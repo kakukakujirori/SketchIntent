@@ -96,7 +96,7 @@ class ConstraintModel(torch.nn.Module):
         prim_embeddings = self.prim_model(src)
         # Prepend fixed val embeddings (constraint types)
         batch_size = src['c_val'].shape[0]
-        fixed_tokens = np.tile(range(len(constraint_data.Token)), (batch_size, 1))
+        fixed_tokens = np.tile(range(len(constraint_data.Token)), (batch_size, 1))  # [[0, 1, ..., N-1], [0, 1, ..., N-1], ...]
         fixed_tokens = torch.tensor(fixed_tokens).to(src['c_val'].device)
         fixed_val_embeddings = self.val_embed(fixed_tokens)
         prim_embeddings = torch.cat([fixed_val_embeddings, prim_embeddings], 1)

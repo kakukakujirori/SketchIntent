@@ -1,7 +1,9 @@
-lz4>=3.1
-hydra-core>=1.1.0
-omegaconf>=2.1
-tqdm>=4.61
-pytorch-lightning>=1.4.0
-torchmetrics>=0.4
+lz4
+hydra-core
+lightning==1.5.10.post0
+numpy==1.26.4
+omegaconf
+pyparsing
+torchmetrics==0.8.2
 torch-scatter
+tqdm

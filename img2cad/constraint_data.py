@@ -2,6 +2,7 @@
 """
 
 import copy
+import random
 import dataclasses
 import enum
 from typing import Dict, Optional, Sequence
@@ -64,12 +65,12 @@ class Token(enum.IntEnum):
 
 
 
-def tokenize_constraints(seq: datalib.ConstructionSequence, gather_idxs: Sequence[int], max_length: Optional[int]=None):
+def tokenize_constraints(seq: datalib.sequence, gather_idxs: Sequence[int], max_length: Optional[int]=None):
     """Tokenizes the constraints in a sketch construction sequence.
 
     Parameters
     ----------
-    seq : datalib.ConstructionSequence
+    seq : datalib.sequence
         The sketch construction sequence to tokenize.
     gather_idxs : Sequence[int]
         Indices produced by `dataset.tokenize_sketch` used to track entity tokens.
@@ -155,11 +156,24 @@ class ConstraintDataset(torch.utils.data.Dataset[Dict[str, torch.Tensor]]):
         self.num_bins = num_bins
         self.max_length = max_length
 
-        self.sequences = flat_array.load_dictionary_flat(sequence_file)['sequences']
+        sequence_array = flat_array.load_dictionary_flat(sequence_file)
+        if 'sequences' in sequence_array:
+            self.sequences = sequence_array['sequences']  # = [cpt_0, cpt_1, ...]
+            self.is_purturbed = False
+        elif 'perturbations' in sequence_array:
+            self.sequences = sequence_array['perturbations']  # = [[cpt_0, cpt_1, ..., cpt_49], ...]
+            self.is_purturbed = True
+        else:
+            raise KeyError("Neither 'sequences' or 'perturbations' found in the key")
         self.tokenize = tokenize
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         seq = self.sequences[idx]
+        if self.is_purturbed:
+            if len(seq) == 0:
+                print(f"Empty sequence at index {idx}. Using the previous sequence.")
+                seq = self.sequences[max(0, idx - 1)]
+            seq = random.choice(seq)
 
         sketch = datalib.sketch_from_sequence(seq)
         data_utils.normalize_sketch(sketch)
@@ -183,7 +197,10 @@ class ConstraintDataset(torch.utils.data.Dataset[Dict[str, torch.Tensor]]):
         return sample
 
     def __len__(self) -> int:
-        return len(self.sequences)
+        if self.is_purturbed:
+            return len(self.sequences) // len(self.sequences[0])
+        else:
+            return len(self.sequences)
 
 
 @dataclasses.dataclass

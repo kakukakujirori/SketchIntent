@@ -11,6 +11,7 @@ optim:
   learning_rate: 3e-5
 
 data:
+  sequence_path: data_processed/sg_filtered_unique.npy  # cptsketchgraphs.npy
   primitive_noise:
     enabled: True
 

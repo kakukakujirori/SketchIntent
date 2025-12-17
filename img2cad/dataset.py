@@ -114,10 +114,10 @@ def tokenize_sketch(sketch: datalib.Sketch, num_bins: int, max_length: Optional[
 
     # Index tracking for constraint model's gather operation
     gather_map = {
-        Arc: [0, 1, 3, 5],
-        Circle: [0, 1],
-        Line: [0, 1, 3],
-        Point: [0]
+        Arc: [0, 1, 3, 5], # [entity_token, start(x/y), mid(x/y), end(x/y)]
+        Circle: [0, 1],    # [entity_token, center(x/y)??? radius???]
+        Line: [0, 1, 3],   # [entity_token, start(x/y), end(x/y)]
+        Point: [0]         # [entity_token] (WHY start(x/y) IS UNNECESSARY???)
     }
     gather_idxs = [0]  # 0 is for external even though we don't use
 
@@ -168,8 +168,8 @@ def tokenize_sketch(sketch: datalib.Sketch, num_bins: int, max_length: Optional[
         pos_tokens.append(pos_idx+1)
 
     sample = {
-        'val': _pad_or_truncate_to_length(np.array(val_tokens, dtype=np.int64), max_length), 
-        'coord': _pad_or_truncate_to_length(np.array(coord_tokens, dtype=np.int64), max_length), 
+        'val': _pad_or_truncate_to_length(np.array(val_tokens, dtype=np.int64), max_length),
+        'coord': _pad_or_truncate_to_length(np.array(coord_tokens, dtype=np.int64), max_length),
         'pos': _pad_or_truncate_to_length(np.array(pos_tokens, dtype=np.int64), max_length)
     }
 
