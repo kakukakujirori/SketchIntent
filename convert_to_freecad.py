@@ -54,7 +54,8 @@ def meter_to_millimeter(op: NodeOp | EdgeOp) -> NodeOp | EdgeOp:
             elif length.endswith('METER'):
                 op.parameters["length"] = float(length.replace(' METER', '')) * 1000
             else:
-                raise NotImplementedError(f"Unknown length unit: {length}")
+                print(f"[meter_to_millimeter] Unknown length unit ({length}) in {op=}")
+                pass  # Skip for now; it won't cause issues unless Diameter/Radius/Length/Distance are used
     else:
         raise ValueError(f"Unknown op type: {type(op)}")
     return op
@@ -235,9 +236,10 @@ def convert_constraint(op: EdgeOp, sketch, node_idx_map):
                     cmd = f"sketch.addConstraint(Sketcher.Constraint('Horizontal', {r1[0]}, {r1[1]}, {r2[0]}, {r2[1]}))"
 
         elif op.label == ConstraintType.Parallel: # 5
-            if r1 and r2 and r1[0] != -1 and r2[0] != -1:
-                sketch.addConstraint(Sketcher.Constraint('Parallel', r1[0], r2[0]))
-                cmd = f"sketch.addConstraint(Sketcher.Constraint('Parallel', {r1[0]}, {r2[0]}))"
+            cmd = "\n# Skipped ConstraintType.Parallel (likely to cause redundant constraints)\n"
+            # if r1 and r2 and r1[0] != -1 and r2[0] != -1:
+            #     sketch.addConstraint(Sketcher.Constraint('Parallel', r1[0], r2[0]))
+            #     cmd = f"sketch.addConstraint(Sketcher.Constraint('Parallel', {r1[0]}, {r2[0]}))"
 
         elif op.label == ConstraintType.Vertical: # 6
             if len(op.references) == 1:
@@ -615,31 +617,36 @@ if __name__ == '__main__':
     output_dir = "sg_filtered_unique"
     os.makedirs(output_dir, exist_ok=True)
 
-    # error_log = os.path.join(output_dir, "error_log.txt")
-    # if os.path.isfile(error_log):
-    #     os.remove(error_log)
+    error_log = os.path.join(output_dir, "error_log.txt")
+    if os.path.isfile(error_log):
+        os.remove(error_log)
 
-    # for i, seq in enumerate(tqdm(seq_data['sequences'])):
-    #     sketch = datalib.sketch_from_sequence(seq)
-    #     fig = datalib.render_sketch(sketch)
-    #     fig.savefig(f"{output_dir}/{i}_gt.svg")
-    #     plt.close(fig)
+    for i, seq in enumerate(tqdm(seq_data['sequences'])):
 
-    #     try:
-    #         process_sequence(
-    #             seq,
-    #             output_py_path=f"{output_dir}/{i}.py",
-    #             output_svg_path=f"{output_dir}/{i}.svg",
-    #             debug=False)
-    #     except Exception as e:
-    #         print(f"Error processing sequence {i}: {e}")
-    #         with open(error_log, "a") as f:
-    #             f.write(f"Error processing sequence {i}: {e}\n\n")
-    #         continue
+        if os.path.isfile(f"{output_dir}/{i}.svg"):
+            print(f"{output_dir}/{i}.svg already exists. Skipping...")
+            continue
+
+        sketch = datalib.sketch_from_sequence(seq)
+        fig = datalib.render_sketch(sketch)
+        fig.savefig(f"{output_dir}/{i}_gt.svg")
+        plt.close(fig)
+
+        try:
+            process_sequence(
+                seq,
+                output_py_path=f"{output_dir}/{i}.py",
+                output_svg_path=f"{output_dir}/{i}.svg",
+                debug=False)
+        except Exception as e:
+            print(f"Error processing sequence {i}: {e}")
+            with open(error_log, "a") as f:
+                f.write(f"Error processing sequence {i}: {e}\n\n")
+            continue
 
 
-    seq = seq_data['sequences'][35]
-    sketch = datalib.sketch_from_sequence(seq)
-    fig = datalib.render_sketch(sketch)
-    fig.savefig('sketch_gt.svg')
-    process_sequence(seq, debug=True)
+    # seq = seq_data['sequences'][101]
+    # sketch = datalib.sketch_from_sequence(seq)
+    # fig = datalib.render_sketch(sketch)
+    # fig.savefig('sketch_gt.svg')
+    # process_sequence(seq, debug=True)
