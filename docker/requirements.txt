@@ -1,9 +1,0 @@
-lz4
-hydra-core
-lightning==1.5.10.post0
-numpy==1.26.4
-omegaconf
-pyparsing
-torchmetrics==0.8.2
-torch-scatter
-tqdm

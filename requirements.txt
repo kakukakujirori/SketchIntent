@@ -1,6 +1,11 @@
-numpy>=1.17
-matplotlib>=3.1
-zstandard>=0.14
-lz4>=3.1
-tqdm>=4.48
-requests>=2.25.1
+hydra-core
+pytorch-lightning==1.5.10.post0
+lz4
+matplotlib
+numpy<2.0.0
+omegaconf
+requests
+scipy
+torchmetrics==0.8.2
+tqdm
+zstandard
