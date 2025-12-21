@@ -33,7 +33,7 @@ import sketchgraphs.data as datalib
 from sketchgraphs.data import flat_array, NodeOp, EdgeOp, EntityType, ConstraintType
 
 
-def meter_to_millimeter(op: NodeOp | EdgeOp) -> NodeOp | EdgeOp:
+def meter_to_millimeter(op: NodeOp | EdgeOp, debug: bool = False) -> NodeOp | EdgeOp:
     if isinstance(op, NodeOp):
         length_keys = ['x', 'y', 'pntX', 'pntY', 'radius', 'minorRadius', 'xCenter', 'yCenter']
         for k in length_keys:
@@ -54,7 +54,7 @@ def meter_to_millimeter(op: NodeOp | EdgeOp) -> NodeOp | EdgeOp:
             elif length.endswith('METER'):
                 op.parameters["length"] = float(length.replace(' METER', '')) * 1000
             else:
-                print(f"[meter_to_millimeter] Unknown length unit ({length}) in {op=}")
+                if debug: print(f"[meter_to_millimeter] Unknown length unit ({length}) in {op=}")
                 pass  # Skip for now; it won't cause issues unless Diameter/Radius/Length/Distance are used
     else:
         raise ValueError(f"Unknown op type: {type(op)}")
@@ -215,15 +215,101 @@ def convert_constraint(op: EdgeOp, sketch, node_idx_map):
             cmd = "# Skipped ConstraintType.Mirror (Complexity: Mapping check)"
 
         elif op.label == ConstraintType.Distance: # 3
-            cmd = "\n# Skipped ConstraintType.Distance (Needs valid value)\n"
-            # if r1[1] > 0 or r2[1] > 0:
-            #     sketch.addConstraint(Sketcher.Constraint('Distance', r1[0], r1[1], r2[0], r2[1], op.parameters['length']))
-            #     cmd = f"sketch.addConstraint(Sketcher.Constraint('Distance', {r1[0]}, {r1[1]}, {r2[0]}, {r2[1]}, {op.parameters['length']}))"
-            # else:  # distance between parallel lines are not directly supported
-            #     assert isinstance(sketch.Geometry[r1[0]], Part.LineSegment) and isinstance(sketch.Geometry[r2[0]], Part.LineSegment)
-            #     # evaluate the distance between the starting point of Line 1 and Line 2
-            #     sketch.addConstraint(Sketcher.Constraint('Distance', r1[0], 1, r2[0], r2[1], op.parameters['length']))
-            #     cmd = f"sketch.addConstraint(Sketcher.Constraint('Distance', {r1[0]}, 1, {r2[0]}, {r2[1]}, {op.parameters['length']}))"
+            if r1 and r2 and r1[0] != -1 and r2[0] != -1:
+                # Helper to get point coordinates from geometry
+                def get_point(geo_id, pt_id):
+                    geo = sketch.Geometry[geo_id]
+                    if pt_id == 1:  # Start
+                        if hasattr(geo, 'StartPoint'):
+                            return geo.StartPoint
+                        elif hasattr(geo, 'X'):  # Point geometry
+                            return FreeCAD.Vector(geo.X, geo.Y, 0)
+                    elif pt_id == 2:  # End
+                        if hasattr(geo, 'EndPoint'):
+                            return geo.EndPoint
+                    elif pt_id == 3:  # Center
+                        if hasattr(geo, 'Center'):
+                            return geo.Center
+                    return None
+
+                # Helper to compute perpendicular distance from point to line
+                def point_to_line_distance(pt, line_geo):
+                    if not hasattr(line_geo, 'StartPoint') or not hasattr(line_geo, 'EndPoint'):
+                        return None
+                    p1 = line_geo.StartPoint
+                    p2 = line_geo.EndPoint
+                    # Line direction vector
+                    d = p2 - p1
+                    d_len = d.Length
+                    if d_len < 1e-9:
+                        return (pt - p1).Length
+                    # Project pt onto line and compute perpendicular distance
+                    t = (pt - p1).dot(d) / (d_len * d_len)
+                    closest = p1 + d * t
+                    return (pt - closest).Length
+
+                if r1[1] > 0 and r2[1] > 0:
+                    # Point-to-Point distance
+                    p1 = get_point(r1[0], r1[1])
+                    p2 = get_point(r2[0], r2[1])
+                    if p1 and p2:
+                        dist = (p1 - p2).Length
+                        sketch.addConstraint(Sketcher.Constraint('Distance', r1[0], r1[1], r2[0], r2[1], dist))
+                        cmd = f"sketch.addConstraint(Sketcher.Constraint('Distance', {r1[0]}, {r1[1]}, {r2[0]}, {r2[1]}, {dist}))"
+                    else:
+                        cmd = f"# Skipped ConstraintType.Distance: Could not get points ({r1=}, {r2=})"
+
+                elif r1[1] == 0 and r2[1] == 0:
+                    # Edge-to-Edge distance (parallel lines)
+                    # Use line1's start point to line2 perpendicular distance
+                    geo1 = sketch.Geometry[r1[0]]
+                    geo2 = sketch.Geometry[r2[0]]
+                    if not isinstance(geo1, Part.LineSegment) or not isinstance(geo2, Part.LineSegment):
+                        cmd = f"# Skipped ConstraintType.Distance: Not both are LineSegments ({r1=}, {r2=})"
+                        return
+                    if not hasattr(geo1, 'StartPoint'):
+                        cmd = f"# Skipped ConstraintType.Distance: geo1 has no StartPoint ({r1=}, {r2=})"
+                        return
+                    p1 = geo1.StartPoint
+                    dist = point_to_line_distance(p1, geo2)
+                    if dist is not None:
+                        sketch.addConstraint(Sketcher.Constraint('Distance', r1[0], 1, r2[0], 0, dist))
+                        cmd = f"sketch.addConstraint(Sketcher.Constraint('Distance', {r1[0]}, 1, {r2[0]}, 0, {dist}))"
+                    else:
+                        cmd = f"# Skipped ConstraintType.Distance: Could not compute line distance ({r1=}, {r2=})"
+
+                elif r1[1] > 0 and r2[1] == 0:
+                    # Point to Edge distance
+                    p1 = get_point(r1[0], r1[1])
+                    geo2 = sketch.Geometry[r2[0]]
+                    if p1:
+                        dist = point_to_line_distance(p1, geo2)
+                        if dist is not None:
+                            sketch.addConstraint(Sketcher.Constraint('Distance', r1[0], r1[1], r2[0], 0, dist))
+                            cmd = f"sketch.addConstraint(Sketcher.Constraint('Distance', {r1[0]}, {r1[1]}, {r2[0]}, 0, {dist}))"
+                        else:
+                            cmd = f"# Skipped ConstraintType.Distance: Could not compute point-line distance ({r1=}, {r2=})"
+                    else:
+                        cmd = f"# Skipped ConstraintType.Distance: Could not get point ({r1=})"
+
+                elif r1[1] == 0 and r2[1] > 0:
+                    # Edge to Point distance (swap and use Point to Edge)
+                    p2 = get_point(r2[0], r2[1])
+                    geo1 = sketch.Geometry[r1[0]]
+                    if p2:
+                        dist = point_to_line_distance(p2, geo1)
+                        if dist is not None:
+                            sketch.addConstraint(Sketcher.Constraint('Distance', r2[0], r2[1], r1[0], 0, dist))
+                            cmd = f"sketch.addConstraint(Sketcher.Constraint('Distance', {r2[0]}, {r2[1]}, {r1[0]}, 0, {dist}))"
+                        else:
+                            cmd = f"# Skipped ConstraintType.Distance: Could not compute point-line distance ({r1=}, {r2=})"
+                    else:
+                        cmd = f"# Skipped ConstraintType.Distance: Could not get point ({r2=})"
+
+                else:
+                    cmd = f"# Skipped ConstraintType.Distance: Unhandled case ({r1=}, {r2=})"
+            else:
+                cmd = f"# Skipped ConstraintType.Distance: Invalid references ({r1=}, {r2=})"
 
         elif op.label == ConstraintType.Horizontal: # 4
             if len(op.references) == 1:
@@ -236,10 +322,9 @@ def convert_constraint(op: EdgeOp, sketch, node_idx_map):
                     cmd = f"sketch.addConstraint(Sketcher.Constraint('Horizontal', {r1[0]}, {r1[1]}, {r2[0]}, {r2[1]}))"
 
         elif op.label == ConstraintType.Parallel: # 5
-            cmd = "\n# Skipped ConstraintType.Parallel (likely to cause redundant constraints)\n"
-            # if r1 and r2 and r1[0] != -1 and r2[0] != -1:
-            #     sketch.addConstraint(Sketcher.Constraint('Parallel', r1[0], r2[0]))
-            #     cmd = f"sketch.addConstraint(Sketcher.Constraint('Parallel', {r1[0]}, {r2[0]}))"
+            if r1 and r2 and r1[0] != -1 and r2[0] != -1:
+                sketch.addConstraint(Sketcher.Constraint('Parallel', r1[0], r2[0]))
+                cmd = f"sketch.addConstraint(Sketcher.Constraint('Parallel', {r1[0]}, {r2[0]}))"
 
         elif op.label == ConstraintType.Vertical: # 6
             if len(op.references) == 1:
@@ -263,12 +348,23 @@ def convert_constraint(op: EdgeOp, sketch, node_idx_map):
                     sketch.addConstraint(Sketcher.Constraint('TangentViaPoint', r1[0], r2[0], r2[0], r2[1]))
                     cmd = f"sketch.addConstraint(Sketcher.Constraint('TangentViaPoint', {r1[0]}, {r2[0]}, {r2[0]}, {r2[1]}))"
                 else:
-                    print(f"\n[Tangent] WARNING: Tangency between curves are ill-functional in FreeCAD ({r1=}, {r2=})\n")
+                    # Curve-to-curve tangency (both refs are edges, not vertices)
+                    # FreeCAD can handle this - it finds the tangent point automatically
                     sketch.addConstraint(Sketcher.Constraint('Tangent', r1[0], r2[0]))
                     cmd = f"sketch.addConstraint(Sketcher.Constraint('Tangent', {r1[0]}, {r2[0]}))"
 
         elif op.label == ConstraintType.Length: # 8
-            cmd = "\n# Skipped ConstraintType.Length (Needs valid value and reference)\n"
+            if r1 and r1[0] != -1:
+                geo = sketch.Geometry[r1[0]]
+                # Length constraint only applies to line segments
+                if isinstance(geo, Part.LineSegment):
+                    length = (geo.EndPoint - geo.StartPoint).Length
+                    sketch.addConstraint(Sketcher.Constraint('Distance', r1[0], length))
+                    cmd = f"sketch.addConstraint(Sketcher.Constraint('Distance', {r1[0]}, {length}))  # Line length"
+                else:
+                    cmd = f"# Skipped ConstraintType.Length: Not a LineSegment ({type(geo).__name__})"
+            else:
+                cmd = f"# Skipped ConstraintType.Length: Invalid reference ({r1=})"
 
         elif op.label == ConstraintType.Perpendicular: # 9
             if r1 and r2 and r1[0] != -1 and r2[0] != -1:
@@ -276,7 +372,57 @@ def convert_constraint(op: EdgeOp, sketch, node_idx_map):
                 cmd = f"sketch.addConstraint(Sketcher.Constraint('Perpendicular', {r1[0]}, {r2[0]}))"
 
         elif op.label == ConstraintType.Midpoint: # 10
-            cmd = "# Skipped ConstraintType.Midpoint (Implementation varies)"
+            r3 = node_idx_map.get(op.references[2]) if len(op.references) > 2 else None
+
+            if r1 and r2 and r1[0] != -1 and r2[0] != -1:
+                # Case 1: Three-point Midpoint -> Symmetric
+                if r3 and r3[0] != -1:
+                    # Determine which reference is the midpoint based on geometry types
+                    # If r2 or r3 reference Line geometry (vertex 1 or 2 from a LineSegment), r1 is midpoint
+                    # If all are Point geometries, r3 is the midpoint
+                    geo_r2 = sketch.Geometry[r2[0]] if r2[0] >= 0 else None
+                    geo_r3 = sketch.Geometry[r3[0]] if r3[0] >= 0 else None
+
+                    r2_is_line_vertex = geo_r2 is not None and isinstance(geo_r2, Part.LineSegment)
+                    r3_is_line_vertex = geo_r3 is not None and isinstance(geo_r3, Part.LineSegment)
+
+                    if r2_is_line_vertex or r3_is_line_vertex:
+                        # r1 is midpoint, r2 and r3 are the symmetric points (Line vertices case)
+                        mid_ref, p1_ref, p2_ref = r1, r2, r3
+                    else:
+                        # All are Point geometries, r3 is the midpoint
+                        mid_ref, p1_ref, p2_ref = r3, r1, r2
+
+                    sketch.addConstraint(Sketcher.Constraint('Symmetric', p1_ref[0], p1_ref[1], p2_ref[0], p2_ref[1], mid_ref[0], mid_ref[1]))
+                    cmd = f"sketch.addConstraint(Sketcher.Constraint('Symmetric', {p1_ref[0]}, {p1_ref[1]}, {p2_ref[0]}, {p2_ref[1]}, {mid_ref[0]}, {mid_ref[1]}))"
+
+                # Case 2: Midpoint(Point, Curve) or Midpoint(Curve, Point)
+                else:
+                    # Identify which is the Curve (Edge) and which is the Point
+                    # r[1] == 0 -> Edge, r[1] > 0 -> Point/Vertex
+                    c_ref, p_ref = None, None
+                    if r1[1] == 0 and r2[1] > 0:
+                        c_ref, p_ref = r1, r2
+                    elif r2[1] == 0 and r1[1] > 0:
+                        c_ref, p_ref = r2, r1
+
+                    if c_ref:
+                        # Found Point-Curve pair
+                        # Apply Symmetric constraint: Point is symmetric between Curve.Start(1) and Curve.End(2)
+                        sketch.addConstraint(Sketcher.Constraint('Symmetric', c_ref[0], 1, c_ref[0], 2, p_ref[0], p_ref[1]))
+                        cmd_lines = [f"sketch.addConstraint(Sketcher.Constraint('Symmetric', {c_ref[0]}, 1, {c_ref[0]}, 2, {p_ref[0]}, {p_ref[1]}))"]
+
+                        # If Curve is Arc, also add PointOnObject to ensure it lies on the arc
+                        geo_type = sketch.Geometry[c_ref[0]]
+                        if isinstance(geo_type, Part.ArcOfCircle):
+                            sketch.addConstraint(Sketcher.Constraint('PointOnObject', p_ref[0], p_ref[1], c_ref[0]))
+                            cmd_lines.append(f"sketch.addConstraint(Sketcher.Constraint('PointOnObject', {p_ref[0]}, {p_ref[1]}, {c_ref[0]}))")
+
+                        cmd = "\n".join(cmd_lines)
+                    else:
+                        cmd = f"# Skipped ConstraintType.Midpoint: References not Point-Curve pair or Triple Points ({r1=}, {r2=}, {r3=})"
+            else:
+                cmd = f"# Skipped ConstraintType.Midpoint: Invalid references ({r1=}, {r2=})"
 
         elif op.label == ConstraintType.Equal: # 11
             if r1 and r2 and r1[0] != -1 and r2[0] != -1:
@@ -284,25 +430,40 @@ def convert_constraint(op: EdgeOp, sketch, node_idx_map):
                 cmd = f"sketch.addConstraint(Sketcher.Constraint('Equal', {r1[0]}, {r2[0]}))"
 
         elif op.label == ConstraintType.Diameter: # 12
-            cmd = "\n# Skipped ConstraintType.Diameter (Needs valid value)\n"
-            # if r1 and r1[0] != -1:
-            #     src_diameter = float(sketch.Geometry[r1[0]].Radius * 2)
-            #     tgt_diameter = float(op.parameters['length'])
-            #     assert abs(src_diameter - tgt_diameter) < 1e-9, f"Diameter Mismatch: {src_diameter} != {tgt_diameter}"
-            #     sketch.addConstraint(Sketcher.Constraint('Diameter', r1[0], src_diameter))
-            #     cmd = f"sketch.addConstraint(Sketcher.Constraint('Diameter', {r1[0]}, {src_diameter}))"
+            if r1 and r1[0] != -1:
+                src_diameter = float(sketch.Geometry[r1[0]].Radius * 2)
+                # tgt_diameter = float(op.parameters['length'])
+                # assert abs(src_diameter - tgt_diameter) < 1e-9, f"Diameter Mismatch: {src_diameter} != {tgt_diameter}"
+                sketch.addConstraint(Sketcher.Constraint('Diameter', r1[0], src_diameter))
+                cmd = f"sketch.addConstraint(Sketcher.Constraint('Diameter', {r1[0]}, {src_diameter}))"
 
         elif op.label == ConstraintType.Offset: # 13
-            cmd = "\n# Skipped ConstraintType.Offset (Needs valid value)\n"
+            # Offset = relationship without distance specification
+            # Lines: Parallel, Circles/Arcs: Concentric (distance is implicit in geometry)
+            if r1 and r2 and r1[0] != -1 and r2[0] != -1:
+                geo1 = sketch.Geometry[r1[0]]
+                geo2 = sketch.Geometry[r2[0]]
+
+                if isinstance(geo1, Part.LineSegment) and isinstance(geo2, Part.LineSegment):
+                    # Parallel constraint only (distance is defined by geometry)
+                    sketch.addConstraint(Sketcher.Constraint('Parallel', r1[0], r2[0]))
+                    cmd = f"sketch.addConstraint(Sketcher.Constraint('Parallel', {r1[0]}, {r2[0]}))"
+                elif hasattr(geo1, 'Center') and hasattr(geo2, 'Center'):
+                    # Circles or Arcs: Concentric (radii difference is defined by geometry)
+                    sketch.addConstraint(Sketcher.Constraint('Coincident', r1[0], 3, r2[0], 3))
+                    cmd = f"sketch.addConstraint(Sketcher.Constraint('Coincident', {r1[0]}, 3, {r2[0]}, 3))"
+                else:
+                    cmd = f"# Skipped ConstraintType.Offset: Unsupported geometry types ({type(geo1).__name__}, {type(geo2).__name__})"
+            else:
+                cmd = f"# Skipped ConstraintType.Offset: Invalid references ({r1=}, {r2=})"
 
         elif op.label == ConstraintType.Radius: # 14
-            cmd = "\n# Skipped ConstraintType.Radius (Needs valid value)\n"
-            # if r1 and r1[0] != -1:
-            #     src_radius = float(sketch.Geometry[r1[0]].Radius)
-            #     tgt_radius = float(op.parameters['length'])
-            #     assert abs(src_radius - tgt_radius) < 1e-9, f"Radius Mismatch: {src_radius} != {tgt_radius}"
-            #     sketch.addConstraint(Sketcher.Constraint('Radius', r1[0], src_radius))
-            #     cmd = f"sketch.addConstraint(Sketcher.Constraint('Radius', {r1[0]}, {src_radius}))"
+            if r1 and r1[0] != -1:
+                src_radius = float(sketch.Geometry[r1[0]].Radius)
+                # tgt_radius = float(op.parameters['length'])
+                # assert abs(src_radius - tgt_radius) < 1e-9, f"Radius Mismatch: {src_radius} != {tgt_radius}"
+                sketch.addConstraint(Sketcher.Constraint('Radius', r1[0], src_radius))
+                cmd = f"sketch.addConstraint(Sketcher.Constraint('Radius', {r1[0]}, {src_radius}))"
 
         elif op.label == ConstraintType.Concentric: # 15
             if r1 and r2 and r1[0] != -1 and r2[0] != -1:
@@ -310,15 +471,43 @@ def convert_constraint(op: EdgeOp, sketch, node_idx_map):
                 cmd = f"sketch.addConstraint(Sketcher.Constraint('Coincident', {r1[0]}, 3, {r2[0]}, 3))"
 
         elif op.label == ConstraintType.Fix: # 16
-            if r1 and r1[0] != -1:
-                if r1[1] == 0:
-                    sketch.addConstraint(Sketcher.Constraint('Block', r1[0]))
-                    cmd = f"sketch.addConstraint(Sketcher.Constraint('Block', {r1[0]}))"
-                else:
-                    cmd = f"# Skipped ConstraintType.Fix (Point Fix is uncommon in practice)"
+            cmd = f"# Skipped ConstraintType.Fix (We should avoid its use)"
+            # if r1 and r1[0] != -1:
+            #     if r1[1] == 0:
+            #         sketch.addConstraint(Sketcher.Constraint('Block', r1[0]))
+            #         cmd = f"sketch.addConstraint(Sketcher.Constraint('Block', {r1[0]}))"
+            #     else:
+            #         cmd = f"# Skipped ConstraintType.Fix (Point Fix is uncommon in practice)"
 
         elif op.label == ConstraintType.Angle: # 17
-            cmd = "\n# Skipped ConstraintType.Angle (Needs value)\n"
+            if r1 and r2 and r1[0] != -1 and r2[0] != -1:
+                import math
+                geo1 = sketch.Geometry[r1[0]]
+                geo2 = sketch.Geometry[r2[0]]
+
+                if hasattr(geo1, 'StartPoint') and hasattr(geo1, 'EndPoint') and \
+                   hasattr(geo2, 'StartPoint') and hasattr(geo2, 'EndPoint'):
+                    d1 = geo1.EndPoint - geo1.StartPoint
+                    d2 = geo2.EndPoint - geo2.StartPoint
+
+                    # Compute signed angle from d2 to d1
+                    angle1 = math.atan2(d1.y, d1.x)
+                    angle2 = math.atan2(d2.y, d2.x)
+                    angle_rad = angle2 - angle1
+
+                    # Normalize to [-pi, pi]
+                    while angle_rad > math.pi:
+                        angle_rad -= 2 * math.pi
+                    while angle_rad < -math.pi:
+                        angle_rad += 2 * math.pi
+
+                    angle_deg = math.degrees(angle_rad)
+                    sketch.addConstraint(Sketcher.Constraint('Angle', r1[0], r2[0], angle_rad))
+                    cmd = f"sketch.addConstraint(Sketcher.Constraint('Angle', {r1[0]}, {r2[0]}, {angle_rad}))  # {angle_deg:.2f} deg"
+                else:
+                    cmd = f"# Skipped ConstraintType.Angle: No direction vectors ({r1=}, {r2=})"
+            else:
+                cmd = f"# Skipped ConstraintType.Angle: Invalid references ({r1=}, {r2=})"
 
         elif op.label == ConstraintType.Subnode: # 101
             child_idx = op.references[0]
@@ -401,7 +590,7 @@ def resolve_subnodes(seq: list[NodeOp | EdgeOp]) -> dict[int, tuple[int, int]]:
     return node_idx_map
 
 
-def resolve_redundant_coincident(seq: list[NodeOp | EdgeOp], node_idx_map: dict[int, tuple[int, int]]) -> list[NodeOp | EdgeOp]:
+def resolve_redundant_coincident(seq: list[NodeOp | EdgeOp], node_idx_map: dict[int, tuple[int, int]], debug: bool = False) -> list[NodeOp | EdgeOp]:
     """
     PointOnObject(primitive_idx, primitive_point_pos, curve_idx) and Coincident(primitive_idx, primitive_point_pos, curve_idx, curve_point_pos) are deemed redundant.
     This function detects these two pairs and disable the former.
@@ -435,7 +624,7 @@ def resolve_redundant_coincident(seq: list[NodeOp | EdgeOp], node_idx_map: dict[
                 elif pt1_prev > 0 and pt2_prev > 0:
                     seq[coincident_op_idx] = EdgeOp(ConstraintType.Coincident, references=(ref1, ref2), parameters={"disable": True})
                 else:
-                    print(f"[resolve_redundant_coincident] WARNING: Double PointOnLine detected ({idx1=}, {idx2=} / {pt1=}, {pt2=} / {pt1_prev=}, {pt2_prev=})")
+                    if debug: print(f"[resolve_redundant_coincident] WARNING: Double PointOnLine detected ({idx1=}, {idx2=} / {pt1=}, {pt2=} / {pt1_prev=}, {pt2_prev=})")
             else:
                 coincident_map[(idx1, idx2)] = (pt1, ref1, pt2, ref2, coincident_op_idx)
 
@@ -486,60 +675,169 @@ def resolve_tangent(seq: list[NodeOp | EdgeOp], node_idx_map: dict[int, tuple[in
 
 
 def draw_svg(doc, sketch, output_svg_path: str, debug: bool = False):
-    # NOTE: diag can be uncomputable if the sketch is invalid.
-    #       This works as an implicit sketch validity test.
-    bbox = sketch.Shape.BoundBox
-    diag = bbox.DiagonalLength
+    """
+    Generate SVG from sketch geometry.
+    - Construction lines are rendered as dashed lines.
+    - Regular geometry is rendered as solid lines.
+    """
+    import math
 
-    # --- SCALING LOGIC ---
-    target_size = 40.0 # mm
+    # Collect geometry data and compute bounding box
+    x_min, y_min, x_max, y_max = float('inf'), float('inf'), float('-inf'), float('-inf')
+    svg_elements = []
 
-    if diag > 1e-6:
-        scale_factor = target_size / diag
-        if debug: print(f"Scaling Sketch: Current Diag={diag:.4f}mm, Target={target_size}mm, Factor={scale_factor:.4f}")
+    for i, geo in enumerate(sketch.Geometry):
+        is_construction = sketch.getConstruction(i)
 
-        new_geo_list = []
-        center = FreeCAD.Vector(0,0,0)
-        current_geoms = sketch.Geometry
-        for geo in current_geoms:
-            try:
-                new_geo = geo.copy()
-                new_geo.scale(center, scale_factor)
-                new_geo_list.append(new_geo)
-            except Exception as e:
-                print(f"Failed to scale geometry {geo}: {e}")
-                new_geo_list.append(geo)
-
-        sketch.Geometry = new_geo_list
-        sketch.recompute()
-        doc.recompute()
-        if debug: print("Sketch scaled successfully.")
-    else:
-        if debug: print("Sketch is empty or zero size, skipping scale.")
-
-    # --- SVG EXPORT Logic ---
-    if importSVG:
+        # Extract geometry coordinates
         try:
-            importSVG.export([sketch], output_svg_path)
+            # Check for Circle/Arc FIRST (they also have StartPoint/EndPoint)
+            if hasattr(geo, 'Center') and hasattr(geo, 'Radius'):
+                # Circle or Arc
+                c = geo.Center
+                r = geo.Radius
+                x_min = min(x_min, c.x - r)
+                y_min = min(y_min, c.y - r)
+                x_max = max(x_max, c.x + r)
+                y_max = max(y_max, c.y + r)
 
-            with open(output_svg_path, 'r') as f:
-                content = f.read()
+                # Distinguish full circle from arc by geometry type or angle span
+                geo_type_name = type(geo).__name__
+                is_full_circle = 'Circle' in geo_type_name and 'Arc' not in geo_type_name
 
-            content = content.replace('stroke="#000000"', 'stroke="#FF0000"')
-            content = re.sub(r'\s(width|height)="[^"]+"', '', content)
+                if not is_full_circle and hasattr(geo, 'FirstParameter') and hasattr(geo, 'LastParameter'):
+                    # Check if it's nearly a full circle (angle span ≈ 2π)
+                    angle_span = abs(geo.LastParameter - geo.FirstParameter)
+                    if angle_span >= 2 * math.pi - 0.01:
+                        is_full_circle = True
 
-            with open(output_svg_path, 'w') as f:
-                f.write(content)
+                if is_full_circle:
+                    svg_elements.append(('circle', c.x, c.y, r, is_construction))
+                else:
+                    # Calculate base angle from StartPoint (most reliable)
+                    p_start = geo.StartPoint
+                    base_angle = math.atan2(p_start.y - c.y, p_start.x - c.x)
 
-            if debug:
-                display(SVG(data=content))
+                    # Arc span
+                    arc_span = geo.LastParameter - geo.FirstParameter
 
-            if debug: print(f"SVG exported to {output_svg_path}")
+                    # Direction.z tells us CCW (+1) or CW (-1)
+                    is_ccw = geo.Axis.z > 0
+
+                    # For CW arcs, we go backwards from start
+                    if is_ccw:
+                        start_angle = base_angle
+                        end_angle = base_angle + arc_span
+                    else:
+                        start_angle = base_angle
+                        end_angle = base_angle - arc_span
+
+                    svg_elements.append(('arc', c.x, c.y, r, start_angle, end_angle, is_ccw, is_construction))
+
+            elif hasattr(geo, 'StartPoint') and hasattr(geo, 'EndPoint'):
+                # Line segment (check after Circle/Arc)
+                p1 = geo.StartPoint
+                p2 = geo.EndPoint
+                x_min = min(x_min, p1.x, p2.x)
+                y_min = min(y_min, p1.y, p2.y)
+                x_max = max(x_max, p1.x, p2.x)
+                y_max = max(y_max, p1.y, p2.y)
+                svg_elements.append(('line', p1.x, p1.y, p2.x, p2.y, is_construction))
+
+            elif hasattr(geo, 'X') and hasattr(geo, 'Y'):
+                # Point
+                x_min = min(x_min, geo.X)
+                y_min = min(y_min, geo.Y)
+                x_max = max(x_max, geo.X)
+                y_max = max(y_max, geo.Y)
+                svg_elements.append(('point', geo.X, geo.Y, is_construction))
 
         except Exception as e:
-            print(f"SVG Export failed: {e}")
-    else:
-        print("SVG export skipped (module missing or incompatible).")
+            if debug:
+                print(f"Skipping geometry {i}: {e}")
+
+    if x_min >= float('inf'):
+        print("SVG Export failed: No valid geometry")
+        return
+
+    # Calculate viewBox and stroke width
+    margin = max(x_max - x_min, y_max - y_min) * 0.1
+    vb_x = x_min - margin
+    vb_y = -(y_max + margin)  # SVG Y is inverted
+    vb_w = (x_max - x_min) + 2 * margin
+    vb_h = (y_max - y_min) + 2 * margin
+
+    diag = (vb_w**2 + vb_h**2) ** 0.5
+    stroke_width = max(diag * 0.001, 0.5)
+    point_radius = stroke_width * 1.5
+
+    # Build SVG content
+    svg_lines = [
+        '<?xml version="1.0"?>',
+        f'<svg viewBox="{vb_x:.4f} {vb_y:.4f} {vb_w:.4f} {vb_h:.4f}" xmlns="http://www.w3.org/2000/svg">',
+        f'<g transform="scale(1,-1)">',  # Flip Y axis
+    ]
+
+    for elem in svg_elements:
+        if elem[0] == 'line':
+            _, x1, y1, x2, y2, is_const = elem
+            color = "#0088FF" if is_const else "#FF0000"
+            dash = f'stroke-dasharray="{stroke_width*3:.2f},{stroke_width*2:.2f}"' if is_const else ''
+            svg_lines.append(
+                f'<line x1="{x1:.4f}" y1="{y1:.4f}" x2="{x2:.4f}" y2="{y2:.4f}" '
+                f'stroke="{color}" stroke-width="{stroke_width:.2f}" {dash} stroke-linecap="round"/>'
+            )
+
+        elif elem[0] == 'circle':
+            _, cx, cy, r, is_const = elem
+            color = "#0088FF" if is_const else "#FF0000"
+            dash = f'stroke-dasharray="{stroke_width*3:.2f},{stroke_width*2:.2f}"' if is_const else ''
+            svg_lines.append(
+                f'<circle cx="{cx:.4f}" cy="{cy:.4f}" r="{r:.4f}" '
+                f'stroke="{color}" stroke-width="{stroke_width:.2f}" fill="none" {dash}/>'
+            )
+
+        elif elem[0] == 'arc':
+            _, cx, cy, r, start_angle, end_angle, is_ccw, is_const = elem
+
+            # Calculate start and end points
+            x1 = cx + r * math.cos(start_angle)
+            y1 = cy + r * math.sin(start_angle)
+            x2 = cx + r * math.cos(end_angle)
+            y2 = cy + r * math.sin(end_angle)
+
+            # Arc span determines large_arc flag
+            arc_span = abs(end_angle - start_angle)
+            large_arc = 1 if arc_span > math.pi else 0
+
+            # Sweep: CCW arcs need sweep=1 (after Y-flip appears CCW), CW arcs need sweep=0
+            sweep = 1 if is_ccw else 0
+
+            color = "#0088FF" if is_const else "#FF0000"
+            dash = f'stroke-dasharray="{stroke_width*3:.2f},{stroke_width*2:.2f}"' if is_const else ''
+            svg_lines.append(
+                f'<path d="M {x1:.4f},{y1:.4f} A {r:.4f},{r:.4f} 0 {large_arc},{sweep} {x2:.4f},{y2:.4f}" '
+                f'stroke="{color}" stroke-width="{stroke_width:.2f}" fill="none" {dash} stroke-linecap="round"/>'
+            )
+
+        elif elem[0] == 'point':
+            _, x, y, is_const = elem
+            color = "#0088FF" if is_const else "#FF0000"
+            svg_lines.append(
+                f'<circle cx="{x:.4f}" cy="{y:.4f}" r="{point_radius:.4f}" fill="{color}"/>'
+            )
+
+    svg_lines.append('</g>')
+    svg_lines.append('</svg>')
+
+    content = '\n'.join(svg_lines)
+
+    with open(output_svg_path, 'w') as f:
+        f.write(content)
+
+    if debug:
+        display(SVG(data=content))
+        print(f"SVG exported to {output_svg_path}")
 
 
 def process_sequence(
@@ -565,7 +863,7 @@ def process_sequence(
     history_commands.append("# ... attachment setup skipped for brevity ...")
 
     # rescale
-    seq = [meter_to_millimeter(op) for op in seq]
+    seq = [meter_to_millimeter(op, debug) for op in seq]
     if debug:
         geom_cnt = 0
         for i, op in enumerate(seq):
@@ -580,7 +878,7 @@ def process_sequence(
     if debug: print(f"{node_idx_map=}")
 
     # Pass 2: Constraint Refinement
-    seq = resolve_redundant_coincident(seq, node_idx_map)
+    seq = resolve_redundant_coincident(seq, node_idx_map, debug)
     seq = resolve_tangent(seq, node_idx_map)
 
     # Pass 3: Generation
