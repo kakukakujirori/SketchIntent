@@ -5,7 +5,7 @@ import dataclasses
 
 import torch
 import torch.utils.data
-import pytorch_lightning
+import lightning as L
 import omegaconf
 
 from sketchgraphs.pipeline.graph_model.target import TargetType
@@ -89,9 +89,9 @@ class OptimConfig:
 
 @dataclasses.dataclass
 class SketchgraphsTrainingConfig(lightning.TrainingConfiguration):
-    model: SketchgraphsModelConfig = SketchgraphsModelConfig()
-    data: graph_data.SketchgraphsDataConfig = graph_data.SketchgraphsDataConfig()
-    optim: OptimConfig = OptimConfig()
+    model: SketchgraphsModelConfig = dataclasses.field(default_factory=SketchgraphsModelConfig)
+    data: graph_data.SketchgraphsDataConfig = dataclasses.field(default_factory=graph_data.SketchgraphsDataConfig)
+    optim: OptimConfig = dataclasses.field(default_factory=OptimConfig)
     batch_size: int = 2048
 
 
@@ -107,7 +107,7 @@ def _total_loss(losses):
     return result
 
 
-class SketchgraphsModel(pytorch_lightning.LightningModule):
+class SketchgraphsModel(L.LightningModule):
     """Main module for training Sketchgraphs generative model on the Vitruvion problem.
     """
     hparams: SketchgraphsTrainingConfig
@@ -196,7 +196,7 @@ class SgAutoconstraintModel(pytorch_lightning.LightningModule):
         total_loss = sum(losses.values())
         loss = total_loss / batch['graph'].node_counts.shape[0]
 
-        with torch.no_grad():   
+        with torch.no_grad():
             average_losses = sketchgraphs_models.autoconstraint.model.compute_average_losses(batch, losses)
 
         self.log_dict({prefix + 'loss/' + k: v for k, v in average_losses.items()})

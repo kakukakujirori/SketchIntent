@@ -91,7 +91,7 @@ class ImagePrimitiveDataConfig(PrimitiveDataConfig):
         Otherwise, uses reference renderings.
     """
     image_data_folder: Optional[str] = None
-    augmentation: ImageAugmentationConfig = ImageAugmentationConfig()
+    augmentation: ImageAugmentationConfig = dataclasses.field(default_factory=ImageAugmentationConfig)
     use_noisy_images: bool = True
 
 

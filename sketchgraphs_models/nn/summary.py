@@ -101,8 +101,8 @@ class CohenKappa(torchmetrics.Metric):
     """
     recorded: torch.Tensor
 
-    def __init__(self, num_outcomes=2, compute_on_step=True, dist_sync_on_step=False):
-        super().__init__(compute_on_step=compute_on_step, dist_sync_on_step=dist_sync_on_step)
+    def __init__(self, num_outcomes=2, **kwargs):
+        super().__init__(**kwargs)
 
         self.num_outcomes = num_outcomes
         self.add_state("recorded", torch.zeros(num_outcomes * num_outcomes, dtype=torch.int32), dist_reduce_fx='sum')

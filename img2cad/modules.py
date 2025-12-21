@@ -19,7 +19,7 @@ def generate_square_subsequent_mask(source: torch.Tensor) -> torch.Tensor:
 
 class TransformerModel(nn.Module):
     """Transformer component of image-conditional primitive generation model.
-    
+
     This module assumes inputs have already been embedded with value,
     coordinate, and position indicators.
     """
@@ -43,12 +43,16 @@ class TransformerModel(nn.Module):
             src_mask = None
         output = self.transformer_encoder(src, src_mask)
         return output
-    
+
 
 class TokenInput(TypedDict):
     val: torch.Tensor
     coord: torch.Tensor
     pos: torch.Tensor
+    c_val: torch.Tensor
+    c_coord: torch.Tensor
+    c_pos: torch.Tensor
+
 
 
 class PrimitiveModel(nn.Module):
@@ -60,10 +64,10 @@ class PrimitiveModel(nn.Module):
     def __init__(self,
                  num_bins,
                  max_entities,
-                 embed_dim, 
-                 fc_size, 
+                 embed_dim,
+                 fc_size,
                  num_heads,
-                 num_layers, 
+                 num_layers,
                  dropout=0,
                  use_mask=True,
                  linear_decode=True):

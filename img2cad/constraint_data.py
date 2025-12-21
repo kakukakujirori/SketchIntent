@@ -8,7 +8,7 @@ import enum
 from typing import Dict, Optional, Sequence
 
 import numpy as np
-import pytorch_lightning
+import lightning as L
 import torch
 import torch.utils.data
 
@@ -206,10 +206,10 @@ class ConstraintDataset(torch.utils.data.Dataset[Dict[str, torch.Tensor]]):
 @dataclasses.dataclass
 class ConstraintDataConfig(primitives_data.PrimitiveDataConfig):
     max_token_length: int = 130
-    primitive_noise: PrimitiveNoiseConfig = PrimitiveNoiseConfig(enabled=True)
+    primitive_noise: PrimitiveNoiseConfig = dataclasses.field(default_factory=lambda: PrimitiveNoiseConfig(enabled=True))
 
 
-class ConstraintDataModule(pytorch_lightning.LightningDataModule):
+class ConstraintDataModule(L.LightningDataModule):
     def __init__(self, config: ConstraintDataConfig, batch_size: int, num_workers: int=8):
         super().__init__()
 

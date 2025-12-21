@@ -13,7 +13,7 @@ def main(config: constraint_models.ConstraintModelTrainingConfig):
     data.setup()
 
     config.data.dataset_size = data.train_dataset_size
-    model = constraint_models.ConstraintModule(config)
+    model = constraint_models.ConstraintMDDModule(config)  # ConstraintModule(config)
     trainer = lightning.make_trainer(config)
 
     trainer.fit(model, datamodule=data)
