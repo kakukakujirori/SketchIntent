@@ -11,6 +11,22 @@ import lightning as L
 import torch
 import torch.utils.data
 from typing import TypedDict
+from scipy.stats import truncnorm
+
+import sketchgraphs.data as datalib
+from sketchgraphs.data import flat_array
+from sketchgraphs.data._entity import Arc
+
+from img2cad_diffusion import sketch_utils, primitive_data
+from img2cad_diffusion.primitive_data import _pad_or_truncate_to_length
+
+# Import token definitions from centralized module
+from img2cad_diffusion.tokens import (
+    ConstraintToken as Token,
+    NON_COORD_TOKEN,
+    CONSTRAINT_COORD_TOKENS,
+)
+
 
 class TokenInput(TypedDict):
     val: torch.Tensor
@@ -19,19 +35,6 @@ class TokenInput(TypedDict):
     c_val: torch.Tensor
     c_coord: torch.Tensor
     c_pos: torch.Tensor
-
-import sketchgraphs.data as datalib
-from sketchgraphs.data import flat_array
-
-from img2cad_diffusion import noise_models, data_utils, dataset, primitives_data
-from img2cad_diffusion.dataset import _pad_or_truncate_to_length
-
-# Import token definitions from centralized module
-from img2cad_diffusion.tokens import (
-    ConstraintToken as Token,
-    NON_COORD_TOKEN,
-    CONSTRAINT_COORD_TOKENS,
-)
 
 
 @dataclasses.dataclass
@@ -53,7 +56,75 @@ class PrimitiveNoiseConfig:
     max_difference: float = 0.15
 
 
-def tokenize_constraints(seq: datalib.sequence, gather_idxs: Sequence[int], max_length: Optional[int]=None):
+# =============================================================================
+# Sketch Noise Functions (moved from noise_models.py)
+# =============================================================================
+
+def _trunc_normal_entity_noise(entity: datalib.Entity, std: float = 0.2, max_diff: float = 0.1):
+    """Applies truncated normal noise to entity parameters.
+
+    Parameters
+    ----------
+    entity : Entity
+        The entity to apply noise to.
+    std : float
+        Standard deviation of the truncated normal noise distribution.
+    max_diff : float
+        Maximum allowed magnitude of change in a parameter value.
+
+    Returns
+    -------
+    Entity
+        New entity with noisy parameters.
+    """
+    assert std > 0.0 and max_diff > 0.0
+
+    params = sketch_utils.parameterize_entity(entity)
+    trial = 0
+    while True:
+        noise = truncnorm.rvs(a=-max_diff, b=max_diff,
+                              scale=std / (2 ** trial), size=params.size)
+        new_params = params + noise
+        new_ent = sketch_utils.entity_from_params(new_params, entity_id=entity.entityId)
+
+        if isinstance(entity, Arc):
+            trial += 1
+            if new_ent is None:
+                continue
+            actual_new_params = sketch_utils.parameterize_entity(new_ent)
+            if (np.abs(actual_new_params - params) <= max_diff).all():
+                if (np.abs(entity.center_point - new_ent.center_point) <= max_diff).all():
+                    break
+        else:
+            break
+    return new_ent
+
+
+def _noisify_sketch_ents(sketch: datalib.Sketch, std: float = 0.2, max_diff: float = 0.1):
+    """Inject noise into entity parameters of the given sketch (in-place)."""
+    for ent_key, ent in sketch.entities.items():
+        new_ent = _trunc_normal_entity_noise(ent, std, max_diff)
+        new_ent.isConstruction = ent.isConstruction
+        sketch.entities[ent_key] = new_ent
+    return sketch
+
+
+
+def apply_primitive_noise(sketch: datalib.Sketch, std: float = 0.15, max_difference: float = 0.15) -> datalib.Sketch:
+    """Apply noise to sketch entities, returning a new noisy copy."""
+    noise_sketch = copy.deepcopy(sketch)
+    try:
+        _noisify_sketch_ents(noise_sketch, std=std, max_diff=max_difference)
+    except:
+        noise_sketch = sketch
+    return noise_sketch
+
+
+# =============================================================================
+# Constraint Tokenization
+# =============================================================================
+
+def tokenize_constraints(seq: datalib.sequence, gather_idxs: Sequence[int], max_length: Optional[int] = None):
     """Tokenizes the constraints in a sketch construction sequence.
 
     Parameters
@@ -61,7 +132,7 @@ def tokenize_constraints(seq: datalib.sequence, gather_idxs: Sequence[int], max_
     seq : datalib.sequence
         The sketch construction sequence to tokenize.
     gather_idxs : Sequence[int]
-        Indices produced by `dataset.tokenize_sketch` used to track entity tokens.
+        Indices produced by `primitive_data.tokenize_sketch` used to track entity tokens.
     max_length : Optional[int]
         If not `None`, truncates the sequence to this length.
     """
@@ -88,13 +159,13 @@ def tokenize_constraints(seq: datalib.sequence, gather_idxs: Sequence[int], max_
         pos_tokens.append(pos_idx)
 
         # Add reference parameters
-        val_tokens.extend(
-            [gather_idxs[ref] + len(Token) for ref in sorted(refs)])
+        val_tokens.extend([gather_idxs[ref] + len(Token) for ref in sorted(refs)])
         coord_tokens.extend(CONSTRAINT_COORD_TOKENS[:len(refs)])
         pos_tokens.extend([pos_idx] * len(refs))
+
     val_tokens.append(Token.Stop)
     coord_tokens.append(NON_COORD_TOKEN)
-    pos_tokens.append(pos_idx+1)
+    pos_tokens.append(pos_idx + 1)
 
     sample = {
         'val': _pad_or_truncate_to_length(np.array(val_tokens, dtype=np.int64), max_length),
@@ -105,14 +176,9 @@ def tokenize_constraints(seq: datalib.sequence, gather_idxs: Sequence[int], max_
     return sample
 
 
-def apply_primitive_noise(sketch: datalib.Sketch, std: float=0.15, max_difference: float=0.15) -> datalib.Sketch:
-    noise_sketch = copy.deepcopy(sketch)
-    try:
-        noise_models.noisify_sketch_ents(noise_sketch, std=std, max_diff=max_difference)
-    except:
-        noise_sketch = sketch
-    return noise_sketch
-
+# =============================================================================
+# Dataset and DataModule
+# =============================================================================
 
 class ConstraintDataset(torch.utils.data.Dataset[Dict[str, torch.Tensor]]):
     """Constraint generation dataset."""
@@ -164,7 +230,7 @@ class ConstraintDataset(torch.utils.data.Dataset[Dict[str, torch.Tensor]]):
             seq = random.choice(seq)
 
         sketch = datalib.sketch_from_sequence(seq)
-        data_utils.normalize_sketch(sketch)
+        sketch_utils.normalize_sketch(sketch)
 
         if self.primitive_noise_config.enabled:
             sketch = apply_primitive_noise(sketch, self.primitive_noise_config.std, self.primitive_noise_config.max_difference)
@@ -172,7 +238,7 @@ class ConstraintDataset(torch.utils.data.Dataset[Dict[str, torch.Tensor]]):
         if not self.tokenize:
             return sketch
 
-        sample, gather_idx = dataset.tokenize_sketch(sketch, self.num_bins, self.max_length)
+        sample, gather_idx = primitive_data.tokenize_sketch(sketch, self.num_bins, self.max_length)
         c_sample = tokenize_constraints(seq, gather_idx, self.max_length)
         c_sample = {f'c_{k}': v for k, v in c_sample.items()}
 
@@ -192,7 +258,7 @@ class ConstraintDataset(torch.utils.data.Dataset[Dict[str, torch.Tensor]]):
 
 
 @dataclasses.dataclass
-class ConstraintDataConfig(primitives_data.PrimitiveDataConfig):
+class ConstraintDataConfig(primitive_data.PrimitiveDataConfig):
     max_token_length: int = 130
     primitive_noise: PrimitiveNoiseConfig = dataclasses.field(default_factory=lambda: PrimitiveNoiseConfig(enabled=True))
 
@@ -217,7 +283,7 @@ class ConstraintDataModule(L.LightningDataModule):
             self.config.max_token_length,
             self.config.primitive_noise)
 
-        self._train_dataset, self._valid_dataset, self._test_dataset = primitives_data.split_dataset(
+        self._train_dataset, self._valid_dataset, self._test_dataset = primitive_data.split_dataset(
             self._dataset, self.config.validation_fraction, self.config.test_fraction)
 
     def _make_dataloader(self, dataset: torch.utils.data.Dataset, shuffle: bool) -> torch.utils.data.DataLoader[TokenInput]:

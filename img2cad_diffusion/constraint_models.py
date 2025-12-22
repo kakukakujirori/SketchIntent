@@ -11,7 +11,7 @@ import torch
 import torch.nn.functional as F
 import torchmetrics
 
-from img2cad_diffusion import constraint_data, lightning, dataset
+from img2cad_diffusion import constraint_data, primitive_data
 from sketchgraphs_models.nn.summary import CohenKappa
 from . import dit
 from .prob_path import MaskProbPath
@@ -44,6 +44,7 @@ class ConstraintModelConfig:
     num_heads: int = 4
     num_layers: int = 8
 
+
 @dataclasses.dataclass
 class OptimConfig:
     learning_rate: float = 1e-4
@@ -51,12 +52,16 @@ class OptimConfig:
 
 
 @dataclasses.dataclass
-class ConstraintModelTrainingConfig(lightning.TrainingConfiguration):
+class ConstraintModelTrainingConfig:
+    """Training configuration for constraint models."""
     data: constraint_data.ConstraintDataConfig = dataclasses.field(default_factory=constraint_data.ConstraintDataConfig)
     model: ConstraintModelConfig = dataclasses.field(default_factory=ConstraintModelConfig)
     optim: OptimConfig = dataclasses.field(default_factory=OptimConfig)
     batch_size: int = 256
     num_data_workers: int = 8
+    max_epochs: int = 30
+    num_gpus: int = 1
+    mixed_precision: bool = False
 
 
 class PrimitiveBlock(torch.nn.Module):
@@ -124,18 +129,18 @@ class PrimitiveModel(torch.nn.Module):
 
         # Embeddings
         # Value embeddings
-        num_val_embeddings = len(dataset.Token) + num_bins
-        if dataset.INCLUDE_CONSTRUCTION:
+        num_val_embeddings = len(primitive_data.Token) + num_bins
+        if primitive_data.INCLUDE_CONSTRUCTION:
             num_val_embeddings += 2
-        self.val_embed = torch.nn.Embedding(num_val_embeddings, embed_dim, padding_idx=dataset.Token.Pad)
+        self.val_embed = torch.nn.Embedding(num_val_embeddings, embed_dim, padding_idx=primitive_data.Token.Pad)
 
         # Coordinate embeddings
-        num_coord_embeddings = 2 + sum([len(cm) for cm in dataset.COORD_TOKEN_MAP.values()])
-        self.coord_embed = torch.nn.Embedding(num_coord_embeddings, embed_dim, padding_idx=dataset.Token.Pad)
+        num_coord_embeddings = 2 + sum([len(cm) for cm in primitive_data.COORD_TOKEN_MAP.values()])
+        self.coord_embed = torch.nn.Embedding(num_coord_embeddings, embed_dim, padding_idx=primitive_data.Token.Pad)
 
         # Position embeddings
         num_pos_embeddings = 3 + max_entities
-        self.pos_embed = torch.nn.Embedding(num_pos_embeddings, embed_dim, padding_idx=dataset.Token.Pad)
+        self.pos_embed = torch.nn.Embedding(num_pos_embeddings, embed_dim, padding_idx=primitive_data.Token.Pad)
 
         # Rotary
         self.rotary_emb = dit.Rotary(embed_dim // num_heads)
