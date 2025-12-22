@@ -1,5 +1,6 @@
 hydra-core
-pytorch-lightning #==1.5.10.post0
+# pytorch-lightning==1.5.10.post0
+lightning
 lz4
 matplotlib
 numpy #<2.0.0
