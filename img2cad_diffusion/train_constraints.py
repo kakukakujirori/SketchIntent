@@ -61,7 +61,7 @@ def make_trainer(config: constraint_models.ConstraintModelTrainingConfig) -> pl.
         if config.num_gpus == 0:
             log.warning('Requested mixed precision but no GPUs. Disabled.')
         else:
-            trainer_kwargs['precision'] = 16
+            trainer_kwargs['precision'] = "bf16-mixed"
 
     return pl.Trainer(logger=logger, callbacks=callbacks, **trainer_kwargs)
 

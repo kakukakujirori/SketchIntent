@@ -32,6 +32,8 @@ except ImportError as e:
 import sketchgraphs.data as datalib
 from sketchgraphs.data import flat_array, NodeOp, EdgeOp, EntityType, ConstraintType
 
+from img2cad_diffusion.constraint_data import deduplicate_refs
+
 
 def meter_to_millimeter(op: NodeOp | EdgeOp, debug: bool = False) -> NodeOp | EdgeOp:
     if isinstance(op, NodeOp):
@@ -100,6 +102,16 @@ def convert_primitive(op: NodeOp, sketch):
         start = pnt + dir_vec * op.parameters['startParam']
         end = pnt + dir_vec * op.parameters['endParam']
         is_construction = op.parameters['isConstruction']
+
+        # Ensure minimum-length Line (prevent OCC "Both points are equal" error)
+        min_length = 1e-3  # 1 micron minimum in mm scale
+        if (start - end).Length < min_length:
+            # Create a tiny Line in the direction (or arbitrary X direction)
+            if dir_vec.Length > 1e-9:
+                end = start + dir_vec * min_length
+            else:
+                end = start + FreeCAD.Vector(min_length, 0, 0)
+
         sketch.addGeometry(Part.LineSegment(start, end), is_construction)
         cmd = f"sketch.addGeometry(Part.LineSegment({start}, {end}), {is_construction})"
 
@@ -135,6 +147,15 @@ def convert_primitive(op: NodeOp, sketch):
             ep += 2*math.pi
         mid_param = (sp + ep) / 2.0
         p_mid = get_pt(mid_param)
+
+        # For clockwise arcs, swap start and end when creating the FreeCAD arc.
+        # get_pt() with clockwise=True produces: start at angle -startParam, end at angle -endParam
+        # For a semicircle with startParam=-90° and endParam=90°, this gives:
+        #   p_start at +90° (top), p_end at -90° (bottom)
+        # But FreeCAD Part.ArcOfCircle interprets (start, mid, end) in CCW order,
+        # so we swap to get: p_start at bottom, p_end at top (correct CCW orientation)
+        if clockwise:
+            p_start, p_end = p_end, p_start
 
         sketch.addGeometry(Part.ArcOfCircle(p_start, p_mid, p_end), is_construction)
         cmd = f"sketch.addGeometry(Part.ArcOfCircle({p_start}, {p_mid}, {p_end}), {is_construction})"
@@ -185,10 +206,14 @@ def convert_constraint(op: EdgeOp, sketch, node_idx_map):
     """
     if op.parameters.get("disable", False): return f"# Disabled: {op}"
 
+    # Deduplicate refs (handles cases like (5, 5, 3, 3) -> (3, 5))
+    op = deduplicate_refs(op)
+    refs = op.references
+
     cmd = ""
     try:
-        r1 = node_idx_map.get(op.references[0]) if len(op.references) > 0 else None
-        r2 = node_idx_map.get(op.references[1]) if len(op.references) > 1 else None
+        r1 = node_idx_map.get(refs[0]) if len(refs) > 0 else None
+        r2 = node_idx_map.get(refs[1]) if len(refs) > 1 else None
 
         if op.label == ConstraintType.Coincident: # 0
             """ NOTE: Although FreeCAD 1.0.0 and later unifies Coincident and PointOnObject,
@@ -312,11 +337,11 @@ def convert_constraint(op: EdgeOp, sketch, node_idx_map):
                 cmd = f"# Skipped ConstraintType.Distance: Invalid references ({r1=}, {r2=})"
 
         elif op.label == ConstraintType.Horizontal: # 4
-            if len(op.references) == 1:
+            if len(refs) == 1:
                 if r1 and r1[0] != -1:
                     sketch.addConstraint(Sketcher.Constraint('Horizontal', r1[0]))
                     cmd = f"sketch.addConstraint(Sketcher.Constraint('Horizontal', {r1[0]}))"
-            elif len(op.references) == 2:
+            elif len(refs) == 2:
                 if r1 and r2 and r1[0] != -1 and r2[0] != -1:
                     sketch.addConstraint(Sketcher.Constraint('Horizontal', r1[0], r1[1], r2[0], r2[1]))
                     cmd = f"sketch.addConstraint(Sketcher.Constraint('Horizontal', {r1[0]}, {r1[1]}, {r2[0]}, {r2[1]}))"
@@ -327,11 +352,11 @@ def convert_constraint(op: EdgeOp, sketch, node_idx_map):
                 cmd = f"sketch.addConstraint(Sketcher.Constraint('Parallel', {r1[0]}, {r2[0]}))"
 
         elif op.label == ConstraintType.Vertical: # 6
-            if len(op.references) == 1:
+            if len(refs) == 1:
                 if r1 and r1[0] != -1:
                     sketch.addConstraint(Sketcher.Constraint('Vertical', r1[0]))
                     cmd = f"sketch.addConstraint(Sketcher.Constraint('Vertical', {r1[0]}))"
-            elif len(op.references) == 2:
+            elif len(refs) == 2:
                 if r1 and r2 and r1[0] != -1 and r2[0] != -1:
                     sketch.addConstraint(Sketcher.Constraint('Vertical', r1[0], r1[1], r2[0], r2[1]))
                     cmd = f"sketch.addConstraint(Sketcher.Constraint('Vertical', {r1[0]}, {r1[1]}, {r2[0]}, {r2[1]}))"
@@ -372,26 +397,15 @@ def convert_constraint(op: EdgeOp, sketch, node_idx_map):
                 cmd = f"sketch.addConstraint(Sketcher.Constraint('Perpendicular', {r1[0]}, {r2[0]}))"
 
         elif op.label == ConstraintType.Midpoint: # 10
-            r3 = node_idx_map.get(op.references[2]) if len(op.references) > 2 else None
+            r3 = node_idx_map.get(refs[2]) if len(refs) > 2 else None
 
             if r1 and r2 and r1[0] != -1 and r2[0] != -1:
                 # Case 1: Three-point Midpoint -> Symmetric
                 if r3 and r3[0] != -1:
-                    # Determine which reference is the midpoint based on geometry types
-                    # If r2 or r3 reference Line geometry (vertex 1 or 2 from a LineSegment), r1 is midpoint
-                    # If all are Point geometries, r3 is the midpoint
-                    geo_r2 = sketch.Geometry[r2[0]] if r2[0] >= 0 else None
-                    geo_r3 = sketch.Geometry[r3[0]] if r3[0] >= 0 else None
-
-                    r2_is_line_vertex = geo_r2 is not None and isinstance(geo_r2, Part.LineSegment)
-                    r3_is_line_vertex = geo_r3 is not None and isinstance(geo_r3, Part.LineSegment)
-
-                    if r2_is_line_vertex or r3_is_line_vertex:
-                        # r1 is midpoint, r2 and r3 are the symmetric points (Line vertices case)
-                        mid_ref, p1_ref, p2_ref = r1, r2, r3
-                    else:
-                        # All are Point geometries, r3 is the midpoint
-                        mid_ref, p1_ref, p2_ref = r3, r1, r2
+                    # Midpoint(A, B, C) semantics: A is the midpoint of B and C
+                    # Tokenization preserves this order (first ref is midpoint, rest are sorted)
+                    # So r1 is always the midpoint, r2 and r3 are the symmetric points
+                    mid_ref, p1_ref, p2_ref = r1, r2, r3
 
                     sketch.addConstraint(Sketcher.Constraint('Symmetric', p1_ref[0], p1_ref[1], p2_ref[0], p2_ref[1], mid_ref[0], mid_ref[1]))
                     cmd = f"sketch.addConstraint(Sketcher.Constraint('Symmetric', {p1_ref[0]}, {p1_ref[1]}, {p2_ref[0]}, {p2_ref[1]}, {mid_ref[0]}, {mid_ref[1]}))"
@@ -510,8 +524,8 @@ def convert_constraint(op: EdgeOp, sketch, node_idx_map):
                 cmd = f"# Skipped ConstraintType.Angle: Invalid references ({r1=}, {r2=})"
 
         elif op.label == ConstraintType.Subnode: # 101
-            child_idx = op.references[0]
-            parent_idx = op.references[1]
+            child_idx = refs[0]
+            parent_idx = refs[1]
             child_info = node_idx_map.get(child_idx)
             parent_info = node_idx_map.get(parent_idx)
 
@@ -560,6 +574,7 @@ def resolve_subnodes(seq: list[NodeOp | EdgeOp]) -> dict[int, tuple[int, int]]:
     # Resolve Subnodes using EdgeOp(label=ConstraintType.Subnode, references=(child, parent))
     for op in seq:
         if isinstance(op, EdgeOp) and op.label == ConstraintType.Subnode:
+            op = deduplicate_refs(op)
             child_idx = op.references[0]
             parent_idx = op.references[1]
             assert parent_idx in node_idx_map
@@ -604,7 +619,10 @@ def resolve_redundant_coincident(seq: list[NodeOp | EdgeOp], node_idx_map: dict[
     coincident_map = {}
     for coincident_op_idx, op in enumerate(seq):
         if isinstance(op, EdgeOp) and op.label == ConstraintType.Coincident:
-            ref1, ref2 = op.references
+            op = deduplicate_refs(op)
+            refs = op.references
+            assert len(refs) == 2, f"Coincident should have 2 refs after dedup, got {refs}"
+            ref1, ref2 = refs[0], refs[1]
             idx1, pt1 = node_idx_map[ref1]
             idx2, pt2 = node_idx_map[ref2]
             idx1, pt1, ref1, idx2, pt2, ref2 = sort_idx(idx1, pt1, ref1, idx2, pt2, ref2)
@@ -645,7 +663,10 @@ def resolve_tangent(seq: list[NodeOp | EdgeOp], node_idx_map: dict[int, tuple[in
     coincident_map = {}
     for coincident_op_idx, op in enumerate(seq):
         if isinstance(op, EdgeOp) and op.label == ConstraintType.Coincident:
-            ref1, ref2 = op.references
+            op = deduplicate_refs(op)
+            refs = op.references
+            assert len(refs) == 2, f"Coincident should have 2 refs after dedup, got {refs}"
+            ref1, ref2 = refs[0], refs[1]
             idx1, pt1 = node_idx_map[ref1]
             idx2, pt2 = node_idx_map[ref2]
             idx1, pt1, ref1, idx2, pt2, ref2 = sort_idx(idx1, pt1, ref1, idx2, pt2, ref2)
@@ -656,7 +677,10 @@ def resolve_tangent(seq: list[NodeOp | EdgeOp], node_idx_map: dict[int, tuple[in
     for tangent_op_idx, op in enumerate(seq):
         if isinstance(op, EdgeOp) and op.label == ConstraintType.Tangent:
             # Check references (pt1_dummy == pt2_dummy == 0 in most cases)
-            ref1_dummy, ref2_dummy = op.references
+            op = deduplicate_refs(op)
+            refs = op.references
+            assert len(refs) == 2, f"Tangent should have 2 refs after dedup, got {refs}"
+            ref1_dummy, ref2_dummy = refs[0], refs[1]
             idx1, pt1_dummy = node_idx_map[ref1_dummy]
             idx2, pt2_dummy = node_idx_map[ref2_dummy]
             idx1, pt1_dummy, ref1_dummy, idx2, pt2_dummy, ref2_dummy = sort_idx(idx1, pt1_dummy, ref1_dummy, idx2, pt2_dummy, ref2_dummy)
@@ -943,7 +967,7 @@ if __name__ == '__main__':
             continue
 
 
-    # seq = seq_data['sequences'][101]
+    # seq = seq_data['sequences'][540168]
     # sketch = datalib.sketch_from_sequence(seq)
     # fig = datalib.render_sketch(sketch)
     # fig.savefig('sketch_gt.svg')

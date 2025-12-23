@@ -244,11 +244,13 @@ def normalize_sketch(sketch):
 
 
 def _parameterize_arc(arc: datalib.Arc) -> np.ndarray:
-    """Extract parameterization for the given Arc instance."""
-    start_point, end_point = arc.start_point, arc.end_point
-    if arc.clockwise:
-        start_point, end_point = end_point, start_point
-    return np.concatenate([start_point, arc.mid_point, end_point])
+    """Extract parameterization for the given Arc instance.
+
+    Returns [center_point, start_point, end_point] to match SketchGraphs
+    Sequence representation where Arc subnodes are ordered as
+    [SN_Center, SN_Start, SN_End].
+    """
+    return np.concatenate([arc.center_point, arc.start_point, arc.end_point])
 
 def _parameterize_circle(circle: datalib.Circle) -> np.ndarray:
     """Extract parameterization for the given Circle instance."""
@@ -294,40 +296,81 @@ def parameterize_entity(ent) -> np.array:
     return param_fn(ent)
 
 
-def _arc_from_params(params, entity_id=None):
+def _arc_from_params(params, entity_id: str | None = None, clockwise: bool | None = None):
     """Instantiate an arc from the given parameterization.
-    Implementation from:
-    https://stackoverflow.com/questions/52990094/calculate-circle-given-
-    3-points-code-explanation
+
+    Parameters are expected as [center_point, start_point, end_point] to match
+    SketchGraphs Sequence representation [SN_Center, SN_Start, SN_End].
+
+    Parameters
+    ----------
+    params : list
+        Arc parameters [cx, cy, sx, sy, ex, ey]
+    entity_id : str, optional
+        Entity ID
+    clockwise : bool, optional
+        If provided, use this value for clockwise. Otherwise infer from geometry.
     """
-    b, c, d = params[:2], params[2:4], params[4:]
+    import math
 
-    temp = c[0]**2 + c[1]**2
-    bc = (b[0]**2 + b[1]**2 - temp) / 2
-    cd = (temp - d[0]**2 - d[1]**2) / 2
-    det = (b[0] - c[0]) * (c[1] - d[1]) - (c[0] - d[0]) * (b[1] - c[1])
+    center = params[:2]
+    start = params[2:4]
+    end = params[4:]
 
-    if abs(det) < 1.0e-10:
-        return None
+    # Calculate radius from center to start point
+    radius = ((center[0] - start[0])**2 + (center[1] - start[1])**2)**.5
+    if radius < 1e-9:
+        radius = 1e-9
 
-    # Center of circle
-    cx = (bc*(c[1] - d[1]) - cd*(b[1] - c[1])) / det
-    cy = ((b[0] - c[0]) * cd - (c[0] - d[0]) * bc) / det
+    # Compute angles from center to start and end
+    v_start = [start[0] - center[0], start[1] - center[1]]
+    v_end = [end[0] - center[0], end[1] - center[1]]
+    start_angle = math.atan2(v_start[1], v_start[0])
+    end_angle = math.atan2(v_end[1], v_end[0])
 
-    radius = ((cx - b[0])**2 + (cy - b[1])**2)**.5
+    # Determine clockwise if not provided
+    if clockwise is None:
+        # Use shorter path heuristic (default to CCW for 180° arcs)
+        ccw_angle = end_angle - start_angle
+        if ccw_angle <= 0:
+            ccw_angle += 2 * math.pi
+        clockwise = ccw_angle > math.pi
 
-    info = {
-        'id': entity_id,
-        'center': [cx, cy],
-        'radius': radius,
-        'startPoint': params[:2],
-        'endPoint': params[-2:]
-    }
-    return Arc.from_info(info)
+    # Compute startParam and endParam based on clockwise
+    if clockwise:
+        start_param = -start_angle
+        end_param = -end_angle
+        if start_param > end_param:
+            start_param -= 2 * math.pi
+    else:
+        # CCW arc: ensure end_angle > start_angle
+        start_param = start_angle
+        end_param = end_angle
+        # Handle wrap-around: if end < start, add 2π to end
+        # This handles cases like start_angle=π, end_angle=-π/2
+        # which should become start_param=π, end_param=3π/2
+        if end_param <= start_param:
+            end_param += 2 * math.pi
+
+    return Arc(
+        entityId=entity_id,
+        xCenter=center[0],
+        yCenter=center[1],
+        radius=radius,
+        clockwise=clockwise,
+        xDir=1.0,
+        yDir=0.0,
+        startParam=start_param,
+        endParam=end_param
+    )
 
 def _circle_from_params(params, entity_id=None):
     """Instantiate a circle from the given parameterization."""
-    return Circle(entity_id, xCenter=params[0], yCenter=params[1], radius=params[2])
+    # Ensure radius is positive (noise can occasionally make it negative)
+    radius = abs(params[2])
+    if radius < 1e-9:
+        radius = 1e-9  # Minimum radius to avoid degenerate circles
+    return Circle(entity_id, xCenter=params[0], yCenter=params[1], radius=radius)
 
 def _line_from_params(params, entity_id=None):
     """Instantiate a line from the given parameterization."""
@@ -343,7 +386,7 @@ def _point_from_params(params, entity_id=None):
     return Point(entity_id, x=params[0], y=params[1])
 
 
-def entity_from_params(params, entity_id: str=None):
+def entity_from_params(params, entity_id: str | None = None, clockwise: bool | None = None):
     """Instantiate an entity from the given parameterization.
 
     The length of params uniquely determines the target entity type.
@@ -354,23 +397,26 @@ def entity_from_params(params, entity_id: str=None):
         The entity's parameterization
     entity_id : str, optional
         Optional string specifying the id of the entity to create.
+    clockwise : bool, optional
+        For Arc entities, the clockwise flag. Ignored for other entity types.
 
     Returns
     -------
     Entity
         The entity instance corresponding to the input parameterization
     """
-    entity_by_num_params = {
-        NUM_PARAMS[Arc]: _arc_from_params,
-        NUM_PARAMS[Circle]: _circle_from_params,
-        NUM_PARAMS[Line]: _line_from_params,
-        NUM_PARAMS[Point]: _point_from_params
-    }
+    num_arc_params = NUM_PARAMS[Arc]
 
-    ent_build_fn = entity_by_num_params.get(len(params))
-    if ent_build_fn is None:
-        raise ValueError("Unsupported number of parameters")
-    return ent_build_fn(params, entity_id)
+    if len(params) == num_arc_params:
+        return _arc_from_params(params, entity_id, clockwise=clockwise)
+    elif len(params) == NUM_PARAMS[Circle]:
+        return _circle_from_params(params, entity_id)
+    elif len(params) == NUM_PARAMS[Line]:
+        return _line_from_params(params, entity_id)
+    elif len(params) == NUM_PARAMS[Point]:
+        return _point_from_params(params, entity_id)
+    else:
+        raise ValueError(f"Unsupported number of parameters: {len(params)}")
 
 
 # Minimum and maximum parameter values following normalization
@@ -429,4 +475,3 @@ def dequantize_params(params, n_bins):
     params = params.astype('float32') + 0.5  # center of each bin
     params = params / n_bins * (max_val - min_val) + min_val
     return params
-

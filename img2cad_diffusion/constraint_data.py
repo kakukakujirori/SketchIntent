@@ -4,7 +4,7 @@
 import copy
 import random
 import dataclasses
-from typing import Dict, Optional, Sequence
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import lightning as L
@@ -85,7 +85,10 @@ def _trunc_normal_entity_noise(entity: datalib.Entity, std: float = 0.2, max_dif
         noise = truncnorm.rvs(a=-max_diff, b=max_diff,
                               scale=std / (2 ** trial), size=params.size)
         new_params = params + noise
-        new_ent = sketch_utils.entity_from_params(new_params, entity_id=entity.entityId)
+
+        # Preserve clockwise attribute for Arc entities
+        clockwise = entity.clockwise if isinstance(entity, Arc) else None
+        new_ent = sketch_utils.entity_from_params(new_params, entity_id=entity.entityId, clockwise=clockwise)
 
         if isinstance(entity, Arc):
             trial += 1
@@ -124,6 +127,39 @@ def apply_primitive_noise(sketch: datalib.Sketch, std: float = 0.15, max_differe
 # Constraint Tokenization
 # =============================================================================
 
+def deduplicate_refs(op: datalib.EdgeOp) -> datalib.EdgeOp:
+    """Remove duplicate references from EdgeOp.
+
+    Some Coincident EdgeOps in SketchGraphs data have duplicate references like (5, 5, 3, 3).
+    This function deduplicates them. Only applies to 4+ refs cases.
+
+    For refs with <= 3 elements (normal constraints including Midpoint),
+    the original EdgeOp is returned unchanged to preserve ordering.
+
+    Note: Sorting is NOT performed here - that responsibility belongs to the caller
+    (e.g., tokenize_constraints sorts refs based on gather_idxs).
+
+    Parameters
+    ----------
+    op : EdgeOp
+        The EdgeOp to process.
+
+    Returns
+    -------
+    EdgeOp
+        EdgeOp with deduplicated references for 4+ refs cases, original otherwise.
+    """
+    refs = op.references
+    if len(refs) >= 4:
+        # This should only happen for duplicated Coincident constraints
+        assert op.label == datalib.ConstraintType.Coincident, \
+            f"4+ refs bug should only occur for Coincident, got {op.label}"
+        deduped = tuple(set(refs))
+        assert len(deduped) == 2, f"Expected 2 unique refs after dedup, got {deduped}"
+        return datalib.EdgeOp(op.label, deduped, op.parameters)
+    return op
+
+
 def tokenize_constraints(seq: datalib.sequence, gather_idxs: Sequence[int], max_length: Optional[int] = None):
     """Tokenizes the constraints in a sketch construction sequence.
 
@@ -148,9 +184,19 @@ def tokenize_constraints(seq: datalib.sequence, gather_idxs: Sequence[int], max_
             continue
         if not op.label.name in Token.__members__:
             continue
-        refs = op.references
-        if 0 in refs:  # skip external constraints
+        if 0 in op.references:  # skip external constraints
             continue
+
+        # Deduplicate refs (handles cases like (5, 5, 3, 3) -> (3, 5))
+        op = deduplicate_refs(op)
+        refs = op.references
+
+        # Skip constraints with references that would be out of bounds after truncation
+        # gather_idxs[0]=None (External placeholder, ref=0)
+        # gather_idxs[ref] gives the first token position for entity with node_idx=ref
+        if max_length is not None:
+            if any(gather_idxs[ref] >= max_length for ref in refs):
+                continue
 
         # Add constraint type tokens
         val_tokens.append(Token[op.label.name])
@@ -159,7 +205,16 @@ def tokenize_constraints(seq: datalib.sequence, gather_idxs: Sequence[int], max_
         pos_tokens.append(pos_idx)
 
         # Add reference parameters
-        val_tokens.extend([gather_idxs[ref] + len(Token) for ref in sorted(refs)])
+        # For Midpoint constraints, the first reference is the midpoint and should stay fixed
+        # Only sort the remaining references (symmetric points)
+        if op.label == datalib.ConstraintType.Midpoint and len(refs) == 3:
+            # Midpoint(A, B, C) means A is the midpoint of B and C
+            # Keep A fixed, sort B and C
+            sorted_refs = [refs[0]] + sorted(refs[1:], key=lambda r: gather_idxs[r])
+        else:
+            sorted_refs = sorted(refs, key=lambda r: gather_idxs[r])
+
+        val_tokens.extend([gather_idxs[ref] + len(Token) for ref in sorted_refs])
         coord_tokens.extend(CONSTRAINT_COORD_TOKENS[:len(refs)])
         pos_tokens.extend([pos_idx] * len(refs))
 
@@ -174,6 +229,325 @@ def tokenize_constraints(seq: datalib.sequence, gather_idxs: Sequence[int], max_
     }
 
     return sample
+
+
+# =============================================================================
+# Constraint Detokenization
+# =============================================================================
+
+def detokenize_constraints(c_val_tokens: np.ndarray) -> List[Tuple[Token, List[int]]]:
+    """Convert constraint tokens back to (constraint_type, gather_indices) pairs.
+
+    This function is the inverse of tokenize_constraints for the value tokens.
+    It parses the token sequence and extracts constraint types with their
+    associated entity references (as gather indices).
+
+    Parameters
+    ----------
+    c_val_tokens : np.ndarray
+        The constraint value token sequence (c_val from tokenization).
+        Should contain [Start, <constraints...>, Stop, <padding>].
+
+    Returns
+    -------
+    List[Tuple[Token, List[int]]]
+        List of (constraint_type, [gather_idx1, gather_idx2, ...]) tuples.
+        Each gather_idx is an index into the gather_idxs list from primitive tokenization.
+    """
+    constraints = []
+    current_constraint = None
+    current_refs = []
+
+    for token in c_val_tokens:
+        token = int(token)
+
+        # Skip padding and mask tokens
+        if token == Token.Pad or token == Token.Mask:
+            continue
+
+        # Control tokens
+        if token == Token.Start:
+            continue
+        if token == Token.Stop:
+            # Finalize last constraint if any
+            if current_constraint is not None:
+                constraints.append((current_constraint, current_refs))
+            break
+
+        # Check if this is a constraint type token (4-16)
+        if token >= Token.Coincident and token <= Token.Vertical:
+            # Save previous constraint if exists
+            if current_constraint is not None:
+                constraints.append((current_constraint, current_refs))
+            # Start new constraint
+            current_constraint = Token(token)
+            current_refs = []
+        elif token >= len(Token):
+            # This is a reference token: gather_idx = token - len(Token)
+            gather_idx = token - len(Token)
+            current_refs.append(gather_idx)
+
+    return constraints
+
+
+def build_gather_idx_mapping(sketch: datalib.Sketch, num_bins: int) -> Dict[int, Tuple[int, int]]:
+    """Build a mapping from primitive token position to (entity_id, subnode_idx).
+
+    The gather_idxs created during primitive tokenization map entity sub-references
+    (like start/end points) to positions in the primitive token sequence.
+    This function creates a reverse mapping to recover which entity and which
+    sub-part of that entity a primitive token position refers to.
+
+    Parameters
+    ----------
+    sketch : datalib.Sketch
+        The sketch containing the entities.
+    num_bins : int
+        Number of bins used for primitive tokenization.
+
+    Returns
+    -------
+    Dict[int, Tuple[int, int]]
+        Mapping from primitive token position to (entity_idx, subnode_idx).
+        entity_idx is 1-based (0 is reserved for external).
+        subnode_idx meanings depend on entity type:
+        - Arc: 0=entity, 1=start, 2=mid, 3=end
+        - Circle: 0=entity, 1=center
+        - Line: 0=entity, 1=start, 2=end
+        - Point: 0=entity
+    """
+    from sketchgraphs.data import Arc, Circle, Line, Point
+
+    # Re-tokenize to get the actual gather_idxs (positions in primitive token sequence)
+    _, gather_idxs = primitive_data.tokenize_sketch(sketch, num_bins, max_length=None, include_stop=False)
+
+    # gather_map: for each entity type, which subnodes are tracked
+    gather_map = {
+        Arc: [0, 1, 2, 3],      # entity, start, mid, end
+        Circle: [0, 1],          # entity, center
+        Line: [0, 1, 2],         # entity, start, end
+        Point: [0]               # entity only
+    }
+
+
+    # Build mapping: primitive_token_position -> (entity_idx, subnode_idx)
+    # gather_idxs[0]=None (External placeholder), gather_idxs[1]+ are real entities
+    # Note: entity_idx here is 1-based (first entity = 1)
+    mapping = {}
+
+    gather_list_idx = 1  # Skip index 0 (External placeholder) and start at 1 (first real entity)
+    entity_idx = 1  # 1-based entity index (matching SketchGraphs refs)
+
+    for ent in sketch.entities.values():
+        if ent is None:
+            entity_idx += 1
+            continue
+
+        ent_type = type(ent)
+        if ent_type not in gather_map:
+            entity_idx += 1
+            continue
+
+        subnode_types = gather_map[ent_type]
+        for subnode_idx in subnode_types:
+            if gather_list_idx < len(gather_idxs):
+                prim_token_pos = gather_idxs[gather_list_idx]
+                if prim_token_pos is not None:  # Skip None placeholders
+                    mapping[prim_token_pos] = (entity_idx, subnode_idx)
+                gather_list_idx += 1
+
+        entity_idx += 1
+
+    return mapping
+
+
+def reconstruct_sketch_with_constraints(
+    sketch: datalib.Sketch,
+    c_val_tokens: np.ndarray,
+    num_bins: int
+) -> datalib.sequence:
+    """Reconstruct a full construction sequence with constraints from tokens.
+
+    This function takes a sketch (reconstructed from primitive tokens) and
+    constraint tokens, and produces a complete construction sequence that
+    includes both NodeOp (for entities) and EdgeOp (for constraints).
+
+    Parameters
+    ----------
+    sketch : datalib.Sketch
+        The sketch containing entities, typically from primitive_data.sketch_from_tokens().
+    c_val_tokens : np.ndarray
+        The constraint value token sequence.
+    num_bins : int
+        Number of bins used for primitive quantization (for re-tokenizing to get gather_idxs).
+
+    Returns
+    -------
+    datalib.sequence
+        A complete construction sequence with NodeOp and EdgeOp.
+    """
+    # Re-tokenize to get gather_idxs mapping
+    _, gather_idxs = primitive_data.tokenize_sketch(sketch, num_bins, max_length=None, include_stop=False)
+
+    # Build mapping from primitive token position to (entity_idx, subnode_idx)
+    gather_to_entity = build_gather_idx_mapping(sketch, num_bins)
+
+    # Detokenize constraints
+    constraint_list = detokenize_constraints(c_val_tokens)
+
+    # Build the sequence with proper subnode structure
+    sequence = []
+    node_ops = []  # Track NodeOps for subnode reference
+    subnode_map = {}  # Maps (entity_idx, subnode_type) -> node_idx
+    entity_node_map = {}  # Maps entity_idx -> node_idx of the entity NodeOp
+
+    # Subnode types for each entity - ORDER MUST MATCH ORIGINAL SKETCHGRAPHS SEQUENCE
+    # Arc subnodes appear as: Center, Start, End in the original sequence
+    from sketchgraphs.data import Arc, Circle, Line, Point
+
+    subnode_types = {
+        Arc: [datalib.SubnodeType.SN_Center, datalib.SubnodeType.SN_Start, datalib.SubnodeType.SN_End],
+        Circle: [datalib.SubnodeType.SN_Center],
+        Line: [datalib.SubnodeType.SN_Start, datalib.SubnodeType.SN_End],
+        Point: []  # Points have no subnodes
+    }
+
+    # Helper to convert entity to parameters dict
+    def entity_to_parameters(ent) -> dict:
+        """Convert a sketch entity to a parameters dictionary for NodeOp."""
+        params = {'isConstruction': getattr(ent, 'isConstruction', False)}
+
+        if isinstance(ent, Arc):
+            params.update({
+                'xCenter': ent.xCenter,
+                'yCenter': ent.yCenter,
+                'radius': ent.radius,
+                'xDir': getattr(ent, 'xDir', 1.0),
+                'yDir': getattr(ent, 'yDir', 0.0),
+                'startParam': getattr(ent, 'startParam', 0.0),
+                'endParam': getattr(ent, 'endParam', 3.14159),
+                'clockwise': getattr(ent, 'clockwise', False),
+            })
+        elif isinstance(ent, Circle):
+            params.update({
+                'xCenter': ent.xCenter,
+                'yCenter': ent.yCenter,
+                'radius': ent.radius,
+            })
+        elif isinstance(ent, Line):
+            start = ent.start_point
+            end = ent.end_point
+            dx = end[0] - start[0]
+            dy = end[1] - start[1]
+            length = (dx**2 + dy**2)**0.5
+            if length > 1e-10:
+                dirX, dirY = dx/length, dy/length
+            else:
+                dirX, dirY = 1.0, 0.0
+            params.update({
+                'pntX': start[0],
+                'pntY': start[1],
+                'dirX': dirX,
+                'dirY': dirY,
+                'startParam': 0.0,
+                'endParam': length,
+            })
+        elif isinstance(ent, Point):
+            params.update({
+                'x': ent.x,
+                'y': ent.y,
+            })
+
+        return params
+
+    # Add NodeOps for entities and their subnodes
+    entity_idx = 1  # 1-based entity indexing (External=0 is skipped)
+    for ent_key, ent in sketch.entities.items():
+        if ent is None:
+            entity_idx += 1
+            continue
+
+        # Add entity NodeOp
+        entity_node_idx = len(node_ops)
+        entity_node_map[entity_idx] = entity_node_idx
+        node_op = datalib.NodeOp(label=ent.type, parameters=entity_to_parameters(ent))
+        node_ops.append(node_op)
+        sequence.append(node_op)
+
+        # Add subnode NodeOps for this entity
+        ent_type = type(ent)
+        for sn_type in subnode_types.get(ent_type, []):
+            subnode_node_idx = len(node_ops)
+            subnode_op = datalib.NodeOp(label=sn_type, parameters={})
+            node_ops.append(subnode_op)
+            sequence.append(subnode_op)
+            subnode_map[(entity_idx, sn_type)] = subnode_node_idx
+
+            # Add Subnode EdgeOp to link subnode to parent entity
+            subnode_edge = datalib.EdgeOp(
+                label=datalib.ConstraintType.Subnode,
+                references=(subnode_node_idx, entity_node_idx)
+            )
+            sequence.append(subnode_edge)
+
+        entity_idx += 1
+
+    # Map: subnode index in gather_idxs -> subnode type
+    # For Arc: gather slots are [entity(0), center(1), start(2), end(3)]
+    # For Line: gather slots are [entity(0), start(1), end(2)]
+    subnode_idx_to_type = {
+        Arc: {0: None, 1: datalib.SubnodeType.SN_Center, 2: datalib.SubnodeType.SN_Start, 3: datalib.SubnodeType.SN_End},
+        Circle: {0: None, 1: datalib.SubnodeType.SN_Center},
+        Line: {0: None, 1: datalib.SubnodeType.SN_Start, 2: datalib.SubnodeType.SN_End},
+        Point: {0: None}
+    }
+
+    # 2. Add EdgeOps for constraints
+    for constraint_type, gather_refs in constraint_list:
+        # Convert gather refs (primitive token positions) to node indices
+        node_refs = []
+        for prim_tok_pos in gather_refs:
+            if prim_tok_pos in gather_to_entity:
+                entity_id, subnode_slot = gather_to_entity[prim_tok_pos]
+
+                # Get entity type to determine what subnode type this slot represents
+                ent_list = list(sketch.entities.values())
+                if entity_id >= 1 and entity_id <= len(ent_list):
+                    ent = ent_list[entity_id - 1]
+                    if ent is not None:
+                        ent_type = type(ent)
+                        sn_type = subnode_idx_to_type.get(ent_type, {}).get(subnode_slot)
+
+                        if sn_type is not None and (entity_id, sn_type) in subnode_map:
+                            # Reference the subnode's node index
+                            node_refs.append(subnode_map[(entity_id, sn_type)])
+                        elif entity_id in entity_node_map:
+                            # Reference the entity's node index (slot 0 = entity itself)
+                            node_refs.append(entity_node_map[entity_id])
+                        else:
+                            node_refs.append(0)
+                    else:
+                        node_refs.append(0)
+                else:
+                    node_refs.append(prim_tok_pos)
+            else:
+                node_refs.append(prim_tok_pos)
+
+        # Map Token to ConstraintType
+        constraint_type_name = constraint_type.name
+        if constraint_type_name in datalib.ConstraintType.__members__:
+            constraint_label = datalib.ConstraintType[constraint_type_name]
+        else:
+            continue  # Skip unknown constraint types
+
+        # Create EdgeOp
+        edge_op = datalib.EdgeOp(
+            label=constraint_label,
+            references=tuple(node_refs)
+        )
+        sequence.append(edge_op)
+
+    return sequence
 
 
 # =============================================================================
@@ -309,4 +683,3 @@ class ConstraintDataModule(L.LightningDataModule):
     def train_dataset_size(self) -> int:
         assert self._train_dataset is not None
         return len(self._train_dataset)
-

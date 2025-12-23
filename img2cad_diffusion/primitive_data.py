@@ -91,7 +91,7 @@ class PrimitiveDataConfig:
 # =============================================================================
 
 INCLUDE_CONSTRUCTION = True
-
+INCLUDE_CLOCKWISE = True  # clockwise tokens for Arc entities
 
 def _pad_or_truncate_to_length(arr: np.ndarray, target_length: Optional[int] = None) -> np.ndarray:
     """Ensures that the array has the given length by truncating or padding.
@@ -149,18 +149,30 @@ def tokenize_sketch(
     pos_tokens = [pos_idx]
 
     # Index tracking for constraint model's gather operation
+    # Maps entity subnodes to token positions in the primitive token sequence.
+    # gather_idxs[0] = None is a placeholder for External (node_idx=0).
+    # EdgeOp.references use 0-based node indices:
+    #   ref=0 -> External (skipped in tokenize_constraints)
+    #   ref=1 -> first real entity -> gather_idxs[1]
+    # This allows direct access: gather_idxs[ref] where ref is the node index.
     gather_map = {
-        Arc: [0, 1, 3, 5],   # [entity_token, start(x/y), mid(x/y), end(x/y)]
+        Arc: [0, 1, 3, 5],   # [entity_token, center(x/y), start(x/y), end(x/y)]
         Circle: [0, 1],      # [entity_token, center(x/y)]
         Line: [0, 1, 3],     # [entity_token, start(x/y), end(x/y)]
         Point: [0]           # [entity_token]
     }
-    gather_idxs = [0]  # 0 is for external even though we don't use
+    gather_idxs = [None]  # Index 0 is placeholder for External (ref=0)
 
     # isConstruction tokens
     construction_tok_dict = {
         True: len(Token) + num_bins,
         False: len(Token) + num_bins + 1
+    }
+
+    # clockwise tokens (Arc only)
+    clockwise_tok_dict = {
+        True: len(Token) + num_bins + 2,
+        False: len(Token) + num_bins + 3
     }
 
     if permute:
@@ -171,12 +183,13 @@ def tokenize_sketch(
 
     for ent in sketch.entities.values():
         gather_idxs.extend([len(val_tokens) + gidx for gidx in gather_map[type(ent)]])
+
         val_tokens.append(Token[ent.type.name])
         coord_tokens.append(NON_COORD_TOKEN)
         pos_idx += 1
         pos_tokens.append(pos_idx)
-        params = i2c_utils.parameterize_entity(ent)
 
+        params = i2c_utils.parameterize_entity(ent)
         try:
             param_bins = i2c_utils.quantize_params(params, num_bins)
         except:
@@ -188,6 +201,12 @@ def tokenize_sketch(
         val_tokens.extend(param_bins + len(Token))
         coord_tokens.extend(COORD_TOKEN_MAP[type(ent)])
         pos_tokens.extend([pos_idx] * param_bins.size)
+
+        # Add clockwise attribute for Arc entities
+        if isinstance(ent, Arc):
+            val_tokens.append(clockwise_tok_dict[ent.clockwise])
+            coord_tokens.append(NON_COORD_TOKEN)
+            pos_tokens.append(pos_idx)
 
         # Add isConstruction attribute
         if INCLUDE_CONSTRUCTION:
@@ -222,38 +241,50 @@ def param_seq_from_tokens(tokens, num_bins):
     Returns
     -------
     all_params : list
-        A list of tuples of the quantized entity parameters and isConstruction
-        attribute, where all_params[i] contains the parameters for
-        the i-th entity
+        A list of tuples (params, clockwise, isConstruction) where:
+        - params: quantized entity parameters
+        - clockwise: True/False for Arc, None for other entities
+        - isConstruction: True/False for all entities
     """
     reverse_construction_toks = {
         len(Token) + num_bins: True,
         len(Token) + num_bins + 1: False
     }
 
+    reverse_clockwise_toks = {
+        len(Token) + num_bins + 2: True,
+        len(Token) + num_bins + 3: False
+    }
+
     all_params = []
     curr_params = []
+    clockwise = None  # Only set for Arc entities
+    isConstruction = False
     for token in tokens:
         if token == Token.Start:
             continue
         if token < len(Token):
             if curr_params:
-                all_params.append((curr_params, isConstruction))
+                all_params.append((curr_params, clockwise, isConstruction))
                 curr_params = []
+                clockwise = None  # Reset for next entity
+                isConstruction = False
         if token in [Token.Stop, Token.Pad]:
             break
         if token >= len(Token):
-            isConstruction = False  # initialize to False in case not modeling
             if token <= len(Token) + (num_bins - 1):
                 # Numerical coordinate
                 curr_params.append(token - len(Token))
-            else:
+            elif token in reverse_clockwise_toks:
+                # clockwise attribute (Arc only)
+                clockwise = reverse_clockwise_toks[token]
+            elif token in reverse_construction_toks:
                 # isConstruction attribute
                 isConstruction = reverse_construction_toks[token]
 
     if curr_params:
         # Append possibly leftover entity parameters
-        all_params.append((curr_params, isConstruction))
+        all_params.append((curr_params, clockwise, isConstruction))
     return all_params
 
 
@@ -274,10 +305,10 @@ def sketch_from_tokens(tokens, num_bins):
     """
     all_params = param_seq_from_tokens(tokens, num_bins)
     sketch = datalib.Sketch()
-    for idx, (ent_params, isConstruction) in enumerate(all_params):
+    for idx, (ent_params, clockwise, isConstruction) in enumerate(all_params):
         ent_params = i2c_utils.dequantize_params(ent_params, num_bins)
         ent_params = ent_params.tolist()
-        ent = i2c_utils.entity_from_params(ent_params)
+        ent = i2c_utils.entity_from_params(ent_params, clockwise=clockwise)
         if ent is not None:
             ent.entityId = str(idx + 1)
             ent.isConstruction = isConstruction

@@ -132,6 +132,8 @@ class PrimitiveModel(torch.nn.Module):
         num_val_embeddings = len(primitive_data.Token) + num_bins
         if primitive_data.INCLUDE_CONSTRUCTION:
             num_val_embeddings += 2
+        if primitive_data.INCLUDE_CLOCKWISE:
+            num_val_embeddings += 2  # clockwise True/False tokens for Arc
         self.val_embed = torch.nn.Embedding(num_val_embeddings, embed_dim, padding_idx=primitive_data.Token.Pad)
 
         # Coordinate embeddings
