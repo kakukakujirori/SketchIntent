@@ -967,7 +967,7 @@ if __name__ == '__main__':
             continue
 
 
-    # seq = seq_data['sequences'][540168]
+    # seq = seq_data['sequences'][20]
     # sketch = datalib.sketch_from_sequence(seq)
     # fig = datalib.render_sketch(sketch)
     # fig.savefig('sketch_gt.svg')

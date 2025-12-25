@@ -54,6 +54,36 @@ class PrimitiveTokenInput(TypedDict):
     pos: torch.Tensor
 
 
+@dataclasses.dataclass
+class EntityTokenMapping:
+    """Mapping from an entity to its token positions in the primitive sequence.
+
+    This replaces the implicit gather_idxs list with an explicit structure.
+    External entities are not included in the mapping (they are identified
+    by their absence, not by assuming index 0).
+
+    Attributes
+    ----------
+    entity_idx : int
+        Node index in the SketchGraphs sequence (1-based for entities, 0 is External).
+    entity_type : type
+        The entity type (Arc, Circle, Line, Point).
+    entity_token_pos : int
+        Position of the entity type token in the val sequence.
+    subnode_positions : Dict[str, int]
+        Mapping from subnode name to token position.
+        e.g., {"entity": 5, "center": 6, "start": 8, "end": 10}
+    """
+    entity_idx: int
+    entity_type: type
+    entity_token_pos: int
+    subnode_positions: Dict[str, int]
+
+
+# Type alias for the gather mapping
+GatherMap = Dict[int, EntityTokenMapping]
+
+
 # =============================================================================
 # Configuration
 # =============================================================================
@@ -118,7 +148,7 @@ def tokenize_sketch(
     max_length: Optional[int] = None,
     permute: bool = False,
     include_stop: bool = True
-) -> Tuple[SketchTokenSet, List[int]]:
+) -> Tuple[SketchTokenSet, GatherMap]:
     """Tokenizes the given sketch.
 
     Parameters
@@ -140,49 +170,47 @@ def tokenize_sketch(
     data : SketchTokenSet
         A dictionary containing the token sequence corresponding to the given sketch.
         The token sequence is padded or truncated to the given length if specified.
-    gather_idx : List[int]
-        A list of integers representing indices to track for the constraint model.
+    gather_map : GatherMap
+        A dictionary mapping entity node index to EntityTokenMapping.
+        External entities are NOT included (identified by absence in the map).
     """
+    from .tokens import ENTITY_TOKEN_OFFSETS
+
     val_tokens = [Token.Start]
     coord_tokens = [NON_COORD_TOKEN]
     pos_idx = 1  # 0 is reserved for padding
     pos_tokens = [pos_idx]
 
-    # Index tracking for constraint model's gather operation
-    # Maps entity subnodes to token positions in the primitive token sequence.
-    # gather_idxs[0] = None is a placeholder for External (node_idx=0).
-    # EdgeOp.references use 0-based node indices:
-    #   ref=0 -> External (skipped in tokenize_constraints)
-    #   ref=1 -> first real entity -> gather_idxs[1]
-    # This allows direct access: gather_idxs[ref] where ref is the node index.
-    gather_map = {
-        Arc: [0, 1, 3, 5],   # [entity_token, center(x/y), start(x/y), end(x/y)]
-        Circle: [0, 1],      # [entity_token, center(x/y)]
-        Line: [0, 1, 3],     # [entity_token, start(x/y), end(x/y)]
-        Point: [0]           # [entity_token]
-    }
-    gather_idxs = [None]  # Index 0 is placeholder for External (ref=0)
+    gather_map: GatherMap = {}
 
-    # isConstruction tokens
+    # Token dictionaries
     construction_tok_dict = {
         True: len(Token) + num_bins,
         False: len(Token) + num_bins + 1
     }
-
-    # clockwise tokens (Arc only)
     clockwise_tok_dict = {
         True: len(Token) + num_bins + 2,
         False: len(Token) + num_bins + 3
     }
 
     if permute:
-        # Randomly permute primitive ordering
         entities = list(sketch.entities.items())
         shuffle(entities)
         sketch.entities = OrderedDict(entities)
 
+    # Track entity node indices (1-based, 0 is External which is not tokenized)
+    node_idx = 1
     for ent in sketch.entities.values():
-        gather_idxs.extend([len(val_tokens) + gidx for gidx in gather_map[type(ent)]])
+        entity_start_pos = len(val_tokens)
+
+        # Build EntityTokenMapping
+        offsets = ENTITY_TOKEN_OFFSETS[type(ent)]
+        gather_map[node_idx] = EntityTokenMapping(
+            entity_idx=node_idx,
+            entity_type=type(ent),
+            entity_token_pos=entity_start_pos,
+            subnode_positions={name: entity_start_pos + offset for name, offset in offsets.items()}
+        )
 
         val_tokens.append(Token[ent.type.name])
         coord_tokens.append(NON_COORD_TOKEN)
@@ -193,7 +221,6 @@ def tokenize_sketch(
         try:
             param_bins = i2c_utils.quantize_params(params, num_bins)
         except:
-            # Zero-length line segment issue
             params[params > 0.5] = 0.5
             params[params < -0.5] = -0.5
             param_bins = i2c_utils.quantize_params(params, num_bins)
@@ -202,17 +229,17 @@ def tokenize_sketch(
         coord_tokens.extend(COORD_TOKEN_MAP[type(ent)])
         pos_tokens.extend([pos_idx] * param_bins.size)
 
-        # Add clockwise attribute for Arc entities
         if isinstance(ent, Arc):
             val_tokens.append(clockwise_tok_dict[ent.clockwise])
             coord_tokens.append(NON_COORD_TOKEN)
             pos_tokens.append(pos_idx)
 
-        # Add isConstruction attribute
         if INCLUDE_CONSTRUCTION:
             val_tokens.append(construction_tok_dict[ent.isConstruction])
             coord_tokens.append(NON_COORD_TOKEN)
             pos_tokens.append(pos_idx)
+
+        node_idx += 1
 
     if include_stop:
         val_tokens.append(Token.Stop)
@@ -225,7 +252,7 @@ def tokenize_sketch(
         'pos': _pad_or_truncate_to_length(np.array(pos_tokens, dtype=np.int64), max_length)
     }
 
-    return sample, gather_idxs
+    return sample, gather_map
 
 
 def param_seq_from_tokens(tokens, num_bins):

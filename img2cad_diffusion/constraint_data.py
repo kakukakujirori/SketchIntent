@@ -160,15 +160,20 @@ def deduplicate_refs(op: datalib.EdgeOp) -> datalib.EdgeOp:
     return op
 
 
-def tokenize_constraints(seq: datalib.sequence, gather_idxs: Sequence[int], max_length: Optional[int] = None):
+def tokenize_constraints(
+    seq: datalib.sequence,
+    gather_map: 'primitive_data.GatherMap',
+    max_length: Optional[int] = None,
+):
     """Tokenizes the constraints in a sketch construction sequence.
 
     Parameters
     ----------
     seq : datalib.sequence
         The sketch construction sequence to tokenize.
-    gather_idxs : Sequence[int]
-        Indices produced by `primitive_data.tokenize_sketch` used to track entity tokens.
+    gather_map : GatherMap
+        Mapping from node_idx to EntityTokenMapping.
+        External detection uses `ref not in gather_map`.
     max_length : Optional[int]
         If not `None`, truncates the sequence to this length.
     """
@@ -177,44 +182,39 @@ def tokenize_constraints(seq: datalib.sequence, gather_idxs: Sequence[int], max_
     pos_idx = 1  # 0 is reserved for padding
     pos_tokens = [pos_idx]
 
-    # Iterate through edge ops
     for op in seq:
-        # Ensure op is applicable edge op
         if not isinstance(op, datalib.EdgeOp):
             continue
-        if not op.label.name in Token.__members__:
-            continue
-        if 0 in op.references:  # skip external constraints
+        if op.label.name not in Token.__members__:
             continue
 
-        # Deduplicate refs (handles cases like (5, 5, 3, 3) -> (3, 5))
+        # Skip External constraints: refs not in gather_map are External
+        if any(ref not in gather_map for ref in op.references):
+            continue
+
         op = deduplicate_refs(op)
         refs = op.references
 
-        # Skip constraints with references that would be out of bounds after truncation
-        # gather_idxs[0]=None (External placeholder, ref=0)
-        # gather_idxs[ref] gives the first token position for entity with node_idx=ref
+        # Skip constraints with references that would be out of bounds
         if max_length is not None:
-            if any(gather_idxs[ref] >= max_length for ref in refs):
+            if any(gather_map[ref].entity_token_pos >= max_length for ref in refs):
                 continue
 
-        # Add constraint type tokens
         val_tokens.append(Token[op.label.name])
         coord_tokens.append(NON_COORD_TOKEN)
         pos_idx += 1
         pos_tokens.append(pos_idx)
 
-        # Add reference parameters
-        # For Midpoint constraints, the first reference is the midpoint and should stay fixed
-        # Only sort the remaining references (symmetric points)
-        if op.label == datalib.ConstraintType.Midpoint and len(refs) == 3:
-            # Midpoint(A, B, C) means A is the midpoint of B and C
-            # Keep A fixed, sort B and C
-            sorted_refs = [refs[0]] + sorted(refs[1:], key=lambda r: gather_idxs[r])
-        else:
-            sorted_refs = sorted(refs, key=lambda r: gather_idxs[r])
+        # Sort references by token position
+        def get_sort_key(ref):
+            return gather_map[ref].entity_token_pos
 
-        val_tokens.extend([gather_idxs[ref] + len(Token) for ref in sorted_refs])
+        if op.label == datalib.ConstraintType.Midpoint and len(refs) == 3:
+            sorted_refs = [refs[0]] + sorted(refs[1:], key=get_sort_key)
+        else:
+            sorted_refs = sorted(refs, key=get_sort_key)
+
+        val_tokens.extend([gather_map[ref].entity_token_pos + len(Token) for ref in sorted_refs])
         coord_tokens.extend(CONSTRAINT_COORD_TOKENS[:len(refs)])
         pos_tokens.extend([pos_idx] * len(refs))
 
@@ -227,6 +227,7 @@ def tokenize_constraints(seq: datalib.sequence, gather_idxs: Sequence[int], max_
         'coord': _pad_or_truncate_to_length(np.array(coord_tokens, dtype=np.int64), max_length),
         'pos': _pad_or_truncate_to_length(np.array(pos_tokens, dtype=np.int64), max_length)
     }
+
 
     return sample
 
@@ -290,20 +291,15 @@ def detokenize_constraints(c_val_tokens: np.ndarray) -> List[Tuple[Token, List[i
     return constraints
 
 
-def build_gather_idx_mapping(sketch: datalib.Sketch, num_bins: int) -> Dict[int, Tuple[int, int]]:
+def build_gather_idx_mapping(
+    gather_map: 'primitive_data.GatherMap',
+) -> Dict[int, Tuple[int, int]]:
     """Build a mapping from primitive token position to (entity_id, subnode_idx).
-
-    The gather_idxs created during primitive tokenization map entity sub-references
-    (like start/end points) to positions in the primitive token sequence.
-    This function creates a reverse mapping to recover which entity and which
-    sub-part of that entity a primitive token position refers to.
 
     Parameters
     ----------
-    sketch : datalib.Sketch
-        The sketch containing the entities.
-    num_bins : int
-        Number of bins used for primitive tokenization.
+    gather_map : GatherMap
+        Mapping from node_idx to EntityTokenMapping.
 
     Returns
     -------
@@ -311,53 +307,29 @@ def build_gather_idx_mapping(sketch: datalib.Sketch, num_bins: int) -> Dict[int,
         Mapping from primitive token position to (entity_idx, subnode_idx).
         entity_idx is 1-based (0 is reserved for external).
         subnode_idx meanings depend on entity type:
-        - Arc: 0=entity, 1=start, 2=mid, 3=end
+        - Arc: 0=entity, 1=center, 2=start, 3=end
         - Circle: 0=entity, 1=center
         - Line: 0=entity, 1=start, 2=end
         - Point: 0=entity
     """
-    from sketchgraphs.data import Arc, Circle, Line, Point
-
-    # Re-tokenize to get the actual gather_idxs (positions in primitive token sequence)
-    _, gather_idxs = primitive_data.tokenize_sketch(sketch, num_bins, max_length=None, include_stop=False)
-
-    # gather_map: for each entity type, which subnodes are tracked
-    gather_map = {
-        Arc: [0, 1, 2, 3],      # entity, start, mid, end
-        Circle: [0, 1],          # entity, center
-        Line: [0, 1, 2],         # entity, start, end
-        Point: [0]               # entity only
+    subnode_name_to_idx = {
+        'entity': 0,
+        'center': 1,
+        'start': 1,  # For Line
+        'end': 2,
+    }
+    arc_subnode_name_to_idx = {
+        'entity': 0, 'center': 1, 'start': 2, 'end': 3,
     }
 
-
-    # Build mapping: primitive_token_position -> (entity_idx, subnode_idx)
-    # gather_idxs[0]=None (External placeholder), gather_idxs[1]+ are real entities
-    # Note: entity_idx here is 1-based (first entity = 1)
     mapping = {}
-
-    gather_list_idx = 1  # Skip index 0 (External placeholder) and start at 1 (first real entity)
-    entity_idx = 1  # 1-based entity index (matching SketchGraphs refs)
-
-    for ent in sketch.entities.values():
-        if ent is None:
-            entity_idx += 1
-            continue
-
-        ent_type = type(ent)
-        if ent_type not in gather_map:
-            entity_idx += 1
-            continue
-
-        subnode_types = gather_map[ent_type]
-        for subnode_idx in subnode_types:
-            if gather_list_idx < len(gather_idxs):
-                prim_token_pos = gather_idxs[gather_list_idx]
-                if prim_token_pos is not None:  # Skip None placeholders
-                    mapping[prim_token_pos] = (entity_idx, subnode_idx)
-                gather_list_idx += 1
-
-        entity_idx += 1
-
+    for entity_idx, entity_mapping in gather_map.items():
+        for subnode_name, token_pos in entity_mapping.subnode_positions.items():
+            if entity_mapping.entity_type.__name__ == 'Arc':
+                subnode_idx = arc_subnode_name_to_idx.get(subnode_name, 0)
+            else:
+                subnode_idx = subnode_name_to_idx.get(subnode_name, 0)
+            mapping[token_pos] = (entity_idx, subnode_idx)
     return mapping
 
 
@@ -387,10 +359,10 @@ def reconstruct_sketch_with_constraints(
         A complete construction sequence with NodeOp and EdgeOp.
     """
     # Re-tokenize to get gather_idxs mapping
-    _, gather_idxs = primitive_data.tokenize_sketch(sketch, num_bins, max_length=None, include_stop=False)
+    _, gather_map = primitive_data.tokenize_sketch(sketch, num_bins, max_length=None, include_stop=False)
 
     # Build mapping from primitive token position to (entity_idx, subnode_idx)
-    gather_to_entity = build_gather_idx_mapping(sketch, num_bins)
+    gather_to_entity = build_gather_idx_mapping(gather_map)
 
     # Detokenize constraints
     constraint_list = detokenize_constraints(c_val_tokens)
@@ -557,8 +529,8 @@ def reconstruct_sketch_with_constraints(
 class ConstraintDataset(torch.utils.data.Dataset[Dict[str, torch.Tensor]]):
     """Constraint generation dataset."""
 
-    def __init__(self, sequence_file: str, num_bins: int, max_length: Optional[int]=None,
-                 primitive_noise_config: PrimitiveNoiseConfig=None, tokenize: bool=True):
+    def __init__(self, sequence_file: str, num_bins: int, max_length: int | None = None,
+                 primitive_noise_config: PrimitiveNoiseConfig | None = None):
         """Create a new constraint dataset.
 
         Parameters
@@ -571,10 +543,6 @@ class ConstraintDataset(torch.utils.data.Dataset[Dict[str, torch.Tensor]]):
             Length to which to pad or truncate sequence tokens.
         primitive_noise_config : PrimitiveNoiseConfig, optional
             If not `None`, configuration for the primitive noise to apply.
-        tokenize : bool
-            If `True` (default), indicates that the sketches should be tokenized into
-            primitive and constraint token sequences. Otherwise, simply returns the sketch
-            (with potential primitive noise applied).
         """
 
         if primitive_noise_config is None:
@@ -593,9 +561,8 @@ class ConstraintDataset(torch.utils.data.Dataset[Dict[str, torch.Tensor]]):
             self.is_purturbed = True
         else:
             raise KeyError("Neither 'sequences' or 'perturbations' found in the key")
-        self.tokenize = tokenize
 
-    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+    def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
         seq = self.sequences[idx]
         if self.is_purturbed:
             if len(seq) == 0:
@@ -609,15 +576,12 @@ class ConstraintDataset(torch.utils.data.Dataset[Dict[str, torch.Tensor]]):
         if self.primitive_noise_config.enabled:
             sketch = apply_primitive_noise(sketch, self.primitive_noise_config.std, self.primitive_noise_config.max_difference)
 
-        if not self.tokenize:
-            return sketch
-
-        sample, gather_idx = primitive_data.tokenize_sketch(sketch, self.num_bins, self.max_length)
-        c_sample = tokenize_constraints(seq, gather_idx, self.max_length)
+        p_sample, gather_map = primitive_data.tokenize_sketch(sketch, self.num_bins, self.max_length)
+        c_sample = tokenize_constraints(seq, gather_map, self.max_length)
         c_sample = {f'c_{k}': v for k, v in c_sample.items()}
 
         sample = {
-            **sample,
+            **p_sample,
             **c_sample
         }
 
