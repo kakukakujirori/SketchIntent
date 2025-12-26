@@ -290,6 +290,120 @@ class DDiTBlock(nn.Module):
     return x
 
 
+class DDiTCrossBlock(nn.Module):
+  """DDiT block with self-attention followed by cross-attention.
+
+  Architecture per block:
+    1. Self-attention on x (target sequence)
+    2. Cross-attention: Q from x, K/V from memory (source sequence)
+    3. Feed-forward network
+  """
+  def __init__(self, dim, n_heads, cond_dim, mlp_ratio=4, dropout=0.1):
+    super().__init__()
+    self.n_heads = n_heads
+    self.head_dim = dim // n_heads
+    self.dropout = dropout
+
+    # Self-attention layers
+    self.norm1 = LayerNorm(dim)
+    self.self_attn_qkv = nn.Linear(dim, 3 * dim, bias=False)
+    self.self_attn_out = nn.Linear(dim, dim, bias=False)
+
+    # Cross-attention layers
+    self.norm_cross = LayerNorm(dim)
+    self.cross_attn_q = nn.Linear(dim, dim, bias=False)
+    self.cross_attn_kv = nn.Linear(dim, 2 * dim, bias=False)
+    self.cross_attn_out = nn.Linear(dim, dim, bias=False)
+
+    # FFN layers
+    self.norm2 = LayerNorm(dim)
+    self.mlp = nn.Sequential(
+      nn.Linear(dim, mlp_ratio * dim, bias=True),
+      nn.GELU(approximate='tanh'),
+      nn.Linear(mlp_ratio * dim, dim, bias=True))
+
+    # AdaLN modulation: 9 * dim for (self-attn: shift, scale, gate) + (cross-attn: shift, scale, gate) + (mlp: shift, scale, gate)
+    self.adaLN_modulation = nn.Linear(cond_dim, 9 * dim, bias=True)
+    self.adaLN_modulation.weight.data.zero_()
+    self.adaLN_modulation.bias.data.zero_()
+
+  def _get_bias_dropout_scale(self):
+    if self.training:
+      return bias_dropout_add_scale_fused_train
+    else:
+      return bias_dropout_add_scale_fused_inference
+
+  def forward(self, x, memory, rotary_cos_sin, c, seqlens=None):
+    """
+    Args:
+      x: Target sequence [B, L_tgt, D] - constraint embeddings
+      memory: Source sequence [B, L_src, D] - primitive embeddings
+      rotary_cos_sin: Rotary position embeddings for self-attention
+      c: Conditioning vector [B, D]
+      seqlens: Optional sequence lengths
+    """
+    batch_size, tgt_len = x.shape[0], x.shape[1]
+    src_len = memory.shape[1]
+
+    bias_dropout_scale_fn = self._get_bias_dropout_scale()
+
+    # AdaLN modulation parameters
+    c_out = self.adaLN_modulation(c)
+    split_size = c_out.shape[-1] // 9
+    (shift_sa, scale_sa, gate_sa,
+     shift_ca, scale_ca, gate_ca,
+     shift_mlp, scale_mlp, gate_mlp) = c_out[:, None].split(split_size, dim=2)
+
+    # 1. Self-attention on x
+    x_skip = x
+    x_normed = modulate_fused(self.norm1(x), shift_sa, scale_sa)
+
+    qkv = self.self_attn_qkv(x_normed)
+    qkv = rearrange(qkv, 'b s (three h d) -> b s three h d', three=3, h=self.n_heads)
+    with torch.cuda.amp.autocast(enabled=False):
+      cos, sin = rotary_cos_sin
+      qkv = apply_rotary_pos_emb(qkv, cos.to(qkv.dtype), sin.to(qkv.dtype))
+    qkv = rearrange(qkv, 'b s ... -> (b s) ...')
+    if seqlens is None:
+      cu_seqlens = torch.arange(0, (batch_size + 1) * tgt_len, step=tgt_len,
+                                dtype=torch.int32, device=qkv.device)
+    else:
+      cu_seqlens = seqlens.cumsum(-1)
+    x = flash_attn.flash_attn_interface.flash_attn_varlen_qkvpacked_func(
+      qkv, cu_seqlens, tgt_len, 0., causal=False)
+    x = rearrange(x, '(b s) h d -> b s (h d)', b=batch_size)
+
+    x = bias_dropout_scale_fn(self.self_attn_out(x), None, gate_sa, x_skip, self.dropout)
+
+    # 2. Cross-attention: Q from x, K/V from memory
+    x_skip = x
+    x_normed = modulate_fused(self.norm_cross(x), shift_ca, scale_ca)
+
+    q = self.cross_attn_q(x_normed)
+    kv = self.cross_attn_kv(memory)
+
+    q = rearrange(q, 'b s (h d) -> b h s d', h=self.n_heads)
+    kv = rearrange(kv, 'b s (two h d) -> b h s two d', two=2, h=self.n_heads)
+    k, v = kv[..., 0, :], kv[..., 1, :]
+
+    # Standard attention (no flash for cross-attention with variable lengths to keep simple)
+    scale = self.head_dim ** -0.5
+    attn_weights = torch.matmul(q, k.transpose(-2, -1)) * scale
+    attn_weights = F.softmax(attn_weights, dim=-1)
+    attn_weights = F.dropout(attn_weights, p=self.dropout, training=self.training)
+    attn_out = torch.matmul(attn_weights, v)
+    attn_out = rearrange(attn_out, 'b h s d -> b s (h d)')
+
+    x = bias_dropout_scale_fn(self.cross_attn_out(attn_out), None, gate_ca, x_skip, self.dropout)
+
+    # 3. FFN
+    x = bias_dropout_scale_fn(
+      self.mlp(modulate_fused(self.norm2(x), shift_mlp, scale_mlp)),
+      None, gate_mlp, x, self.dropout)
+
+    return x
+
+
 
 class EmbeddingLayer(nn.Module):
   def __init__(self, dim, vocab_dim):
@@ -425,6 +539,57 @@ class FeatureDIT(nn.Module, huggingface_hub.PyTorchModelHubMixin):
     with torch.cuda.amp.autocast(dtype=torch.bfloat16):
       for i in range(len(self.blocks)):
         x = self.blocks[i](x, rotary_cos_sin, c, seqlens=None)
+      x = self.output_layer(x, c)
+
+    return x
+
+
+class CrossAttentionFeatureDIT(nn.Module, huggingface_hub.PyTorchModelHubMixin):
+  """DIT with cross-attention: target attends to memory (encoder-decoder style).
+
+  Used for constraint generation conditioned on primitives:
+    - x (target): constraint sequence
+    - memory (source): primitive embeddings (fixed, used as K/V in cross-attention)
+  """
+  def __init__(self, config, output_size: int):
+    super().__init__()
+    if type(config) == dict:
+      config = omegaconf.OmegaConf.create(config)
+
+    self.config = config
+    self.output_size = output_size
+    self.rotary_emb = Rotary(
+      config.model.hidden_size // config.model.n_heads)
+
+    blocks = []
+    for _ in range(config.model.n_blocks):
+      blocks.append(DDiTCrossBlock(
+        config.model.hidden_size,
+        config.model.n_heads,
+        config.model.cond_dim,
+        dropout=config.model.dropout))
+    self.blocks = nn.ModuleList(blocks)
+
+    self.output_layer = DDitFinalLayer(
+      config.model.hidden_size,
+      output_size,
+      config.model.cond_dim)
+    self.scale_by_sigma = config.model.scale_by_sigma
+
+  def forward(self, x, memory, c):
+    """
+    Args:
+      x: Target sequence [B, L_tgt, D] - constraint embeddings (self-attention + cross-attention target)
+      memory: Source sequence [B, L_src, D] - primitive embeddings (cross-attention source, K/V)
+      c: Conditioning vector [B, D] - timestep embedding
+
+    Returns:
+      Output features [B, L_tgt, output_size]
+    """
+    rotary_cos_sin = self.rotary_emb(x)
+    with torch.cuda.amp.autocast(dtype=torch.bfloat16):
+      for block in self.blocks:
+        x = block(x, memory, rotary_cos_sin, c, seqlens=None)
       x = self.output_layer(x, c)
 
     return x

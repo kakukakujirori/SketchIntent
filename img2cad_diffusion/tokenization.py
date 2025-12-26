@@ -14,7 +14,6 @@ import sketchgraphs.data as datalib
 
 from . import sketch_utils
 from .tokens import (
-    TokenVocabulary,
     SpecialToken,
     PrimitiveToken,
     ConstraintToken,
@@ -249,9 +248,25 @@ def tokenize_constraints(
                     unique_refs.append(r)
             refs = unique_refs
 
-        # Skip if truncated
+        # Helper to compute token_pos for a reference (including subnode offset)
+        def get_token_pos(entity_idx: int, subnode_name: str | None) -> int:
+            mapping = gather_map[entity_idx]
+            if subnode_name is not None:
+                subnode_to_param = {
+                    'start': PrimitiveParamToken.StartX,
+                    'end': PrimitiveParamToken.EndX,
+                    'center': PrimitiveParamToken.CenterX
+                }
+                target_param = subnode_to_param.get(subnode_name)
+                if target_param is None or target_param not in mapping.param_tokens:
+                    return mapping.entity_token_pos  # Fallback
+                offset = list(mapping.param_tokens).index(target_param) + 1
+                return mapping.entity_token_pos + offset
+            return mapping.entity_token_pos
+
+        # Skip if any reference's token_pos (including subnode offset) exceeds max_length
         if max_length is not None:
-            if any(gather_map[entity_idx].entity_token_pos >= max_length for entity_idx, _ in refs):
+            if any(get_token_pos(entity_idx, subnode) >= max_length for entity_idx, subnode in refs):
                 continue
 
         # Constraint type token
@@ -273,27 +288,13 @@ def tokenize_constraints(
                     sorted_refs = refs
             else:
                 # 3+ refs: first is midpoint (keep), sort rest by token position
-                sorted_refs = [refs[0]] + sorted(refs[1:], key=lambda r: gather_map[r[0]].entity_token_pos)
+                sorted_refs = [refs[0]] + sorted(refs[1:], key=lambda r: get_token_pos(r[0], r[1]))
         else:
-            sorted_refs = sorted(refs, key=lambda r: gather_map[r[0]].entity_token_pos)
+            sorted_refs = sorted(refs, key=lambda r: get_token_pos(r[0], r[1]))
 
         # Reference tokens
-        for i, (entity_idx, subnode_name) in enumerate(sorted_refs):
-            mapping = gather_map[entity_idx]
-
-            # Determine token position based on subnode
-            if subnode_name is not None:
-                # Find subnode position from param_tokens
-                subnode_to_param = {'start': PrimitiveParamToken.StartX, 'end': PrimitiveParamToken.EndX, 'center': PrimitiveParamToken.CenterX}
-                target_param = subnode_to_param.get(subnode_name)
-                assert target_param is not None, f"Unknown subnode type: {subnode_name}"
-                assert target_param in mapping.param_tokens, \
-                    f"Subnode '{subnode_name}' ({target_param}) not in entity param_tokens: {mapping.param_tokens}"
-                offset = list(mapping.param_tokens).index(target_param) + 1  # +1 for entity type token
-                token_pos = mapping.entity_token_pos + offset
-            else:
-                # Entity reference (no subnode)
-                token_pos = mapping.entity_token_pos
+        for entity_idx, subnode_name in sorted_refs:
+            token_pos = get_token_pos(entity_idx, subnode_name)
 
             val_tokens.append(token_pos + val_token_index_offset)
             coord_tokens.append(ConstraintParamToken.Position)
@@ -320,6 +321,8 @@ def tokenize_sketch(
     num_bins: int,
     max_length: int | None = None,
     normalize: bool = True,
+    uniquify_primitive_val_tokens: bool = True,
+    uniquify_constraint_val_tokens: bool = True,
 ) -> TokenizedSketch:
     """Tokenize a complete sketch (primitives + constraints).
 
@@ -348,8 +351,8 @@ def tokenize_sketch(
         )
         sketch_utils.normalize_sketch(sketch)
 
-    prim_tokens, gather_map = tokenize_primitives(sketch, num_bins, max_length)
-    constr_tokens = tokenize_constraints(sketch, gather_map, max_length)
+    prim_tokens, gather_map = tokenize_primitives(sketch, num_bins, max_length, uniquify_primitive_val_tokens)
+    constr_tokens = tokenize_constraints(sketch, gather_map, max_length, uniquify_constraint_val_tokens)
 
     return TokenizedSketch(
         prim_tokens=prim_tokens,
@@ -383,18 +386,3 @@ def tokenize_sequence(
     """
     sketch = datalib.sketch_from_sequence(seq)
     return tokenize_sketch(sketch, num_bins, max_length, normalize=True)
-
-
-def to_tensors(result: TokenizedSketch) -> dict[str, torch.Tensor]:
-    """Convert TokenizedSketch to tensor dictionary for training.
-
-    Returns format expected by ConstraintMDDModel.
-    """
-    return {
-        'val': torch.from_numpy(result.prim_tokens['val']),
-        'coord': torch.from_numpy(result.prim_tokens['coord']),
-        'pos': torch.from_numpy(result.prim_tokens['pos']),
-        'c_val': torch.from_numpy(result.constr_tokens['val']),
-        'c_coord': torch.from_numpy(result.constr_tokens['coord']),
-        'c_pos': torch.from_numpy(result.constr_tokens['pos']),
-    }

@@ -5,13 +5,17 @@ model:
   num_layers: 12
   hidden_size: 384
   embedding_dimension: 256
-  num_positional_embeddings: 16
 
 optim:
   learning_rate: 3e-5
 
 data:
+  num_position_bins: 64
   sequence_path: data_processed/sg_filtered_unique.npy  # cptsketchgraphs.npy
+  max_token_length: 130
+  validation_fraction: 0.025
+  test_fraction: 0.05
+  permute_entities: false
   primitive_noise:
     enabled: True
 

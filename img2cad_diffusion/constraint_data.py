@@ -4,7 +4,7 @@
 import copy
 import random
 import dataclasses
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Sequence
 
 import numpy as np
 import lightning as L
@@ -26,7 +26,7 @@ from img2cad_diffusion.tokens import (
     PrimitiveParamToken,
     ConstraintParamToken,
 )
-from tokenization import GatherMap, tokenize_primitives, tokenize_sketch
+from .tokenization import GatherMap, tokenize_primitives, tokenize_sketch
 from .tokens import PrimitiveParamToken
 
 
@@ -161,83 +161,86 @@ def deduplicate_refs(op: datalib.EdgeOp) -> datalib.EdgeOp:
     return op
 
 
-def tokenize_constraints(
-    seq: datalib.sequence,
-    gather_map: 'primitive_data.GatherMap',
-    max_length: Optional[int] = None,
-):
-    """Tokenizes the constraints in a sketch construction sequence.
+# def tokenize_constraints_from_sequence(
+#     seq: datalib.sequence,
+#     gather_map: 'primitive_data.GatherMap',
+#     max_length: int | None = None,
+# ):
+#     """Tokenizes the constraints in a sketch construction sequence.
 
-    Parameters
-    ----------
-    seq : datalib.sequence
-        The sketch construction sequence to tokenize.
-    gather_map : GatherMap
-        Mapping from node_idx to EntityTokenMapping.
-        External detection uses `ref not in gather_map`.
-    max_length : Optional[int]
-        If not `None`, truncates the sequence to this length.
-    """
-    val_tokens = [ConstraintToken.Start]
-    coord_tokens = [ConstraintParamToken.Type]  # Start is a type token
-    pos_idx = 1  # 0 is reserved for padding
-    pos_tokens = [pos_idx]
+#     Note: This is the sequence-based version. For sketch-based tokenization,
+#     use tokenization.tokenize_constraints instead.
 
-    for op in seq:
-        if not isinstance(op, datalib.EdgeOp):
-            continue
-        if op.label.name not in ConstraintToken.__members__:
-            continue
+#     Parameters
+#     ----------
+#     seq : datalib.sequence
+#         The sketch construction sequence to tokenize.
+#     gather_map : GatherMap
+#         Mapping from node_idx to EntityTokenMapping.
+#         External detection uses `ref not in gather_map`.
+#     max_length : int | None
+#         If not `None`, truncates the sequence to this length.
+#     """
+#     val_tokens = [ConstraintToken.Start]
+#     coord_tokens = [ConstraintParamToken.Type]  # Start is a type token
+#     pos_idx = 1  # 0 is reserved for padding
+#     pos_tokens = [pos_idx]
 
-        # Skip External constraints: refs not in gather_map are External
-        if any(ref not in gather_map for ref in op.references):
-            continue
+#     for op in seq:
+#         if not isinstance(op, datalib.EdgeOp):
+#             continue
+#         if op.label.name not in ConstraintToken.__members__:
+#             continue
 
-        op = deduplicate_refs(op)
-        refs = op.references
+#         # Skip External constraints: refs not in gather_map are External
+#         if any(ref not in gather_map for ref in op.references):
+#             continue
 
-        # Skip constraints with references that would be out of bounds
-        if max_length is not None:
-            if any(gather_map[ref].entity_token_pos >= max_length for ref in refs):
-                continue
+#         op = deduplicate_refs(op)
+#         refs = op.references
 
-        val_tokens.append(ConstraintToken[op.label.name])
-        coord_tokens.append(ConstraintParamToken.Type)  # Constraint type token
-        pos_idx += 1
-        pos_tokens.append(pos_idx)
+#         # Skip constraints with references that would be out of bounds
+#         if max_length is not None:
+#             if any(gather_map[ref].entity_token_pos >= max_length for ref in refs):
+#                 continue
 
-        # Sort references by token position
-        def get_sort_key(ref):
-            return gather_map[ref].entity_token_pos
+#         val_tokens.append(ConstraintToken[op.label.name])
+#         coord_tokens.append(ConstraintParamToken.Type)  # Constraint type token
+#         pos_idx += 1
+#         pos_tokens.append(pos_idx)
 
-        if op.label == datalib.ConstraintType.Midpoint and len(refs) == 3:
-            sorted_refs = [refs[0]] + sorted(refs[1:], key=get_sort_key)
-        else:
-            sorted_refs = sorted(refs, key=get_sort_key)
+#         # Sort references by token position
+#         def get_sort_key(ref):
+#             return gather_map[ref].entity_token_pos
 
-        val_tokens.extend([gather_map[ref].entity_token_pos + len(Token) for ref in sorted_refs])
-        coord_tokens.extend([ConstraintParamToken.Position] * len(refs))
-        pos_tokens.extend([pos_idx] * len(refs))
+#         if op.label == datalib.ConstraintType.Midpoint and len(refs) == 3:
+#             sorted_refs = [refs[0]] + sorted(refs[1:], key=get_sort_key)
+#         else:
+#             sorted_refs = sorted(refs, key=get_sort_key)
 
-    val_tokens.append(ConstraintToken.Stop)
-    coord_tokens.append(ConstraintParamToken.Type)  # Stop is a type token
-    pos_tokens.append(pos_idx + 1)
+#         val_tokens.extend([gather_map[ref].entity_token_pos + len(ConstraintToken) for ref in sorted_refs])
+#         coord_tokens.extend([ConstraintParamToken.Position] * len(refs))
+#         pos_tokens.extend([pos_idx] * len(refs))
 
-    sample = {
-        'val': _pad_or_truncate_to_length(np.array(val_tokens, dtype=np.int64), max_length),
-        'coord': _pad_or_truncate_to_length(np.array(coord_tokens, dtype=np.int64), max_length),
-        'pos': _pad_or_truncate_to_length(np.array(pos_tokens, dtype=np.int64), max_length)
-    }
+#     val_tokens.append(ConstraintToken.Stop)
+#     coord_tokens.append(ConstraintParamToken.Type)  # Stop is a type token
+#     pos_tokens.append(pos_idx + 1)
+
+#     sample = {
+#         'val': _pad_or_truncate_to_length(np.array(val_tokens, dtype=np.int64), max_length),
+#         'coord': _pad_or_truncate_to_length(np.array(coord_tokens, dtype=np.int64), max_length),
+#         'pos': _pad_or_truncate_to_length(np.array(pos_tokens, dtype=np.int64), max_length)
+#     }
 
 
-    return sample
+#     return sample
 
 
 # =============================================================================
 # Constraint Detokenization
 # =============================================================================
 
-def detokenize_constraints(c_val_tokens: np.ndarray) -> List[Tuple[Token, List[int]]]:
+def detokenize_constraints(c_val_tokens: np.ndarray) -> list[tuple[ConstraintToken, list[int]]]:
     """Convert constraint tokens back to (constraint_type, gather_indices) pairs.
 
     This function is the inverse of tokenize_constraints for the value tokens.
@@ -252,7 +255,7 @@ def detokenize_constraints(c_val_tokens: np.ndarray) -> List[Tuple[Token, List[i
 
     Returns
     -------
-    List[Tuple[Token, List[int]]]
+    list[tuple[ConstraintToken, list[int]]]
         List of (constraint_type, [gather_idx1, gather_idx2, ...]) tuples.
         Each gather_idx is an index into the gather_idxs list from primitive tokenization.
     """
@@ -285,7 +288,7 @@ def detokenize_constraints(c_val_tokens: np.ndarray) -> List[Tuple[Token, List[i
             current_constraint = ConstraintToken(token)
             current_refs = []
         elif token >= len(ConstraintToken):
-            # This is a reference token: gather_idx = token - len(Token)
+            # This is a reference token: gather_idx = token - len(ConstraintToken)
             gather_idx = token - len(ConstraintToken)
             current_refs.append(gather_idx)
 
@@ -294,7 +297,7 @@ def detokenize_constraints(c_val_tokens: np.ndarray) -> List[Tuple[Token, List[i
 
 def build_gather_idx_mapping(
     gather_map: GatherMap,
-) -> Dict[int, Tuple[int, int]]:
+) -> dict[int, tuple[int, int]]:
     """Build a mapping from primitive token position to (entity_idx, subnode_idx).
 
     Parameters
@@ -304,7 +307,7 @@ def build_gather_idx_mapping(
 
     Returns
     -------
-    Dict[int, Tuple[int, int]]
+    dict[int, tuple[int, int]]
         Mapping from primitive token position to (entity_idx, subnode_idx).
         entity_idx is 1-based (0 is reserved for external).
         subnode_idx is derived from param_tokens:
@@ -499,7 +502,7 @@ def reconstruct_sketch_with_constraints(
             else:
                 node_refs.append(prim_tok_pos)
 
-        # Map Token to ConstraintType
+        # Map ConstraintToken to ConstraintType
         constraint_type_name = constraint_type.name
         if constraint_type_name in datalib.ConstraintType.__members__:
             constraint_label = datalib.ConstraintType[constraint_type_name]
@@ -570,14 +573,23 @@ class ConstraintDataset(torch.utils.data.Dataset):
         if self.primitive_noise_config.enabled:
             sketch = apply_primitive_noise(sketch, self.primitive_noise_config.std, self.primitive_noise_config.max_difference)
 
-        result = tokenize_sketch(sketch, self.num_bins, self.max_length, normalize=False)
+        result = tokenize_sketch(
+            sketch,
+            self.num_bins,
+            self.max_length,
+            normalize=False,  # NOTE: manually normalized above by `sketch_utils.normalize_sketch`
+            uniquify_primitive_val_tokens=True,   # NOTE: THIS IS MUST!!! PrimitiveModel implicitly assumes the len(PrimitiveToken)-offset when doing torch.gather.
+            uniquify_constraint_val_tokens=True,  # NOTE: THIS IS MUST!!! ConstraintMMDModel implicitly assumes the len(ConstraintToken)-offset when doing torch.gather.
+        )
 
-        sample = {
-            **result.prim_tokens,
-            **{f'c_{k}': v for k, v in result.constr_tokens.items()}
+        return {
+            'val': torch.from_numpy(result.prim_tokens['val']),
+            'coord': torch.from_numpy(result.prim_tokens['coord']),
+            'pos': torch.from_numpy(result.prim_tokens['pos']),
+            'c_val': torch.from_numpy(result.constr_tokens['val']),
+            'c_coord': torch.from_numpy(result.constr_tokens['coord']),
+            'c_pos': torch.from_numpy(result.constr_tokens['pos']),
         }
-        sample = {k: torch.from_numpy(v) for k, v in sample.items()}
-        return sample
 
     def __len__(self) -> int:
         if self.is_purturbed:
@@ -605,7 +617,7 @@ class ConstraintDataModule(L.LightningDataModule):
         self._valid_dataset = None
         self._test_dataset = None
 
-    def setup(self, stage: Optional[str]=None) -> None:
+    def setup(self, stage: str | None = None) -> None:
         self._dataset = ConstraintDataset(
             self.config.sequence_path,
             self.config.num_position_bins,
@@ -626,11 +638,11 @@ class ConstraintDataModule(L.LightningDataModule):
         assert self._train_dataset is not None
         return self._make_dataloader(self._train_dataset, shuffle=True)
 
-    def val_dataloader(self) -> Optional[torch.utils.data.DataLoader[TokenInput]]:
+    def val_dataloader(self) -> torch.utils.data.DataLoader[TokenInput]:
         assert self._valid_dataset is not None
         return self._make_dataloader(self._valid_dataset, shuffle=False)
 
-    def test_dataloader(self) -> Optional[torch.utils.data.DataLoader[TokenInput]]:
+    def test_dataloader(self) -> torch.utils.data.DataLoader[TokenInput]:
         assert self._test_dataset is not None
         return self._make_dataloader(self._test_dataset, shuffle=False)
 

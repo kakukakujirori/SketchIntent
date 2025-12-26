@@ -29,7 +29,7 @@ from sketchgraphs.data import Arc, Circle, Line, Point
 
 from . import sketch_utils, tokenization
 from .tokens import (
-    PrimitiveToken as Token,
+    PrimitiveToken,
     PrimitiveParamToken,
     NUM_PARAMS,
 )
@@ -134,9 +134,9 @@ def _pad_or_truncate_to_length(arr: np.ndarray, target_length: Optional[int] = N
         return arr[:target_length]
 
     if isinstance(arr, np.ndarray):
-        return np.pad(arr, (0, target_length - len(arr)), constant_values=Token.Pad)
+        return np.pad(arr, (0, target_length - len(arr)), constant_values=PrimitiveToken.Pad)
     elif isinstance(arr, torch.Tensor):
-        return torch.nn.functional.pad(arr, (0, target_length - len(arr)), value=Token.Pad)
+        return torch.nn.functional.pad(arr, (0, target_length - len(arr)), value=PrimitiveToken.Pad)
     else:
         raise ValueError('arr must be either numpy array or torch Tensor')
 
@@ -160,13 +160,13 @@ def param_seq_from_tokens(tokens, num_bins):
         - isConstruction: True/False for all entities
     """
     reverse_construction_toks = {
-        len(Token) + num_bins: True,
-        len(Token) + num_bins + 1: False
+        len(PrimitiveToken) + num_bins: True,
+        len(PrimitiveToken) + num_bins + 1: False
     }
 
     reverse_clockwise_toks = {
-        len(Token) + num_bins + 2: True,
-        len(Token) + num_bins + 3: False
+        len(PrimitiveToken) + num_bins + 2: True,
+        len(PrimitiveToken) + num_bins + 3: False
     }
 
     all_params = []
@@ -174,20 +174,20 @@ def param_seq_from_tokens(tokens, num_bins):
     clockwise = None  # Only set for Arc entities
     isConstruction = False
     for token in tokens:
-        if token == Token.Start:
+        if token == PrimitiveToken.Start:
             continue
-        if token < len(Token):
+        if token < len(PrimitiveToken):
             if curr_params:
                 all_params.append((curr_params, clockwise, isConstruction))
                 curr_params = []
                 clockwise = None  # Reset for next entity
                 isConstruction = False
-        if token in [Token.Stop, Token.Pad]:
+        if token in [PrimitiveToken.Stop, PrimitiveToken.Pad]:
             break
-        if token >= len(Token):
-            if token <= len(Token) + (num_bins - 1):
+        if token >= len(PrimitiveToken):
+            if token <= len(PrimitiveToken) + (num_bins - 1):
                 # Numerical coordinate
-                curr_params.append(token - len(Token))
+                curr_params.append(token - len(PrimitiveToken))
             elif token in reverse_clockwise_toks:
                 # clockwise attribute (Arc only)
                 clockwise = reverse_clockwise_toks[token]

@@ -15,7 +15,7 @@ from img2cad_diffusion import constraint_data, primitive_data
 from sketchgraphs_models.nn.summary import CohenKappa
 from . import dit
 from .prob_path import MaskProbPath
-from .tokens import PrimitiveParamToken
+from .tokens import PrimitiveToken, PrimitiveParamToken, ConstraintToken, ConstraintParamToken
 
 # Function overload to not need 'modules'
 def generate_square_subsequent_mask(source: torch.Tensor) -> torch.Tensor:
@@ -28,8 +28,6 @@ class ConstraintModelConfig:
 
     Attributes
     ----------
-    num_position_embeddings
-        Maximum number of entities in the sketch
     embedding_dimension
         Dimension of embeddings used
     hidden_size
@@ -39,7 +37,6 @@ class ConstraintModelConfig:
     num_layers
         Number of transformer layers
     """
-    num_positional_embeddings: int = 16
     embedding_dimension: int = 128
     hidden_size: int = 256
     num_heads: int = 4
@@ -125,26 +122,36 @@ class PrimitiveBlock(torch.nn.Module):
 
 
 class PrimitiveModel(torch.nn.Module):
-    def __init__(self, num_bins, max_entities, embed_dim, fc_size, num_heads, num_layers, dropout=0):
+    def __init__(
+        self,
+        num_bins: int,
+        max_token_length: int,
+        embed_dim: int,
+        fc_size: int,
+        num_heads: int,
+        num_layers: int,
+        dropout: float = 0,
+    ):
         super().__init__()
 
         # Embeddings
         # Value embeddings
-        num_val_embeddings = len(primitive_data.Token) + num_bins
+        num_val_embeddings = len(PrimitiveToken) + num_bins
         if primitive_data.INCLUDE_CONSTRUCTION:
             num_val_embeddings += 2
         if primitive_data.INCLUDE_CLOCKWISE:
             num_val_embeddings += 2  # clockwise True/False tokens for Arc
-        self.val_embed = torch.nn.Embedding(num_val_embeddings, embed_dim, padding_idx=primitive_data.Token.Pad)
+        self.val_embed = torch.nn.Embedding(num_val_embeddings, embed_dim, padding_idx=PrimitiveToken.Pad)
 
         # Coordinate embeddings (use PrimitiveParamToken size for semantic param types)
         num_coord_embeddings = len(PrimitiveParamToken)
-        self.coord_embed = torch.nn.Embedding(num_coord_embeddings, embed_dim, padding_idx=primitive_data.Token.Pad)
+        self.coord_embed = torch.nn.Embedding(num_coord_embeddings, embed_dim, padding_idx=PrimitiveParamToken.Pad)
 
-        # Position embeddings (pos tokens now start at len(SpecialToken)=2)
-        # Max pos = 2 + max_entities + buffer for entity tokens
-        num_pos_embeddings = 2 + max_entities * 8  # buffer for params + attributes per entity
-        self.pos_embed = torch.nn.Embedding(num_pos_embeddings, embed_dim, padding_idx=primitive_data.Token.Pad)
+        # Position embeddings
+        # max(pos) = number_of_entities + 4 (Pad=0, Mask=1, Start=2, Stop)
+        # number_of_entities ≈ max_token_length / 5 (avg ~5 tokens per entity)
+        num_pos_embeddings = max_token_length // 5 + 4
+        self.pos_embed = torch.nn.Embedding(num_pos_embeddings, embed_dim, padding_idx=PrimitiveToken.Pad)
 
         # Rotary
         self.rotary_emb = dit.Rotary(embed_dim // num_heads)
@@ -179,37 +186,40 @@ class PrimitiveModel(torch.nn.Module):
 
 class ConstraintMDDModel(torch.nn.Module):
     """Masked discrete diffusion model of constraints conditioned on primitives.
+
+    Uses cross-attention architecture where constraints attend to primitives,
+    providing a stronger inductive bias for learning constraint-primitive relationships.
     """
     def __init__(self,
-                 num_bins,
-                 max_entities,
-                 embed_dim,
-                 fc_size,
-                 num_heads,
-                 num_layers,
-                 dropout=0,
-                 cond_dim=None):
+                 num_bins: int,
+                 max_token_length: int,
+                 embed_dim: int,
+                 fc_size: int,
+                 num_heads: int,
+                 num_layers: int,
+                 dropout: float = 0,
+                 cond_dim: int | None = None):
         super().__init__()
         # Primitive model (for dynamic embeddings)
-        self.prim_model = PrimitiveModel(num_bins, max_entities, embed_dim,
+        self.prim_model = PrimitiveModel(num_bins, max_token_length, embed_dim,
             fc_size, num_heads, num_layers, dropout)
-        pad_tok = constraint_data.Token.Pad
         # Value embeddings: constraint tokens + reference tokens (prim positions up to max_length)
         # Reference tokens are: len(ConstraintToken) + prim_token_position
-        num_val_embeddings = len(constraint_data.Token) + 200  # max prim seq length (was 130, increased for larger sketches)
+        num_val_embeddings = len(ConstraintToken)
         self.val_embed = torch.nn.Embedding(num_val_embeddings, embed_dim,
-            padding_idx=pad_tok)
-        # Coordinate embeddings (use PrimitiveParamToken size for semantic param types)
-        num_coord_embeddings = len(PrimitiveParamToken)
+            padding_idx=ConstraintToken.Pad)
+        # Coordinate embeddings for constraint param types (Type, Position)
+        num_coord_embeddings = len(ConstraintParamToken)
         self.coord_embed = torch.nn.Embedding(num_coord_embeddings, embed_dim,
-            padding_idx=pad_tok)
+            padding_idx=ConstraintParamToken.Pad)
         # Position embeddings
-        num_pos_embeddings = 3 + (4 * max_entities)  # see make_sequence_dataset
+        # max(c_pos) = number_of_constraints + 4 (Pad=0, Mask=1, Start=2, Stop)
+        # Observed max: 48 with max_token_length=130, so avg ~2.5 tokens per constraint
+        num_pos_embeddings = max_token_length // 2 + 4
         self.pos_embed = torch.nn.Embedding(num_pos_embeddings, embed_dim,
-            padding_idx=pad_tok)  # TODO: dry-ify overlapping logic w/ PrimModel
+            padding_idx=ConstraintToken.Pad)
 
-        # DiT Backbone
-        # Use simple config dict for DIT
+        # DiT Backbone with Cross-Attention
         if cond_dim is None:
             cond_dim = embed_dim
 
@@ -220,40 +230,45 @@ class ConstraintMDDModel(torch.nn.Module):
                 'n_blocks': num_layers,
                 'dropout': dropout,
                 'cond_dim': cond_dim,
-                'scale_by_sigma': False # Default
+                'scale_by_sigma': False
             }
         }
-        # Output size is embed_dim because we will do dot product with embeddings later
-        self.dit_backbone = dit.FeatureDIT(dit_config, output_size=embed_dim)
+        # Use CrossAttentionFeatureDIT: c_embeddings attend to p_embeddings
+        self.dit_backbone = dit.CrossAttentionFeatureDIT(dit_config, output_size=embed_dim)
         self.sigma_map = dit.TimestepEmbedder(cond_dim)
         self.embed_dim = embed_dim
 
-    def _embed_tokens(self, src):
+    def _embed_tokens(self, src: dict[str, torch.Tensor]):
+        """Embed primitive and constraint tokens.
+
+        Returns:
+            c_embeddings: Constraint embeddings [B, L_c, D]
+            p_embeddings: Primitive embeddings with prepended constraint type tokens [B, L_p, D]
+                          Used as cross-attention memory and pointer network vocabulary
+        """
         # Embed primitives
         prim_embeddings = self.prim_model(src)
-        # Prepend fixed val embeddings (constraint types)
+
+        # Prepend fixed val embeddings (constraint types) - these form the pointer vocabulary
         batch_size = src['c_val'].shape[0]
-        fixed_tokens = np.tile(range(len(constraint_data.Token)), (batch_size, 1))  # [[0, 1, ..., N-1], [0, 1, ..., N-1], ...]
+        fixed_tokens = np.tile(range(len(ConstraintToken)), (batch_size, 1))
         fixed_tokens = torch.tensor(fixed_tokens).to(src['c_val'].device)
         fixed_val_embeddings = self.val_embed(fixed_tokens)
 
-        # p_embeddings contains [Fixed Tokens (including Mask), Primitives]
+        # p_embeddings: [constraint type tokens | primitive embeddings]
+        # This serves as both cross-attention memory and pointer vocabulary
+        # NOTE: This ordering is important so that it aligns with the constraint tokenization
         p_embeddings = torch.cat([fixed_val_embeddings, prim_embeddings], 1)
 
         # Embed constraint tokens (the noisy input)
-        # c_val contains INDICES into p_embeddings
+        # c_val contains indices into p_embeddings:
+        #   - 0 to len(ConstraintToken)-1: constraint type tokens
+        #   - len(ConstraintToken) to len(ConstraintToken)+max_prim_len-1: primitive references
+        # Tokenization ensures c_val never exceeds p_embeddings.shape[1]
         c_val_indices = src['c_val']
 
-        # Pad p_embeddings to fixed size for cross-entropy consistency
-        # The logits shape will be [B, L_c, p_embeddings.shape[1]], so target indices
-        # must be < p_embeddings.shape[1] for CrossEntropyLoss. Max c_val is ~150.
-        target_size = len(constraint_data.Token) + 200  # 17 + 200 = 217 (max c_val ~150)
-        if p_embeddings.shape[1] < target_size:
-            pad_size = target_size - p_embeddings.shape[1]
-            padding = torch.zeros(p_embeddings.shape[0], pad_size, p_embeddings.shape[2],
-                                  device=p_embeddings.device, dtype=p_embeddings.dtype)
-            p_embeddings = torch.cat([p_embeddings, padding], dim=1)
-
+        # Gather embeddings from p_embeddings using c_val as indices
+        # NOTE: The most crucial part - this implements the pointer mechanism
         val_embeddings = torch.gather(p_embeddings, 1, c_val_indices.unsqueeze(-1).expand(-1, -1, self.embed_dim))
 
         coord_embeddings = self.coord_embed(src['c_coord'])
@@ -262,27 +277,20 @@ class ConstraintMDDModel(torch.nn.Module):
 
         return c_embeddings, p_embeddings
 
-    def forward(self, src, sigma):
-        # Embed
+    def forward(self, src: dict[str, torch.Tensor], sigma: torch.Tensor):
+        # Embed tokens
         c_embeddings, p_embeddings = self._embed_tokens(src)
 
-        # Concatenate for DiT: [Primitives, Constraints]
-        # We want the model to attend to primitives.
-        x = torch.cat([p_embeddings, c_embeddings], dim=1)
-
-        # Conditioning on sigma
+        # Conditioning on sigma (timestep)
         if sigma.ndim > 1:
             sigma = sigma.squeeze(-1)
         c = F.silu(self.sigma_map(sigma))
 
-        # Pass to DiT
-        output = self.dit_backbone(x, c)
+        # Cross-attention DiT: c_embeddings attend to p_embeddings
+        # c_embeddings: target (queries), p_embeddings: memory (keys/values)
+        c_out = self.dit_backbone(c_embeddings, p_embeddings, c)
 
-        # Separate output: we only care about the constraint part
-        # output shape: [B, L_p + L_c, H]
-        c_out = output[:, p_embeddings.shape[1]:, :]
-
-        # Pointer dot-product: Match against p_embeddings (the dictionary)
+        # Pointer dot-product: Match against p_embeddings (the vocabulary)
         # p_embeddings shape: [B, L_p, H] -> transpose to [B, H, L_p]
         logits = torch.matmul(c_out, p_embeddings.to(c_out.dtype).transpose(1, 2))
 
@@ -338,7 +346,7 @@ class ConstraintMDDModule(L.LightningModule):
         # Ignoring redundant comments about embedding dimension mapping
         self.model = ConstraintMDDModel(
             num_bins=self.hparams.data.num_position_bins,
-            max_entities=self.hparams.model.num_positional_embeddings,
+            max_token_length=self.hparams.data.max_token_length,
             embed_dim=self.hparams.model.embedding_dimension,
             fc_size=self.hparams.model.hidden_size,
             num_heads=self.hparams.model.num_heads,
@@ -346,20 +354,19 @@ class ConstraintMDDModule(L.LightningModule):
             cond_dim=self.hparams.model.embedding_dimension
         )
 
-        self.criterion = torch.nn.CrossEntropyLoss(ignore_index=constraint_data.Token.Pad)
+        self.criterion = torch.nn.CrossEntropyLoss(ignore_index=ConstraintToken.Pad)
 
-        # Increment num_classes for Mask token
-        # Must match p_embeddings fixed size: len(Token) + 200 = 217
-        num_classes = len(constraint_data.Token) + 200  # config.data.max_token_length
-        self._kappa_metric = CohenKappa(num_classes)
-        self._accuracy_metric = torchmetrics.Accuracy(task='multiclass', num_classes=num_classes)
+        # num_pointer_targets = p_embeddings vocabulary size = len(ConstraintToken) + max_token_length
+        num_pointer_targets = len(ConstraintToken) + self.hparams.data.max_token_length
+        self._kappa_metric = CohenKappa(num_pointer_targets)
+        self._accuracy_metric = torchmetrics.Accuracy(task='multiclass', num_classes=num_pointer_targets)
 
         # Metrics for full generation
-        self._kappa_metric_total = CohenKappa(num_classes)
-        self._accuracy_metric_total = torchmetrics.Accuracy(task='multiclass', num_classes=num_classes)
+        self._kappa_metric_total = CohenKappa(num_pointer_targets)
+        self._accuracy_metric_total = torchmetrics.Accuracy(task='multiclass', num_classes=num_pointer_targets)
 
         # >>> PRISM >>>
-        self.mask_index = constraint_data.Token.Mask # Mask token index is now Token.Mask
+        self.mask_index = ConstraintToken.Mask  # Mask token index for diffusion
         self.noise = LogLinearNoise()
         self.antithetic_sampling = True
         self.importance_sampling = False
@@ -445,7 +452,7 @@ class ConstraintMDDModule(L.LightningModule):
 
         with torch.no_grad():
             preds = torch.distributions.Categorical(logits=output).sample()
-            relevant_idxs = (target != constraint_data.Token.Pad)
+            relevant_idxs = (target != ConstraintToken.Pad)
             self._kappa_metric(preds[relevant_idxs], target[relevant_idxs])
             self._accuracy_metric(preds[relevant_idxs], target[relevant_idxs])
 
@@ -490,7 +497,7 @@ class ConstraintMDDModule(L.LightningModule):
 
         # Evaluate
         target = batch['c_val']
-        relevant_idxs = (target != constraint_data.Token.Pad)
+        relevant_idxs = (target != ConstraintToken.Pad)
 
         # samples is the generated index tensor [B, L]
         # target is the ground truth [B, L]

@@ -11,58 +11,16 @@ from typing import Dict, List
 from sketchgraphs.data import Arc, Circle, Line, Point
 
 
-# Generic special tokens (shared across Primitive/Constraint)
-class SpecialToken(enum.IntEnum):
-    Pad = 0   # Universal padding token
-    Mask = 1  # Universal mask token (for diffusion)
-
-
-# =============================================================================
-# Parameter Semantic Tokens (coord_tokens)
-# =============================================================================
-
-class PrimitiveParamToken(enum.IntEnum):
-    """Semantic tokens for primitive parameter types in coord_tokens.
-
-    These tokens indicate what semantic meaning each value token has for primitives.
-    """
-    Pad = SpecialToken.Pad   # Padding
-    Type = 1                 # Entity type token (Arc, Line, etc.)
-    Clockwise = 2            # Arc clockwise attribute
-    Construction = 3         # isConstruction attribute
-    # >>> COORDINATE PARAMETERS >>>
-    StartX = 4
-    StartY = 5
-    EndX = 6
-    EndY = 7
-    CenterX = 8
-    CenterY = 9
-    Radius = 10
-    # <<< COORDINATE PARAMETERS <<<
-
-
-class ConstraintParamToken(enum.IntEnum):
-    """Semantic tokens for constraint parameter types in coord_tokens.
-
-    These tokens indicate what semantic meaning each value token has for constraints.
-    """
-    Pad = SpecialToken.Pad   # Padding
-    Type = 1                 # Constraint type token (Coincident, Parallel, etc.)
-    Position = 2             # Primitive position reference
-
-
-# Number of parameters per entity type (TODO: REMOVE AFTER REFACTORING)
-NUM_PARAMS: Dict[type, int] = {
-    Arc: 6,
-    Circle: 3,
-    Line: 4,
-    Point: 2,
-}
-
-
 # =============================================================================
 # Token Enumerations
 # =============================================================================
+
+class SpecialToken(enum.IntEnum):
+    """Base special tokens. All Token classes should include these at the start.
+    """
+    Pad = 0   # Universal padding token
+    Mask = 1  # Universal mask token (for diffusion)
+
 
 class PrimitiveToken(enum.IntEnum):
     """Token values for primitive entity models.
@@ -70,14 +28,14 @@ class PrimitiveToken(enum.IntEnum):
     These tokens represent the non-parameter value tokens used in the
     primitive sequence representation.
     """
-
-    Pad = SpecialToken.Pad  # References shared constant
-    Start = 1
-    Stop = 2
-    Arc = 3
-    Circle = 4
-    Line = 5
-    Point = 6
+    Pad = SpecialToken.Pad    # Padding
+    Mask = SpecialToken.Mask  # Mask (unused but included for consistency)
+    Start = 2
+    Stop = 3
+    Arc = 4
+    Circle = 5
+    Line = 6
+    Point = 7
 
 
 class ConstraintToken(enum.IntEnum):
@@ -107,96 +65,45 @@ class ConstraintToken(enum.IntEnum):
 
 
 # =============================================================================
+# Parameter Semantic Tokens (coord_tokens)
+# =============================================================================
 
-from dataclasses import dataclass, field
-from typing import ClassVar
+class PrimitiveParamToken(enum.IntEnum):
+    """Semantic tokens for primitive parameter types in coord_tokens.
 
-
-@dataclass
-class TokenVocabulary:
-    """Centralized token vocabulary for primitive and constraint models.
-
-    PAD and MASK are shared across both primitive and constraint models.
-    All token indices are pre-computed based on num_bins for consistency.
-
-    Attributes
-    ----------
-    num_bins : int
-        Number of quantization bins for coordinate values.
+    These tokens indicate what semantic meaning each value token has for primitives.
     """
-    num_bins: int
+    Pad = SpecialToken.Pad    # Padding
+    Mask = SpecialToken.Mask  # Mask (unused but included for consistency)
+    Type = 2                  # Entity type token (Arc, Line, etc.)
+    Clockwise = 3             # Arc clockwise attribute
+    Construction = 4          # isConstruction attribute
+    # >>> COORDINATE PARAMETERS >>>
+    StartX = 5
+    StartY = 6
+    EndX = 7
+    EndY = 8
+    CenterX = 9
+    CenterY = 10
+    Radius = 11
+    # <<< COORDINATE PARAMETERS <<<
 
-    # Shared tokens (universal across primitive/constraint)
-    PAD: ClassVar[int] = 0   # Universal padding
-    MASK: ClassVar[int] = 1  # Universal mask (for diffusion)
 
-    # Computed token ranges (set in __post_init__)
-    _primitive_special_start: int = field(init=False)
-    _primitive_coord_start: int = field(init=False)
-    _primitive_construction_start: int = field(init=False)
-    _primitive_clockwise_start: int = field(init=False)
+class ConstraintParamToken(enum.IntEnum):
+    """Semantic tokens for constraint parameter types in coord_tokens.
 
-    def __post_init__(self):
-        """Compute all token ranges based on num_bins."""
-        # Primitive tokens: [Pad, Start, Stop, Arc, Circle, Line, Point] = 7 tokens
-        self._primitive_special_start = 0
-        num_primitive_special = len(PrimitiveToken)  # 7
+    These tokens indicate what semantic meaning each value token has for constraints.
+    """
+    Pad = SpecialToken.Pad    # Padding
+    Mask = SpecialToken.Mask  # Mask (unused but included for consistency)
+    Type = 2                  # Constraint type token (Coincident, Parallel, etc.)
+    Position = 3              # Primitive position reference
 
-        # Coordinate bins: [0 ... num_bins-1]
-        self._primitive_coord_start = num_primitive_special
 
-        # Construction tokens: [True, False]
-        self._primitive_construction_start = num_primitive_special + self.num_bins
-
-        # Clockwise tokens (Arc only): [True, False]
-        self._primitive_clockwise_start = self._primitive_construction_start + 2
-
-    @property
-    def primitive_vocab_size(self) -> int:
-        """Total vocabulary size for primitive model."""
-        # special + bins + construction(2) + clockwise(2)
-        return len(PrimitiveToken) + self.num_bins + 2 + 2
-
-    @property
-    def constraint_vocab_size(self) -> int:
-        """Total vocabulary size for constraint model.
-
-        Constraint model uses pointer network, so vocab includes:
-        - Fixed constraint tokens (Pad, Mask, Start, Stop, constraint types)
-        - Dynamic tokens from primitives (length varies)
-        """
-        return len(ConstraintToken)
-
-    def coord_to_token(self, bin_idx: int) -> int:
-        """Convert coordinate bin index [0, num_bins-1] to token index."""
-        return self._primitive_coord_start + bin_idx
-
-    def token_to_coord(self, token: int) -> int:
-        """Convert token index back to coordinate bin index."""
-        return token - self._primitive_coord_start
-
-    def construction_token(self, is_construction: bool) -> int:
-        """Get token for isConstruction attribute."""
-        return self._primitive_construction_start + (0 if is_construction else 1)
-
-    def clockwise_token(self, is_clockwise: bool) -> int:
-        """Get token for clockwise attribute (Arc only)."""
-        return self._primitive_clockwise_start + (0 if is_clockwise else 1)
-
-    def is_coord_token(self, token: int) -> bool:
-        """Check if token is a coordinate bin token."""
-        return self._primitive_coord_start <= token < self._primitive_construction_start
-
-    def is_construction_token(self, token: int) -> bool:
-        """Check if token is a construction attribute token."""
-        return self._primitive_construction_start <= token < self._primitive_clockwise_start
-
-    def is_clockwise_token(self, token: int) -> bool:
-        """Check if token is a clockwise attribute token."""
-        return self._primitive_clockwise_start <= token < self._primitive_clockwise_start + 2
-
-    @classmethod
-    def from_config(cls, num_bins: int) -> 'TokenVocabulary':
-        """Create a TokenVocabulary from configuration."""
-        return cls(num_bins=num_bins)
-
+# Number of parameters per entity type (TODO: REMOVE AFTER REFACTORING)
+NUM_PARAMS: Dict[type, int] = {
+    Arc: 6,
+    Circle: 3,
+    Line: 4,
+    Point: 2,
+}
