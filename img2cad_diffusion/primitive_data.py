@@ -27,11 +27,10 @@ import sketchgraphs.data as datalib
 from sketchgraphs.data import flat_array
 from sketchgraphs.data import Arc, Circle, Line, Point
 
-from . import sketch_utils as i2c_utils
+from . import sketch_utils, tokenization
 from .tokens import (
     PrimitiveToken as Token,
-    NON_COORD_TOKEN,
-    PRIMITIVE_COORD_TOKEN_MAP as COORD_TOKEN_MAP,
+    PrimitiveParamToken,
     NUM_PARAMS,
 )
 
@@ -142,119 +141,6 @@ def _pad_or_truncate_to_length(arr: np.ndarray, target_length: Optional[int] = N
         raise ValueError('arr must be either numpy array or torch Tensor')
 
 
-def tokenize_sketch(
-    sketch: datalib.Sketch,
-    num_bins: int,
-    max_length: Optional[int] = None,
-    permute: bool = False,
-    include_stop: bool = True
-) -> Tuple[SketchTokenSet, GatherMap]:
-    """Tokenizes the given sketch.
-
-    Parameters
-    ----------
-    sketch : datalib.Sketch
-        Sketch from which to generate the tokens.
-    num_bins : int
-        Number of bins used to quantize sketch positions.
-    max_length : int, optional
-        Length to which the token sequence is padded or truncated.
-    permute : bool, optional
-        If True, the primitives are randomly permuted. (default False)
-    include_stop : bool, optional
-        If `True`, indicates that the stop token is included at the end of the
-        sequence. Otherwise, no stop token is included at the end of the sequence.
-
-    Returns
-    -------
-    data : SketchTokenSet
-        A dictionary containing the token sequence corresponding to the given sketch.
-        The token sequence is padded or truncated to the given length if specified.
-    gather_map : GatherMap
-        A dictionary mapping entity node index to EntityTokenMapping.
-        External entities are NOT included (identified by absence in the map).
-    """
-    from .tokens import ENTITY_TOKEN_OFFSETS
-
-    val_tokens = [Token.Start]
-    coord_tokens = [NON_COORD_TOKEN]
-    pos_idx = 1  # 0 is reserved for padding
-    pos_tokens = [pos_idx]
-
-    gather_map: GatherMap = {}
-
-    # Token dictionaries
-    construction_tok_dict = {
-        True: len(Token) + num_bins,
-        False: len(Token) + num_bins + 1
-    }
-    clockwise_tok_dict = {
-        True: len(Token) + num_bins + 2,
-        False: len(Token) + num_bins + 3
-    }
-
-    if permute:
-        entities = list(sketch.entities.items())
-        shuffle(entities)
-        sketch.entities = OrderedDict(entities)
-
-    # Track entity node indices (1-based, 0 is External which is not tokenized)
-    node_idx = 1
-    for ent in sketch.entities.values():
-        entity_start_pos = len(val_tokens)
-
-        # Build EntityTokenMapping
-        offsets = ENTITY_TOKEN_OFFSETS[type(ent)]
-        gather_map[node_idx] = EntityTokenMapping(
-            entity_idx=node_idx,
-            entity_type=type(ent),
-            entity_token_pos=entity_start_pos,
-            subnode_positions={name: entity_start_pos + offset for name, offset in offsets.items()}
-        )
-
-        val_tokens.append(Token[ent.type.name])
-        coord_tokens.append(NON_COORD_TOKEN)
-        pos_idx += 1
-        pos_tokens.append(pos_idx)
-
-        params = i2c_utils.parameterize_entity(ent)
-        try:
-            param_bins = i2c_utils.quantize_params(params, num_bins)
-        except:
-            params[params > 0.5] = 0.5
-            params[params < -0.5] = -0.5
-            param_bins = i2c_utils.quantize_params(params, num_bins)
-
-        val_tokens.extend(param_bins + len(Token))
-        coord_tokens.extend(COORD_TOKEN_MAP[type(ent)])
-        pos_tokens.extend([pos_idx] * param_bins.size)
-
-        if isinstance(ent, Arc):
-            val_tokens.append(clockwise_tok_dict[ent.clockwise])
-            coord_tokens.append(NON_COORD_TOKEN)
-            pos_tokens.append(pos_idx)
-
-        if INCLUDE_CONSTRUCTION:
-            val_tokens.append(construction_tok_dict[ent.isConstruction])
-            coord_tokens.append(NON_COORD_TOKEN)
-            pos_tokens.append(pos_idx)
-
-        node_idx += 1
-
-    if include_stop:
-        val_tokens.append(Token.Stop)
-        coord_tokens.append(NON_COORD_TOKEN)
-        pos_tokens.append(pos_idx + 1)
-
-    sample = {
-        'val': _pad_or_truncate_to_length(np.array(val_tokens, dtype=np.int64), max_length),
-        'coord': _pad_or_truncate_to_length(np.array(coord_tokens, dtype=np.int64), max_length),
-        'pos': _pad_or_truncate_to_length(np.array(pos_tokens, dtype=np.int64), max_length)
-    }
-
-    return sample, gather_map
-
-
 def param_seq_from_tokens(tokens, num_bins):
     """Convert value tokens to sequence of quantized entity parameters.
 
@@ -333,9 +219,9 @@ def sketch_from_tokens(tokens, num_bins):
     all_params = param_seq_from_tokens(tokens, num_bins)
     sketch = datalib.Sketch()
     for idx, (ent_params, clockwise, isConstruction) in enumerate(all_params):
-        ent_params = i2c_utils.dequantize_params(ent_params, num_bins)
+        ent_params = sketch_utils.dequantize_params(ent_params, num_bins)
         ent_params = ent_params.tolist()
-        ent = i2c_utils.entity_from_params(ent_params, clockwise=clockwise)
+        ent = sketch_utils.entity_from_params(ent_params, clockwise=clockwise)
         if ent is not None:
             ent.entityId = str(idx + 1)
             ent.isConstruction = isConstruction
@@ -372,12 +258,12 @@ class PrimitiveDataset(torch.utils.data.Dataset[SketchTokenSet]):
         self.num_bins = num_bins
         self.permute = permute
 
-    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+    def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
         seq = self.sequences[idx]
         sketch = datalib.sketch_from_sequence(seq)
-        i2c_utils.normalize_sketch(sketch)
+        sketch_utils.normalize_sketch(sketch)
 
-        sample, _ = tokenize_sketch(sketch, self.num_bins, self.max_length, permute=self.permute)
+        sample, _ = tokenization.tokenize_primitives(sketch, self.num_bins, self.max_length)
         sample = {k: torch.from_numpy(v) for k, v in sample.items()}
         return sample
 
@@ -644,9 +530,6 @@ class PrimitiveDataModule(L.LightningDataModule):
         )
 
     def _make_dataloader(self, dataset, shuffle: bool) -> torch.utils.data.DataLoader[PrimitiveTokenInput]:
-        if dataset is None:
-            return None
-
         return torch.utils.data.DataLoader(
             dataset, self.batch_size,
             shuffle=shuffle, num_workers=self.num_workers,

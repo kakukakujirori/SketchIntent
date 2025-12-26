@@ -15,6 +15,7 @@ from img2cad_diffusion import constraint_data, primitive_data
 from sketchgraphs_models.nn.summary import CohenKappa
 from . import dit
 from .prob_path import MaskProbPath
+from .tokens import PrimitiveParamToken
 
 # Function overload to not need 'modules'
 def generate_square_subsequent_mask(source: torch.Tensor) -> torch.Tensor:
@@ -136,12 +137,13 @@ class PrimitiveModel(torch.nn.Module):
             num_val_embeddings += 2  # clockwise True/False tokens for Arc
         self.val_embed = torch.nn.Embedding(num_val_embeddings, embed_dim, padding_idx=primitive_data.Token.Pad)
 
-        # Coordinate embeddings
-        num_coord_embeddings = 2 + sum([len(cm) for cm in primitive_data.COORD_TOKEN_MAP.values()])
+        # Coordinate embeddings (use PrimitiveParamToken size for semantic param types)
+        num_coord_embeddings = len(PrimitiveParamToken)
         self.coord_embed = torch.nn.Embedding(num_coord_embeddings, embed_dim, padding_idx=primitive_data.Token.Pad)
 
-        # Position embeddings
-        num_pos_embeddings = 3 + max_entities
+        # Position embeddings (pos tokens now start at len(SpecialToken)=2)
+        # Max pos = 2 + max_entities + buffer for entity tokens
+        num_pos_embeddings = 2 + max_entities * 8  # buffer for params + attributes per entity
         self.pos_embed = torch.nn.Embedding(num_pos_embeddings, embed_dim, padding_idx=primitive_data.Token.Pad)
 
         # Rotary
@@ -192,13 +194,13 @@ class ConstraintMDDModel(torch.nn.Module):
         self.prim_model = PrimitiveModel(num_bins, max_entities, embed_dim,
             fc_size, num_heads, num_layers, dropout)
         pad_tok = constraint_data.Token.Pad
-        # Value embeddings (only fixed ones)
-        num_val_embeddings = len(constraint_data.Token)
+        # Value embeddings: constraint tokens + reference tokens (prim positions up to max_length)
+        # Reference tokens are: len(ConstraintToken) + prim_token_position
+        num_val_embeddings = len(constraint_data.Token) + 200  # max prim seq length (was 130, increased for larger sketches)
         self.val_embed = torch.nn.Embedding(num_val_embeddings, embed_dim,
             padding_idx=pad_tok)
-        # Coordinate embeddings
-        num_coord_embeddings = 2 + len(
-            constraint_data.CONSTRAINT_COORD_TOKENS)
+        # Coordinate embeddings (use PrimitiveParamToken size for semantic param types)
+        num_coord_embeddings = len(PrimitiveParamToken)
         self.coord_embed = torch.nn.Embedding(num_coord_embeddings, embed_dim,
             padding_idx=pad_tok)
         # Position embeddings
@@ -241,6 +243,16 @@ class ConstraintMDDModel(torch.nn.Module):
         # Embed constraint tokens (the noisy input)
         # c_val contains INDICES into p_embeddings
         c_val_indices = src['c_val']
+
+        # Pad p_embeddings to fixed size for cross-entropy consistency
+        # The logits shape will be [B, L_c, p_embeddings.shape[1]], so target indices
+        # must be < p_embeddings.shape[1] for CrossEntropyLoss. Max c_val is ~150.
+        target_size = len(constraint_data.Token) + 200  # 17 + 200 = 217 (max c_val ~150)
+        if p_embeddings.shape[1] < target_size:
+            pad_size = target_size - p_embeddings.shape[1]
+            padding = torch.zeros(p_embeddings.shape[0], pad_size, p_embeddings.shape[2],
+                                  device=p_embeddings.device, dtype=p_embeddings.dtype)
+            p_embeddings = torch.cat([p_embeddings, padding], dim=1)
 
         val_embeddings = torch.gather(p_embeddings, 1, c_val_indices.unsqueeze(-1).expand(-1, -1, self.embed_dim))
 
@@ -337,8 +349,8 @@ class ConstraintMDDModule(L.LightningModule):
         self.criterion = torch.nn.CrossEntropyLoss(ignore_index=constraint_data.Token.Pad)
 
         # Increment num_classes for Mask token
-        num_classes = len(constraint_data.Token) + config.data.max_token_length
-        num_classes = len(constraint_data.Token) + config.data.max_token_length
+        # Must match p_embeddings fixed size: len(Token) + 200 = 217
+        num_classes = len(constraint_data.Token) + 200  # config.data.max_token_length
         self._kappa_metric = CohenKappa(num_classes)
         self._accuracy_metric = torchmetrics.Accuracy(task='multiclass', num_classes=num_classes)
 

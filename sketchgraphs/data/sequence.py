@@ -194,7 +194,7 @@ def sketch_from_sequence(seq) -> Sketch:
     last_main_idx = node_idx
     constraint_idx = 1
 
-    def create_entity_id(node_idx):
+    def create_entity_id(node_idx: int) -> str:
         """Helper function for creating entity id - manages sub-entities"""
         if node_idx not in main_node_map:
             return str(node_idx)
@@ -224,6 +224,15 @@ def sketch_from_sequence(seq) -> Sketch:
                 # Skipping external constraints for now
                 continue
             if op.label == ConstraintType.Subnode:
+                # Verify EdgeOp Subnode matches NodeOp-inferred parent relationship
+                if len(op.references) >= 2:
+                    child_idx = op.references[0]
+                    parent_idx = op.references[1]
+                    if child_idx in main_node_map:
+                        inferred_parent, subnode_label = main_node_map[child_idx]
+                        assert inferred_parent == parent_idx, \
+                            f"EdgeOp Subnode mismatch: EdgeOp says child {child_idx} -> parent {parent_idx}, " \
+                            f"but NodeOp ordering inferred parent {inferred_parent}"
                 # Don't include subnode edges in constraints
                 continue
 
@@ -231,19 +240,25 @@ def sketch_from_sequence(seq) -> Sketch:
             constraint_idx += 1
             constraint_type = op.label
 
-            # Adjust reference parameter ids if necessary
+            # Build reference parameters
+            params = []
+
             if constraint_type == ConstraintType.Midpoint:
-                param_ids = ['local0', 'local1']
+                # Midpoint: preserve original Sequence order (midpoint first, then curve/points)
+                for i, ref_idx in enumerate(op.references):
+                    param_id = f'local{i}'
+                    params.append(LocalReferenceParameter(param_id, create_entity_id(ref_idx)))
             else:
-                param_ids = ['localFirst', 'localSecond']
-
-            param1 = LocalReferenceParameter(param_ids[0], create_entity_id(op.references[-1]))
-            params = [param1]
-
-            if len(op.references) > 1:
-                # Non self-constraint
-                param2 = LocalReferenceParameter(param_ids[1], create_entity_id(op.references[0]))
-                params.append(param2)
+                # Other constraints: symmetric, order doesn't matter semantically
+                # Use localFirst/localSecond naming for compatibility
+                for i, ref_idx in enumerate(op.references):
+                    if i == 0:
+                        param_id = 'localFirst'
+                    elif i == 1:
+                        param_id = 'localSecond'
+                    else:
+                        param_id = f'local{i}'
+                    params.append(LocalReferenceParameter(param_id, create_entity_id(ref_idx)))
 
             # Extract parameters for numerical constraints
             params_are_ok = True

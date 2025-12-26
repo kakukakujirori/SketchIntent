@@ -1,6 +1,7 @@
 """This module contains some utilities for processing the sketch data for
 img2cad.
 """
+import math
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -9,6 +10,7 @@ import sketchgraphs.data as datalib
 from sketchgraphs.data import EntityType
 from sketchgraphs.data import Arc, Circle, Line, Point
 
+from .tokens import PrimitiveParamToken, NUM_PARAMS
 
 # Positional parameters
 POS_PARAMS = {
@@ -191,7 +193,7 @@ def center_sketch(sketch):
             setattr(ent, param_id, curr_val - this_offset)
 
 
-def rescale_sketch(sketch):
+def rescale_sketch(sketch: datalib.Sketch) -> float:
     """Rescale the sketch such that the long axis of the bounding box is one.
 
     The entity parameters of the given sketch are modified in place. This
@@ -235,7 +237,7 @@ def rescale_sketch(sketch):
     return factor
 
 
-def normalize_sketch(sketch):
+def normalize_sketch(sketch: datalib.Sketch) -> float:
     """Helper function that both centers and rescales the given sketch in place.
     """
     center_sketch(sketch)
@@ -243,56 +245,83 @@ def normalize_sketch(sketch):
     return scale_factor
 
 
-def _parameterize_arc(arc: datalib.Arc) -> np.ndarray:
-    """Extract parameterization for the given Arc instance.
+def _parameterize_arc(arc: datalib.Arc | None) -> tuple[np.ndarray | None, tuple[PrimitiveParamToken, ...]]:
+    """Extract parameterization for Arc.
 
     Returns [center_point, start_point, end_point] to match SketchGraphs
     Sequence representation where Arc subnodes are ordered as
     [SN_Center, SN_Start, SN_End].
+
+    If arc is None, returns (None, param_tokens) for offset derivation.
     """
-    return np.concatenate([arc.center_point, arc.start_point, arc.end_point])
+    param_tokens = (
+        PrimitiveParamToken.CenterX, PrimitiveParamToken.CenterY,
+        PrimitiveParamToken.StartX, PrimitiveParamToken.StartY,
+        PrimitiveParamToken.EndX, PrimitiveParamToken.EndY,
+    )
+    if arc is None:
+        return None, param_tokens
+    values = np.concatenate([arc.center_point, arc.start_point, arc.end_point])
+    return values, param_tokens
 
-def _parameterize_circle(circle: datalib.Circle) -> np.ndarray:
-    """Extract parameterization for the given Circle instance."""
-    return np.append(circle.center_point, circle.radius)
+def _parameterize_circle(circle: datalib.Circle | None) -> tuple[np.ndarray | None, tuple[PrimitiveParamToken, ...]]:
+    """Extract parameterization for Circle.
 
-def _parameterize_line(line: datalib.Line) -> np.ndarray:
-    """Extract parameterization for the given Line instance."""
-    return np.concatenate([line.start_point, line.end_point])
+    If circle is None, returns (None, param_tokens) for offset derivation.
+    """
+    param_tokens = (PrimitiveParamToken.CenterX, PrimitiveParamToken.CenterY, PrimitiveParamToken.Radius)
+    if circle is None:
+        return None, param_tokens
+    values = np.append(circle.center_point, circle.radius)
+    return values, param_tokens
 
-def _parameterize_point(point: datalib.Point) -> np.ndarray:
-    """Extract parameterization for the given Point instance."""
-    return np.array([point.x, point.y])
+def _parameterize_line(line: datalib.Line | None) -> tuple[np.ndarray | None, tuple[PrimitiveParamToken, ...]]:
+    """Extract parameterization for Line.
+
+    If line is None, returns (None, param_tokens) for offset derivation.
+    """
+    param_tokens = (PrimitiveParamToken.StartX, PrimitiveParamToken.StartY, PrimitiveParamToken.EndX, PrimitiveParamToken.EndY)
+    if line is None:
+        return None, param_tokens
+    values = np.concatenate([line.start_point, line.end_point])
+    return values, param_tokens
+
+def _parameterize_point(point: datalib.Point | None) -> tuple[np.ndarray | None, tuple[PrimitiveParamToken, ...]]:
+    """Extract parameterization for Point.
+
+    If point is None, returns (None, param_tokens) for offset derivation.
+    """
+    param_tokens = (PrimitiveParamToken.StartX, PrimitiveParamToken.StartY)
+    if point is None:
+        return None, param_tokens
+    values = np.array([point.x, point.y])
+    return values, param_tokens
 
 
-# Import NUM_PARAMS from centralized tokens module
-from .tokens import NUM_PARAMS
-
-
-def parameterize_entity(ent) -> np.array:
-    """Extract parameterization for the given entity.
-
-    Only continuous parameters of the entity are included.
+def parameterize_entity(ent: datalib.Entity) -> tuple[np.ndarray, tuple[PrimitiveParamToken, ...]]:
+    """Extract parameterization for an entity instance.
 
     Parameters
     ----------
-    ent : Entity
-        The entity of interest for parameterization
+    ent : Entity instance (Arc, Circle, Line, Point)
 
     Returns
     -------
-    np.array
-        The entity's parameterization
+    tuple[np.ndarray, tuple[PrimitiveParamToken, ...]]
+        (values, param_tokens)
     """
-    param_by_type = {
+    # Mapping from entity type to parameterization function
+    _PARAM_BY_TYPE = {
         Arc: _parameterize_arc,
         Circle: _parameterize_circle,
         Line: _parameterize_line,
-        Point: _parameterize_point
+        Point: _parameterize_point,
     }
-    param_fn = param_by_type.get(type(ent))
+
+    # Instance passed - return values + param_tokens
+    param_fn = _PARAM_BY_TYPE.get(type(ent))
     if param_fn is None:
-        return None
+        raise ValueError(f"Unsupported entity type: {type(ent)}")
     return param_fn(ent)
 
 
@@ -311,8 +340,6 @@ def _arc_from_params(params, entity_id: str | None = None, clockwise: bool | Non
     clockwise : bool, optional
         If provided, use this value for clockwise. Otherwise infer from geometry.
     """
-    import math
-
     center = params[:2]
     start = params[2:4]
     end = params[4:]
@@ -405,9 +432,7 @@ def entity_from_params(params, entity_id: str | None = None, clockwise: bool | N
     Entity
         The entity instance corresponding to the input parameterization
     """
-    num_arc_params = NUM_PARAMS[Arc]
-
-    if len(params) == num_arc_params:
+    if len(params) == NUM_PARAMS[Arc]:
         return _arc_from_params(params, entity_id, clockwise=clockwise)
     elif len(params) == NUM_PARAMS[Circle]:
         return _circle_from_params(params, entity_id)

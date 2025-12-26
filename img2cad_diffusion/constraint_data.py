@@ -15,17 +15,19 @@ from scipy.stats import truncnorm
 
 import sketchgraphs.data as datalib
 from sketchgraphs.data import flat_array
-from sketchgraphs.data._entity import Arc
+from sketchgraphs.data import Arc, Circle, Line, Point
 
 from img2cad_diffusion import sketch_utils, primitive_data
 from img2cad_diffusion.primitive_data import _pad_or_truncate_to_length
 
 # Import token definitions from centralized module
 from img2cad_diffusion.tokens import (
-    ConstraintToken as Token,
-    NON_COORD_TOKEN,
-    CONSTRAINT_COORD_TOKENS,
+    ConstraintToken,
+    PrimitiveParamToken,
+    ConstraintParamToken,
 )
+from tokenization import GatherMap, tokenize_primitives, tokenize_sketch
+from .tokens import PrimitiveParamToken
 
 
 class TokenInput(TypedDict):
@@ -79,7 +81,7 @@ def _trunc_normal_entity_noise(entity: datalib.Entity, std: float = 0.2, max_dif
     """
     assert std > 0.0 and max_diff > 0.0
 
-    params = sketch_utils.parameterize_entity(entity)
+    params, _ = sketch_utils.parameterize_entity(entity)
     trial = 0
     while True:
         noise = truncnorm.rvs(a=-max_diff, b=max_diff,
@@ -94,7 +96,7 @@ def _trunc_normal_entity_noise(entity: datalib.Entity, std: float = 0.2, max_dif
             trial += 1
             if new_ent is None:
                 continue
-            actual_new_params = sketch_utils.parameterize_entity(new_ent)
+            actual_new_params, _ = sketch_utils.parameterize_entity(new_ent)
             if (np.abs(actual_new_params - params) <= max_diff).all():
                 if (np.abs(entity.center_point - new_ent.center_point) <= max_diff).all():
                     break
@@ -110,7 +112,6 @@ def _noisify_sketch_ents(sketch: datalib.Sketch, std: float = 0.2, max_diff: flo
         new_ent.isConstruction = ent.isConstruction
         sketch.entities[ent_key] = new_ent
     return sketch
-
 
 
 def apply_primitive_noise(sketch: datalib.Sketch, std: float = 0.15, max_difference: float = 0.15) -> datalib.Sketch:
@@ -177,15 +178,15 @@ def tokenize_constraints(
     max_length : Optional[int]
         If not `None`, truncates the sequence to this length.
     """
-    val_tokens = [Token.Start]
-    coord_tokens = [NON_COORD_TOKEN]
+    val_tokens = [ConstraintToken.Start]
+    coord_tokens = [ConstraintParamToken.Type]  # Start is a type token
     pos_idx = 1  # 0 is reserved for padding
     pos_tokens = [pos_idx]
 
     for op in seq:
         if not isinstance(op, datalib.EdgeOp):
             continue
-        if op.label.name not in Token.__members__:
+        if op.label.name not in ConstraintToken.__members__:
             continue
 
         # Skip External constraints: refs not in gather_map are External
@@ -200,8 +201,8 @@ def tokenize_constraints(
             if any(gather_map[ref].entity_token_pos >= max_length for ref in refs):
                 continue
 
-        val_tokens.append(Token[op.label.name])
-        coord_tokens.append(NON_COORD_TOKEN)
+        val_tokens.append(ConstraintToken[op.label.name])
+        coord_tokens.append(ConstraintParamToken.Type)  # Constraint type token
         pos_idx += 1
         pos_tokens.append(pos_idx)
 
@@ -215,11 +216,11 @@ def tokenize_constraints(
             sorted_refs = sorted(refs, key=get_sort_key)
 
         val_tokens.extend([gather_map[ref].entity_token_pos + len(Token) for ref in sorted_refs])
-        coord_tokens.extend(CONSTRAINT_COORD_TOKENS[:len(refs)])
+        coord_tokens.extend([ConstraintParamToken.Position] * len(refs))
         pos_tokens.extend([pos_idx] * len(refs))
 
-    val_tokens.append(Token.Stop)
-    coord_tokens.append(NON_COORD_TOKEN)
+    val_tokens.append(ConstraintToken.Stop)
+    coord_tokens.append(ConstraintParamToken.Type)  # Stop is a type token
     pos_tokens.append(pos_idx + 1)
 
     sample = {
@@ -263,38 +264,38 @@ def detokenize_constraints(c_val_tokens: np.ndarray) -> List[Tuple[Token, List[i
         token = int(token)
 
         # Skip padding and mask tokens
-        if token == Token.Pad or token == Token.Mask:
+        if token == ConstraintToken.Pad or token == ConstraintToken.Mask:
             continue
 
         # Control tokens
-        if token == Token.Start:
+        if token == ConstraintToken.Start:
             continue
-        if token == Token.Stop:
+        if token == ConstraintToken.Stop:
             # Finalize last constraint if any
             if current_constraint is not None:
                 constraints.append((current_constraint, current_refs))
             break
 
         # Check if this is a constraint type token (4-16)
-        if token >= Token.Coincident and token <= Token.Vertical:
+        if token >= ConstraintToken.Coincident and token <= ConstraintToken.Vertical:
             # Save previous constraint if exists
             if current_constraint is not None:
                 constraints.append((current_constraint, current_refs))
             # Start new constraint
-            current_constraint = Token(token)
+            current_constraint = ConstraintToken(token)
             current_refs = []
-        elif token >= len(Token):
+        elif token >= len(ConstraintToken):
             # This is a reference token: gather_idx = token - len(Token)
-            gather_idx = token - len(Token)
+            gather_idx = token - len(ConstraintToken)
             current_refs.append(gather_idx)
 
     return constraints
 
 
 def build_gather_idx_mapping(
-    gather_map: 'primitive_data.GatherMap',
+    gather_map: GatherMap,
 ) -> Dict[int, Tuple[int, int]]:
-    """Build a mapping from primitive token position to (entity_id, subnode_idx).
+    """Build a mapping from primitive token position to (entity_idx, subnode_idx).
 
     Parameters
     ----------
@@ -306,30 +307,25 @@ def build_gather_idx_mapping(
     Dict[int, Tuple[int, int]]
         Mapping from primitive token position to (entity_idx, subnode_idx).
         entity_idx is 1-based (0 is reserved for external).
-        subnode_idx meanings depend on entity type:
-        - Arc: 0=entity, 1=center, 2=start, 3=end
-        - Circle: 0=entity, 1=center
-        - Line: 0=entity, 1=start, 2=end
-        - Point: 0=entity
+        subnode_idx is derived from param_tokens:
+        - 0 = entity type token
+        - 1+ = param token positions (CenterX=1, CenterY=2, etc.)
     """
-    subnode_name_to_idx = {
-        'entity': 0,
-        'center': 1,
-        'start': 1,  # For Line
-        'end': 2,
-    }
-    arc_subnode_name_to_idx = {
-        'entity': 0, 'center': 1, 'start': 2, 'end': 3,
-    }
 
     mapping = {}
     for entity_idx, entity_mapping in gather_map.items():
-        for subnode_name, token_pos in entity_mapping.subnode_positions.items():
-            if entity_mapping.entity_type.__name__ == 'Arc':
-                subnode_idx = arc_subnode_name_to_idx.get(subnode_name, 0)
-            else:
-                subnode_idx = subnode_name_to_idx.get(subnode_name, 0)
-            mapping[token_pos] = (entity_idx, subnode_idx)
+        entity_pos = entity_mapping.entity_token_pos
+
+        # Entity type token position (offset 0)
+        mapping[entity_pos] = (entity_idx, 0)
+
+        # Parameter token positions (offset 1+)
+        for i, param_token in enumerate(entity_mapping.param_tokens):
+            token_pos = entity_pos + 1 + i  # +1 for entity type token
+            # subnode_idx based on semantic meaning
+            # Use param_token value as subnode_idx for now (can be refined)
+            mapping[token_pos] = (entity_idx, i + 1)
+
     return mapping
 
 
@@ -358,8 +354,8 @@ def reconstruct_sketch_with_constraints(
     datalib.sequence
         A complete construction sequence with NodeOp and EdgeOp.
     """
-    # Re-tokenize to get gather_idxs mapping
-    _, gather_map = primitive_data.tokenize_sketch(sketch, num_bins, max_length=None, include_stop=False)
+    # Re-tokenize to get gather_map
+    _, gather_map = tokenize_primitives(sketch, num_bins, max_length=None)
 
     # Build mapping from primitive token position to (entity_idx, subnode_idx)
     gather_to_entity = build_gather_idx_mapping(gather_map)
@@ -375,8 +371,6 @@ def reconstruct_sketch_with_constraints(
 
     # Subnode types for each entity - ORDER MUST MATCH ORIGINAL SKETCHGRAPHS SEQUENCE
     # Arc subnodes appear as: Center, Start, End in the original sequence
-    from sketchgraphs.data import Arc, Circle, Line, Point
-
     subnode_types = {
         Arc: [datalib.SubnodeType.SN_Center, datalib.SubnodeType.SN_Start, datalib.SubnodeType.SN_End],
         Circle: [datalib.SubnodeType.SN_Center],
@@ -526,7 +520,7 @@ def reconstruct_sketch_with_constraints(
 # Dataset and DataModule
 # =============================================================================
 
-class ConstraintDataset(torch.utils.data.Dataset[Dict[str, torch.Tensor]]):
+class ConstraintDataset(torch.utils.data.Dataset):
     """Constraint generation dataset."""
 
     def __init__(self, sequence_file: str, num_bins: int, max_length: int | None = None,
@@ -562,12 +556,12 @@ class ConstraintDataset(torch.utils.data.Dataset[Dict[str, torch.Tensor]]):
         else:
             raise KeyError("Neither 'sequences' or 'perturbations' found in the key")
 
-    def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
-        seq = self.sequences[idx]
+    def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
+        seq = self.sequences[index]
         if self.is_purturbed:
             if len(seq) == 0:
-                print(f"Empty sequence at index {idx}. Using the previous sequence.")
-                seq = self.sequences[max(0, idx - 1)]
+                print(f"Empty sequence at index {index}. Using the previous sequence.")
+                seq = self.sequences[max(0, index - 1)]
             seq = random.choice(seq)
 
         sketch = datalib.sketch_from_sequence(seq)
@@ -576,15 +570,12 @@ class ConstraintDataset(torch.utils.data.Dataset[Dict[str, torch.Tensor]]):
         if self.primitive_noise_config.enabled:
             sketch = apply_primitive_noise(sketch, self.primitive_noise_config.std, self.primitive_noise_config.max_difference)
 
-        p_sample, gather_map = primitive_data.tokenize_sketch(sketch, self.num_bins, self.max_length)
-        c_sample = tokenize_constraints(seq, gather_map, self.max_length)
-        c_sample = {f'c_{k}': v for k, v in c_sample.items()}
+        result = tokenize_sketch(sketch, self.num_bins, self.max_length, normalize=False)
 
         sample = {
-            **p_sample,
-            **c_sample
+            **result.prim_tokens,
+            **{f'c_{k}': v for k, v in result.constr_tokens.items()}
         }
-
         sample = {k: torch.from_numpy(v) for k, v in sample.items()}
         return sample
 

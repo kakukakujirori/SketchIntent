@@ -11,29 +11,53 @@ from typing import Dict, List
 from sketchgraphs.data import Arc, Circle, Line, Point
 
 
+# Generic special tokens (shared across Primitive/Constraint)
+class SpecialToken(enum.IntEnum):
+    Pad = 0   # Universal padding token
+    Mask = 1  # Universal mask token (for diffusion)
+
+
 # =============================================================================
-# Coordinate Token Constants
+# Parameter Semantic Tokens (coord_tokens)
 # =============================================================================
 
-NON_COORD_TOKEN = 1  # 0 is reserved for padding
+class PrimitiveParamToken(enum.IntEnum):
+    """Semantic tokens for primitive parameter types in coord_tokens.
 
-# Number of parameters per entity type
+    These tokens indicate what semantic meaning each value token has for primitives.
+    """
+    Pad = SpecialToken.Pad   # Padding
+    Type = 1                 # Entity type token (Arc, Line, etc.)
+    Clockwise = 2            # Arc clockwise attribute
+    Construction = 3         # isConstruction attribute
+    # >>> COORDINATE PARAMETERS >>>
+    StartX = 4
+    StartY = 5
+    EndX = 6
+    EndY = 7
+    CenterX = 8
+    CenterY = 9
+    Radius = 10
+    # <<< COORDINATE PARAMETERS <<<
+
+
+class ConstraintParamToken(enum.IntEnum):
+    """Semantic tokens for constraint parameter types in coord_tokens.
+
+    These tokens indicate what semantic meaning each value token has for constraints.
+    """
+    Pad = SpecialToken.Pad   # Padding
+    Type = 1                 # Constraint type token (Coincident, Parallel, etc.)
+    Position = 2             # Primitive position reference
+
+
+# Number of parameters per entity type (TODO: REMOVE AFTER REFACTORING)
 NUM_PARAMS: Dict[type, int] = {
     Arc: 6,
     Circle: 3,
     Line: 4,
     Point: 2,
 }
-
-# Build COORD_TOKEN_MAP for primitive entities
-PRIMITIVE_COORD_TOKEN_MAP: Dict[type, List[int]] = {}
-_tok = NON_COORD_TOKEN + 1
-for _ent_type in [Arc, Circle, Line, Point]:
-    PRIMITIVE_COORD_TOKEN_MAP[_ent_type] = list(range(_tok, _tok + NUM_PARAMS[_ent_type]))
-    _tok += NUM_PARAMS[_ent_type]
-
-# Constraint coordinate tokens (reference parameter types)
-CONSTRAINT_COORD_TOKENS = [NON_COORD_TOKEN + 1, NON_COORD_TOKEN + 2]  # [2, 3]
 
 
 # =============================================================================
@@ -47,7 +71,7 @@ class PrimitiveToken(enum.IntEnum):
     primitive sequence representation.
     """
 
-    Pad = 0
+    Pad = SpecialToken.Pad  # References shared constant
     Start = 1
     Stop = 2
     Arc = 3
@@ -63,8 +87,8 @@ class ConstraintToken(enum.IntEnum):
     constraint sequence representation, including geometric constraint types.
     """
 
-    Pad = 0
-    Mask = 1
+    Pad = SpecialToken.Pad    # References shared constant
+    Mask = SpecialToken.Mask  # References shared constant
     Start = 2
     Stop = 3
     Coincident = 4
@@ -83,22 +107,9 @@ class ConstraintToken(enum.IntEnum):
 
 
 # =============================================================================
-# Token Vocabulary (Centralized)
-# =============================================================================
 
 from dataclasses import dataclass, field
 from typing import ClassVar
-
-
-# Token offsets for gather positions within each entity type
-# Arc: 6 params = [cx, cy, sx, sy, ex, ey], we track x-coordinates of key points
-# These offsets are relative to the entity type token position
-ENTITY_TOKEN_OFFSETS: Dict[type, Dict[str, int]] = {
-    Arc: {"entity": 0, "center": 1, "start": 3, "end": 5},
-    Circle: {"entity": 0, "center": 1},
-    Line: {"entity": 0, "start": 1, "end": 3},
-    Point: {"entity": 0},
-}
 
 
 @dataclass
