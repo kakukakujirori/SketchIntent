@@ -1,9 +1,6 @@
 """Main pytorch-lightning models for training constraint problem.
 """
-from werkzeug.exceptions import NotImplemented
-
 import dataclasses
-from typing import Optional
 
 import numpy as np
 import lightning as L
@@ -11,11 +8,14 @@ import torch
 import torch.nn.functional as F
 import torchmetrics
 
-from img2cad_diffusion import constraint_data, primitive_data
+from img2cad_diffusion import primitive_data
 from sketchgraphs_models.nn.summary import CohenKappa
 from . import dit
+from .constraint_data import ConstraintDataConfig, ConstraintTokenInput
+from .detokenization import reconstruct_constraints
 from .prob_path import MaskProbPath
 from .tokens import PrimitiveToken, PrimitiveParamToken, ConstraintToken, ConstraintParamToken
+
 
 # Function overload to not need 'modules'
 def generate_square_subsequent_mask(source: torch.Tensor) -> torch.Tensor:
@@ -46,13 +46,13 @@ class ConstraintModelConfig:
 @dataclasses.dataclass
 class OptimConfig:
     learning_rate: float = 1e-4
-    gradient_clip_norm: Optional[float] = 1.0
+    gradient_clip_norm: float | None = 1.0
 
 
 @dataclasses.dataclass
 class ConstraintModelTrainingConfig:
     """Training configuration for constraint models."""
-    data: constraint_data.ConstraintDataConfig = dataclasses.field(default_factory=constraint_data.ConstraintDataConfig)
+    data: ConstraintDataConfig = dataclasses.field(default_factory=ConstraintDataConfig)
     model: ConstraintModelConfig = dataclasses.field(default_factory=ConstraintModelConfig)
     optim: OptimConfig = dataclasses.field(default_factory=OptimConfig)
     batch_size: int = 256
@@ -92,7 +92,7 @@ class PrimitiveBlock(torch.nn.Module):
         qkv = self.attn_qkv(x)
         qkv = dit.rearrange(qkv, 'b s (three h d) -> b s three h d', three=3, h=self.n_heads)
 
-        with torch.cuda.amp.autocast(enabled=False):
+        with torch.amp.autocast('cuda', enabled=False):
             cos, sin = rotary_cos_sin
             qkv = dit.apply_rotary_pos_emb(qkv, cos.to(qkv.dtype), sin.to(qkv.dtype))
 
@@ -164,7 +164,7 @@ class PrimitiveModel(torch.nn.Module):
         # Final Norm
         self.norm = dit.LayerNorm(embed_dim)
 
-    def forward(self, src: constraint_data.TokenInput) -> torch.Tensor:
+    def forward(self, src: ConstraintTokenInput) -> torch.Tensor:
         # Embed
         val_embeddings = self.val_embed(src['val'])
         coord_embeddings = self.coord_embed(src['coord'])
@@ -176,7 +176,7 @@ class PrimitiveModel(torch.nn.Module):
 
         # Blocks
         # Using bfloat16 for blocks as per DiT design
-        with torch.cuda.amp.autocast(dtype=torch.bfloat16):
+        with torch.amp.autocast('cuda', dtype=torch.bfloat16):
             for block in self.blocks:
                 x = block(x, rotary_cos_sin)
             x = self.norm(x)
@@ -207,16 +207,6 @@ class ConstraintMDDModel(torch.nn.Module):
         # Reference tokens are: len(ConstraintToken) + prim_token_position
         num_val_embeddings = len(ConstraintToken)
         self.val_embed = torch.nn.Embedding(num_val_embeddings, embed_dim,
-            padding_idx=ConstraintToken.Pad)
-        # Coordinate embeddings for constraint param types (Type, Position)
-        num_coord_embeddings = len(ConstraintParamToken)
-        self.coord_embed = torch.nn.Embedding(num_coord_embeddings, embed_dim,
-            padding_idx=ConstraintParamToken.Pad)
-        # Position embeddings
-        # max(c_pos) = number_of_constraints + 4 (Pad=0, Mask=1, Start=2, Stop)
-        # Observed max: 48 with max_token_length=130, so avg ~2.5 tokens per constraint
-        num_pos_embeddings = max_token_length // 2 + 4
-        self.pos_embed = torch.nn.Embedding(num_pos_embeddings, embed_dim,
             padding_idx=ConstraintToken.Pad)
 
         # DiT Backbone with Cross-Attention
@@ -269,11 +259,7 @@ class ConstraintMDDModel(torch.nn.Module):
 
         # Gather embeddings from p_embeddings using c_val as indices
         # NOTE: The most crucial part - this implements the pointer mechanism
-        val_embeddings = torch.gather(p_embeddings, 1, c_val_indices.unsqueeze(-1).expand(-1, -1, self.embed_dim))
-
-        coord_embeddings = self.coord_embed(src['c_coord'])
-        pos_embeddings = self.pos_embed(src['c_pos'])
-        c_embeddings = val_embeddings + coord_embeddings + pos_embeddings
+        c_embeddings = torch.gather(p_embeddings, 1, c_val_indices.unsqueeze(-1).expand(-1, -1, self.embed_dim))
 
         return c_embeddings, p_embeddings
 
@@ -366,14 +352,13 @@ class ConstraintMDDModule(L.LightningModule):
         self._accuracy_metric_total = torchmetrics.Accuracy(task='multiclass', num_classes=num_pointer_targets)
 
         # >>> PRISM >>>
-        self.mask_index = ConstraintToken.Mask  # Mask token index for diffusion
         self.noise = LogLinearNoise()
         self.antithetic_sampling = True
         self.importance_sampling = False
         self.sampling_eps = 0.001
         self.inference_sampling_steps = 50
 
-        self.ProbPath = MaskProbPath(self, config, self.mask_index, self.noise)
+        self.ProbPath = MaskProbPath(self, config, self.noise)
         # <<< PRISM <<<
 
     def configure_optimizers(self):
@@ -400,7 +385,7 @@ class ConstraintMDDModule(L.LightningModule):
 
         return [optim], [scheduler_config]
 
-    def forward(self, batch: constraint_data.TokenInput, sigma: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def forward(self, batch: ConstraintTokenInput, sigma: torch.Tensor | None = None) -> torch.Tensor:
         return self.model(batch, sigma)
 
     def _sample_t(self, b: int, device: torch.device, _eps_0: float = 0.001):
@@ -413,20 +398,7 @@ class ConstraintMDDModule(L.LightningModule):
             return self.noise.importance_sampling_transformation(t)
         return t
 
-    def _sample_xt_x0(self, x: torch.Tensor, move_chance: float | torch.Tensor):
-        """Computes the noisy sample xt.
-
-        Args:
-        x: int torch.Tensor with shape (batch_size, diffusion_model_input_length), input.
-        move_chance: float torch.Tensor with shape (batch_size, 1).
-        """
-        move_indices = torch.rand(*x.shape, device=x.device) < move_chance
-        xt = torch.where(move_indices, self.mask_index, x)
-        mask_indices = (xt == self.mask_index)
-
-        return xt, mask_indices
-
-    def _compute_loss(self, batch: constraint_data.TokenInput) -> torch.Tensor:
+    def _compute_loss(self, batch: ConstraintTokenInput):
 
         t = self._sample_t(batch["c_val"].shape[0], batch["c_val"].device, _eps_0=self.sampling_eps)
         sigma, dsigma = self.noise(t)
@@ -435,14 +407,21 @@ class ConstraintMDDModule(L.LightningModule):
         # Prepare input for model
         target = batch["c_val"]
 
-        # Apply noise (masking)
-        xt, mask_indices = self._sample_xt_x0(target, move_chance)
+        # Apply noise (masking) to constraint tokens only
+        # Generate mask indices once and apply to all constraint tensors
+        mask_indices = torch.rand_like(batch["c_val"], dtype=torch.float32) < move_chance
+        c_val_masked = torch.where(mask_indices, ConstraintToken.Mask, batch["c_val"])
 
-        src_noisy = batch.copy()
-        src_noisy['c_val'] = xt
+        # Create masked batch (primitives unchanged, constraints masked)
+        masked_batch = ConstraintTokenInput(
+            val = batch['val'],
+            coord = batch['coord'],
+            pos = batch['pos'],
+            c_val = c_val_masked,
+        )
 
         # model forward pass
-        output = self.model.forward(src_noisy, sigma)  # [B, L, C] -> logits
+        output = self.model.forward(masked_batch, sigma)  # [B, L, C] -> logits
 
         # compute the loss--the reweighting term = 1/t for LogLinearNoise
         reweighting = 1 / t.unsqueeze(-1).expand(-1, target.size(1))
@@ -456,21 +435,32 @@ class ConstraintMDDModule(L.LightningModule):
             self._kappa_metric(preds[relevant_idxs], target[relevant_idxs])
             self._accuracy_metric(preds[relevant_idxs], target[relevant_idxs])
 
-        return loss
+            # Debug: separate accuracy for masked vs unmasked positions
+            masked_relevant = mask_indices & relevant_idxs
+            unmasked_relevant = (~mask_indices) & relevant_idxs
 
-    def training_step(self, batch: constraint_data.TokenInput, batch_idx: int):
-        loss = self._compute_loss(batch)
+            masked_acc = (preds[masked_relevant] == target[masked_relevant]).float().mean()
+            unmasked_acc = (preds[unmasked_relevant] == target[unmasked_relevant]).float().mean()
+
+        return loss, masked_acc, unmasked_acc
+
+    def training_step(self, batch: ConstraintTokenInput, batch_idx: int):
+        loss, masked_acc, unmasked_acc = self._compute_loss(batch)
 
         self.log('loss', loss)
         self.log('kappa', self._kappa_metric, prog_bar=True)
+        self.log('acc_masked', masked_acc, prog_bar=True)
+        self.log('acc_unmasked', unmasked_acc, prog_bar=True)
 
         return loss
 
-    def validation_step(self, batch: constraint_data.TokenInput, batch_idx: int):
-        loss = self._compute_loss(batch)
+    def validation_step(self, batch: ConstraintTokenInput, batch_idx: int):
+        loss, masked_acc, unmasked_acc = self._compute_loss(batch)
 
         self.log('validation/loss', loss)
         self.log('validation/kappa', self._kappa_metric)
+        self.log('validation/acc_masked', masked_acc)
+        self.log('validation/acc_unmasked', unmasked_acc)
 
     def on_validation_epoch_end(self):
         """
@@ -481,7 +471,7 @@ class ConstraintMDDModule(L.LightningModule):
         """
         val_loader = self.trainer.val_dataloaders
         if val_loader is None:
-             return
+            return
 
         # Handle list of dataloaders or single dataloader
         if isinstance(val_loader, list):
@@ -489,11 +479,12 @@ class ConstraintMDDModule(L.LightningModule):
 
         val_iter = next(iter(val_loader))
         # Move batch to device
-        batch: constraint_data.TokenInput = {k: v.to(self.device) for k, v in val_iter.items()} # type: ignore
+        batch = {k: v.to(self.device) for k, v in val_iter.items()}
 
         # Generate samples
         # generate_sample takes the batch (which contains primitives) and masks c_val internally
-        samples, _ = self.ProbPath.generate_sample(batch=batch, num_steps=self.inference_sampling_steps, device=self.device)
+        start_tokens = [ConstraintToken.Start]
+        samples, intermediates = self.ProbPath.generate_sample(batch=batch, num_steps=self.inference_sampling_steps, start_tokens=start_tokens)
 
         # Evaluate
         target = batch['c_val']
@@ -511,7 +502,63 @@ class ConstraintMDDModule(L.LightningModule):
         self.log('validation/kappa_gen', self._kappa_metric_total)
         self.log('validation/accuracy_gen', self._accuracy_metric_total)
 
-    def test_step(self, batch: constraint_data.TokenInput, batch_idx: int):
+        # Print detokenized samples on rank 0 only to avoid interleaved output
+        if self.global_rank == 0:
+
+            def format_constraint_sequence(tokens, max_show=None):
+                """Format constraint tokens for display, showing MASK tokens explicitly."""
+                result = []
+                for tok in tokens:
+                    tok_val = int(tok)
+                    if tok_val == ConstraintToken.Mask:
+                        result.append("[MASK]")
+                    elif tok_val == ConstraintToken.Pad:
+                        break  # Stop at padding
+                    elif tok_val == ConstraintToken.Start:
+                        result.append("[START]")
+                    elif tok_val == ConstraintToken.Stop:
+                        result.append("[STOP]")
+                        break
+                    elif ConstraintToken.Coincident <= tok_val <= ConstraintToken.Vertical:
+                        result.append(ConstraintToken(tok_val).name)
+                    else:
+                        result.append(f"R{tok_val - len(ConstraintToken)}")  # Reference
+                if max_show and len(result) > max_show:
+                    return result[:max_show] + [f"... (+{len(result) - max_show} more)"]
+                return result
+
+            print("\n" + "="*80)
+            print("VALIDATION SAMPLE COMPARISON (rank 0)")
+            print("="*80)
+
+            # Show 1 sample with full detail
+            i = 0
+            print(f"\n[Sample {i}] Full constraint sequence:")
+            print(f"  GT  : {format_constraint_sequence(target[i].cpu().numpy())}")
+            print(f"  Gen : {format_constraint_sequence(samples[i].cpu().numpy())}")
+
+            # Show parsed constraints
+            gen_constraints = reconstruct_constraints(samples[i].cpu().numpy())
+            gt_constraints = reconstruct_constraints(target[i].cpu().numpy())
+            print(f"\n  Parsed GT  ({len(gt_constraints)} constraints):")
+            for c_type, refs in gt_constraints:
+                print(f"    {c_type.name}({refs})")
+            print(f"\n  Parsed Gen ({len(gen_constraints)} constraints):")
+            for c_type, refs in gen_constraints:
+                print(f"    {c_type.name}({refs})")
+
+            # Show intermediate denoising steps (first sample)
+            if intermediates:
+                print(f"\n  Denoising progression ({len(intermediates)} steps, showing every 10th):")
+                steps_to_show = list(range(0, len(intermediates), max(1, len(intermediates) // 5)))
+                for step_idx in steps_to_show:
+                    step_tokens = intermediates[step_idx][i].cpu().numpy()
+                    formatted = format_constraint_sequence(step_tokens, max_show=20)
+                    print(f"    Step {step_idx:3d}: {formatted}")
+
+            print("="*80 + "\n")
+
+    def test_step(self, batch: ConstraintTokenInput, batch_idx: int):
         raise NotImplementedError
         # loss = self._compute_loss(batch)
 

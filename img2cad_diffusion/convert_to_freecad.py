@@ -32,7 +32,38 @@ except ImportError as e:
 import sketchgraphs.data as datalib
 from sketchgraphs.data import flat_array, NodeOp, EdgeOp, EntityType, ConstraintType
 
-from img2cad_diffusion.constraint_data import deduplicate_refs
+
+def deduplicate_refs(op: datalib.EdgeOp) -> datalib.EdgeOp:
+    """Remove duplicate references from EdgeOp.
+
+    Some Coincident EdgeOps in SketchGraphs data have duplicate references like (5, 5, 3, 3).
+    This function deduplicates them. Only applies to 4+ refs cases.
+
+    For refs with <= 3 elements (normal constraints including Midpoint),
+    the original EdgeOp is returned unchanged to preserve ordering.
+
+    Note: Sorting is NOT performed here - that responsibility belongs to the caller
+    (e.g., tokenize_constraints sorts refs based on gather_idxs).
+
+    Parameters
+    ----------
+    op : EdgeOp
+        The EdgeOp to process.
+
+    Returns
+    -------
+    EdgeOp
+        EdgeOp with deduplicated references for 4+ refs cases, original otherwise.
+    """
+    refs = op.references
+    if len(refs) >= 4:
+        # This should only happen for duplicated Coincident constraints
+        assert op.label == datalib.ConstraintType.Coincident, \
+            f"4+ refs bug should only occur for Coincident, got {op.label}"
+        deduped = tuple(set(refs))
+        assert len(deduped) == 2, f"Expected 2 unique refs after dedup, got {deduped}"
+        return datalib.EdgeOp(op.label, deduped, op.parameters)
+    return op
 
 
 def meter_to_millimeter(op: NodeOp | EdgeOp, debug: bool = False) -> NodeOp | EdgeOp:

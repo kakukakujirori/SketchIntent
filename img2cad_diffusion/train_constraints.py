@@ -47,7 +47,7 @@ def make_trainer(config: constraint_models.ConstraintModelTrainingConfig) -> pl.
     if config.num_gpus > 0:
         trainer_kwargs['accelerator'] = 'gpu'
         trainer_kwargs['devices'] = config.num_gpus
-        callbacks.append(pl.callbacks.DeviceStatsMonitor())
+        # callbacks.append(pl.callbacks.DeviceStatsMonitor())
     else:
         trainer_kwargs['accelerator'] = 'cpu'
 
@@ -75,8 +75,6 @@ def main(config: constraint_models.ConstraintModelTrainingConfig):
         config.batch_size // config.num_gpus,
         config.num_data_workers // config.num_gpus
     )
-
-    data.prepare_data()
     data.setup()
 
     config.data.dataset_size = data.train_dataset_size

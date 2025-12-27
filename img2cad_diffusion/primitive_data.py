@@ -1,7 +1,6 @@
 """This module handles primitive dataset functionality including tokenization.
 
 This module contains:
-- Tokenization functions for sketches (tokenize_sketch, sketch_from_tokens)
 - Dataset classes (PrimitiveDataset, CachedPrimitiveDataset)
 - DataModule for Lightning (PrimitiveDataModule)
 - Configuration dataclasses (PrimitiveDataConfig)
@@ -14,7 +13,7 @@ import math
 import os
 from collections import OrderedDict
 from random import shuffle
-from typing import Callable, Dict, List, Optional, Sequence, Tuple, TypedDict, Union
+from typing import Callable, Sequence, TypedDict
 
 import numpy as np
 import lightning as L
@@ -39,48 +38,11 @@ from .tokens import (
 # Type Definitions
 # =============================================================================
 
-class SketchTokenSet(TypedDict):
-    """Token set representing a sketch."""
-    val: np.ndarray
-    coord: np.ndarray
-    pos: np.ndarray
-
-
 class PrimitiveTokenInput(TypedDict):
     """Batch input type for primitive models."""
     val: torch.Tensor
     coord: torch.Tensor
     pos: torch.Tensor
-
-
-@dataclasses.dataclass
-class EntityTokenMapping:
-    """Mapping from an entity to its token positions in the primitive sequence.
-
-    This replaces the implicit gather_idxs list with an explicit structure.
-    External entities are not included in the mapping (they are identified
-    by their absence, not by assuming index 0).
-
-    Attributes
-    ----------
-    entity_idx : int
-        Node index in the SketchGraphs sequence (1-based for entities, 0 is External).
-    entity_type : type
-        The entity type (Arc, Circle, Line, Point).
-    entity_token_pos : int
-        Position of the entity type token in the val sequence.
-    subnode_positions : Dict[str, int]
-        Mapping from subnode name to token position.
-        e.g., {"entity": 5, "center": 6, "start": 8, "end": 10}
-    """
-    entity_idx: int
-    entity_type: type
-    entity_token_pos: int
-    subnode_positions: Dict[str, int]
-
-
-# Type alias for the gather mapping
-GatherMap = Dict[int, EntityTokenMapping]
 
 
 # =============================================================================
@@ -109,9 +71,9 @@ class PrimitiveDataConfig:
     num_position_bins: int = 64
     sequence_path: str = 'data_processed/sg_filtered_unique.npy'
     max_token_length: int = 130
-    dataset_size: Optional[int] = None
-    validation_fraction: Optional[float] = 0.025
-    test_fraction: Optional[float] = 0.05
+    dataset_size: int | None = None
+    validation_fraction: float | None = 0.025
+    test_fraction: float | None = 0.05
     permute_entities: bool = False
 
 
@@ -122,7 +84,7 @@ class PrimitiveDataConfig:
 INCLUDE_CONSTRUCTION = True
 INCLUDE_CLOCKWISE = True  # clockwise tokens for Arc entities
 
-def _pad_or_truncate_to_length(arr: np.ndarray, target_length: Optional[int] = None) -> np.ndarray:
+def _pad_or_truncate_to_length(arr: np.ndarray, target_length: int | None = None) -> np.ndarray:
     """Ensures that the array has the given length by truncating or padding.
 
     If `target_length` is `None`, returns `arr` unchanged.
@@ -141,102 +103,14 @@ def _pad_or_truncate_to_length(arr: np.ndarray, target_length: Optional[int] = N
         raise ValueError('arr must be either numpy array or torch Tensor')
 
 
-def param_seq_from_tokens(tokens, num_bins):
-    """Convert value tokens to sequence of quantized entity parameters.
-
-    Parameters
-    ----------
-    tokens : np.array
-        The sequence of value tokens
-    num_bins : int
-        The number of quantization bins
-
-    Returns
-    -------
-    all_params : list
-        A list of tuples (params, clockwise, isConstruction) where:
-        - params: quantized entity parameters
-        - clockwise: True/False for Arc, None for other entities
-        - isConstruction: True/False for all entities
-    """
-    reverse_construction_toks = {
-        len(PrimitiveToken) + num_bins: True,
-        len(PrimitiveToken) + num_bins + 1: False
-    }
-
-    reverse_clockwise_toks = {
-        len(PrimitiveToken) + num_bins + 2: True,
-        len(PrimitiveToken) + num_bins + 3: False
-    }
-
-    all_params = []
-    curr_params = []
-    clockwise = None  # Only set for Arc entities
-    isConstruction = False
-    for token in tokens:
-        if token == PrimitiveToken.Start:
-            continue
-        if token < len(PrimitiveToken):
-            if curr_params:
-                all_params.append((curr_params, clockwise, isConstruction))
-                curr_params = []
-                clockwise = None  # Reset for next entity
-                isConstruction = False
-        if token in [PrimitiveToken.Stop, PrimitiveToken.Pad]:
-            break
-        if token >= len(PrimitiveToken):
-            if token <= len(PrimitiveToken) + (num_bins - 1):
-                # Numerical coordinate
-                curr_params.append(token - len(PrimitiveToken))
-            elif token in reverse_clockwise_toks:
-                # clockwise attribute (Arc only)
-                clockwise = reverse_clockwise_toks[token]
-            elif token in reverse_construction_toks:
-                # isConstruction attribute
-                isConstruction = reverse_construction_toks[token]
-
-    if curr_params:
-        # Append possibly leftover entity parameters
-        all_params.append((curr_params, clockwise, isConstruction))
-    return all_params
-
-
-def sketch_from_tokens(tokens, num_bins):
-    """Convert value tokens to Sketch instance.
-
-    Parameters
-    ----------
-    tokens : np.array
-        The sequence of value tokens
-    num_bins : int
-        The number of quantization bins
-
-    Returns
-    -------
-    Sketch
-        A Sketch instance corresponding to the given value tokens
-    """
-    all_params = param_seq_from_tokens(tokens, num_bins)
-    sketch = datalib.Sketch()
-    for idx, (ent_params, clockwise, isConstruction) in enumerate(all_params):
-        ent_params = sketch_utils.dequantize_params(ent_params, num_bins)
-        ent_params = ent_params.tolist()
-        ent = sketch_utils.entity_from_params(ent_params, clockwise=clockwise)
-        if ent is not None:
-            ent.entityId = str(idx + 1)
-            ent.isConstruction = isConstruction
-        sketch.entities[str(idx)] = ent
-    return sketch
-
-
 # =============================================================================
 # Dataset Classes
 # =============================================================================
 
-class PrimitiveDataset(torch.utils.data.Dataset[SketchTokenSet]):
+class PrimitiveDataset(torch.utils.data.Dataset[PrimitiveTokenInput]):
     """This dataset encapsulates a sequence of sketch as a dataset of tokenized primitives."""
 
-    def __init__(self, sequence_file: str, num_bins: int, max_length: Optional[int] = None, permute: bool = False):
+    def __init__(self, sequence_file: str, num_bins: int, max_length: int | None = None, permute: bool = False):
         """Create a new primitive dataset from the given sequence.
 
         Parameters
@@ -271,7 +145,7 @@ class PrimitiveDataset(torch.utils.data.Dataset[SketchTokenSet]):
         return len(self.sequences)
 
 
-class CachedPrimitiveDataset(torch.utils.data.Dataset[SketchTokenSet]):
+class CachedPrimitiveDataset(torch.utils.data.Dataset[PrimitiveTokenInput]):
     """This dataset encapsulates a set of pre-tokenized sequences.
 
     This dataset presents functionality similar to `PrimitiveDataset`, but instead
@@ -282,7 +156,7 @@ class CachedPrimitiveDataset(torch.utils.data.Dataset[SketchTokenSet]):
     _pos_tokens: torch.Tensor
     _coord_tokens: torch.Tensor
 
-    def __init__(self, cached_sequence_file: str, num_bins: int, max_length: Optional[int] = None):
+    def __init__(self, cached_sequence_file: str, num_bins: int, max_length: int | None = None):
         super().__init__()
 
         data = np.load(cached_sequence_file)
@@ -298,22 +172,16 @@ class CachedPrimitiveDataset(torch.utils.data.Dataset[SketchTokenSet]):
         self.num_bins = num_bins
         self.max_length = max_length
 
-    def __getitem__(self, idx: int) -> SketchTokenSet:
-        idx_start = self._offsets[idx]
-        idx_stop = self._offsets[idx + 1]
+    def __getitem__(self, index: int) -> PrimitiveTokenInput:
+        idx_start = self._offsets[index]
+        idx_stop = self._offsets[index + 1]
         segment = slice(idx_start, idx_stop)
 
-        result = {
-            'val': self._val_tokens[segment],
-            'pos': self._pos_tokens[segment],
-            'coord': self._coord_tokens[segment]
-        }
-
-        # Pytorch much prefers 64-bit integer indexing for Embeddings.
-        return {
-            k: _pad_or_truncate_to_length(v.to(dtype=torch.int64), self.max_length)
-            for k, v in result.items()
-        }
+        return PrimitiveTokenInput(
+            val = _pad_or_truncate_to_length(self._val_tokens[segment].to(dtype=torch.int64), self.max_length),
+            coord = _pad_or_truncate_to_length(self._coord_tokens[segment].to(dtype=torch.int64), self.max_length),
+            pos = _pad_or_truncate_to_length(self._pos_tokens[segment].to(dtype=torch.int64), self.max_length),
+        )
 
     def __len__(self) -> int:
         return len(self._offsets) - 1
@@ -330,12 +198,12 @@ def _counts_to_offset(x):
     return offsets
 
 
-def concatenate_tokens(tokens: Sequence[SketchTokenSet]) -> Dict[str, torch.Tensor]:
+def concatenate_tokens(tokens: Sequence[PrimitiveTokenInput]) -> dict[str, torch.Tensor]:
     """Concatenates a sequence of token sequences.
 
     Parameters
     ----------
-    tokens : Sequence[SketchTokenSet]
+    tokens : Sequence[PrimitiveTokenInput]
         A sequence of tokens to concatenate.
     """
     counts = np.concatenate([
@@ -356,7 +224,7 @@ def concatenate_tokens(tokens: Sequence[SketchTokenSet]) -> Dict[str, torch.Tens
     }
 
 
-def process_sequence_data(dataset: PrimitiveDataset, num_workers: Optional[int] = None) -> Dict[str, torch.Tensor]:
+def process_sequence_data(dataset: PrimitiveDataset, num_workers: int | None = None) -> dict[str, torch.Tensor]:
     """Tokenizes all the data from the given `PrimitiveDataset`.
 
     Parameters
@@ -392,9 +260,9 @@ def process_sequence_data(dataset: PrimitiveDataset, num_workers: Optional[int] 
 
 def split_dataset(
     dataset: torch.utils.data.Dataset,
-    validation_fraction: Optional[float] = None,
-    test_fraction: Optional[float] = None
-) -> Tuple[torch.utils.data.Subset, torch.utils.data.Subset, torch.utils.data.Subset]:
+    validation_fraction: float | None = None,
+    test_fraction: float | None = None
+) -> tuple[torch.utils.data.Subset, torch.utils.data.Subset, torch.utils.data.Subset]:
     """Splits the given dataset into training, validation, and test datasets.
 
     The split is performed randomly (but the same every time).
@@ -501,7 +369,7 @@ class PrimitiveDataModule(L.LightningDataModule):
     def prepare_data(self) -> None:
         cache_data_if_needed(self.config.sequence_path, self.config.num_position_bins)
 
-    def setup(self, stage: Optional[str] = None):
+    def setup(self, stage: str | None = None):
         dataset_args = {
             'sequence_file': self.config.sequence_path,
             'num_bins': self.config.num_position_bins,

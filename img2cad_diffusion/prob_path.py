@@ -1,12 +1,14 @@
+import copy
 import torch
 import math
 import torch.nn.functional as F
+from einops import rearrange
 from tqdm import tqdm
-from torch import Tensor
-from typing import Optional, Tuple, List, Dict
-from img2cad_diffusion import constraint_data
+from img2cad_diffusion.constraint_data import ConstraintTokenInput
+from img2cad_diffusion.tokens import ConstraintToken, PrimitiveToken
 
-def _sample_categorical(categorical_probs: Tensor) -> Tensor:
+
+def _sample_categorical(categorical_probs: torch.Tensor) -> torch.Tensor:
     r"""Sample from a categorical distribution using the Gumbel-max trick.
     Args:
         categorical_probs: A tensor of shape `(..., num_classes)` representing
@@ -23,7 +25,7 @@ def _sample_categorical(categorical_probs: Tensor) -> Tensor:
 
 class MaskProbPath:
     """Sampler for Masked Discrete Diffusion."""
-    def __init__(self, model, config, mask_index: int, noise_scheduler):
+    def __init__(self, model: torch.nn.Module, config: dict, noise_scheduler):
         """
         Args:
             model: The ConstraintMDDModel.
@@ -60,72 +62,63 @@ class MaskProbPath:
             self.nucleus_p = 1.0
             self.dfm = False
 
-        self.mask_index = mask_index
+        self.pad_index = ConstraintToken.Pad
+        self.mask_index = ConstraintToken.Mask
         self.noise = noise_scheduler
         self.neg_infinity = -1e6
 
-    def _p_x0_xt(self, logits: Tensor, x: Tensor) -> Tensor:
-        # logits: [B, L, V]
-        # x: [B, L]
-        # Mask out likelihood of predicting Mask token itself
-        logits = logits.clone()
-        logits[:, :, self.mask_index] += self.neg_infinity
+    def _p_x0_xt(self, logits: torch.Tensor, batch_t: ConstraintTokenInput) -> torch.Tensor:
+        logits = logits.clone()  # [B, L, V]
+
+        # Mask out likelihood of predicting Pad & Mask tokens
+        logits[:, :, self.pad_index] = self.neg_infinity
+        logits[:, :, self.mask_index] = self.neg_infinity
+
+        # Mask out likelihood of predicting indices pointing to PrimitiveToken.Pad
+        prim_is_pad = rearrange(batch_t['val'] == PrimitiveToken.Pad, "b prim_token_len -> b () prim_token_len")
+        num_constraint_tokens = len(ConstraintToken)
+        logits[:, :, num_constraint_tokens:][prim_is_pad.expand(-1, logits.size(1), -1)] = self.neg_infinity
+
+        # Convert to probabilities p(x0|xt)
         probs = F.softmax(logits, dim=-1) # [B, L, V]
 
         # For unmasked tokens in x, the probability is 1.0 for their current value
         # This preserves "clamped" or "observed" values.
         # x != mask_index
-        unmasked_indices = (x != self.mask_index)
+        xt = batch_t['c_val']  # [B, L]
+        unmasked_indices = (xt != self.mask_index)
         probs[unmasked_indices] = 0
-        probs[unmasked_indices, x[unmasked_indices]] = 1.0
+        probs[unmasked_indices, xt[unmasked_indices]] = 1.0
         return probs
 
-    def _schedule_k(self, total_mask_tokens, total_steps, remasking_s_on, remasking_steps, current_step):
-        # Linearly decrease the number of masks (or increase number of clean tokens)
-        # We want k (clean tokens) to go from 0 to L
-        # Or masked tokens to go from L to 0
-        # This implementation seems to calculate "number of clean tokens"
-        # Adjusted for this specific task where we start fully masked usually.
-
-        # Simple linear schedule for standard topk:
-        # k = ceil(L * (t+1)/T)
-
-        model_length = total_mask_tokens # assuming full mask start
-
-        if current_step < remasking_s_on:
-             k = math.ceil((model_length / total_steps) * (current_step + 1))
-        elif current_step >= remasking_s_on and current_step < (remasking_s_on + remasking_steps):
-             k = math.ceil((model_length / total_steps) * remasking_s_on)
-        else:
-             k = math.ceil((model_length / total_steps) * (current_step + 1 - remasking_steps))
-
-        return min(k, model_length)
-
-    def _compute_model_outputs(self, x: Tensor, sigma: Tensor, batch_context: constraint_data.TokenInput) -> Tuple[Tensor, Optional[Tensor], Tensor]:
+    def _compute_model_outputs(
+        self,
+        batch: ConstraintTokenInput,
+        sigma: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Args:
-            x: Current hypothesis for constraint tokens [B, L]
+            batch: The dictionary of original primitives and current masked constraint tokens [B, L]
             sigma: Noise level [B, 1]
-            batch_context: The original batch input containing primitives etc.
         """
-        # Construct the input for the model
-        src = batch_context.copy()
-        src['c_val'] = x # Update with current hypothesis
-
-        # Model forward
         # logits: [B, L, V]
-        logits = self.model.forward(src, sigma)
+        logits = self.model.forward(batch, sigma)
 
         # Convert to probabilities p(x0|xt)
-        probs = self._p_x0_xt(logits, x)
+        probs = self._p_x0_xt(logits, batch)
 
-        # Confidence - simple random for now as we don't have a separate adapter/critic
-        conf = torch.rand(logits.shape[:-1], device=logits.device)
+        return probs, logits
 
-        return probs, conf, logits
-
-    def _score_tokens(self, p_x0, masks, conf=None, step=None, x0=None, fixed_tokens=None):
-        # Simple random scoring for now (PRISM default/baseline)
+    def _score_tokens(
+        self,
+        p_x0: torch.Tensor,
+        masks: torch.Tensor,
+        conf: torch.Tensor | None,
+        step: int,
+        x0: torch.Tensor,
+        fixed_tokens: torch.Tensor | None,
+    ):
+        # TODO: Simple random scoring for now
         # scores: [B, L]
         # masked tokens get random score [0, 1]
         # unmasked/fixed tokens get inf
@@ -138,10 +131,19 @@ class MaskProbPath:
 
         return token_score
 
-    def _select_k_tokens(self, p_x0, masks, conf, k, step, x0, fixed_tokens):
+    def _select_k_tokens(
+        self,
+        p_x0: torch.Tensor,
+        masks: torch.Tensor,
+        conf: torch.Tensor | None,
+        k: int,
+        step: int,
+        x0: torch.Tensor,
+        fixed_tokens: torch.Tensor | None,
+    ) -> torch.Tensor:
         # Select k tokens to keep (or rather, select tokens such that we have k clean ones)
-        # If we have N fixed/clean tokens already, and we want K total clean tokens.
-        # logic: calculate scores for all masked tokens. Select top (K - N_current_clean) to unmask.
+        # If we have N fixed/clean tokens already, and we want K total clean tokens,
+        # we calculate scores for all masked tokens. Select top (K - N_current_clean) to unmask.
 
         # p_x0: [B, L, V]
         # masks: [B, L] (True if masked)
@@ -164,12 +166,20 @@ class MaskProbPath:
 
         return selected_tokens
 
-
-    def _topk_static_update(self, x, t, k, step, fixed_tokens, batch_context):
+    def _topk_static_update(
+        self,
+        batch: ConstraintTokenInput,
+        t: float | torch.Tensor,
+        k: int,
+        step: int,
+        fixed_tokens: torch.Tensor | None,
+    ) -> ConstraintTokenInput:
+        x = batch['c_val']
         sigma_t, _ = self.noise(t)
         masks = (x == self.mask_index)
 
-        p_x0, conf, logits = self._compute_model_outputs(x, sigma_t, batch_context)
+        p_x0, logits = self._compute_model_outputs(batch, sigma_t)
+        conf = None
 
         # Nucleus sampling for x0 prediction
         if self.nucleus_p < 1.0:
@@ -192,68 +202,95 @@ class MaskProbPath:
 
         # Ensure fixed tokens remain fixed (though logic above should handle it via inf scores)
         if fixed_tokens is not None:
-             x_next = torch.where(fixed_tokens, x, x_next)
+            x_next = torch.where(fixed_tokens, x, x_next)
 
-        return x_next
+        # NOTE: In-palace change
+        batch['c_val'] = x_next
+
+        return batch
+
+    @staticmethod
+    def _schedule_k(
+        total_mask_tokens: int,
+        total_steps: int,
+        remasking_s_on: int,
+        remasking_steps: int,
+        current_step: int,
+    ) -> int:
+        # Linearly decrease the number of masks (or increase number of clean tokens)
+        # We want k (clean tokens) to go from 0 to L
+        # Or masked tokens to go from L to 0
+        # This implementation seems to calculate "number of clean tokens"
+        # Adjusted for this specific task where we start fully masked usually.
+
+        # Simple linear schedule for standard topk:
+        # k = ceil(L * (t+1)/T)
+
+        model_length = total_mask_tokens # assuming full mask start
+
+        if current_step < remasking_s_on:
+            k = math.ceil((model_length / total_steps) * (current_step + 1))
+        elif current_step >= remasking_s_on and current_step < (remasking_s_on + remasking_steps):
+            k = math.ceil((model_length / total_steps) * remasking_s_on)
+        else:
+            k = math.ceil((model_length / total_steps) * (current_step + 1 - remasking_steps))
+
+        return min(k, model_length)
 
     @torch.inference_mode()
-    def generate_sample(self, batch: constraint_data.TokenInput, num_steps: int = 64, device='cuda') -> Tuple[Tensor, List[Tensor]]:
+    def generate_sample(self, batch: ConstraintTokenInput, num_steps: int = 64, start_tokens: list[int] | None = None) -> tuple[torch.Tensor, list[torch.Tensor]]:
         """
         Generate samples using the Discrete Diffusion process.
         Args:
             batch: Initial batch containing primitives and 'c_val' (which serves as ground truth target usually, but here we mask it).
             num_steps: Number of diffusion steps.
+            start_tokens: List of tokens to fix at the beginning of the sequence.
         """
-        # Initialize x with all masks (except maybe padding?)
-        # batch['c_val'] has shape [B, L]
-        # We should respect padding in c_val if possible, but simplest is to mask everything first.
-        # Actually, if we mask padding, the model should ideally learn to predict Pad token for those positions
-        # or we handled padding separately?
-        # For validation, let's assume valid lengths are handled by the model or we mask everything up to max_len.
+        batch = copy.deepcopy(batch)
 
-        b, l = batch['c_val'].shape
-        x = torch.full((b, l), self.mask_index, device=device, dtype=torch.long)
-
-        # Identify fixed tokens (e.g. Pad) if we wanted to keep them.
-        # For now, let's assume we want to generate EVERYTHING.
-        # If there are constraints we want to condition on (inpainting), we would set them here.
+        # Initialize x with all masks
+        device = batch['c_val'].device
+        b, total_tokens = batch['c_val'].shape
+        x = torch.full((b, total_tokens), self.mask_index, device=device, dtype=torch.long)
         fixed_tokens = torch.zeros_like(x, dtype=torch.bool)
 
-        # If we strictly want to ignore padding during generation, we could pre-fill pads from batch['c_val']
-        # and mark them fixed.
-        # fixed_tokens = (batch['c_val'] == constraint_data.Token.Pad)
-        # x = torch.where(fixed_tokens, batch['c_val'], x)
+        # Initialize fixed_tokens
+        if start_tokens is not None:
+            n_start = len(start_tokens)
+            start_tensor = torch.tensor(start_tokens, device=device, dtype=x.dtype)
 
-        intermediates = [x.clone()]
+            if n_start > total_tokens:
+                raise ValueError(f"Length of start_tokens ({n_start}) exceeds sequence length ({total_tokens})")
+
+            if not torch.all(batch['c_val'][:, :n_start] == start_tensor):
+                 raise ValueError(f"`c_val` GT must start from `start_tokens`={start_tokens}")
+
+            x[:, :n_start] = start_tensor.reshape(1, n_start)
+            fixed_tokens[:, :n_start] = True
 
         timesteps = torch.linspace(1, 1e-5, num_steps + 1, device=device)
+        k_schedule = [self._schedule_k(total_tokens, num_steps, self.loop_step_on, self.loop_steps, i) for i in range(num_steps)]
 
-        # Schedule for k (number of clean tokens)
-        # We start with 0 clean tokens (all masked), end with L clean tokens.
-        # k_schedule[i] is how many clean tokens we want at step i.
-
-        total_tokens = l # or count of non-fixed tokens per batch item? vectorized schedule is harder.
-        # Let's use constant L for all batch items for simplicity.
-
-        k_schedule = [self._schedule_k(total_tokens, num_steps, self.loop_step_on, self.loop_steps, i)
-                      for i in range(num_steps)]
+        # NOTE: From now on we don't have access to the GT, only the predicted tokens
+        batch['c_val'] = x
+        intermediates = [batch['c_val'].clone()]
 
         for i in tqdm(range(num_steps), desc="Sampling"):
-            t = timesteps[i] * torch.ones(b, 1, device=device) # [B, 1]
+            t = timesteps[i] * torch.ones(b, 1, device=device)
             k = k_schedule[i]
-
-            x = self._topk_static_update(x, t, k, step=i, fixed_tokens=fixed_tokens, batch_context=batch)
-            intermediates.append(x.clone())
+            batch = self._topk_static_update(batch, t, k, step=i, fixed_tokens=fixed_tokens)
+            intermediates.append(batch['c_val'].clone())
 
         # Final cleanup / noise removal step if enabled
         if self.noise_removal:
-             # Predict one last time with t ~ 0
-             t = timesteps[-1] * torch.ones(b, 1, device=device)
-             sigma_t, _ = self.noise(t)
-             p_x0, _, _ = self._compute_model_outputs(x, sigma_t, batch)
-             x = p_x0.argmax(dim=-1)
-             if fixed_tokens is not None:
+            # Predict one last time with t ~ 0
+            t = timesteps[-1] * torch.ones(b, 1, device=device)
+            sigma_t, _ = self.noise(t)
+            p_x0, _ = self._compute_model_outputs(batch, sigma_t)
+            x = p_x0.argmax(dim=-1)
+            if fixed_tokens is not None:
                 x = torch.where(fixed_tokens, batch['c_val'], x) # Restore fixed tokens just in case
-             intermediates.append(x.clone())
+            batch['c_val'] = x
+            intermediates.append(batch['c_val'].clone())
 
-        return x, intermediates
+        return batch['c_val'], intermediates

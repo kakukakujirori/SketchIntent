@@ -7,7 +7,7 @@ model:
   embedding_dimension: 256
 
 optim:
-  learning_rate: 3e-5
+  learning_rate: 3e-4 #3e-5
 
 data:
   num_position_bins: 64

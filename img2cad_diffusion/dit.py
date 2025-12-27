@@ -129,7 +129,7 @@ class LayerNorm(nn.Module):
     self.weight = nn.Parameter(torch.ones([dim]))
     self.dim = dim
   def forward(self, x):
-    with torch.cuda.amp.autocast(enabled=False):
+    with torch.amp.autocast('cuda', enabled=False):
       x = F.layer_norm(x.float(), [self.dim])
     return x * self.weight[None,None,:]
 
@@ -260,7 +260,7 @@ class DDiTBlock(nn.Module):
                     'b s (three h d) -> b s three h d',
                     three=3,
                     h=self.n_heads)
-    with torch.cuda.amp.autocast(enabled=False):
+    with torch.amp.autocast('cuda', enabled=False):
       cos, sin = rotary_cos_sin
       qkv = apply_rotary_pos_emb(
         qkv, cos.to(qkv.dtype), sin.to(qkv.dtype))
@@ -360,7 +360,7 @@ class DDiTCrossBlock(nn.Module):
 
     qkv = self.self_attn_qkv(x_normed)
     qkv = rearrange(qkv, 'b s (three h d) -> b s three h d', three=3, h=self.n_heads)
-    with torch.cuda.amp.autocast(enabled=False):
+    with torch.amp.autocast('cuda', enabled=False):
       cos, sin = rotary_cos_sin
       qkv = apply_rotary_pos_emb(qkv, cos.to(qkv.dtype), sin.to(qkv.dtype))
     qkv = rearrange(qkv, 'b s ... -> (b s) ...')
@@ -479,7 +479,7 @@ class DIT(nn.Module, huggingface_hub.PyTorchModelHubMixin):
 
     rotary_cos_sin = self.rotary_emb(x)
 
-    with torch.cuda.amp.autocast(dtype=torch.bfloat16):
+    with torch.amp.autocast('cuda', dtype=torch.bfloat16):
       for i in range(len(self.blocks)):
         x = self.blocks[i](x, rotary_cos_sin, c, seqlens=None)
       # hidden_state = self.output_layer.norm_final(x)
@@ -493,7 +493,7 @@ class DIT(nn.Module, huggingface_hub.PyTorchModelHubMixin):
 
     rotary_cos_sin = self.rotary_emb(x)
 
-    with torch.cuda.amp.autocast(dtype=torch.bfloat16):
+    with torch.amp.autocast('cuda', dtype=torch.bfloat16):
       for i in range(len(self.blocks)):
         x = self.blocks[i](x, rotary_cos_sin, c, seqlens=None)
       x = self.output_layer(x, c)
@@ -536,7 +536,7 @@ class FeatureDIT(nn.Module, huggingface_hub.PyTorchModelHubMixin):
 
   def forward(self, x, c):
     rotary_cos_sin = self.rotary_emb(x)
-    with torch.cuda.amp.autocast(dtype=torch.bfloat16):
+    with torch.amp.autocast('cuda', dtype=torch.bfloat16):
       for i in range(len(self.blocks)):
         x = self.blocks[i](x, rotary_cos_sin, c, seqlens=None)
       x = self.output_layer(x, c)
@@ -587,7 +587,7 @@ class CrossAttentionFeatureDIT(nn.Module, huggingface_hub.PyTorchModelHubMixin):
       Output features [B, L_tgt, output_size]
     """
     rotary_cos_sin = self.rotary_emb(x)
-    with torch.cuda.amp.autocast(dtype=torch.bfloat16):
+    with torch.amp.autocast('cuda', dtype=torch.bfloat16):
       for block in self.blocks:
         x = block(x, memory, rotary_cos_sin, c, seqlens=None)
       x = self.output_layer(x, c)

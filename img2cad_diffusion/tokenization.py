@@ -71,7 +71,7 @@ class TokenizedSketch:
 from sketchgraphs.data import Arc, Circle, Line, Point
 
 
-def _pad_or_truncate(arr: np.ndarray, length: int | None = None, pad_value: int = 0) -> np.ndarray:
+def _pad_or_truncate(arr: np.ndarray, length: int | None = None, pad_value: int = SpecialToken.Pad) -> np.ndarray:
     """Pad or truncate array to fixed length."""
     if length is None:
         return arr
@@ -132,11 +132,21 @@ def tokenize_primitives(
 
         # Parameter tokens
         params, param_tokens = sketch_utils.parameterize_entity(ent)
-        try:
-            param_bins = sketch_utils.quantize_params(params, num_bins)
-        except:
-            params = np.clip(params, -0.5, 0.5)
-            param_bins = sketch_utils.quantize_params(params, num_bins)
+
+        # Clip parameters to valid range with warning if significantly outside
+        # Use small tolerance to avoid false positives from floating point precision
+        eps = 1e-6
+        if params.min() < -0.5 - eps or params.max() > 0.5 + eps:
+            import warnings
+            warnings.warn(
+                f"Entity {entity_id} has params outside [-0.5, 0.5]: "
+                f"[{params.min():.4f}, {params.max():.4f}]. Clipping.",
+                RuntimeWarning
+            )
+        # Always clip to ensure values are in valid range
+        params = np.clip(params, -0.5, 0.5)
+
+        param_bins = sketch_utils.quantize_params(params, num_bins)
 
         val_tokens.extend(parameter_offset + param_bins)
         coord_tokens.extend(param_tokens)
@@ -149,7 +159,8 @@ def tokenize_primitives(
             pos_tokens.append(pos_idx)
 
         # Construction attribute
-        val_tokens.append(attribute_offset + int(ent.isConstruction))
+        clockwise_offset = 2 if uniquify_val_tokens else 0
+        val_tokens.append(attribute_offset + clockwise_offset + int(ent.isConstruction))
         coord_tokens.append(PrimitiveParamToken.Construction)
         pos_tokens.append(pos_idx)
 
@@ -188,6 +199,7 @@ def tokenize_constraints(
     """Tokenize sketch constraints.
 
     Uses sketch.constraints (not sequence EdgeOps) for cleaner access.
+    Constraints are sorted by minimum reference token position for canonical ordering.
 
     Parameters
     ----------
@@ -203,12 +215,29 @@ def tokenize_constraints(
     tokens : SketchTokenSet
         Constraint token arrays (val, coord, pos).
     """
-    val_tokens = [ConstraintToken.Start]
-    coord_tokens = [ConstraintParamToken.Type]  # Start token
-    pos_idx = len(SpecialToken)
-    pos_tokens = [pos_idx]
-
     val_token_index_offset = len(ConstraintToken) if uniquify_val_tokens else 0
+
+    # Helper to compute token_pos for a reference (including subnode offset)
+    def get_token_pos(entity_idx: int, subnode_name: str | None) -> int:
+        mapping = gather_map[entity_idx]
+        if subnode_name is not None:
+            subnode_to_param = {
+                'start': PrimitiveParamToken.StartX,
+                'end': PrimitiveParamToken.EndX,
+                'center': PrimitiveParamToken.CenterX
+            }
+            target_param = subnode_to_param.get(subnode_name)
+            if target_param is None or target_param not in mapping.param_tokens:
+                return mapping.entity_token_pos  # Fallback
+            offset = list(mapping.param_tokens).index(target_param) + 1
+            return mapping.entity_token_pos + offset
+        return mapping.entity_token_pos
+
+    # ==========================================================================
+    # Phase 1: Collect all valid constraints with parsed refs
+    # ==========================================================================
+    # Each entry: (constraint_type: str, sorted_refs: list[tuple[int, str | None]], min_token_pos: int)
+    parsed_constraints: list[tuple[str, list[tuple[int, str | None]], int]] = []
 
     for constraint in sketch.constraints.values():
         # Get constraint type
@@ -248,34 +277,12 @@ def tokenize_constraints(
                     unique_refs.append(r)
             refs = unique_refs
 
-        # Helper to compute token_pos for a reference (including subnode offset)
-        def get_token_pos(entity_idx: int, subnode_name: str | None) -> int:
-            mapping = gather_map[entity_idx]
-            if subnode_name is not None:
-                subnode_to_param = {
-                    'start': PrimitiveParamToken.StartX,
-                    'end': PrimitiveParamToken.EndX,
-                    'center': PrimitiveParamToken.CenterX
-                }
-                target_param = subnode_to_param.get(subnode_name)
-                if target_param is None or target_param not in mapping.param_tokens:
-                    return mapping.entity_token_pos  # Fallback
-                offset = list(mapping.param_tokens).index(target_param) + 1
-                return mapping.entity_token_pos + offset
-            return mapping.entity_token_pos
-
         # Skip if any reference's token_pos (including subnode offset) exceeds max_length
         if max_length is not None:
             if any(get_token_pos(entity_idx, subnode) >= max_length for entity_idx, subnode in refs):
                 continue
 
-        # Constraint type token
-        val_tokens.append(ConstraintToken[constraint_type])
-        coord_tokens.append(ConstraintParamToken.Type)  # Constraint type
-        pos_idx += 1
-        pos_tokens.append(pos_idx)
-
-        # Sort refs by token position
+        # Sort refs within this constraint by token position
         # Midpoint: ensure midpoint (point/subnode) is always first for consistency
         if constraint_type == 'Midpoint':
             if len(refs) == 2:
@@ -283,7 +290,7 @@ def tokenize_constraints(
                 first_entity_idx, first_subnode = refs[0]
                 first_entity_str = str(first_entity_idx)
                 if not isinstance(sketch.entities.get(first_entity_str, None), Point):
-                    sorted_refs =list(reversed(refs))
+                    sorted_refs = list(reversed(refs))
                 else:
                     sorted_refs = refs
             else:
@@ -292,10 +299,31 @@ def tokenize_constraints(
         else:
             sorted_refs = sorted(refs, key=lambda r: get_token_pos(r[0], r[1]))
 
+        # Compute minimum token position for sorting constraints
+        min_token_pos = min(get_token_pos(entity_idx, subnode) for entity_idx, subnode in sorted_refs)
+
+        parsed_constraints.append((constraint_type, sorted_refs, min_token_pos))
+
+    # ==========================================================================
+    # Phase 2: Sort constraints by min_token_pos and emit tokens
+    # ==========================================================================
+    parsed_constraints.sort(key=lambda x: x[2])  # Sort by min_token_pos
+
+    val_tokens = [ConstraintToken.Start]
+    coord_tokens = [ConstraintParamToken.Type]  # Start token
+    pos_idx = len(SpecialToken)
+    pos_tokens = [pos_idx]
+
+    for constraint_type, sorted_refs, _ in parsed_constraints:
+        # Constraint type token
+        val_tokens.append(ConstraintToken[constraint_type])
+        coord_tokens.append(ConstraintParamToken.Type)
+        pos_idx += 1
+        pos_tokens.append(pos_idx)
+
         # Reference tokens
         for entity_idx, subnode_name in sorted_refs:
             token_pos = get_token_pos(entity_idx, subnode_name)
-
             val_tokens.append(token_pos + val_token_index_offset)
             coord_tokens.append(ConstraintParamToken.Position)
             pos_tokens.append(pos_idx)

@@ -116,6 +116,15 @@ def _get_entity_bbox(ent):
             x0 = min(x_start, x_end)
         if not has_ordered_quadrants(3, 4):
             y0 = min(y_start, y_end)
+
+        # Include center point in bbox for tokenization purposes
+        # (center point is used in parameterize_entity and must be normalized)
+        cx, cy = ent.center_point
+        x0 = min(x0, cx)
+        y0 = min(y0, cy)
+        x1 = max(x1, cx)
+        y1 = max(y1, cy)
+
         return np.array([[x0, y0], [x1, y1]])
 
     if isinstance(ent, Circle):
