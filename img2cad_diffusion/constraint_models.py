@@ -466,7 +466,10 @@ class ConstraintMDDModule(L.LightningModule):
                     elif tok_val == ConstraintToken.Stop:
                         result.append("[STOP]")
                         break
-                    elif ConstraintToken.Coincident <= tok_val <= ConstraintToken.Vertical:
+                    elif tok_val == ConstraintToken.InnerPad:
+                        result.append("[PAD]")
+                    elif tok_val < len(ConstraintToken):
+                        # Constraint type token (Coincident, Parallel, etc.)
                         result.append(ConstraintToken(tok_val).name)
                     else:
                         result.append(f"R{tok_val - len(ConstraintToken)}")  # Reference

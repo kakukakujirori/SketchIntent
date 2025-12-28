@@ -132,8 +132,14 @@ def apply_primitive_noise(sketch: datalib.Sketch, std: float = 0.15, max_differe
 class ConstraintDataset(torch.utils.data.Dataset):
     """Constraint generation dataset."""
 
-    def __init__(self, sequence_file: str, num_bins: int, max_length: int | None = None,
-                 primitive_noise_config: PrimitiveNoiseConfig | None = None):
+    def __init__(
+        self,
+        sequence_file: str,
+        num_bins: int,
+        max_length: int | None = None,
+        primitive_noise_config: PrimitiveNoiseConfig | None = None,
+        align_constraint_token_length: bool = False,
+    ):
         """Create a new constraint dataset.
 
         Parameters
@@ -146,6 +152,8 @@ class ConstraintDataset(torch.utils.data.Dataset):
             Length to which to pad or truncate sequence tokens.
         primitive_noise_config : PrimitiveNoiseConfig, optional
             If not `None`, configuration for the primitive noise to apply.
+        align_constraint_token_length : bool
+            If True, each constraint uses exactly 4 tokens with InnerPad padding.
         """
 
         if primitive_noise_config is None:
@@ -154,6 +162,7 @@ class ConstraintDataset(torch.utils.data.Dataset):
         self.primitive_noise_config = primitive_noise_config
         self.num_bins = num_bins
         self.max_length = max_length
+        self.align_constraint_token_length = align_constraint_token_length
 
         sequence_array = flat_array.load_dictionary_flat(sequence_file)
         if 'sequences' in sequence_array:
@@ -189,6 +198,7 @@ class ConstraintDataset(torch.utils.data.Dataset):
             normalize=False,  # NOTE: manually normalized above by `sketch_utils.normalize_sketch`
             uniquify_primitive_val_tokens=True,   # NOTE: THIS IS MUST!!! PrimitiveModel implicitly assumes the len(PrimitiveToken)-offset when doing torch.gather.
             uniquify_constraint_val_tokens=True,  # NOTE: THIS IS MUST!!! ConstraintMMDModel implicitly assumes the len(ConstraintToken)-offset when doing torch.gather.
+            align_constraint_token_length=self.align_constraint_token_length,
         )
 
         return {
@@ -213,6 +223,8 @@ class ConstraintDataConfig(primitive_data.PrimitiveDataConfig):
     primitive_noise: PrimitiveNoiseConfig = dataclasses.field(default_factory=lambda: PrimitiveNoiseConfig(enabled=True))
     # Path to FC clusters JSON file (contains selected_for_validation indices)
     fc_clusters_path: str | None = None
+    # Fixed-length tokenization: each constraint uses exactly 4 tokens
+    align_constraint_token_length: bool = False
 
 
 class ConstraintDataModule(L.LightningDataModule):
@@ -249,7 +261,8 @@ class ConstraintDataModule(L.LightningDataModule):
             self.config.sequence_path,
             self.config.num_position_bins,
             self.config.max_token_length,
-            self.config.primitive_noise)
+            self.config.primitive_noise,
+            self.config.align_constraint_token_length)
 
         # Load FC validation indices
         fc_indices = self._load_fc_validation_indices()

@@ -1,5 +1,5 @@
 hydra-core
-# pytorch-lightning==1.5.10.post0
+huggingface_hub
 lightning
 lz4
 matplotlib
@@ -7,6 +7,7 @@ numpy #<2.0.0
 omegaconf
 requests
 scipy
+tensorboard
 torchmetrics #==0.8.2
 tqdm
 zstandard

@@ -140,8 +140,10 @@ def reconstruct_constraints(c_val_tokens: np.ndarray) -> list[tuple[ConstraintTo
     for token in c_val_tokens:
         token = int(token)
 
-        # Skip padding and mask tokens
-        if token == ConstraintToken.Pad or token == ConstraintToken.Mask:
+        # Skip padding, mask, and inner padding tokens
+        if (token == ConstraintToken.Pad or \
+            token == ConstraintToken.Mask or \
+            token == ConstraintToken.InnerPad):
             continue
 
         # Control tokens

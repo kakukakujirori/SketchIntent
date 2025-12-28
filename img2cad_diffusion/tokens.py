@@ -62,6 +62,7 @@ class ConstraintToken(enum.IntEnum):
     Quadrant = 14
     Tangent = 15
     Vertical = 16
+    InnerPad = 17  # Padding within fixed-length constraint blocks (loss computed)
 
 
 # =============================================================================
@@ -98,6 +99,7 @@ class ConstraintParamToken(enum.IntEnum):
     Mask = SpecialToken.Mask  # Mask (unused but included for consistency)
     Type = 2                  # Constraint type token (Coincident, Parallel, etc.)
     Position = 3              # Primitive position reference
+    InnerPad = 4              # Padding within fixed-length constraint blocks
 
 
 # Number of parameters per entity type (TODO: REMOVE AFTER REFACTORING)

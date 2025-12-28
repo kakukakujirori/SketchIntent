@@ -190,12 +190,17 @@ def tokenize_primitives(
 # Constraint Tokenization (using sketch.constraints)
 # =============================================================================
 
+# Fixed token length for aligned constraint tokenization
+CONSTRAINT_TOKEN_LEN = 4  # [Type, Ref1, Ref2orInnerPad, Ref3orInnerPad]
+
+
 def tokenize_constraints(
     sketch: datalib.Sketch,
     gather_map: GatherMap,
     max_length: int | None = None,
     uniquify_val_tokens: bool = True,
     sort_by_ref_id: bool = False,
+    align_token_length: bool = False,
 ) -> SketchTokenSet:
     """Tokenize sketch constraints.
 
@@ -210,6 +215,9 @@ def tokenize_constraints(
         Entity -> token position mapping from tokenize_primitives.
     max_length : int | None
         Max sequence length.
+    align_token_length : bool
+        If True, each constraint emits exactly CONSTRAINT_TOKEN_LEN tokens (4),
+        padding with InnerPad for unused reference slots.
 
     Returns
     -------
@@ -323,12 +331,38 @@ def tokenize_constraints(
         pos_idx += 1
         pos_tokens.append(pos_idx)
 
-        # Reference tokens
-        for entity_idx, subnode_name in sorted_refs:
-            token_pos = get_token_pos(entity_idx, subnode_name)
-            val_tokens.append(token_pos + val_token_index_offset)
-            coord_tokens.append(ConstraintParamToken.Position)
-            pos_tokens.append(pos_idx)
+        # Reference tokens (sorted refs already, now append)
+        num_refs = len(sorted_refs)
+
+        if align_token_length:
+            # Fixed 4-token format: [Type, Ref1, Ref2orInnerPad, Ref3orInnerPad]
+            # Type token already added, need exactly 3 ref slots
+            max_refs = CONSTRAINT_TOKEN_LEN - 1  # 3 reference slots
+            if num_refs > max_refs:
+                raise ValueError(
+                    f"Constraint '{constraint_type}' has {num_refs} refs, "
+                    f"exceeds max {max_refs} for fixed {CONSTRAINT_TOKEN_LEN}-token format"
+                )
+
+            # Add actual references
+            for entity_idx, subnode_name in sorted_refs:
+                token_pos = get_token_pos(entity_idx, subnode_name)
+                val_tokens.append(token_pos + val_token_index_offset)
+                coord_tokens.append(ConstraintParamToken.Position)
+                pos_tokens.append(pos_idx)
+
+            # Pad with InnerPad to reach fixed length
+            for _ in range(max_refs - num_refs):
+                val_tokens.append(ConstraintToken.InnerPad)
+                coord_tokens.append(ConstraintParamToken.InnerPad)
+                pos_tokens.append(pos_idx)
+        else:
+            # Original variable-length format
+            for entity_idx, subnode_name in sorted_refs:
+                token_pos = get_token_pos(entity_idx, subnode_name)
+                val_tokens.append(token_pos + val_token_index_offset)
+                coord_tokens.append(ConstraintParamToken.Position)
+                pos_tokens.append(pos_idx)
 
     # Stop token
     val_tokens.append(ConstraintToken.Stop)
@@ -353,6 +387,7 @@ def tokenize_sketch(
     normalize: bool = True,
     uniquify_primitive_val_tokens: bool = True,
     uniquify_constraint_val_tokens: bool = True,
+    align_constraint_token_length: bool = False,
 ) -> TokenizedSketch:
     """Tokenize a complete sketch (primitives + constraints).
 
@@ -368,6 +403,8 @@ def tokenize_sketch(
         Max token sequence length.
     normalize : bool
         Whether to normalize the sketch first.
+    align_constraint_token_length : bool
+        If True, each constraint uses exactly 4 tokens (with InnerPad padding).
 
     Returns
     -------
@@ -382,7 +419,10 @@ def tokenize_sketch(
         sketch_utils.normalize_sketch(sketch)
 
     prim_tokens, gather_map = tokenize_primitives(sketch, num_bins, max_length, uniquify_primitive_val_tokens)
-    constr_tokens = tokenize_constraints(sketch, gather_map, max_length, uniquify_constraint_val_tokens)
+    constr_tokens = tokenize_constraints(
+        sketch, gather_map, max_length, uniquify_constraint_val_tokens,
+        align_token_length=align_constraint_token_length
+    )
 
     return TokenizedSketch(
         prim_tokens=prim_tokens,

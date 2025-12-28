@@ -20,6 +20,9 @@ data:
   permute_entities: false
   primitive_noise:
     enabled: True
+    std: 0.15
+    max_difference: 0.15
+  align_constraint_token_length: True  # If True, each constraint uses exactly 4 tokens
 
 mixed_precision: True
 batch_size: 384
