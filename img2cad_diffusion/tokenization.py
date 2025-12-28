@@ -195,6 +195,7 @@ def tokenize_constraints(
     gather_map: GatherMap,
     max_length: int | None = None,
     uniquify_val_tokens: bool = True,
+    sort_by_ref_id: bool = False,
 ) -> SketchTokenSet:
     """Tokenize sketch constraints.
 
@@ -307,7 +308,8 @@ def tokenize_constraints(
     # ==========================================================================
     # Phase 2: Sort constraints by min_token_pos and emit tokens
     # ==========================================================================
-    parsed_constraints.sort(key=lambda x: x[2])  # Sort by min_token_pos
+    if sort_by_ref_id:
+        parsed_constraints.sort(key=lambda x: x[2])  # Sort by min_token_pos
 
     val_tokens = [ConstraintToken.Start]
     coord_tokens = [ConstraintParamToken.Type]  # Start token

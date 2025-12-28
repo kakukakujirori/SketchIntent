@@ -1,6 +1,7 @@
 # @package _global_
 
 model:
+  model_type: mdd  # "ar" or "mdd"
   num_heads: 8
   num_layers: 12
   hidden_size: 384

@@ -37,6 +37,7 @@ class ConstraintModelConfig:
     num_layers
         Number of transformer layers
     """
+    model_type: str = "mdd"  # "ar" or "mdd"
     embedding_dimension: int = 128
     hidden_size: int = 256
     num_heads: int = 4

@@ -78,7 +78,16 @@ def main(config: constraint_models.ConstraintModelTrainingConfig):
     data.setup()
 
     config.data.dataset_size = data.train_dataset_size
-    model = constraint_models.ConstraintMDDModule(config)
+
+    # Select model based on config
+    if config.model.model_type == "ar":
+        from img2cad_diffusion import constraint_models_ar
+        model = constraint_models_ar.ConstraintARModule(config)
+    elif config.model.model_type == "mdd":
+        model = constraint_models.ConstraintMDDModule(config)
+    else:
+        raise ValueError(f"Unknown model_type: {config.model.model_type}. Expected 'ar' or 'mdd'.")
+
     trainer = make_trainer(config)
 
     trainer.fit(model, datamodule=data)
