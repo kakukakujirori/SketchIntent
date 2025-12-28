@@ -68,14 +68,26 @@ def make_trainer(config: constraint_models.ConstraintModelTrainingConfig) -> pl.
 
 @hydra.main(config_name='constraints', config_path='conf', version_base=None)
 def main(config: constraint_models.ConstraintModelTrainingConfig):
+    # Set global seed for reproducibility
+    if hasattr(config, 'training_seed') and config.training_seed is not None:
+        pl.seed_everything(config.training_seed, workers=True)
+        log.info(f"Set training seed to {config.training_seed}")
+
     config.data.sequence_path = hydra.utils.to_absolute_path(config.data.sequence_path)
+
+    # Convert fc_clusters_path to absolute path if specified
+    if config.data.fc_clusters_path is not None:
+        config.data.fc_clusters_path = hydra.utils.to_absolute_path(config.data.fc_clusters_path)
 
     data = constraint_data.ConstraintDataModule(
         config.data,
-        config.batch_size // config.num_gpus,
-        config.num_data_workers // config.num_gpus
+        max(1, config.batch_size // max(1, config.num_gpus)),
+        max(1, config.num_data_workers // max(1, config.num_gpus)),
     )
     data.setup()
+
+    if data.has_fc_validation:
+        log.info(f"FC validation enabled with {len(data._fc_valid_dataset)} samples")
 
     config.data.dataset_size = data.train_dataset_size
 

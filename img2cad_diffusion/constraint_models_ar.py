@@ -156,12 +156,16 @@ class ConstraintARModule(L.LightningModule):
 
         return loss
 
-    def validation_step(self, batch: ConstraintTokenInput, batch_idx: int):
+    def validation_step(self, batch: ConstraintTokenInput, batch_idx: int, dataloader_idx: int = 0):
         output = self.forward(batch)
         loss = self._compute_loss(output, batch)
 
-        self.log('validation/loss', loss)
-        self.log('validation/kappa', self._kappa_metric)
+        # Prefix based on dataloader_idx
+        # idx=0: normal validation, idx=1: FC validation
+        prefix = 'validation' if dataloader_idx == 0 else 'validation_fc'
+
+        self.log(f'{prefix}/loss', loss, add_dataloader_idx=False)
+        self.log(f'{prefix}/kappa', self._kappa_metric, add_dataloader_idx=False)
 
     def test_step(self, batch: ConstraintTokenInput, batch_idx: int):
         output = self.forward(batch)

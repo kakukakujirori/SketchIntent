@@ -110,9 +110,36 @@ def rotate_half(x):
 
 
 def apply_rotary_pos_emb(qkv, cos, sin):
-  cos = cos[0,:,0,0,:cos.shape[-1]//2]
-  sin = sin[0,:,0,0,:sin.shape[-1]//2]
-  return flash_attn.layers.rotary.apply_rotary_emb_qkv_(qkv, cos, sin)
+  """Apply rotary position embeddings to QKV tensor.
+
+  Args:
+    qkv: [B, L, 3, H, D] - packed query, key, value
+    cos: [1, L, 3, 1, D] - cosine embeddings from Rotary class
+    sin: [1, L, 3, 1, D] - sine embeddings from Rotary class
+
+  Returns:
+    qkv with RoPE applied to Q and K (V unchanged): [B, L, 3, H, D]
+  """
+  # Slice cos/sin to [L, D/2]
+  cos = cos[0, :, 0, 0, :cos.shape[-1]//2]
+  sin = sin[0, :, 0, 0, :sin.shape[-1]//2]
+
+  # Apply rotary to Q and K only (indices 0 and 1), not V (index 2)
+  q = qkv[:, :, 0, :, :]  # [B, L, H, D]
+  k = qkv[:, :, 1, :, :]
+  v = qkv[:, :, 2, :, :]
+
+  # Expand cos/sin for broadcasting: [L, D/2] -> [1, L, 1, D]
+  cos_full = torch.cat([cos, cos], dim=-1)  # [L, D]
+  sin_full = torch.cat([sin, sin], dim=-1)  # [L, D]
+  cos_full = cos_full[None, :, None, :]  # [1, L, 1, D]
+  sin_full = sin_full[None, :, None, :]  # [1, L, 1, D]
+
+  q_rot = q * cos_full + rotate_half(q) * sin_full
+  k_rot = k * cos_full + rotate_half(k) * sin_full
+
+  # Stack back to [B, L, 3, H, D]
+  return torch.stack([q_rot, k_rot, v], dim=2)
 
 
 # function overload
@@ -211,6 +238,69 @@ class LabelEmbedder(nn.Module):
 #################################################################################
 
 
+class DDiTPlainBlock(nn.Module):
+  """Simple transformer block without conditioning.
+
+  This is DDiTBlock without AdaLN modulation, for embedding primitives.
+  """
+  def __init__(self, dim, n_heads, mlp_ratio=4, dropout=0.1):
+    super().__init__()
+    self.n_heads = n_heads
+    self.dropout = dropout
+
+    self.norm1 = LayerNorm(dim)
+    self.attn_qkv = nn.Linear(dim, 3 * dim, bias=False)
+    self.attn_out = nn.Linear(dim, dim, bias=False)
+
+    self.norm2 = LayerNorm(dim)
+    self.mlp = nn.Sequential(
+      nn.Linear(dim, mlp_ratio * dim, bias=True),
+      nn.GELU(approximate='tanh'),
+      nn.Linear(mlp_ratio * dim, dim, bias=True))
+
+  def forward(self, x, rotary_cos_sin):
+    batch_size, seq_len = x.shape[0], x.shape[1]
+
+    # Self-attention
+    x_skip = x
+    x = self.norm1(x)
+
+    qkv = self.attn_qkv(x)
+    qkv = rearrange(qkv, 'b s (three h d) -> b s three h d', three=3, h=self.n_heads)
+
+    with torch.amp.autocast('cuda', enabled=False):
+      cos, sin = rotary_cos_sin
+      qkv = apply_rotary_pos_emb(qkv, cos.to(qkv.dtype), sin.to(qkv.dtype))
+
+    # Use SDPA for attention
+    q = qkv[:, :, 0, :, :]  # [B, S, H, D]
+    k = qkv[:, :, 1, :, :]
+    v = qkv[:, :, 2, :, :]
+
+    # Rearrange for SDPA: [B, H, S, D]
+    q = q.transpose(1, 2)
+    k = k.transpose(1, 2)
+    v = v.transpose(1, 2)
+
+    x = F.scaled_dot_product_attention(q, k, v, dropout_p=self.dropout if self.training else 0.)
+
+    # Rearrange back: [B, S, H*D]
+    x = x.transpose(1, 2).reshape(batch_size, seq_len, -1)
+
+    x = self.attn_out(x)
+    x = F.dropout(x, p=self.dropout, training=self.training)
+    x = x + x_skip
+
+    # MLP
+    x_skip = x
+    x = self.norm2(x)
+    x = self.mlp(x)
+    x = F.dropout(x, p=self.dropout, training=self.training)
+    x = x + x_skip
+
+    return x
+
+
 class DDiTBlock(nn.Module):
   def __init__(self, dim, n_heads, cond_dim, mlp_ratio=4, dropout=0.1):
     super().__init__()
@@ -264,17 +354,19 @@ class DDiTBlock(nn.Module):
       cos, sin = rotary_cos_sin
       qkv = apply_rotary_pos_emb(
         qkv, cos.to(qkv.dtype), sin.to(qkv.dtype))
-    qkv = rearrange(qkv, 'b s ... -> (b s) ...')
-    if seqlens is None:
-      cu_seqlens = torch.arange(
-        0, (batch_size + 1) * seq_len, step=seq_len,
-        dtype=torch.int32, device=qkv.device)
-    else:
-      cu_seqlens = seqlens.cumsum(-1)
-    x = flash_attn.flash_attn_interface.flash_attn_varlen_qkvpacked_func(
-      qkv, cu_seqlens, seq_len, 0., causal=False)
 
-    x = rearrange(x, '(b s) h d -> b s (h d)', b=batch_size)
+    # Use SDPA for attention (works on both CPU and GPU, auto-selects Flash backend when available)
+    q = qkv[:, :, 0, :, :]  # [B, S, H, D]
+    k = qkv[:, :, 1, :, :]
+    v = qkv[:, :, 2, :, :]
+
+    # Rearrange for SDPA: [B, H, S, D]
+    q = q.transpose(1, 2)
+    k = k.transpose(1, 2)
+    v = v.transpose(1, 2)
+
+    x = F.scaled_dot_product_attention(q, k, v, dropout_p=self.dropout if self.training else 0.)
+    x = x.transpose(1, 2).reshape(batch_size, seq_len, -1)
 
     x = bias_dropout_scale_fn(self.attn_out(x),
                               None,
@@ -363,15 +455,19 @@ class DDiTCrossBlock(nn.Module):
     with torch.amp.autocast('cuda', enabled=False):
       cos, sin = rotary_cos_sin
       qkv = apply_rotary_pos_emb(qkv, cos.to(qkv.dtype), sin.to(qkv.dtype))
-    qkv = rearrange(qkv, 'b s ... -> (b s) ...')
-    if seqlens is None:
-      cu_seqlens = torch.arange(0, (batch_size + 1) * tgt_len, step=tgt_len,
-                                dtype=torch.int32, device=qkv.device)
-    else:
-      cu_seqlens = seqlens.cumsum(-1)
-    x = flash_attn.flash_attn_interface.flash_attn_varlen_qkvpacked_func(
-      qkv, cu_seqlens, tgt_len, 0., causal=False)
-    x = rearrange(x, '(b s) h d -> b s (h d)', b=batch_size)
+
+    # Use SDPA for attention (works on both CPU and GPU, auto-selects Flash backend when available)
+    q = qkv[:, :, 0, :, :]  # [B, S, H, D]
+    k = qkv[:, :, 1, :, :]
+    v = qkv[:, :, 2, :, :]
+
+    # Rearrange for SDPA: [B, H, S, D]
+    q = q.transpose(1, 2)
+    k = k.transpose(1, 2)
+    v = v.transpose(1, 2)
+
+    x = F.scaled_dot_product_attention(q, k, v, dropout_p=self.dropout if self.training else 0.)
+    x = x.transpose(1, 2).reshape(batch_size, tgt_len, -1)
 
     x = bias_dropout_scale_fn(self.self_attn_out(x), None, gate_sa, x_skip, self.dropout)
 

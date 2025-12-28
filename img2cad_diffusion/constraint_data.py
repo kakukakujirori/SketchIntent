@@ -2,8 +2,10 @@
 """
 
 import copy
+import json
 import random
 import dataclasses
+from pathlib import Path
 from typing import Sequence
 
 import numpy as np
@@ -209,6 +211,8 @@ class ConstraintDataset(torch.utils.data.Dataset):
 class ConstraintDataConfig(primitive_data.PrimitiveDataConfig):
     max_token_length: int = 130
     primitive_noise: PrimitiveNoiseConfig = dataclasses.field(default_factory=lambda: PrimitiveNoiseConfig(enabled=True))
+    # Path to FC clusters JSON file (contains selected_for_validation indices)
+    fc_clusters_path: str | None = None
 
 
 class ConstraintDataModule(L.LightningDataModule):
@@ -223,6 +227,22 @@ class ConstraintDataModule(L.LightningDataModule):
         self._train_dataset = None
         self._valid_dataset = None
         self._test_dataset = None
+        self._fc_valid_dataset = None  # FC-only validation dataset
+
+    def _load_fc_validation_indices(self) -> list[int] | None:
+        """Load FC validation indices from cluster JSON file."""
+        if self.config.fc_clusters_path is None:
+            return None
+
+        fc_path = Path(self.config.fc_clusters_path)
+        if not fc_path.exists():
+            print(f"Warning: FC clusters file not found: {fc_path}")
+            return None
+
+        with open(fc_path, 'r') as f:
+            data = json.load(f)
+
+        return data.get('selected_for_validation', [])
 
     def setup(self, stage: str | None = None) -> None:
         self._dataset = ConstraintDataset(
@@ -231,8 +251,25 @@ class ConstraintDataModule(L.LightningDataModule):
             self.config.max_token_length,
             self.config.primitive_noise)
 
-        self._train_dataset, self._valid_dataset, self._test_dataset = primitive_data.split_dataset(
-            self._dataset, self.config.validation_fraction, self.config.test_fraction)
+        # Load FC validation indices
+        fc_indices = self._load_fc_validation_indices()
+
+        if fc_indices:
+            # Create FC validation dataset from specific indices
+            self._fc_valid_dataset = torch.utils.data.Subset(self._dataset, fc_indices)
+
+            # Exclude FC indices from main dataset before splitting
+            fc_set = set(fc_indices)
+            remaining_indices = [i for i in range(len(self._dataset)) if i not in fc_set]
+            remaining_dataset = torch.utils.data.Subset(self._dataset, remaining_indices)
+
+            # Split remaining data into train/val/test
+            self._train_dataset, self._valid_dataset, self._test_dataset = primitive_data.split_dataset(
+                remaining_dataset, self.config.validation_fraction, self.config.test_fraction)
+        else:
+            # No FC validation - use standard split
+            self._train_dataset, self._valid_dataset, self._test_dataset = primitive_data.split_dataset(
+                self._dataset, self.config.validation_fraction, self.config.test_fraction)
 
     def _make_dataloader(self, dataset: torch.utils.data.Dataset, shuffle: bool) -> torch.utils.data.DataLoader[ConstraintTokenInput]:
         return torch.utils.data.DataLoader(
@@ -245,9 +282,22 @@ class ConstraintDataModule(L.LightningDataModule):
         assert self._train_dataset is not None
         return self._make_dataloader(self._train_dataset, shuffle=True)
 
-    def val_dataloader(self) -> torch.utils.data.DataLoader[ConstraintTokenInput]:
+    def val_dataloader(self) -> list[torch.utils.data.DataLoader[ConstraintTokenInput]] | torch.utils.data.DataLoader[ConstraintTokenInput]:
+        """Returns validation dataloaders.
+
+        If FC validation is enabled, returns a list:
+          - dataloader_idx=0: Normal validation set
+          - dataloader_idx=1: FC-only validation set
+        Otherwise, returns a single dataloader.
+        """
         assert self._valid_dataset is not None
-        return self._make_dataloader(self._valid_dataset, shuffle=False)
+        normal_loader = self._make_dataloader(self._valid_dataset, shuffle=False)
+
+        if self._fc_valid_dataset is not None:
+            fc_loader = self._make_dataloader(self._fc_valid_dataset, shuffle=False)
+            return [normal_loader, fc_loader]
+
+        return normal_loader
 
     def test_dataloader(self) -> torch.utils.data.DataLoader[ConstraintTokenInput]:
         assert self._test_dataset is not None
@@ -257,3 +307,8 @@ class ConstraintDataModule(L.LightningDataModule):
     def train_dataset_size(self) -> int:
         assert self._train_dataset is not None
         return len(self._train_dataset)
+
+    @property
+    def has_fc_validation(self) -> bool:
+        """Whether FC validation dataloader is available."""
+        return self._fc_valid_dataset is not None

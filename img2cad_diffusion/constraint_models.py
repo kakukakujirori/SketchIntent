@@ -61,65 +61,7 @@ class ConstraintModelTrainingConfig:
     max_epochs: int = 30
     num_gpus: int = 1
     mixed_precision: bool = False
-
-
-class PrimitiveBlock(torch.nn.Module):
-    def __init__(self, dim, n_heads, mlp_ratio=4, dropout=0.1):
-        super().__init__()
-        self.n_heads = n_heads
-
-        self.norm1 = dit.LayerNorm(dim)
-        self.attn_qkv = torch.nn.Linear(dim, 3 * dim, bias=False)
-        self.attn_out = torch.nn.Linear(dim, dim, bias=False)
-        self.dropout1 = torch.nn.Dropout(dropout)
-
-        self.norm2 = dit.LayerNorm(dim)
-        self.mlp = torch.nn.Sequential(
-            torch.nn.Linear(dim, mlp_ratio * dim, bias=True),
-            torch.nn.GELU(approximate='tanh'),
-            torch.nn.Linear(mlp_ratio * dim, dim, bias=True)
-        )
-        self.dropout2 = torch.nn.Dropout(dropout)
-        self.dropout_p = dropout
-
-    def forward(self, x, rotary_cos_sin):
-        # x: [B, S, D]
-        batch_size, seq_len = x.shape[0], x.shape[1]
-
-        # Attention
-        x_skip = x
-        x = self.norm1(x)
-
-        qkv = self.attn_qkv(x)
-        qkv = dit.rearrange(qkv, 'b s (three h d) -> b s three h d', three=3, h=self.n_heads)
-
-        with torch.amp.autocast('cuda', enabled=False):
-            cos, sin = rotary_cos_sin
-            qkv = dit.apply_rotary_pos_emb(qkv, cos.to(qkv.dtype), sin.to(qkv.dtype))
-
-        qkv = dit.rearrange(qkv, 'b s ... -> (b s) ...')
-
-        cu_seqlens = torch.arange(
-            0, (batch_size + 1) * seq_len, step=seq_len,
-            dtype=torch.int32, device=qkv.device
-        )
-
-        x = dit.flash_attn.flash_attn_interface.flash_attn_varlen_qkvpacked_func(
-            qkv, cu_seqlens, seq_len, 0., causal=False
-        )
-
-        x = dit.rearrange(x, '(b s) h d -> b s (h d)', b=batch_size)
-        x = self.attn_out(x)
-        x = F.dropout(x, p=self.dropout_p, training=self.training)
-        x = x + x_skip
-
-        # MLP
-        x_mlp = self.norm2(x)
-        x_mlp = self.mlp(x_mlp)
-        x_mlp = F.dropout(x_mlp, p=self.dropout_p, training=self.training)
-        x = x + x_mlp
-
-        return x
+    training_seed: int | None = 42  # Seed for reproducibility
 
 
 class PrimitiveModel(torch.nn.Module):
@@ -159,7 +101,7 @@ class PrimitiveModel(torch.nn.Module):
 
         # Transformer Blocks
         self.blocks = torch.nn.ModuleList([
-            PrimitiveBlock(embed_dim, num_heads, dropout=dropout) for _ in range(num_layers)
+            dit.DDiTPlainBlock(embed_dim, num_heads, dropout=dropout) for _ in range(num_layers)
         ])
 
         # Final Norm
@@ -455,13 +397,17 @@ class ConstraintMDDModule(L.LightningModule):
 
         return loss
 
-    def validation_step(self, batch: ConstraintTokenInput, batch_idx: int):
+    def validation_step(self, batch: ConstraintTokenInput, batch_idx: int, dataloader_idx: int = 0):
         loss, masked_acc, unmasked_acc = self._compute_loss(batch)
 
-        self.log('validation/loss', loss)
-        self.log('validation/kappa', self._kappa_metric)
-        self.log('validation/acc_masked', masked_acc)
-        self.log('validation/acc_unmasked', unmasked_acc)
+        # Prefix based on dataloader_idx
+        # idx=0: normal validation, idx=1: FC validation
+        prefix = 'validation' if dataloader_idx == 0 else 'validation_fc'
+
+        self.log(f'{prefix}/loss', loss, add_dataloader_idx=False)
+        self.log(f'{prefix}/kappa', self._kappa_metric, add_dataloader_idx=False)
+        self.log(f'{prefix}/acc_masked', masked_acc, add_dataloader_idx=False)
+        self.log(f'{prefix}/acc_unmasked', unmasked_acc, add_dataloader_idx=False)
 
     def on_validation_epoch_end(self):
         """

@@ -13,6 +13,7 @@ optim:
 data:
   num_position_bins: 64
   sequence_path: data_processed/sg_filtered_unique.npy  # cptsketchgraphs.npy
+  fc_clusters_path: scripts/sketchgraphs_fc_search/sketchgraphs_fc_clustered.json
   max_token_length: 130
   validation_fraction: 0.025
   test_fraction: 0.05
@@ -23,6 +24,7 @@ data:
 mixed_precision: True
 batch_size: 384
 num_gpus: 2
+training_seed: 42  # Seed for training randomness (model init, dropout, etc.)
 
 max_epochs: 30
 num_data_workers: 32
