@@ -23,6 +23,7 @@ data:
     std: 0.15
     max_difference: 0.15
   align_constraint_token_length: True  # If True, each constraint uses exactly 4 tokens
+  use_stop_padding: True  # If True, pad with STOP tokens (required for Hungarian matching)
 
 mixed_precision: True
 batch_size: 384
@@ -31,3 +32,4 @@ training_seed: 42  # Seed for training randomness (model init, dropout, etc.)
 
 max_epochs: 30
 num_data_workers: 32
+use_hungarian_loss: True  # Use Hungarian matching for order-agnostic training

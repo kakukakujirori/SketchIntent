@@ -139,6 +139,7 @@ class ConstraintDataset(torch.utils.data.Dataset):
         max_length: int | None = None,
         primitive_noise_config: PrimitiveNoiseConfig | None = None,
         align_constraint_token_length: bool = False,
+        use_stop_padding: bool = False,
     ):
         """Create a new constraint dataset.
 
@@ -154,6 +155,8 @@ class ConstraintDataset(torch.utils.data.Dataset):
             If not `None`, configuration for the primitive noise to apply.
         align_constraint_token_length : bool
             If True, each constraint uses exactly 4 tokens with InnerPad padding.
+        use_stop_padding : bool
+            If True, pad constraints with STOP tokens instead of PAD.
         """
 
         if primitive_noise_config is None:
@@ -163,6 +166,7 @@ class ConstraintDataset(torch.utils.data.Dataset):
         self.num_bins = num_bins
         self.max_length = max_length
         self.align_constraint_token_length = align_constraint_token_length
+        self.use_stop_padding = use_stop_padding
 
         sequence_array = flat_array.load_dictionary_flat(sequence_file)
         if 'sequences' in sequence_array:
@@ -199,6 +203,7 @@ class ConstraintDataset(torch.utils.data.Dataset):
             uniquify_primitive_val_tokens=True,   # NOTE: THIS IS MUST!!! PrimitiveModel implicitly assumes the len(PrimitiveToken)-offset when doing torch.gather.
             uniquify_constraint_val_tokens=True,  # NOTE: THIS IS MUST!!! ConstraintMMDModel implicitly assumes the len(ConstraintToken)-offset when doing torch.gather.
             align_constraint_token_length=self.align_constraint_token_length,
+            use_stop_padding=self.use_stop_padding,
         )
 
         return {
@@ -225,6 +230,8 @@ class ConstraintDataConfig(primitive_data.PrimitiveDataConfig):
     fc_clusters_path: str | None = None
     # Fixed-length tokenization: each constraint uses exactly 4 tokens
     align_constraint_token_length: bool = False
+    # Use STOP tokens for tail padding instead of PAD (required for Hungarian matching)
+    use_stop_padding: bool = False
 
 
 class ConstraintDataModule(L.LightningDataModule):
@@ -248,8 +255,7 @@ class ConstraintDataModule(L.LightningDataModule):
 
         fc_path = Path(self.config.fc_clusters_path)
         if not fc_path.exists():
-            print(f"Warning: FC clusters file not found: {fc_path}")
-            return None
+            raise FileNotFoundError(f"FC clusters file not found: {fc_path}")
 
         with open(fc_path, 'r') as f:
             data = json.load(f)
@@ -262,7 +268,8 @@ class ConstraintDataModule(L.LightningDataModule):
             self.config.num_position_bins,
             self.config.max_token_length,
             self.config.primitive_noise,
-            self.config.align_constraint_token_length)
+            self.config.align_constraint_token_length,
+            self.config.use_stop_padding)
 
         # Load FC validation indices
         fc_indices = self._load_fc_validation_indices()

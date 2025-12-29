@@ -201,6 +201,7 @@ def tokenize_constraints(
     uniquify_val_tokens: bool = True,
     sort_by_ref_id: bool = False,
     align_token_length: bool = False,
+    use_stop_padding: bool = False,
 ) -> SketchTokenSet:
     """Tokenize sketch constraints.
 
@@ -218,6 +219,8 @@ def tokenize_constraints(
     align_token_length : bool
         If True, each constraint emits exactly CONSTRAINT_TOKEN_LEN tokens (4),
         padding with InnerPad for unused reference slots.
+    use_stop_padding : bool
+        If True, pad with STOP tokens instead of PAD tokens. Required for Hungarian matching.
 
     Returns
     -------
@@ -369,10 +372,13 @@ def tokenize_constraints(
     coord_tokens.append(ConstraintParamToken.Type)
     pos_tokens.append(pos_idx + 1)
 
+    # Determine tail padding token
+    tail_pad_value = ConstraintToken.Stop if use_stop_padding else ConstraintToken.Pad
+
     return {
-        'val': _pad_or_truncate(np.array(val_tokens, dtype=np.int64), max_length),
-        'coord': _pad_or_truncate(np.array(coord_tokens, dtype=np.int64), max_length),
-        'pos': _pad_or_truncate(np.array(pos_tokens, dtype=np.int64), max_length),
+        'val': _pad_or_truncate(np.array(val_tokens, dtype=np.int64), max_length, tail_pad_value),
+        'coord': _pad_or_truncate(np.array(coord_tokens, dtype=np.int64), max_length, tail_pad_value),
+        'pos': _pad_or_truncate(np.array(pos_tokens, dtype=np.int64), max_length, tail_pad_value),
     }
 
 
@@ -388,6 +394,7 @@ def tokenize_sketch(
     uniquify_primitive_val_tokens: bool = True,
     uniquify_constraint_val_tokens: bool = True,
     align_constraint_token_length: bool = False,
+    use_stop_padding: bool = False,
 ) -> TokenizedSketch:
     """Tokenize a complete sketch (primitives + constraints).
 
@@ -405,6 +412,8 @@ def tokenize_sketch(
         Whether to normalize the sketch first.
     align_constraint_token_length : bool
         If True, each constraint uses exactly 4 tokens (with InnerPad padding).
+    use_stop_padding : bool
+        If True, pad constraints with STOP tokens instead of PAD.
 
     Returns
     -------
@@ -421,7 +430,8 @@ def tokenize_sketch(
     prim_tokens, gather_map = tokenize_primitives(sketch, num_bins, max_length, uniquify_primitive_val_tokens)
     constr_tokens = tokenize_constraints(
         sketch, gather_map, max_length, uniquify_constraint_val_tokens,
-        align_token_length=align_constraint_token_length
+        align_token_length=align_constraint_token_length,
+        use_stop_padding=use_stop_padding
     )
 
     return TokenizedSketch(
