@@ -66,70 +66,11 @@ class ConstraintIoU(torchmetrics.Metric):
         return iou
 
 
-def compute_constraint_iou(
-    pred_tokens: torch.Tensor,
-    target_tokens: torch.Tensor,
-) -> tuple[float, float, float]:
-    """Compute constraint set IoU between predictions and targets.
-
-    Converts token sequences to sets of constraints (as tuples) and computes:
-    - Precision: |intersection| / |predicted|
-    - Recall: |intersection| / |target|
-    - IoU (Jaccard): |intersection| / |union|
-
-    Each constraint is represented as a tuple: (type, sorted_refs)
-    where sorted_refs is a tuple of reference indices in sorted order.
-
-    Args:
-        pred_tokens: [B, L] predicted constraint tokens
-        target_tokens: [B, L] ground truth constraint tokens
-
-    Returns:
-        (precision, recall, iou) averaged over batch
-    """
-    B = pred_tokens.shape[0]
-    block_size = CONSTRAINT_TOKEN_LEN
-
-    total_precision = 0.0
-    total_recall = 0.0
-    total_iou = 0.0
-
-    for b in range(B):
-        pred_set = _tokens_to_constraint_set(pred_tokens[b])
-        target_set = _tokens_to_constraint_set(target_tokens[b])
-
-        if len(pred_set) == 0 and len(target_set) == 0:
-            # Both empty - perfect match
-            total_precision += 1.0
-            total_recall += 1.0
-            total_iou += 1.0
-        elif len(pred_set) == 0:
-            # Predicted nothing
-            total_precision += 0.0
-            total_recall += 0.0
-            total_iou += 0.0
-        elif len(target_set) == 0:
-            # Target is empty but we predicted something
-            total_precision += 0.0
-            total_recall += 1.0  # vacuously true
-            total_iou += 0.0
-        else:
-            intersection = pred_set & target_set
-            union = pred_set | target_set
-
-            precision = len(intersection) / len(pred_set)
-            recall = len(intersection) / len(target_set)
-            iou = len(intersection) / len(union)
-
-            total_precision += precision
-            total_recall += recall
-            total_iou += iou
-
-    return total_precision / B, total_recall / B, total_iou / B
-
-
 def _tokens_to_constraint_set(tokens: torch.Tensor) -> set:
     """Convert token sequence to set of constraint tuples.
+
+    Detects constraint boundaries by looking for constraint type tokens
+    (Coincident through Vertical), rather than assuming fixed block sizes.
 
     Args:
         tokens: [L] token sequence (single example)
@@ -137,42 +78,43 @@ def _tokens_to_constraint_set(tokens: torch.Tensor) -> set:
     Returns:
         Set of (constraint_type, (sorted_refs...)) tuples
     """
+    if len(tokens.shape) != 1:
+        raise ValueError(f"Expected 1D tensor, got {tokens.shape}")
     tokens = tokens.cpu().numpy()
     constraints = set()
 
-    block_size = CONSTRAINT_TOKEN_LEN
-    # Skip START token (position 0)
-    tokens = tokens[1:]
+    current_type = None
+    current_refs = []
 
-    n_blocks = len(tokens) // block_size
+    for tok in tokens:
+        tok = int(tok)
 
-    for i in range(n_blocks):
-        block = tokens[i * block_size : (i + 1) * block_size]
-
-        # First token is constraint type
-        constraint_type = int(block[0])
-
-        # Skip if this is a STOP block or invalid
-        if constraint_type == ConstraintToken.Stop:
+        if tok == ConstraintToken.Pad:
+            continue
+        if tok == ConstraintToken.Mask:
+            raise ValueError(f"Mask token found in the evaluation token.")
+        if tok == ConstraintToken.Stop:
             break
-        if constraint_type == ConstraintToken.Pad:
-            continue
-        if constraint_type < ConstraintToken.Coincident or constraint_type > ConstraintToken.Vertical:
+        if tok == ConstraintToken.InnerPad:
             continue
 
-        # Remaining tokens are references (skip InnerPad)
-        refs = []
-        for j in range(1, block_size):
-            tok = int(block[j])
-            if tok == ConstraintToken.InnerPad or tok == ConstraintToken.Stop:
-                continue
-            if tok >= len(ConstraintToken):
-                # This is a reference token
-                ref_idx = tok - len(ConstraintToken)
-                refs.append(ref_idx)
+        if tok < len(ConstraintToken):
+            assert tok != ConstraintToken.InnerPad
+            # Save previous constraint if exists
+            if current_type is not None:
+                constraint_tuple = (current_type, tuple(sorted(current_refs)))
+                constraints.add(constraint_tuple)
+            # Start new constraint
+            current_type = tok
+            current_refs = []
+        else:
+            # This is a reference token
+            ref_idx = tok - len(ConstraintToken)
+            current_refs.append(ref_idx)
 
-        # Create canonical representation (sorted refs)
-        constraint_tuple = (constraint_type, tuple(sorted(refs)))
+    # Don't forget the last constraint
+    if current_type is not None:
+        constraint_tuple = (current_type, tuple(sorted(current_refs)))
         constraints.add(constraint_tuple)
 
     return constraints
@@ -244,7 +186,7 @@ class ConstraintLoss:
         We skip the first token (START) and reshape the rest into blocks.
         """
         B = tensor.shape[0]
-        # Skip START token (position 0)
+        # Skip START token (position 0) - this applies to all tensor types
         tensor = tensor[:, 1:]
         L = tensor.shape[1]
         n_blocks = L // self.block_size

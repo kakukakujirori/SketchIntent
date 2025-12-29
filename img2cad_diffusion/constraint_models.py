@@ -13,7 +13,7 @@ from sketchgraphs_models.nn.summary import CohenKappa
 from . import dit
 from .constraint_data import ConstraintDataConfig, ConstraintTokenInput
 from .detokenization import reconstruct_constraints
-from .losses import ConstraintLoss, ConstraintIoU, compute_constraint_iou
+from .losses import ConstraintLoss, ConstraintIoU
 from .prob_path import MaskProbPath
 from .tokens import PrimitiveToken, PrimitiveParamToken, ConstraintToken, ConstraintParamToken
 
@@ -300,10 +300,15 @@ class ConstraintMDDModule(L.LightningModule):
         self._accuracy_metric_fc = torchmetrics.Accuracy(task='multiclass', num_classes=num_pointer_targets)
         self._iou_metric_fc = ConstraintIoU()
 
-        # Metrics for full generation (on_validation_epoch_end)
+        # Metrics for full generation (on_validation_epoch_end) - normal validation
         self._kappa_metric_gen = CohenKappa(num_pointer_targets)
         self._accuracy_metric_gen = torchmetrics.Accuracy(task='multiclass', num_classes=num_pointer_targets)
         self._iou_metric_gen = ConstraintIoU()
+
+        # Metrics for full generation (on_validation_epoch_end) - FC validation
+        self._kappa_metric_gen_fc = CohenKappa(num_pointer_targets)
+        self._accuracy_metric_gen_fc = torchmetrics.Accuracy(task='multiclass', num_classes=num_pointer_targets)
+        self._iou_metric_gen_fc = ConstraintIoU()
 
         # >>> PRISM >>>
         self.noise = LogLinearNoise()
@@ -566,67 +571,91 @@ class ConstraintMDDModule(L.LightningModule):
 
     def on_validation_epoch_end(self):
         """
-        - Load the first element of the validation dataloader
-        - Mask all the constraint tokens
-        - Run the masked discrete diffusion multiple times to recover all the masks
-        - Compute the kappa metric, and log it
+        - Load a batch from each validation dataloader
+        - Generate samples using the full denoising process
+        - Compute kappa_gen, accuracy_gen, iou_gen for each dataloader
         """
-        val_loader = self.trainer.val_dataloaders
-        if val_loader is None:
+        val_loaders = self.trainer.val_dataloaders
+        if val_loaders is None:
             return
 
-        # Handle list of dataloaders or single dataloader
-        if isinstance(val_loader, list):
-            val_loader = val_loader[0]
+        # Handle single dataloader vs list
+        if not isinstance(val_loaders, list):
+            val_loaders = [val_loaders]
 
-        val_iter = next(iter(val_loader))
-        # Move batch to device
-        batch = {k: v.to(self.device) for k, v in val_iter.items()}
+        # Define metrics and prefixes for each dataloader
+        dataloader_configs = [
+            {
+                'prefix': 'validation',
+                'kappa': self._kappa_metric_gen,
+                'accuracy': self._accuracy_metric_gen,
+                'iou': self._iou_metric_gen,
+                'print_samples': True,
+            },
+            {
+                'prefix': 'validation_fc',
+                'kappa': self._kappa_metric_gen_fc,
+                'accuracy': self._accuracy_metric_gen_fc,
+                'iou': self._iou_metric_gen_fc,
+                'print_samples': True,
+            },
+        ]
 
-        # Generate samples
-        # generate_sample takes the batch (which contains primitives) and masks c_val internally
-        start_tokens = [ConstraintToken.Start]
-        samples, intermediates = self.ProbPath.generate_sample(batch=batch, num_steps=self.inference_sampling_steps, start_tokens=start_tokens)
+        for loader_idx, (loader, config) in enumerate(zip(val_loaders, dataloader_configs)):
+            try:
+                val_iter = next(iter(loader))
+            except StopIteration:
+                continue
 
-        # Evaluate
-        target = batch['c_val']
-        samples_for_metric, target_for_metric, relevant_idxs = self._canonicalize_for_comparison(samples, target)
-        display_label_gt = "GT (sorted)" if self.loss_fn.use_hungarian else "GT"
-        display_label_gen = "Gen (sorted)" if self.loss_fn.use_hungarian else "Gen"
+            # Move batch to device
+            batch = {k: v.to(self.device) for k, v in val_iter.items()}
 
-        self._kappa_metric_gen(samples_for_metric[relevant_idxs], target_for_metric[relevant_idxs])
-        self._accuracy_metric_gen(samples_for_metric[relevant_idxs], target_for_metric[relevant_idxs])
-        self._iou_metric_gen(samples, target)  # IoU on full sequences
+            # Generate samples
+            start_tokens = [ConstraintToken.Start]
+            samples, intermediates = self.ProbPath.generate_sample(
+                batch=batch, num_steps=self.inference_sampling_steps, start_tokens=start_tokens
+            )
 
-        self.log('validation/kappa_gen', self._kappa_metric_gen)
-        self.log('validation/accuracy_gen', self._accuracy_metric_gen)
-        self.log('validation/iou_gen', self._iou_metric_gen, prog_bar=True)
+            # Evaluate
+            target = batch['c_val']
+            samples_for_metric, target_for_metric, relevant_idxs = self._canonicalize_for_comparison(samples, target)
 
-        # Print detokenized samples on rank 0 only to avoid interleaved output
-        if self.global_rank == 0:
-            print("\n" + "="*80)
-            print("VALIDATION SAMPLE COMPARISON (rank 0)")
-            print("="*80)
+            config['kappa'](samples_for_metric[relevant_idxs], target_for_metric[relevant_idxs])
+            config['accuracy'](samples_for_metric[relevant_idxs], target_for_metric[relevant_idxs])
+            config['iou'](samples, target)
 
-            # Show 1 sample with full detail
-            for i in range(5):
-                print(f"\n[Sample {i}] Full constraint sequence:")
+            prefix = config['prefix']
+            self.log(f'{prefix}/kappa_gen', config['kappa'])
+            self.log(f'{prefix}/accuracy_gen', config['accuracy'])
+            self.log(f'{prefix}/iou_gen', config['iou'], prog_bar=(loader_idx == 0))
 
-                # Show intermediate denoising steps (first sample)
-                if intermediates:
-                    print(f"\n  Denoising progression ({len(intermediates)} steps, showing every 10th):")
-                    steps_to_show = list(range(0, len(intermediates), max(1, len(intermediates) // 5)))
-                    for step_idx in steps_to_show:
-                        step_tokens = intermediates[step_idx][i].cpu().numpy()
-                        formatted = self._format_constraint_sequence(step_tokens, max_show=None)
-                        print(f"    Step {step_idx:3d}: {formatted}")
+            # Print samples only for first dataloader on rank 0
+            if config['print_samples'] and self.global_rank == 0:
+                display_label_gt = "GT (sorted)" if self.loss_fn.use_hungarian else "GT"
+                display_label_gen = "Gen (sorted)" if self.loss_fn.use_hungarian else "Gen"
 
-                # Show the final result and GT
-                print("  " + "-"*40)
-                print(f"  {display_label_gen:15}: {self._format_constraint_sequence(samples_for_metric[i].cpu().numpy())}")
-                print(f"  {display_label_gt:15}: {self._format_constraint_sequence(target_for_metric[i].cpu().numpy())}")
+                print("\n" + "="*80)
+                print(f"VALIDATION SAMPLE COMPARISON ({prefix}, rank 0)")
+                print("="*80)
 
-            print("="*80 + "\n")
+                for i in range(min(5, samples.size(0))):
+                    print(f"\n[Sample {i}] Full constraint sequence:")
+
+                    # Show intermediate denoising steps
+                    if intermediates:
+                        print(f"\n  Denoising progression ({len(intermediates)} steps):")
+                        steps_to_show = list(range(0, len(intermediates), max(1, len(intermediates) // 5)))
+                        for step_idx in steps_to_show:
+                            step_tokens = intermediates[step_idx][i].cpu().numpy()
+                            formatted = self._format_constraint_sequence(step_tokens, max_show=None)
+                            print(f"    Step {step_idx:3d}: {formatted}")
+
+                    # Show the final result and GT
+                    print("  " + "-"*40)
+                    print(f"  {display_label_gen:15}: {self._format_constraint_sequence(samples_for_metric[i].cpu().numpy())}")
+                    print(f"  {display_label_gt:15}: {self._format_constraint_sequence(target_for_metric[i].cpu().numpy())}")
+
+                print("="*80 + "\n")
 
     def test_step(self, batch: ConstraintTokenInput, batch_idx: int):
         raise NotImplementedError
