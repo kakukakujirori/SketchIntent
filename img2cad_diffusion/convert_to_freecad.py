@@ -652,7 +652,8 @@ def resolve_redundant_coincident(seq: list[NodeOp | EdgeOp], node_idx_map: dict[
         if isinstance(op, EdgeOp) and op.label == ConstraintType.Coincident:
             op = deduplicate_refs(op)
             refs = op.references
-            assert len(refs) == 2, f"Coincident should have 2 refs after dedup, got {refs}"
+            if len(refs) != 2:
+                raise ValueError(f"Coincident should have 2 refs after dedup, got {refs}")
             ref1, ref2 = refs[0], refs[1]
             idx1, pt1 = node_idx_map[ref1]
             idx2, pt2 = node_idx_map[ref2]

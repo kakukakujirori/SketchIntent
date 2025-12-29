@@ -64,6 +64,9 @@ class ConstraintModelTrainingConfig:
     mixed_precision: bool = False
     training_seed: int | None = 42  # Seed for reproducibility
     use_hungarian_loss: bool = False  # Use Hungarian matching for order-agnostic training
+    # Test-only mode
+    test_only: bool = False  # If True, only run test with checkpoint
+    checkpoint_path: str | None = None  # Path to checkpoint for test_only mode
 
 
 class PrimitiveModel(torch.nn.Module):
@@ -290,25 +293,15 @@ class ConstraintMDDModule(L.LightningModule):
         # num_pointer_targets = p_embeddings vocabulary size = len(ConstraintToken) + max_token_length
         num_pointer_targets = len(ConstraintToken) + self.hparams.data.max_token_length
 
-        # Metrics for training (dataloader_idx=0)
-        self._kappa_metric = CohenKappa(num_pointer_targets)
-        self._accuracy_metric = torchmetrics.Accuracy(task='multiclass', num_classes=num_pointer_targets)
-        self._iou_metric = ConstraintIoU()
+        # Metrics for mask-filling task (0 => normal data, 1 => fully constrained data)
+        self.kappa_metric = torch.nn.ModuleList([CohenKappa(num_pointer_targets) for _ in range(2)])
+        self.accuracy_metric = torch.nn.ModuleList([torchmetrics.Accuracy(task='multiclass', num_classes=num_pointer_targets) for _ in range(2)])
+        self.iou_metric = torch.nn.ModuleList([ConstraintIoU() for _ in range(2)])
 
-        # Metrics for FC validation (dataloader_idx=1)
-        self._kappa_metric_fc = CohenKappa(num_pointer_targets)
-        self._accuracy_metric_fc = torchmetrics.Accuracy(task='multiclass', num_classes=num_pointer_targets)
-        self._iou_metric_fc = ConstraintIoU()
-
-        # Metrics for full generation (on_validation_epoch_end) - normal validation
-        self._kappa_metric_gen = CohenKappa(num_pointer_targets)
-        self._accuracy_metric_gen = torchmetrics.Accuracy(task='multiclass', num_classes=num_pointer_targets)
-        self._iou_metric_gen = ConstraintIoU()
-
-        # Metrics for full generation (on_validation_epoch_end) - FC validation
-        self._kappa_metric_gen_fc = CohenKappa(num_pointer_targets)
-        self._accuracy_metric_gen_fc = torchmetrics.Accuracy(task='multiclass', num_classes=num_pointer_targets)
-        self._iou_metric_gen_fc = ConstraintIoU()
+        # Metrics for full-geneartion task (0 => normal data, 1 => fully constrained data)
+        self.kappa_metric_gen = torch.nn.ModuleList([CohenKappa(num_pointer_targets) for _ in range(2)])
+        self.accuracy_metric_gen = torch.nn.ModuleList([torchmetrics.Accuracy(task='multiclass', num_classes=num_pointer_targets) for _ in range(2)])
+        self.iou_metric_gen = torch.nn.ModuleList([ConstraintIoU() for _ in range(2)])
 
         # >>> PRISM >>>
         self.noise = LogLinearNoise()
@@ -499,6 +492,7 @@ class ConstraintMDDModule(L.LightningModule):
         loss = self.loss_fn.forward(output, target, mask_indices, reweighting)
 
         with torch.no_grad():
+            output[:, :, ConstraintToken.Mask] = -torch.inf
             preds = torch.distributions.Categorical(logits=output).sample()
 
         return loss, preds, target, mask_indices
@@ -523,14 +517,9 @@ class ConstraintMDDModule(L.LightningModule):
         """
         preds_for_metric, target_for_metric, relevant_idxs = self._canonicalize_for_comparison(preds, target)
 
-        if dataloader_idx == 0:
-            kappa = self._kappa_metric
-            accuracy = self._accuracy_metric
-            iou = self._iou_metric
-        else:
-            kappa = self._kappa_metric_fc
-            accuracy = self._accuracy_metric_fc
-            iou = self._iou_metric_fc
+        kappa = self.kappa_metric[dataloader_idx]
+        accuracy = self.accuracy_metric[dataloader_idx]
+        iou = self.iou_metric[dataloader_idx]
 
         kappa(preds_for_metric[relevant_idxs], target_for_metric[relevant_idxs])
         accuracy(preds_for_metric[relevant_idxs], target_for_metric[relevant_idxs])
@@ -559,15 +548,12 @@ class ConstraintMDDModule(L.LightningModule):
         loss, preds, target, mask_indices = self._compute_loss(batch)
         kappa, iou, masked_acc, unmasked_acc = self._compute_metrics(preds, target, mask_indices, dataloader_idx=dataloader_idx)
 
-        # Prefix based on dataloader_idx
-        # idx=0: normal validation, idx=1: FC validation
-        prefix = 'validation' if dataloader_idx == 0 else 'validation_fc'
-
-        self.log(f'{prefix}/loss', loss, add_dataloader_idx=False)
-        self.log(f'{prefix}/kappa', kappa, add_dataloader_idx=False)
-        self.log(f'{prefix}/iou', iou, add_dataloader_idx=False)
-        self.log(f'{prefix}/acc_masked', masked_acc, add_dataloader_idx=False)
-        self.log(f'{prefix}/acc_unmasked', unmasked_acc, add_dataloader_idx=False)
+        # Use add_dataloader_idx=True (default) for side-by-side comparison in table
+        self.log('validation/loss', loss)
+        self.log('validation/kappa', kappa)
+        self.log('validation/iou', iou)
+        self.log('validation/acc_masked', masked_acc)
+        self.log('validation/acc_unmasked', unmasked_acc)
 
     def on_validation_epoch_end(self):
         """
@@ -583,25 +569,7 @@ class ConstraintMDDModule(L.LightningModule):
         if not isinstance(val_loaders, list):
             val_loaders = [val_loaders]
 
-        # Define metrics and prefixes for each dataloader
-        dataloader_configs = [
-            {
-                'prefix': 'validation',
-                'kappa': self._kappa_metric_gen,
-                'accuracy': self._accuracy_metric_gen,
-                'iou': self._iou_metric_gen,
-                'print_samples': True,
-            },
-            {
-                'prefix': 'validation_fc',
-                'kappa': self._kappa_metric_gen_fc,
-                'accuracy': self._accuracy_metric_gen_fc,
-                'iou': self._iou_metric_gen_fc,
-                'print_samples': True,
-            },
-        ]
-
-        for loader_idx, (loader, config) in enumerate(zip(val_loaders, dataloader_configs)):
+        for loader_idx, loader in enumerate(val_loaders):
             try:
                 val_iter = next(iter(loader))
             except StopIteration:
@@ -617,20 +585,24 @@ class ConstraintMDDModule(L.LightningModule):
             )
 
             # Evaluate
+            kappa = self.kappa_metric_gen[loader_idx]
+            accuracy = self.accuracy_metric_gen[loader_idx]
+            iou = self.iou_metric_gen[loader_idx]
+
             target = batch['c_val']
             samples_for_metric, target_for_metric, relevant_idxs = self._canonicalize_for_comparison(samples, target)
 
-            config['kappa'](samples_for_metric[relevant_idxs], target_for_metric[relevant_idxs])
-            config['accuracy'](samples_for_metric[relevant_idxs], target_for_metric[relevant_idxs])
-            config['iou'](samples, target)
+            kappa(samples_for_metric[relevant_idxs], target_for_metric[relevant_idxs])
+            accuracy(samples_for_metric[relevant_idxs], target_for_metric[relevant_idxs])
+            iou(samples, target)
 
-            prefix = config['prefix']
-            self.log(f'{prefix}/kappa_gen', config['kappa'])
-            self.log(f'{prefix}/accuracy_gen', config['accuracy'])
-            self.log(f'{prefix}/iou_gen', config['iou'], prog_bar=(loader_idx == 0))
+            prefix = 'validation' if loader_idx == 0 else 'validation_fc'
+            self.log(f'{prefix}/kappa_gen', kappa)
+            self.log(f'{prefix}/accuracy_gen', accuracy)
+            self.log(f'{prefix}/iou_gen', iou)
 
-            # Print samples only for first dataloader on rank 0
-            if config['print_samples'] and self.global_rank == 0:
+            # Print samples
+            if self.global_rank == 0:
                 display_label_gt = "GT (sorted)" if self.loss_fn.use_hungarian else "GT"
                 display_label_gen = "Gen (sorted)" if self.loss_fn.use_hungarian else "Gen"
 
@@ -657,10 +629,102 @@ class ConstraintMDDModule(L.LightningModule):
 
                 print("="*80 + "\n")
 
-    def test_step(self, batch: ConstraintTokenInput, batch_idx: int):
-        raise NotImplementedError
-        # loss = self._compute_loss(batch)
+    def test_step(self, batch: ConstraintTokenInput, batch_idx: int, dataloader_idx: int = 0):
+        loss, preds, target, mask_indices = self._compute_loss(batch)
+        kappa, iou, masked_acc, unmasked_acc = self._compute_metrics(preds, target, mask_indices, dataloader_idx=dataloader_idx)
 
-        # self.log('test/loss', loss)
-        # self.log('test/kappa', self._kappa_metric)
-        # self.log('test/accuracy', self._accuracy_metric)
+        # Use add_dataloader_idx=True (default) for side-by-side comparison in table
+        self.log('test/loss', loss, sync_dist=True)
+        self.log('test/kappa', kappa, sync_dist=True)
+        self.log('test/iou', iou, sync_dist=True)
+        self.log('test/acc_masked', masked_acc, sync_dist=True)
+        self.log('test/acc_unmasked', unmasked_acc, sync_dist=True)
+
+    def on_test_epoch_end(self):
+        """
+        - Load a batch from each test dataloader
+        - Generate samples using the full denoising process
+        - Compute kappa_gen, accuracy_gen, iou_gen for each dataloader
+        """
+        test_loaders = self.trainer.test_dataloaders
+        if test_loaders is None:
+            return
+
+        # Handle single dataloader vs list
+        if not isinstance(test_loaders, list):
+            test_loaders = [test_loaders]
+
+        for loader_idx, loader in enumerate(test_loaders):
+            try:
+                val_iter = next(iter(loader))
+            except StopIteration:
+                continue
+
+            # Move batch to device
+            batch = {k: v.to(self.device) for k, v in val_iter.items()}
+
+            # Generate samples
+            start_tokens = [ConstraintToken.Start]
+            samples, intermediates = self.ProbPath.generate_sample(
+                batch=batch, num_steps=self.inference_sampling_steps, start_tokens=start_tokens
+            )
+
+            # Evaluate
+            kappa = self.kappa_metric_gen[loader_idx]
+            accuracy = self.accuracy_metric_gen[loader_idx]
+            iou = self.iou_metric_gen[loader_idx]
+
+            target = batch['c_val']
+            samples_for_metric, target_for_metric, relevant_idxs = self._canonicalize_for_comparison(samples, target)
+
+            kappa(samples_for_metric[relevant_idxs], target_for_metric[relevant_idxs])
+            accuracy(samples_for_metric[relevant_idxs], target_for_metric[relevant_idxs])
+            iou(samples, target)
+
+            # Use different names for each loader since on_test_epoch_end is called once
+            fc_suffix = '' if loader_idx == 0 else '_fc'
+            self.log(f'test_gen/kappa{fc_suffix}', kappa, sync_dist=True)
+            self.log(f'test_gen/accuracy{fc_suffix}', accuracy, sync_dist=True)
+            self.log(f'test_gen/iou{fc_suffix}', iou, sync_dist=True)
+
+            # Print samples
+            if self.global_rank == 0:
+                display_label_gt = "GT (sorted)" if self.loss_fn.use_hungarian else "GT"
+                display_label_gen = "Gen (sorted)" if self.loss_fn.use_hungarian else "Gen"
+
+                print("\n" + "="*80)
+                loader_label = 'test' if loader_idx == 0 else 'test_fc'
+                print(f"TEST SAMPLE COMPARISON ({loader_label}, rank 0)")
+                print("="*80)
+
+                for i in range(min(5, samples.size(0))):
+                    print(f"\n[Sample {i}] Full constraint sequence:")
+
+                    # Show intermediate denoising steps
+                    if intermediates:
+                        print(f"\n  Denoising progression ({len(intermediates)} steps):")
+                        steps_to_show = list(range(0, len(intermediates), max(1, len(intermediates) // 5)))
+                        for step_idx in steps_to_show:
+                            step_tokens = intermediates[step_idx][i].cpu().numpy()
+                            formatted = self._format_constraint_sequence(step_tokens, max_show=None)
+                            print(f"    Step {step_idx:3d}: {formatted}")
+
+                    # Show the final result and GT
+                    print("  " + "-"*40)
+                    print(f"  {display_label_gen:15}: {self._format_constraint_sequence(samples_for_metric[i].cpu().numpy())}")
+                    print(f"  {display_label_gt:15}: {self._format_constraint_sequence(target_for_metric[i].cpu().numpy())}")
+
+                print("="*80 + "\n")
+
+            # Solver-based evaluation (rank 0 only, expensive)
+            if self.global_rank == 0:
+                from .solver_feedback import evaluate_constraints_batch, HAS_FREECAD
+                if HAS_FREECAD:
+                    solver_results = evaluate_constraints_batch(
+                        batch['val'],
+                        samples,
+                        num_bins=self.hparams.data.num_position_bins,
+                        fully_constrained_dof=2,
+                    )
+                    if solver_results:
+                        print(f"Solver Report ({loader_label}): {solver_results}")

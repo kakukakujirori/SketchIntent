@@ -63,6 +63,10 @@ def make_trainer(config: constraint_models.ConstraintModelTrainingConfig) -> pl.
         else:
             trainer_kwargs['precision'] = "bf16-mixed"
 
+    if config.test_only:
+        trainer_kwargs['devices'] = 1
+        trainer_kwargs['num_nodes'] = 1
+
     return pl.Trainer(logger=logger, callbacks=callbacks, **trainer_kwargs)
 
 
@@ -87,7 +91,7 @@ def main(config: constraint_models.ConstraintModelTrainingConfig):
     data.setup()
 
     if data.has_fc_validation:
-        log.info(f"FC validation enabled with {len(data._fc_valid_dataset)} samples")
+        log.info(f"FC validation enabled with {len(data._fc_val_dataset)} samples")
 
     config.data.dataset_size = data.train_dataset_size
 
@@ -102,7 +106,20 @@ def main(config: constraint_models.ConstraintModelTrainingConfig):
 
     trainer = make_trainer(config)
 
-    trainer.fit(model, datamodule=data)
+    # Resolve checkpoint path if provided
+    ckpt_path = None
+    if config.checkpoint_path is not None:
+        ckpt_path = hydra.utils.to_absolute_path(config.checkpoint_path)
+
+    if config.test_only:
+        if ckpt_path is None:
+            raise ValueError("checkpoint_path is required when test_only=true")
+        log.info(f"Test-only mode: loading checkpoint from {ckpt_path}")
+        trainer.test(model, datamodule=data, ckpt_path=ckpt_path, weights_only=False)
+    else:
+        if ckpt_path is not None:
+            log.info(f"Resuming training from checkpoint: {ckpt_path}")
+        trainer.fit(model, datamodule=data, ckpt_path=ckpt_path, weights_only=False)
 
 
 if __name__ == '__main__':

@@ -113,8 +113,10 @@ def main():
                         help='Output JSON file')
     parser.add_argument('--n-clusters', type=int, default=100,
                         help='Number of clusters for K-means')
-    parser.add_argument('--n-samples', type=int, default=1000,
+    parser.add_argument('--n-val-samples', type=int, default=1000,
                         help='Number of samples to select for validation')
+    parser.add_argument('--n-test-samples', type=int, default=500,
+                        help='Number of samples to select for test')
     args = parser.parse_args()
 
     print(f"Loading FC indices from {args.fc_file}...")
@@ -173,9 +175,10 @@ def main():
     print(f"Cluster size range: {min(cluster_sizes.values())} - {max(cluster_sizes.values())}")
     print(f"Mean cluster size: {np.mean(list(cluster_sizes.values())):.1f}")
 
-    # Sample from clusters (stratified)
-    print(f"Sampling {args.n_samples} representative sketches...")
-    samples_per_cluster = max(1, args.n_samples // args.n_clusters)
+    # Sample from clusters (stratified) for validation + test
+    total_samples = args.n_val_samples + args.n_test_samples
+    print(f"Sampling {total_samples} representative sketches (val:{args.n_val_samples}, test:{args.n_test_samples})...")
+    samples_per_cluster = max(1, total_samples // args.n_clusters)
     selected_indices = []
 
     for cluster_id in range(args.n_clusters):
@@ -189,27 +192,35 @@ def main():
             selected_indices.extend(sampled.tolist())
 
     # If we need more samples, randomly pick from remaining
-    remaining = args.n_samples - len(selected_indices)
+    remaining = total_samples - len(selected_indices)
     if remaining > 0:
         unselected = [i for i in valid_indices if i not in selected_indices]
         if unselected:
             extra = np.random.choice(unselected, size=min(remaining, len(unselected)), replace=False)
             selected_indices.extend(extra.tolist())
 
-    print(f"Selected {len(selected_indices)} samples for validation")
+    # Shuffle and split into validation and test
+    np.random.shuffle(selected_indices)
+    val_indices = selected_indices[:args.n_val_samples]
+    test_indices = selected_indices[args.n_val_samples:args.n_val_samples + args.n_test_samples]
+
+    print(f"Selected {len(val_indices)} for validation, {len(test_indices)} for test")
 
     # Build output data
+    selected_set = set(val_indices) | set(test_indices)
     output = {
         'metadata': {
             'total_fc_sketches': len(fc_indices),
             'unique_sketches': len(valid_indices),
             'duplicates_removed': duplicate_count,
             'n_clusters': args.n_clusters,
-            'n_selected': len(selected_indices),
+            'n_validation': len(val_indices),
+            'n_test': len(test_indices),
         },
         'clusters': {},
-        'selected_for_validation': selected_indices,
-        'remaining_for_train': [i for i in valid_indices if i not in selected_indices],
+        'selected_for_validation': val_indices,
+        'selected_for_test': test_indices,
+        'remaining_for_train': [i for i in valid_indices if i not in selected_set],
     }
 
     # Store cluster assignments
@@ -231,7 +242,8 @@ def main():
     print(f"  Total FC sketches: {len(fc_indices)}")
     print(f"  Unique sketches: {len(valid_indices)}")
     print(f"  Duplicates removed: {duplicate_count}")
-    print(f"  Selected for validation: {len(selected_indices)}")
+    print(f"  Selected for validation: {len(val_indices)}")
+    print(f"  Selected for test: {len(test_indices)}")
     print(f"  Remaining for train: {len(output['remaining_for_train'])}")
     print(f"\nOutput saved to {args.output}")
 

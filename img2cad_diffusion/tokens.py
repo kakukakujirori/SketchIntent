@@ -4,9 +4,7 @@ This module centralizes all token definitions for both primitive and constraint 
 eliminating duplicate Token class definitions that previously existed in dataset.py
 and constraint_data.py.
 """
-
 import enum
-from typing import Dict, List
 
 from sketchgraphs.data import Arc, Circle, Line, Point
 
@@ -65,6 +63,29 @@ class ConstraintToken(enum.IntEnum):
     InnerPad = 17  # Padding within fixed-length constraint blocks (loss computed)
 
 
+# Mapping from constraint type to acceptable number of references
+# Used for validation during detokenization
+CONSTRAINT_ACCEPTABLE_REF_COUNTS: dict[ConstraintToken, set[int]] = {
+    ConstraintToken.Pad: {0},
+    ConstraintToken.Mask: {0},
+    ConstraintToken.Start: {0},
+    ConstraintToken.Stop: {0},
+    ConstraintToken.Coincident: {2},
+    ConstraintToken.Concentric: {2},
+    ConstraintToken.Equal: {2},
+    ConstraintToken.Fix: {1},
+    ConstraintToken.Horizontal: {1, 2},  # Can be 1 (line) or 2 (two points)
+    ConstraintToken.Midpoint: {2, 3},    # 2 (point-curve) or 3 (point-point-point)
+    ConstraintToken.Normal: {2},
+    ConstraintToken.Offset: {2},
+    ConstraintToken.Parallel: {2},
+    ConstraintToken.Perpendicular: {2},
+    ConstraintToken.Quadrant: {2},
+    ConstraintToken.Tangent: {2},
+    ConstraintToken.Vertical: {1, 2},    # Can be 1 (line) or 2 (two points)
+    ConstraintToken.InnerPad: {0},
+}
+
 # =============================================================================
 # Parameter Semantic Tokens (coord_tokens)
 # =============================================================================
@@ -103,7 +124,7 @@ class ConstraintParamToken(enum.IntEnum):
 
 
 # Number of parameters per entity type (TODO: REMOVE AFTER REFACTORING)
-NUM_PARAMS: Dict[type, int] = {
+NUM_PARAMS: dict[type, int] = {
     Arc: 6,
     Circle: 3,
     Line: 4,

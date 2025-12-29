@@ -18,6 +18,7 @@ from .tokenization import GatherMap, tokenize_primitives
 from .tokens import (
     PrimitiveToken,
     ConstraintToken,
+    CONSTRAINT_ACCEPTABLE_REF_COUNTS,
 )
 
 # =============================================================================
@@ -114,7 +115,12 @@ def reconstruct_primitives(tokens, num_bins: int) -> datalib.Sketch:
 # Constraint Detokenization
 # =============================================================================
 
-def reconstruct_constraints(c_val_tokens: np.ndarray) -> list[tuple[ConstraintToken, list[int]]]:
+def validate_constraints(constraint_token: ConstraintToken, references: list[int]) -> bool:
+    """Check if constraint has valid number of references."""
+    return len(references) in CONSTRAINT_ACCEPTABLE_REF_COUNTS.get(constraint_token, set())
+
+
+def reconstruct_constraints(c_val_tokens: np.ndarray, remove_invalid_constraints: bool = True) -> list[tuple[ConstraintToken, list[int]]]:
     """Convert constraint tokens back to (constraint_type, gather_indices) pairs.
 
     This function is the inverse of tokenize_constraints for the value tokens.
@@ -137,6 +143,18 @@ def reconstruct_constraints(c_val_tokens: np.ndarray) -> list[tuple[ConstraintTo
     current_constraint = None
     current_refs = []
 
+    def may_add_constraint(current_constraint: ConstraintToken | None, current_refs: list[int]):
+        # Save previous constraint if exists
+        if current_constraint is not None:
+            is_valid = validate_constraints(current_constraint, current_refs)
+            if not is_valid:
+                how_to_handle_comment = 'Removing...' if remove_invalid_constraints else 'Leaving it as it is...'
+                print(f"[reconstruct_constraints] Warning: Invalid token sequence detected (type: {current_constraint}, ref: {current_refs}). {how_to_handle_comment}")
+            if (not remove_invalid_constraints) or is_valid:
+                constraints.append((current_constraint, current_refs))
+        # Start new constraint
+        return ConstraintToken(token), []
+
     for token in c_val_tokens:
         token = int(token)
 
@@ -151,19 +169,13 @@ def reconstruct_constraints(c_val_tokens: np.ndarray) -> list[tuple[ConstraintTo
             continue
         if token == ConstraintToken.Stop:
             # Finalize last constraint if any
-            if current_constraint is not None:
-                constraints.append((current_constraint, current_refs))
+            _, _ = may_add_constraint(current_constraint, current_refs)
             break
 
         # Check if this is a constraint type token (4-16)
-        if token >= ConstraintToken.Coincident and token <= ConstraintToken.Vertical:
-            # Save previous constraint if exists
-            if current_constraint is not None:
-                constraints.append((current_constraint, current_refs))
-            # Start new constraint
-            current_constraint = ConstraintToken(token)
-            current_refs = []
-        elif token >= len(ConstraintToken):
+        if token < len(ConstraintToken):
+            current_constraint, current_refs = may_add_constraint(current_constraint, current_refs)
+        else:
             # This is a reference token: gather_idx = token - len(ConstraintToken)
             gather_idx = token - len(ConstraintToken)
             current_refs.append(gather_idx)
