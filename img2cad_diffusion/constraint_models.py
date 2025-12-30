@@ -548,12 +548,12 @@ class ConstraintMDDModule(L.LightningModule):
         loss, preds, target, mask_indices = self._compute_loss(batch)
         kappa, iou, masked_acc, unmasked_acc = self._compute_metrics(preds, target, mask_indices, dataloader_idx=dataloader_idx)
 
-        # Use add_dataloader_idx=True (default) for side-by-side comparison in table
-        self.log('validation/loss', loss)
-        self.log('validation/kappa', kappa)
-        self.log('validation/iou', iou)
-        self.log('validation/acc_masked', masked_acc)
-        self.log('validation/acc_unmasked', unmasked_acc)
+        suffix = '_fc' if dataloader_idx == 1 else ''
+        self.log(f'validation/loss{suffix}', loss, add_dataloader_idx=False, sync_dist=True)
+        self.log(f'validation/kappa{suffix}', kappa, add_dataloader_idx=False, sync_dist=True)
+        self.log(f'validation/iou{suffix}', iou, add_dataloader_idx=False, sync_dist=True)
+        self.log(f'validation/acc_masked{suffix}', masked_acc, add_dataloader_idx=False, sync_dist=True)
+        self.log(f'validation/acc_unmasked{suffix}', unmasked_acc, add_dataloader_idx=False, sync_dist=True)
 
     def on_validation_epoch_end(self):
         """
@@ -596,10 +596,10 @@ class ConstraintMDDModule(L.LightningModule):
             accuracy(samples_for_metric[relevant_idxs], target_for_metric[relevant_idxs])
             iou(samples, target)
 
-            prefix = 'validation' if loader_idx == 0 else 'validation_fc'
-            self.log(f'{prefix}/kappa_gen', kappa)
-            self.log(f'{prefix}/accuracy_gen', accuracy)
-            self.log(f'{prefix}/iou_gen', iou)
+            suffix = '_fc' if loader_idx == 1 else ''
+            self.log(f'validation_gen/kappa{suffix}', kappa, add_dataloader_idx=False, sync_dist=True)
+            self.log(f'validation_gen/accuracy{suffix}', accuracy, add_dataloader_idx=False, sync_dist=True)
+            self.log(f'validation_gen/iou{suffix}', iou, add_dataloader_idx=False, sync_dist=True)
 
             # Print samples
             if self.global_rank == 0:
@@ -607,7 +607,7 @@ class ConstraintMDDModule(L.LightningModule):
                 display_label_gen = "Gen (sorted)" if self.loss_fn.use_hungarian else "Gen"
 
                 print("\n" + "="*80)
-                print(f"VALIDATION SAMPLE COMPARISON ({prefix}, rank 0)")
+                print(f"VALIDATION{suffix.upper()} SAMPLE COMPARISON")
                 print("="*80)
 
                 for i in range(min(5, samples.size(0))):
@@ -682,10 +682,10 @@ class ConstraintMDDModule(L.LightningModule):
             iou(samples, target)
 
             # Use different names for each loader since on_test_epoch_end is called once
-            fc_suffix = '' if loader_idx == 0 else '_fc'
-            self.log(f'test_gen/kappa{fc_suffix}', kappa, sync_dist=True)
-            self.log(f'test_gen/accuracy{fc_suffix}', accuracy, sync_dist=True)
-            self.log(f'test_gen/iou{fc_suffix}', iou, sync_dist=True)
+            suffix = '_fc' if loader_idx == 1 else ''
+            self.log(f'test_gen/kappa{suffix}', kappa, add_dataloader_idx=False, sync_dist=True)
+            self.log(f'test_gen/accuracy{suffix}', accuracy, add_dataloader_idx=False, sync_dist=True)
+            self.log(f'test_gen/iou{suffix}', iou, add_dataloader_idx=False, sync_dist=True)
 
             # Print samples
             if self.global_rank == 0:
@@ -693,8 +693,7 @@ class ConstraintMDDModule(L.LightningModule):
                 display_label_gen = "Gen (sorted)" if self.loss_fn.use_hungarian else "Gen"
 
                 print("\n" + "="*80)
-                loader_label = 'test' if loader_idx == 0 else 'test_fc'
-                print(f"TEST SAMPLE COMPARISON ({loader_label}, rank 0)")
+                print(f"TEST{suffix.upper()} SAMPLE COMPARISON")
                 print("="*80)
 
                 for i in range(min(5, samples.size(0))):
@@ -727,4 +726,4 @@ class ConstraintMDDModule(L.LightningModule):
                         fully_constrained_dof=2,
                     )
                     if solver_results:
-                        print(f"Solver Report ({loader_label}): {solver_results}")
+                        print(f"Solver Report (test{suffix}): {solver_results}")

@@ -29,9 +29,11 @@ def make_trainer(config: constraint_models.ConstraintModelTrainingConfig) -> pl.
 
     callbacks = [
         pl.callbacks.ModelCheckpoint(
-            save_top_k=-1,
+            monitor='epoch',
+            mode="max",
             filename='epoch_{epoch}',
-            auto_insert_metric_name=False),
+            auto_insert_metric_name=False,
+            save_top_k=1),
         pl.callbacks.ModelCheckpoint(
             monitor='validation/loss',
             filename='epoch_{epoch}_vloss_{validation/loss:.3f}',

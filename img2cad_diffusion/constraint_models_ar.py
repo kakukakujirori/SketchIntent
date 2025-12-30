@@ -112,6 +112,28 @@ class ConstraintARModule(L.LightningModule):
         self.accuracy_metric_gen = torch.nn.ModuleList([torchmetrics.Accuracy(task='multiclass', num_classes=num_pointer_targets) for _ in range(2)])
         self.iou_metric_gen = torch.nn.ModuleList([ConstraintIoU() for _ in range(2)])
 
+    @staticmethod
+    def _format_constraint_sequence(tokens, max_show: int | None = None) -> list[str]:
+        result = []
+        for tok in tokens:
+            tok_val = int(tok)
+            if tok_val == ConstraintToken.Pad:
+                break
+            elif tok_val == ConstraintToken.Start:
+                result.append("[START]")
+            elif tok_val == ConstraintToken.Stop:
+                result.append("[STOP]")
+                break
+            elif tok_val == ConstraintToken.InnerPad:
+                result.append("[PAD]")
+            elif tok_val < len(ConstraintToken):
+                result.append(ConstraintToken(tok_val).name)
+            else:
+                result.append(f"R{tok_val - len(ConstraintToken)}")
+        if max_show and len(result) > max_show:
+            return result[:max_show] + [f"... (+{len(result) - max_show} more)"]
+        return result
+
     def configure_optimizers(self):
         base_lr = self.hparams.optim.learning_rate * self.hparams.batch_size / 128
 
@@ -167,7 +189,7 @@ class ConstraintARModule(L.LightningModule):
         preds: torch.Tensor,
         target: torch.Tensor,
         dataloader_idx: int = 0,
-    ) -> tuple[CohenKappa, ConstraintIoU, torch.Tensor]:
+    ) -> tuple[CohenKappa, ConstraintIoU, torchmetrics.Accuracy]:
         """Update metrics for the given dataloader.
 
         Args:
@@ -187,8 +209,7 @@ class ConstraintARModule(L.LightningModule):
         accuracy(preds[relevant_idxs], target[relevant_idxs])
         iou(preds, target)
 
-        acc = (preds[relevant_idxs] == target[relevant_idxs]).float().mean()
-        return kappa, iou, acc
+        return kappa, iou, accuracy
 
     def training_step(self, batch: ConstraintTokenInput, batch_idx: int):
         loss, preds, target = self._compute_loss(batch)
@@ -203,10 +224,95 @@ class ConstraintARModule(L.LightningModule):
         loss, preds, target = self._compute_loss(batch)
         kappa, iou, acc = self._compute_metrics(preds, target, dataloader_idx=dataloader_idx)
 
-        # Use add_dataloader_idx=True (default) for side-by-side comparison in table
-        self.log('validation/loss', loss)
-        self.log('validation/kappa', kappa)
-        self.log('validation/iou', iou)
+        suffix = '_fc' if dataloader_idx == 1 else ''
+        self.log(f'validation/loss{suffix}', loss, add_dataloader_idx=False, sync_dist=True)
+        self.log(f'validation/kappa{suffix}', kappa, add_dataloader_idx=False, sync_dist=True)
+        self.log(f'validation/iou{suffix}', iou, add_dataloader_idx=False, sync_dist=True)
+
+    @torch.no_grad()
+    def on_validation_epoch_end(self):
+        """Generate samples autoregressively from scratch and compute kappa_gen.
+
+        This is the fair comparison metric with MDD's kappa_gen.
+        """
+        val_loaders = self.trainer.val_dataloaders
+        if val_loaders is None:
+            return
+
+        # Handle single dataloader vs list
+        if not isinstance(val_loaders, list):
+            val_loaders = [val_loaders]
+
+        for loader_idx, loader in enumerate(val_loaders):
+            try:
+                val_iter = next(iter(loader))
+            except StopIteration:
+                continue
+
+            # Move batch to device
+            batch = {k: v.to(self.device) for k, v in val_iter.items()}
+
+            # Get target and sequence length
+            target = batch['c_val']
+            batch_size, max_len = target.shape
+
+            # Start with just START token, rest is zeros (will be filled)
+            generated = torch.full((batch_size, max_len), ConstraintToken.Pad,
+                                device=self.device, dtype=target.dtype)
+            generated[:, 0] = ConstraintToken.Start
+
+            # Autoregressive generation
+            for pos in range(max_len - 1):
+                # Create batch with current generated tokens
+                gen_batch = {
+                    'val': batch['val'],
+                    'coord': batch['coord'],
+                    'pos': batch['pos'],
+                    'c_val': generated,
+                }
+
+                # Forward pass
+                output = self.model(gen_batch)  # [B, L, V]
+
+                # Sample next token at position pos
+                next_token_logits = output[:, pos, :]  # [B, V]
+                next_token_logits[:, ConstraintToken.Mask] = -torch.inf
+                next_token = torch.distributions.Categorical(logits=next_token_logits).sample()
+
+                # Fill in position pos+1
+                generated[:, pos + 1] = next_token
+
+                # Early stopping if all sequences have generated STOP
+                if (generated == ConstraintToken.Stop).any(dim=1).all():
+                    break
+
+            # Compute metrics for validation
+            kappa = self.kappa_metric_gen[loader_idx]
+            accuracy = self.accuracy_metric_gen[loader_idx]
+            iou = self.iou_metric_gen[loader_idx]
+
+            relevant_idxs = (target != ConstraintToken.Pad)
+            kappa(generated[relevant_idxs], target[relevant_idxs])
+            accuracy(generated[relevant_idxs], target[relevant_idxs])
+            iou(generated, target)
+
+            suffix = '_fc' if loader_idx == 1 else ''
+            self.log(f'validation_gen/kappa{suffix}', kappa, add_dataloader_idx=False, sync_dist=True)
+            self.log(f'validation_gen/accuracy{suffix}', accuracy, add_dataloader_idx=False, sync_dist=True)
+            self.log(f'validation_gen/iou{suffix}', iou, add_dataloader_idx=False, sync_dist=True)
+
+            # Print comparison on rank 0
+            if self.global_rank == 0:
+                print("\n" + "="*80)
+                print(f"VALIDATION{suffix.upper()} SAMPLE COMPARISON")
+                print("="*80)
+
+                for i in range(min(5, generated.size(0))):
+                    print(f"\n[Sample {i}]:")
+                    print(f"  GT  : {self._format_constraint_sequence(target[i].cpu().numpy())}")
+                    print(f"  Gen : {self._format_constraint_sequence(generated[i].cpu().numpy())}")
+
+                print("="*80 + "\n")
 
     def test_step(self, batch: ConstraintTokenInput, batch_idx: int, dataloader_idx: int = 0):
         loss, preds, target = self._compute_loss(batch)
@@ -217,103 +323,6 @@ class ConstraintARModule(L.LightningModule):
         self.log('test/kappa', kappa, sync_dist=True)
         self.log('test/iou', iou, sync_dist=True)
         self.log('test/accuracy', acc, sync_dist=True)
-
-    @torch.no_grad()
-    def on_validation_epoch_end(self):
-        """Generate samples autoregressively from scratch and compute kappa_gen.
-
-        This is the fair comparison metric with MDD's kappa_gen.
-        """
-        val_loader = self.trainer.val_dataloaders
-        if val_loader is None:
-            return
-
-        # Handle list of dataloaders or single dataloader
-        if isinstance(val_loader, list):
-            val_loader = val_loader[0]
-
-        val_iter = next(iter(val_loader))
-        # Move batch to device
-        batch = {k: v.to(self.device) for k, v in val_iter.items()}
-
-        # Get target and sequence length
-        target = batch['c_val']
-        batch_size = target.shape[0]
-        max_len = target.shape[1]
-
-        # Start with just START token, rest is zeros (will be filled)
-        generated = torch.full((batch_size, max_len), ConstraintToken.Pad,
-                               device=self.device, dtype=target.dtype)
-        generated[:, 0] = ConstraintToken.Start
-
-        # Autoregressive generation
-        for pos in range(max_len - 1):
-            # Create batch with current generated tokens
-            gen_batch = {
-                'val': batch['val'],
-                'coord': batch['coord'],
-                'pos': batch['pos'],
-                'c_val': generated,
-            }
-
-            # Forward pass
-            output = self.model(gen_batch)  # [B, L, V]
-
-            # Sample next token at position pos
-            next_token_logits = output[:, pos, :]  # [B, V]
-            next_token = torch.distributions.Categorical(logits=next_token_logits).sample()
-
-            # Fill in position pos+1
-            generated[:, pos + 1] = next_token
-
-            # Early stopping if all sequences have generated STOP
-            if (generated == ConstraintToken.Stop).any(dim=1).all():
-                break
-
-        # Compute metrics for validation (loader_idx=0)
-        relevant_idxs = (target != ConstraintToken.Pad)
-        kappa = self.kappa_metric_gen[0]
-        accuracy = self.accuracy_metric_gen[0]
-        iou = self.iou_metric_gen[0]
-        kappa(generated[relevant_idxs], target[relevant_idxs])
-        accuracy(generated[relevant_idxs], target[relevant_idxs])
-        iou(generated, target)
-
-        self.log('validation/kappa_gen', kappa)
-        self.log('validation/accuracy_gen', accuracy)
-        self.log('validation/iou_gen', iou)
-
-        # Print comparison on rank 0
-        if self.global_rank == 0:
-            print("\n" + "="*80)
-            print("AR VALIDATION SAMPLE COMPARISON (rank 0)")
-            print("="*80)
-
-            i = 0
-            def format_seq(tokens):
-                result = []
-                for tok in tokens:
-                    tok_val = int(tok)
-                    if tok_val == ConstraintToken.Pad:
-                        break
-                    elif tok_val == ConstraintToken.Start:
-                        result.append("[START]")
-                    elif tok_val == ConstraintToken.Stop:
-                        result.append("[STOP]")
-                        break
-                    elif tok_val == ConstraintToken.InnerPad:
-                        result.append("[PAD]")
-                    elif tok_val < len(ConstraintToken):
-                        # Constraint type token (Coincident, Parallel, etc.)
-                        result.append(ConstraintToken(tok_val).name)
-                    else:
-                        result.append(f"R{tok_val - len(ConstraintToken)}")
-                return result
-
-            print(f"\n[Sample {i}]:")
-            print(f"  GT  : {format_seq(target[i].cpu().numpy())}")
-            print(f"  Gen : {format_seq(generated[i].cpu().numpy())}")
-            print("="*80 + "\n")
 
     @torch.no_grad()
     def on_test_epoch_end(self):
@@ -370,42 +379,23 @@ class ConstraintARModule(L.LightningModule):
             iou(generated, target)
 
             # Use different names for each loader since on_test_epoch_end is called once
-            fc_suffix = '' if loader_idx == 0 else '_fc'
-            self.log(f'test_gen/kappa{fc_suffix}', kappa, sync_dist=True)
-            self.log(f'test_gen/accuracy{fc_suffix}', accuracy, sync_dist=True)
-            self.log(f'test_gen/iou{fc_suffix}', iou, sync_dist=True)
+            suffix = '' if loader_idx == 0 else '_fc'
+            self.log(f'test_gen/kappa{suffix}', kappa, add_dataloader_idx=False, sync_dist=True)
+            self.log(f'test_gen/accuracy{suffix}', accuracy, add_dataloader_idx=False, sync_dist=True)
+            self.log(f'test_gen/iou{suffix}', iou, add_dataloader_idx=False, sync_dist=True)
 
             # Print samples on rank 0
             if self.global_rank == 0:
                 print("\n" + "="*80)
-                loader_label = 'test' if loader_idx == 0 else 'test_fc'
-                print(f"AR TEST SAMPLE COMPARISON ({loader_label}, rank 0)")
+                print(f"TEST{suffix.upper()} SAMPLE COMPARISON")
                 print("="*80)
 
-                def format_seq(tokens):
-                    result = []
-                    for tok in tokens:
-                        tok_val = int(tok)
-                        if tok_val == ConstraintToken.Pad:
-                            break
-                        elif tok_val == ConstraintToken.Start:
-                            result.append("[START]")
-                        elif tok_val == ConstraintToken.Stop:
-                            result.append("[STOP]")
-                            break
-                        elif tok_val == ConstraintToken.InnerPad:
-                            result.append("[PAD]")
-                        elif tok_val < len(ConstraintToken):
-                            result.append(ConstraintToken(tok_val).name)
-                        else:
-                            result.append(f"R{tok_val - len(ConstraintToken)}")
-                    return result
-
-                for i in range(5):
+                for i in range(min(5, generated.size(0))):
                     print(f"\n[Sample {i}]:")
-                    print(f"  GT  : {format_seq(target[i].cpu().numpy())}")
-                    print(f"  Gen : {format_seq(generated[i].cpu().numpy())}")
-                    print("="*80 + "\n")
+                    print(f"  GT  : {self._format_constraint_sequence(target[i].cpu().numpy())}")
+                    print(f"  Gen : {self._format_constraint_sequence(generated[i].cpu().numpy())}")
+
+                print("="*80 + "\n")
 
             # Solver-based evaluation (rank 0 only)
             if self.global_rank == 0:
@@ -418,5 +408,5 @@ class ConstraintARModule(L.LightningModule):
                         fully_constrained_dof=2,
                     )
                     if solver_results:
-                        print(f"Solver Report ({loader_label}): {solver_results}")
+                        print(f"Solver Report (test{suffix}): {solver_results}")
 

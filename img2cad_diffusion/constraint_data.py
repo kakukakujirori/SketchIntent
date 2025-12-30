@@ -140,6 +140,7 @@ class ConstraintDataset(torch.utils.data.Dataset):
         primitive_noise_config: PrimitiveNoiseConfig | None = None,
         align_constraint_token_length: bool = False,
         use_stop_padding: bool = False,
+        constraint_order: str = "original",
     ):
         """Create a new constraint dataset.
 
@@ -157,6 +158,8 @@ class ConstraintDataset(torch.utils.data.Dataset):
             If True, each constraint uses exactly 4 tokens with InnerPad padding.
         use_stop_padding : bool
             If True, pad constraints with STOP tokens instead of PAD.
+        constraint_order : str
+            Constraint ordering: "original", "sort_by_ref_id", or "random_shuffle".
         """
 
         if primitive_noise_config is None:
@@ -167,6 +170,7 @@ class ConstraintDataset(torch.utils.data.Dataset):
         self.max_length = max_length
         self.align_constraint_token_length = align_constraint_token_length
         self.use_stop_padding = use_stop_padding
+        self.constraint_order = constraint_order
 
         sequence_array = flat_array.load_dictionary_flat(sequence_file)
         if 'sequences' in sequence_array:
@@ -204,6 +208,7 @@ class ConstraintDataset(torch.utils.data.Dataset):
             uniquify_constraint_val_tokens=True,  # NOTE: THIS IS MUST!!! ConstraintMMDModel implicitly assumes the len(ConstraintToken)-offset when doing torch.gather.
             align_constraint_token_length=self.align_constraint_token_length,
             use_stop_padding=self.use_stop_padding,
+            constraint_order=self.constraint_order,
         )
 
         return {
@@ -232,6 +237,8 @@ class ConstraintDataConfig(primitive_data.PrimitiveDataConfig):
     align_constraint_token_length: bool = False
     # Use STOP tokens for tail padding instead of PAD (required for Hungarian matching)
     use_stop_padding: bool = False
+    # Constraint ordering: "original", "sort_by_ref_id", or "random_shuffle"
+    constraint_order: str = "original"
 
 
 class ConstraintDataModule(L.LightningDataModule):
@@ -251,6 +258,7 @@ class ConstraintDataModule(L.LightningDataModule):
     def _load_fc_val_test_indices(self) -> tuple[list[int], list[int]]:
         """Load FC validation indices from cluster JSON file."""
         if self.config.fc_clusters_path is None:
+            print("FC clusters path not specified. Skipping FC validation.")
             return [], []
 
         fc_path = Path(self.config.fc_clusters_path)
@@ -259,6 +267,7 @@ class ConstraintDataModule(L.LightningDataModule):
 
         with open(fc_path, 'r') as f:
             data = json.load(f)
+            print(f"Loaded FC clusters from {fc_path}")
 
         return data.get('selected_for_validation', []), data.get('selected_for_test', [])
 
@@ -269,7 +278,9 @@ class ConstraintDataModule(L.LightningDataModule):
             self.config.max_token_length,
             self.config.primitive_noise,
             self.config.align_constraint_token_length,
-            self.config.use_stop_padding)
+            self.config.use_stop_padding,
+            self.config.constraint_order,
+        )
 
         # Load FC validation indices
         fc_val_indices, fc_test_indices = self._load_fc_val_test_indices()
@@ -309,8 +320,9 @@ class ConstraintDataModule(L.LightningDataModule):
         assert self._valid_dataset is not None
         normal_loader = self._make_dataloader(self._valid_dataset, shuffle=False)
 
-        if self._fc_valid_dataset is not None:
-            fc_loader = self._make_dataloader(self._fc_valid_dataset, shuffle=False)
+        if self._fc_val_dataset is not None and len(self._fc_val_dataset) > 0:
+            fc_loader = self._make_dataloader(self._fc_val_dataset, shuffle=False)
+            print(f"Returning 2 validation dataloaders: normal={len(self._valid_dataset)}, fc={len(self._fc_val_dataset)}")
             return [normal_loader, fc_loader]
 
         return normal_loader
@@ -319,8 +331,9 @@ class ConstraintDataModule(L.LightningDataModule):
         assert self._test_dataset is not None
         normal_loader = self._make_dataloader(self._test_dataset, shuffle=False)
 
-        if self._fc_test_dataset is not None:
+        if self._fc_test_dataset is not None and len(self._fc_test_dataset) > 0:
             fc_loader = self._make_dataloader(self._fc_test_dataset, shuffle=False)
+            print(f"Returning 2 test dataloaders: normal={len(self._test_dataset)}, fc={len(self._fc_test_dataset)}")
             return [normal_loader, fc_loader]
 
         return normal_loader
@@ -333,4 +346,4 @@ class ConstraintDataModule(L.LightningDataModule):
     @property
     def has_fc_validation(self) -> bool:
         """Whether FC validation dataloader is available."""
-        return self._fc_valid_dataset is not None
+        return self._fc_val_dataset is not None and len(self._fc_val_dataset) > 0

@@ -194,12 +194,15 @@ def tokenize_primitives(
 CONSTRAINT_TOKEN_LEN = 4  # [Type, Ref1, Ref2orInnerPad, Ref3orInnerPad]
 
 
+ConstraintOrder = str  # Literal["original", "sort_by_ref_id", "random_shuffle"]
+
+
 def tokenize_constraints(
     sketch: datalib.Sketch,
     gather_map: GatherMap,
     max_length: int | None = None,
     uniquify_val_tokens: bool = True,
-    sort_by_ref_id: bool = False,
+    constraint_order: ConstraintOrder = "original",
     align_token_length: bool = False,
     use_stop_padding: bool = False,
 ) -> SketchTokenSet:
@@ -216,6 +219,9 @@ def tokenize_constraints(
         Entity -> token position mapping from tokenize_primitives.
     max_length : int | None
         Max sequence length.
+    constraint_order : str
+        Constraint ordering: "original" (sequence order), "sort_by_ref_id" (canonical),
+        or "random_shuffle" (random each call).
     align_token_length : bool
         If True, each constraint emits exactly CONSTRAINT_TOKEN_LEN tokens (4),
         padding with InnerPad for unused reference slots.
@@ -317,10 +323,17 @@ def tokenize_constraints(
         parsed_constraints.append((constraint_type, sorted_refs, min_token_pos))
 
     # ==========================================================================
-    # Phase 2: Sort constraints by min_token_pos and emit tokens
+    # Phase 2: Order constraints and emit tokens
     # ==========================================================================
-    if sort_by_ref_id:
+    if constraint_order == "sort_by_ref_id":
         parsed_constraints.sort(key=lambda x: x[2])  # Sort by min_token_pos
+    elif constraint_order == "random_shuffle":
+        import random
+        random.shuffle(parsed_constraints)
+    elif constraint_order == "original":
+        pass
+    else:
+        raise NotImplementedError(f"Unknown constraint_order: {constraint_order}")
 
     val_tokens = [ConstraintToken.Start]
     coord_tokens = [ConstraintParamToken.Type]  # Start token
@@ -395,6 +408,7 @@ def tokenize_sketch(
     uniquify_constraint_val_tokens: bool = True,
     align_constraint_token_length: bool = False,
     use_stop_padding: bool = False,
+    constraint_order: ConstraintOrder = "original",
 ) -> TokenizedSketch:
     """Tokenize a complete sketch (primitives + constraints).
 
@@ -414,6 +428,8 @@ def tokenize_sketch(
         If True, each constraint uses exactly 4 tokens (with InnerPad padding).
     use_stop_padding : bool
         If True, pad constraints with STOP tokens instead of PAD.
+    constraint_order : str
+        Constraint ordering: "original", "sort_by_ref_id", or "random_shuffle".
 
     Returns
     -------
@@ -430,6 +446,7 @@ def tokenize_sketch(
     prim_tokens, gather_map = tokenize_primitives(sketch, num_bins, max_length, uniquify_primitive_val_tokens)
     constr_tokens = tokenize_constraints(
         sketch, gather_map, max_length, uniquify_constraint_val_tokens,
+        constraint_order=constraint_order,
         align_token_length=align_constraint_token_length,
         use_stop_padding=use_stop_padding
     )
