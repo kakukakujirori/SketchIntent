@@ -39,7 +39,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 import sketchgraphs.data as datalib
 from sketchgraphs.data import flat_array, NodeOp, EdgeOp
 
-from img2cad_diffusion.convert_to_freecad import (
+from img2cad_diffusion.convert_sequence_to_freecad import (
     convert_constraint,
     convert_primitive,
     meter_to_millimeter,

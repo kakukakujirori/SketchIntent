@@ -264,22 +264,31 @@ def tokenize_constraints(
             continue
 
         # Get entity references with subnode info
+        # Only LocalReferenceParameter contains entity references
         # param.value can be '10' (entity) or '10.start' (subnode)
         refs: list[tuple[int, str | None]] = []
         for param in constraint.parameters:
-            if not hasattr(param, 'value'):
+            # Only process LocalReferenceParameter - skip QuantityParameter and EnumParameter
+            if type(param).__name__ != 'LocalReferenceParameter':
                 continue
+
             value = param.value
             if not isinstance(value, str):
-                continue
+                raise ValueError(f"LocalReferenceParameter.value should be str, got {type(value)}: {value}")
+
             if '.' in value:
                 parts = value.split('.')
-                assert len(parts) == 2, f"Invalid subnode ref format: {value}"
-                entity_idx = int(parts[0])
-                subnode_name = parts[1]  # 'start', 'end', 'center'
-                assert subnode_name in ('start', 'end', 'center'), f"Unknown subnode name: {subnode_name}"
+                if not parts[0].isdigit():
+                    raise ValueError(f"Unexpected non-numeric reference prefix: {value}")
+                if len(parts) != 2:
+                    raise ValueError(f"Unexpected reference format with {len(parts)} parts: {value}")
+                entity_idx, subnode_name = int(parts[0]), parts[1]
+                if subnode_name not in ('start', 'end', 'center'):
+                    raise ValueError(f"Unknown subnode name: {subnode_name} in {value}")
                 refs.append((entity_idx, subnode_name))
             else:
+                if not value.isdigit():
+                    raise ValueError(f"LocalReferenceParameter.value should be numeric, got: {value}")
                 entity_idx = int(value)
                 refs.append((entity_idx, None))
 

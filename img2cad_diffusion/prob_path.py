@@ -113,8 +113,6 @@ class MaskProbPath:
         self,
         p_x0: torch.Tensor,
         masks: torch.Tensor,
-        conf: torch.Tensor | None,
-        step: int,
         x0: torch.Tensor,
         fixed_tokens: torch.Tensor | None,
     ):
@@ -135,9 +133,7 @@ class MaskProbPath:
         self,
         p_x0: torch.Tensor,
         masks: torch.Tensor,
-        conf: torch.Tensor | None,
         k: int,
-        step: int,
         x0: torch.Tensor,
         fixed_tokens: torch.Tensor | None,
     ) -> torch.Tensor:
@@ -148,7 +144,7 @@ class MaskProbPath:
         # p_x0: [B, L, V]
         # masks: [B, L] (True if masked)
 
-        token_score = self._score_tokens(p_x0, masks, conf, step, x0, fixed_tokens)
+        token_score = self._score_tokens(p_x0, masks, x0, fixed_tokens)
 
         # k is target number of clean tokens
         # We want to select indices to be CLEAN.
@@ -179,7 +175,6 @@ class MaskProbPath:
         masks = (x == self.mask_index)
 
         p_x0, logits = self._compute_model_outputs(batch, sigma_t)
-        conf = None
 
         # Nucleus sampling for x0 prediction
         if self.nucleus_p < 1.0:
@@ -195,7 +190,7 @@ class MaskProbPath:
             x0_theta = _sample_categorical(p_x0)
 
         # Select k tokens to be clean
-        clean_token_filter = self._select_k_tokens(p_x0, masks, conf, k, step, x0_theta, fixed_tokens)
+        clean_token_filter = self._select_k_tokens(p_x0, masks, k, x0_theta, fixed_tokens)
 
         # Update x: where filter is True (keep clean), use predicted x0; else mask
         x_next = torch.where(clean_token_filter, x0_theta, self.mask_index)

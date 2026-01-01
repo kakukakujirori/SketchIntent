@@ -433,10 +433,21 @@ def convert_constraint(op: EdgeOp, sketch, node_idx_map):
             if r1 and r2 and r1[0] != -1 and r2[0] != -1:
                 # Case 1: Three-point Midpoint -> Symmetric
                 if r3 and r3[0] != -1:
-                    # Midpoint(A, B, C) semantics: A is the midpoint of B and C
-                    # Tokenization preserves this order (first ref is midpoint, rest are sorted)
-                    # So r1 is always the midpoint, r2 and r3 are the symmetric points
-                    mid_ref, p1_ref, p2_ref = r1, r2, r3
+                    # Determine which reference is the midpoint based on geometry types
+                    # If r2 or r3 reference Line geometry (vertex 1 or 2 from a LineSegment), r1 is midpoint
+                    # If all are Point geometries, r3 is the midpoint
+                    geo_r2 = sketch.Geometry[r2[0]] if r2[0] >= 0 else None
+                    geo_r3 = sketch.Geometry[r3[0]] if r3[0] >= 0 else None
+
+                    r2_is_line_vertex = geo_r2 is not None and isinstance(geo_r2, Part.LineSegment)
+                    r3_is_line_vertex = geo_r3 is not None and isinstance(geo_r3, Part.LineSegment)
+
+                    if r2_is_line_vertex or r3_is_line_vertex:
+                        # r1 is midpoint, r2 and r3 are the symmetric points (Line vertices case)
+                        mid_ref, p1_ref, p2_ref = r1, r2, r3
+                    else:
+                        # All are Point geometries, r3 is the midpoint
+                        mid_ref, p1_ref, p2_ref = r3, r1, r2
 
                     sketch.addConstraint(Sketcher.Constraint('Symmetric', p1_ref[0], p1_ref[1], p2_ref[0], p2_ref[1], mid_ref[0], mid_ref[1]))
                     cmd = f"sketch.addConstraint(Sketcher.Constraint('Symmetric', {p1_ref[0]}, {p1_ref[1]}, {p2_ref[0]}, {p2_ref[1]}, {mid_ref[0]}, {mid_ref[1]}))"
@@ -896,7 +907,7 @@ def draw_svg(doc, sketch, output_svg_path: str, debug: bool = False):
         print(f"SVG exported to {output_svg_path}")
 
 
-def process_sequence(
+def convert_sequence_to_freecad(
     seq: list[NodeOp | EdgeOp],
     output_py_path: str = "sketch_history.py",
     output_svg_path: str = "sketch_export.svg",
@@ -977,9 +988,12 @@ if __name__ == '__main__':
 
     for i, seq in enumerate(tqdm(seq_data['sequences'])):
 
-        if os.path.isfile(f"{output_dir}/{i}.svg"):
-            print(f"{output_dir}/{i}.svg already exists. Skipping...")
-            continue
+        if 100 <= i:
+            break
+
+        # if os.path.isfile(f"{output_dir}/{i}.svg"):
+        #     print(f"{output_dir}/{i}.svg already exists. Skipping...")
+        #     continue
 
         sketch = datalib.sketch_from_sequence(seq)
         fig = datalib.render_sketch(sketch)
@@ -987,7 +1001,7 @@ if __name__ == '__main__':
         plt.close(fig)
 
         try:
-            process_sequence(
+            convert_sequence_to_freecad(
                 seq,
                 output_py_path=f"{output_dir}/{i}.py",
                 output_svg_path=f"{output_dir}/{i}.svg",
@@ -997,10 +1011,3 @@ if __name__ == '__main__':
             with open(error_log, "a") as f:
                 f.write(f"Error processing sequence {i}: {e}\n\n")
             continue
-
-
-    # seq = seq_data['sequences'][20]
-    # sketch = datalib.sketch_from_sequence(seq)
-    # fig = datalib.render_sketch(sketch)
-    # fig.savefig('sketch_gt.svg')
-    # process_sequence(seq, debug=True)

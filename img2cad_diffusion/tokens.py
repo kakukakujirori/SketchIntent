@@ -47,6 +47,7 @@ class ConstraintToken(enum.IntEnum):
     Mask = SpecialToken.Mask  # References shared constant
     Start = 2
     Stop = 3
+    # Geometric constraints (no numerical parameters)
     Coincident = 4
     Concentric = 5
     Equal = 6
@@ -60,7 +61,14 @@ class ConstraintToken(enum.IntEnum):
     Quadrant = 14
     Tangent = 15
     Vertical = 16
-    InnerPad = 17  # Padding within fixed-length constraint blocks (loss computed)
+    # Dimension constraints (numerical parameters not tokenized, only references)
+    Angle = 17
+    Diameter = 18
+    Distance = 19
+    Length = 20
+    Radius = 21
+    # Special tokens
+    InnerPad = 22  # Padding within fixed-length constraint blocks (loss computed)
 
 
 # Mapping from constraint type to acceptable number of references
@@ -83,6 +91,13 @@ CONSTRAINT_ACCEPTABLE_REF_COUNTS: dict[ConstraintToken, set[int]] = {
     ConstraintToken.Quadrant: {2},
     ConstraintToken.Tangent: {2},
     ConstraintToken.Vertical: {1, 2},    # Can be 1 (line) or 2 (two points)
+    # Dimension constraints
+    ConstraintToken.Angle: {2},          # Two lines/edges
+    ConstraintToken.Diameter: {1},       # Circle or arc
+    ConstraintToken.Distance: {1, 2},    # 1 (line length) or 2 (point-point, point-line, line-line)
+    ConstraintToken.Length: {1},         # Line
+    ConstraintToken.Radius: {1},         # Circle or arc
+    # Special tokens
     ConstraintToken.InnerPad: {0},
 }
 

@@ -23,7 +23,7 @@ from sketchgraphs.data import flat_array, sketch_from_sequence
 import sketchgraphs.data as datalib
 
 # Import our converter
-from img2cad_diffusion.convert_to_freecad import process_sequence, meter_to_millimeter, resolve_subnodes, resolve_redundant_coincident, resolve_tangent, convert_primitive, convert_constraint
+from img2cad_diffusion.convert_sequence_to_freecad import convert_sequence_to_freecad, meter_to_millimeter, resolve_subnodes, resolve_redundant_coincident, resolve_tangent, convert_primitive, convert_constraint
 
 def create_sketch_from_sequence(seq):
     """Create FreeCAD sketch from SketchGraphs sequence and return sketch object."""

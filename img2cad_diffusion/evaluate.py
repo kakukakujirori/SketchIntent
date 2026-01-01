@@ -15,7 +15,7 @@ from torch.utils.data import DataLoader
 
 from img2cad_diffusion import constraint_models, constraint_data, primitive_data, convert_to_freecad
 from img2cad_diffusion.constraint_data import Token, detokenize_constraints
-from img2cad_diffusion.convert_to_freecad import draw_svg
+from img2cad_diffusion.convert_sketch_to_freecad import draw_svg
 
 import FreeCAD
 import sketchgraphs.data as datalib

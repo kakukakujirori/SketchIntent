@@ -31,14 +31,7 @@ except ImportError:
 import sketchgraphs.data as datalib
 
 from .detokenization import reconstruct_sketch
-from .convert_to_freecad import (
-    meter_to_millimeter,
-    resolve_subnodes,
-    resolve_redundant_coincident,
-    resolve_tangent,
-    convert_primitive,
-    convert_constraint,
-)
+from .convert_sketch_to_freecad import convert_sketch_to_freecad
 
 
 class SolverStatus(TypedDict):
@@ -80,38 +73,15 @@ def tokens_to_freecad_sketch(
     # Step 1: Tokens → Sketch (SketchGraphs format)
     sketch = reconstruct_sketch(prim_tokens, cons_tokens, num_bins)
 
-    # Step 2: Sketch → Sequence (NodeOp/EdgeOp list)
-    seq = datalib.sketch_to_sequence(sketch)
+    # Step 2: Sketch → FreeCAD (direct conversion)
+    # May raise ValueError for degenerate primitives caused by quantization
+    try:
+        doc, fc_sketch, history_commands = convert_sketch_to_freecad(sketch, doc_name="SolverEval")
+    except Exception as e:
+        # Log the error for debugging, return None to indicate conversion failure
+        print(f"[tokens_to_freecad_sketch] Conversion failed: {e}")
+        return None, None
 
-    # Step 3: Sequence → FreeCAD sketch
-    doc = FreeCAD.newDocument("SolverEval")
-    body = doc.addObject('PartDesign::Body', 'Body')
-    fc_sketch = body.newObject('Sketcher::SketchObject', 'Sketch')
-    xy_plane = body.Origin.OriginFeatures[3]
-    fc_sketch.AttachmentSupport = xy_plane
-    fc_sketch.MapMode = 'FlatFace'
-
-    # Rescale and preprocess
-    seq = [meter_to_millimeter(op, False) for op in seq]
-    node_idx_map = resolve_subnodes(seq)
-    seq = resolve_redundant_coincident(seq, node_idx_map, False)
-    seq = resolve_tangent(seq, node_idx_map)
-
-    # Generate geometry and constraints
-    for op in seq:
-
-        if isinstance(op, datalib.NodeOp):
-            try:
-                convert_primitive(op, fc_sketch)
-            except Part.OCCError as e:
-                print(f"[tokens_to_freecad_sketch] Failed to instantiate a primitive: {e}")
-                FreeCAD.closeDocument(doc.Name)
-                return None, None
-
-        elif isinstance(op, datalib.EdgeOp):
-            convert_constraint(op, fc_sketch, node_idx_map)
-
-    doc.recompute()
     return doc, fc_sketch
 
 
