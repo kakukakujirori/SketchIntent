@@ -67,6 +67,10 @@ class PrimitiveDataConfig:
         Fraction of data to use as test set.
     permute_entities : bool
         If `True`, indicates that entity order should be permuted in the primitive dataset.
+    batch_size : int
+        Batch size for data loading.
+    num_data_workers : int
+        Number of workers for data loading.
     """
     num_position_bins: int = 64
     sequence_path: str = 'data_processed/sg_filtered_unique.npy'
@@ -75,6 +79,8 @@ class PrimitiveDataConfig:
     validation_fraction: float | None = 0.025
     test_fraction: float | None = 0.05
     permute_entities: bool = False
+    batch_size: int = 128
+    num_data_workers: int = 8
 
 
 # =============================================================================
@@ -351,12 +357,12 @@ def cache_data_if_needed(sequence_path: os.PathLike, num_position_bins: int) -> 
 class PrimitiveDataModule(L.LightningDataModule):
     """This class provides a wrapper over `PrimitiveDataset` to handle data loading."""
 
-    def __init__(self, config: PrimitiveDataConfig, batch_size: int = 128, num_workers: int = 8):
+    def __init__(self, config: PrimitiveDataConfig):
         super().__init__()
 
         self.config = config
-        self.batch_size = batch_size
-        self.num_workers = num_workers
+        self.batch_size = config.batch_size
+        self.num_workers = config.num_data_workers
 
         self._dataset = None
         self._train_dataset = None

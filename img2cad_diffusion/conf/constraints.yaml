@@ -1,11 +1,14 @@
 # @package _global_
 
 model:
-  model_type: mdd  # "ar" or "mdd"
-  num_heads: 8
-  num_layers: 12
-  hidden_size: 384
-  embedding_dimension: 256
+  use_hungarian_loss: False  # Use Hungarian matching for order-agnostic training
+  constraint_blockwise_masking: True  # masking operation is not tokenwise but constraint-wise (only applicable to MDD)
+  net:
+    model_type: mdd  # "ar" or "mdd"
+    num_heads: 8
+    num_layers: 12
+    hidden_size: 384
+    embedding_dimension: 256
 
 optim:
   learning_rate: 3e-4 #3e-5
@@ -25,15 +28,18 @@ data:
   align_constraint_token_length: True  # If True, each constraint uses exactly 4 tokens
   use_stop_padding: False  # If True, pad with STOP tokens (required for Hungarian matching)
   constraint_order: original  # "original", "sort_by_ref_id", or "random_shuffle"
+  batch_size: 384
+  num_data_workers: 32
+
+sampling:
+  steps: 64
+  method: tau_leaping
 
 mixed_precision: True
-batch_size: 384
 num_gpus: 2
 training_seed: 42  # Seed for training randomness (model init, dropout, etc.)
 
 max_epochs: 30
-num_data_workers: 32
-use_hungarian_loss: False  # Use Hungarian matching for order-agnostic training
 
 # test_only: true
 # checkpoint_path: outputs/2025-12-28/23-38-22/lightning_logs/version_0/checkpoints/epoch_29.ckpt

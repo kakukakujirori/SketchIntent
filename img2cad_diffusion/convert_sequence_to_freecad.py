@@ -431,23 +431,99 @@ def convert_constraint(op: EdgeOp, sketch, node_idx_map):
             r3 = node_idx_map.get(refs[2]) if len(refs) > 2 else None
 
             if r1 and r2 and r1[0] != -1 and r2[0] != -1:
-                # Case 1: Three-point Midpoint -> Symmetric
                 if r3 and r3[0] != -1:
-                    # Determine which reference is the midpoint based on geometry types
-                    # If r2 or r3 reference Line geometry (vertex 1 or 2 from a LineSegment), r1 is midpoint
-                    # If all are Point geometries, r3 is the midpoint
-                    geo_r2 = sketch.Geometry[r2[0]] if r2[0] >= 0 else None
-                    geo_r3 = sketch.Geometry[r3[0]] if r3[0] >= 0 else None
+                    # SketchGraphs Midpoint(r1, r2, r3) logic is not always (Mid, P1, P2)
+                    # We must determine which reference is the semantic midpoint (symmetry center).
+                    # Strategy:
+                    # 1. Geometric Check: Calculate coords and see which point is physically the midpoint.
+                    # 2. Heuristic: If one ref is a Point Entity and others are Line Vertices, Point is Midpoint.
 
-                    r2_is_line_vertex = geo_r2 is not None and isinstance(geo_r2, Part.LineSegment)
-                    r3_is_line_vertex = geo_r3 is not None and isinstance(geo_r3, Part.LineSegment)
+                    def get_coords_3d(ref):
+                        gid, pid = ref
+                        if gid < 0: return None
+                        try:
+                            # sketch.Geometry is accessible here
+                            if gid >= len(sketch.Geometry): return None
+                            geo = sketch.Geometry[gid]
+                        except:
+                            return None
 
-                    if r2_is_line_vertex or r3_is_line_vertex:
-                        # r1 is midpoint, r2 and r3 are the symmetric points (Line vertices case)
-                        mid_ref, p1_ref, p2_ref = r1, r2, r3
+                        # Handle Geometry Types
+                        if isinstance(geo, Part.Point):
+                            return (geo.X, geo.Y, 0.0)
+                        elif isinstance(geo, (Part.LineSegment, Part.Line)):
+                            # pid=1:Start, pid=2:End, pid=3:Center, pid=0:Edge(Use Center)
+                            if pid == 2: # End
+                                v = geo.EndPoint
+                                return (v.x, v.y, v.z)
+                            else: # Start (1) or Center (3) or Edge (0)
+                                if pid == 3 or pid == 0:
+                                    v = (geo.StartPoint + geo.EndPoint) * 0.5
+                                else:
+                                    v = geo.StartPoint
+                                return (v.x, v.y, v.z)
+                        elif isinstance(geo, (Part.Circle, Part.ArcOfCircle)):
+                            if pid == 1 and hasattr(geo, 'StartPoint'): v = geo.StartPoint
+                            elif pid == 2 and hasattr(geo, 'EndPoint'): v = geo.EndPoint
+                            else: v = geo.Center
+                            return (v.x, v.y, v.z)
+                        return None
+
+                    # Check permutations
+                    candidates = [(r1, r2, r3), (r2, r1, r3), (r3, r1, r2)]
+                    best_perm = None
+                    min_err = 1e9
+
+                    for mid, p1, p2 in candidates:
+                        cm = get_coords_3d(mid)
+                        c1 = get_coords_3d(p1)
+                        c2 = get_coords_3d(p2)
+
+                        if cm and c1 and c2:
+                            mid_calc_x = (c1[0] + c2[0]) * 0.5
+                            mid_calc_y = (c1[1] + c2[1]) * 0.5
+                            # Dist
+                            err = ((cm[0]-mid_calc_x)**2 + (cm[1]-mid_calc_y)**2)**0.5
+                            if err < min_err:
+                                min_err = err
+                                best_perm = (mid, p1, p2)
+
+                    # Selection
+                    mid_ref, p1_ref, p2_ref = None, None, None
+
+                    # Threshold for geometric match (0.1mm)
+                    if best_perm and min_err < 0.1:
+                        mid_ref, p1_ref, p2_ref = best_perm
                     else:
-                        # All are Point geometries, r3 is the midpoint
-                        mid_ref, p1_ref, p2_ref = r3, r1, r2
+                        # Fallback Heuristic: Point Entity Preference
+                        pt_indices = []
+                        geos = [sketch.Geometry[r[0]] if r[0]>=0 and r[0]<len(sketch.Geometry) else None for r in [r1, r2, r3]]
+                        for i, g in enumerate(geos):
+                            if isinstance(g, Part.Point):
+                                pt_indices.append(i)
+
+                        if len(pt_indices) == 1:
+                            idx = pt_indices[0]
+                            if idx == 0: mid_ref, p1_ref, p2_ref = r1, r2, r3
+                            elif idx == 1: mid_ref, p1_ref, p2_ref = r2, r1, r3
+                            else: mid_ref, p1_ref, p2_ref = r3, r1, r2
+                        else:
+                            # Default fallback: Use r1 as midpoint (SketchGraphs data mapping default?)
+                            # Originally we tried r1. But Sample 314 showed r2 could be midpoint.
+                            # Without geometry, r1 is the best guess.
+                            mid_ref, p1_ref, p2_ref = r1, r2, r3
+
+                    # Add Constraint
+                    # For FreeCAD Symmetric:
+                    # - pos_line=0: Line Symmetry (Reflection).
+                    # - pos_line>0: Point Symmetry (Midpoint).
+                    # If our mid_ref is a Point Entity (pos=1), passing 1 gives Point Symmetry. Correct.
+                    geo_mid = sketch.Geometry[mid_ref[0]] if mid_ref[0] >= 0 else None
+                    if isinstance(geo_mid, Part.Point):
+                        # Point entity as symmetry center.
+                        # FreeCAD supports this if we pass the point position (1).
+                        # Previously this was skipped, but it is valid for Point Symmetry.
+                        pass
 
                     sketch.addConstraint(Sketcher.Constraint('Symmetric', p1_ref[0], p1_ref[1], p2_ref[0], p2_ref[1], mid_ref[0], mid_ref[1]))
                     cmd = f"sketch.addConstraint(Sketcher.Constraint('Symmetric', {p1_ref[0]}, {p1_ref[1]}, {p2_ref[0]}, {p2_ref[1]}, {mid_ref[0]}, {mid_ref[1]}))"
@@ -464,17 +540,16 @@ def convert_constraint(op: EdgeOp, sketch, node_idx_map):
 
                     if c_ref:
                         # Found Point-Curve pair
-                        # Apply Symmetric constraint: Point is symmetric between Curve.Start(1) and Curve.End(2)
-                        sketch.addConstraint(Sketcher.Constraint('Symmetric', c_ref[0], 1, c_ref[0], 2, p_ref[0], p_ref[1]))
-                        cmd_lines = [f"sketch.addConstraint(Sketcher.Constraint('Symmetric', {c_ref[0]}, 1, {c_ref[0]}, 2, {p_ref[0]}, {p_ref[1]}))"]
-
-                        # If Curve is Arc, also add PointOnObject to ensure it lies on the arc
                         geo_type = sketch.Geometry[c_ref[0]]
-                        if isinstance(geo_type, Part.ArcOfCircle):
-                            sketch.addConstraint(Sketcher.Constraint('PointOnObject', p_ref[0], p_ref[1], c_ref[0]))
-                            cmd_lines.append(f"sketch.addConstraint(Sketcher.Constraint('PointOnObject', {p_ref[0]}, {p_ref[1]}, {c_ref[0]}))")
 
-                        cmd = "\n".join(cmd_lines)
+                        if isinstance(geo_type, Part.ArcOfCircle):
+                            # For Arc: Midpoint along arc curve cannot be expressed in FreeCAD
+                            # without additional geometry or dimension constraints - skip
+                            cmd = f"# Skipped Midpoint on Arc (not expressible in FreeCAD)"
+                        else:
+                            # For Line: Symmetric constraint gives linear midpoint
+                            sketch.addConstraint(Sketcher.Constraint('Symmetric', c_ref[0], 1, c_ref[0], 2, p_ref[0], p_ref[1]))
+                            cmd = f"sketch.addConstraint(Sketcher.Constraint('Symmetric', {c_ref[0]}, 1, {c_ref[0]}, 2, {p_ref[0]}, {p_ref[1]}))  # Midpoint"
                     else:
                         cmd = f"# Skipped ConstraintType.Midpoint: References not Point-Curve pair or Triple Points ({r1=}, {r2=}, {r3=})"
             else:
@@ -988,8 +1063,11 @@ if __name__ == '__main__':
 
     for i, seq in enumerate(tqdm(seq_data['sequences'])):
 
-        if 100 <= i:
+        if 1000 <= i:
             break
+
+        # if i != 224:
+        #     continue
 
         # if os.path.isfile(f"{output_dir}/{i}.svg"):
         #     print(f"{output_dir}/{i}.svg already exists. Skipping...")

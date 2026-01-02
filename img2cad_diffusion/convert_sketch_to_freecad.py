@@ -430,6 +430,7 @@ def _resolve_tangent(
 def _resolve_redundant_coincident(
     constraints: dict[str, datalib.Constraint],
     entity_to_geoid: dict[int, int],
+    entities: dict,
 ) -> set[str]:
     """Detect and return IDs of redundant Coincident constraints to skip.
 
@@ -469,7 +470,13 @@ def _resolve_redundant_coincident(
                             base_idx = int(ref_str)
                             if base_idx in entity_to_geoid:
                                 geo_id = entity_to_geoid[base_idx]
-                                refs_parsed.append((geo_id, 0))
+                                # Point entity (no subnode) should use pt_id=1, not 0
+                                # Note: entities keys are str, base_idx is int
+                                entity = entities.get(str(base_idx)) or entities.get(base_idx)
+                                if entity is not None and type(entity).__name__ == 'Point':
+                                    refs_parsed.append((geo_id, 1))
+                                else:
+                                    refs_parsed.append((geo_id, 0))
                         except ValueError:
                             pass
 
@@ -496,11 +503,11 @@ def _resolve_redundant_coincident(
                 best_entry = (pt1, pt2, cid)
                 break
 
-        # If no Point-Point found, just keep the first
+        # If no Point-Point found, keep ALL PointOnObject constraints (matching sequence behavior)
         if best_entry is None:
-            best_entry = entries[0]
+            continue  # Don't skip any
 
-        # Skip all entries except the best
+        # Skip all entries except the best (Point-Point)
         for pt1, pt2, cid in entries:
             if cid != best_entry[2]:
                 skip_coincident_ids.add(cid)
@@ -540,6 +547,9 @@ def _add_constraint(
             if r1 and r2:
                 if r1[0] == -1 or r2[0] == -1:
                     cmd = f"# Skipped External Coincident"
+                elif r1[0] == r2[0]:
+                    # Same geometry - point on own edge is tautological
+                    cmd = f"# Skipped self-referencing Coincident (geo {r1[0]})"
                 elif r1[1] == 0 and r2[1] == 0:
                     cmd = f"# Skipped Edge-Edge Coincident"
                 elif r1[1] == 0:  # r1 is Edge, r2 is Point
@@ -632,21 +642,90 @@ def _add_constraint(
             if r1 and r2:
                 if r3:
                     # Three-point: symmetric constraint
-                    # Determine which reference is the midpoint based on geometry types
-                    # If r2 or r3 reference Line geometry (vertex 1 or 2 from a LineSegment), r1 is midpoint
-                    # If all are Point geometries, r3 is the midpoint
-                    geo_r2 = fc_sketch.Geometry[r2[0]] if r2[0] >= 0 else None
-                    geo_r3 = fc_sketch.Geometry[r3[0]] if r3[0] >= 0 else None
+                    # SketchGraphs Midpoint(r1, r2, r3) logic is not always (Mid, P1, P2)
+                    # We must determine which reference is the semantic midpoint (symmetry center).
 
-                    r2_is_line_vertex = geo_r2 is not None and isinstance(geo_r2, Part.LineSegment)
-                    r3_is_line_vertex = geo_r3 is not None and isinstance(geo_r3, Part.LineSegment)
+                    def get_coords_3d(ref):
+                        gid, pid = ref
+                        if gid < 0: return None
+                        try:
+                            # fc_sketch.Geometry is accessible here
+                            if gid >= len(fc_sketch.Geometry): return None
+                            geo = fc_sketch.Geometry[gid]
+                        except:
+                            return None
 
-                    if r2_is_line_vertex or r3_is_line_vertex:
-                        # r1 is midpoint, r2 and r3 are the symmetric points (Line vertices case)
-                        mid_ref, p1_ref, p2_ref = r1, r2, r3
+                        # Handle Geometry Types
+                        if isinstance(geo, Part.Point):
+                            return (geo.X, geo.Y, 0.0)
+                        elif isinstance(geo, (Part.LineSegment, Part.Line)):
+                            # pid=1:Start, pid=2:End, pid=3:Center, pid=0:Edge(Use Center)
+                            if pid == 2: # End
+                                v = geo.EndPoint
+                                return (v.x, v.y, v.z)
+                            else: # Start (1) or Center (3) or Edge (0)
+                                if pid == 3 or pid == 0:
+                                    v = (geo.StartPoint + geo.EndPoint) * 0.5
+                                else:
+                                    v = geo.StartPoint
+                                return (v.x, v.y, v.z)
+                        elif isinstance(geo, (Part.Circle, Part.ArcOfCircle)):
+                            if pid == 1 and hasattr(geo, 'StartPoint'): v = geo.StartPoint
+                            elif pid == 2 and hasattr(geo, 'EndPoint'): v = geo.EndPoint
+                            else: v = geo.Center
+                            return (v.x, v.y, v.z)
+                        return None
+
+                    # Check permutations
+                    candidates = [(r1, r2, r3), (r2, r1, r3), (r3, r1, r2)]
+                    best_perm = None
+                    min_err = 1e9
+
+                    for mid, p1, p2 in candidates:
+                        cm = get_coords_3d(mid)
+                        c1 = get_coords_3d(p1)
+                        c2 = get_coords_3d(p2)
+
+                        if cm and c1 and c2:
+                            mid_calc_x = (c1[0] + c2[0]) * 0.5
+                            mid_calc_y = (c1[1] + c2[1]) * 0.5
+                            # Dist
+                            err = ((cm[0]-mid_calc_x)**2 + (cm[1]-mid_calc_y)**2)**0.5
+                            if err < min_err:
+                                min_err = err
+                                best_perm = (mid, p1, p2)
+
+                    # Selection
+                    mid_ref, p1_ref, p2_ref = None, None, None
+
+                    # Threshold for geometric match (0.1mm)
+                    if best_perm and min_err < 0.1:
+                        mid_ref, p1_ref, p2_ref = best_perm
                     else:
-                        # All are Point geometries, r3 is the midpoint
-                        mid_ref, p1_ref, p2_ref = r3, r1, r2
+                        # Fallback Heuristic: Point Entity Preference
+                        pt_indices = []
+                        geos = [fc_sketch.Geometry[r[0]] if r[0]>=0 and r[0]<len(fc_sketch.Geometry) else None for r in [r1, r2, r3]]
+                        for i, g in enumerate(geos):
+                            if isinstance(g, Part.Point):
+                                pt_indices.append(i)
+
+                        if len(pt_indices) == 1:
+                            idx = pt_indices[0]
+                            if idx == 0: mid_ref, p1_ref, p2_ref = r1, r2, r3
+                            elif idx == 1: mid_ref, p1_ref, p2_ref = r2, r1, r3
+                            else: mid_ref, p1_ref, p2_ref = r3, r1, r2
+                        else:
+                            # Default fallback
+                            mid_ref, p1_ref, p2_ref = r1, r2, r3
+
+                    # Add Constraint
+                    # For FreeCAD Symmetric:
+                    # - pos_line=0: Line Symmetry (Reflection).
+                    # - pos_line>0: Point Symmetry (Midpoint).
+                    geo_mid = fc_sketch.Geometry[mid_ref[0]] if mid_ref[0] >= 0 else None
+                    if isinstance(geo_mid, Part.Point):
+                        # Point entity as symmetry center. Supported.
+                        pass
 
                     fc_sketch.addConstraint(Sketcher.Constraint('Symmetric', p1_ref[0], p1_ref[1], p2_ref[0], p2_ref[1], mid_ref[0], mid_ref[1]))
                     cmd = f"fc_sketch.addConstraint(Sketcher.Constraint('Symmetric', {p1_ref[0]}, {p1_ref[1]}, {p2_ref[0]}, {p2_ref[1]}, {mid_ref[0]}, {mid_ref[1]}))"
@@ -656,8 +735,16 @@ def _add_constraint(
                         c_ref, p_ref = r1, r2
                     else:
                         c_ref, p_ref = r2, r1
-                    fc_sketch.addConstraint(Sketcher.Constraint('Symmetric', c_ref[0], 1, c_ref[0], 2, p_ref[0], p_ref[1]))
-                    cmd = f"fc_sketch.addConstraint(Sketcher.Constraint('Symmetric', {c_ref[0]}, 1, {c_ref[0]}, 2, {p_ref[0]}, {p_ref[1]}))  # Midpoint"
+
+                    geo_type = fc_sketch.Geometry[c_ref[0]]
+                    if isinstance(geo_type, Part.ArcOfCircle):
+                        # For Arc: Midpoint along arc curve cannot be expressed in FreeCAD
+                        # without additional geometry or dimension constraints - skip
+                        cmd = f"# Skipped Midpoint on Arc (not expressible in FreeCAD)"
+                    else:
+                        # For Line: Symmetric constraint gives linear midpoint
+                        fc_sketch.addConstraint(Sketcher.Constraint('Symmetric', c_ref[0], 1, c_ref[0], 2, p_ref[0], p_ref[1]))
+                        cmd = f"fc_sketch.addConstraint(Sketcher.Constraint('Symmetric', {c_ref[0]}, 1, {c_ref[0]}, 2, {p_ref[0]}, {p_ref[1]}))  # Midpoint"
 
         # ===== Dimension Constraints =====
         elif ctype == 'Distance':
@@ -873,17 +960,19 @@ def convert_sketch_to_freecad(
         history_commands.append(cmd)
 
     # Step 1.5: Pre-process Tangent+Coincident pairs
+    # Sequence converter uses resolve_tangent to convert Tangent refs and disable paired Coincident
     skip_coincident_ids, resolved_tangent_refs = _resolve_tangent(sketch.constraints, entity_to_geoid, sketch.entities)
 
     # Step 1.6: Detect redundant Coincident constraints (PointOnObject vs Point-Point for same geo pair)
-    skip_redundant_ids = _resolve_redundant_coincident(sketch.constraints, entity_to_geoid)
+    # Sequence converter uses this to skip point-edge when point-point exists for same geo pair
+    skip_redundant_ids = _resolve_redundant_coincident(sketch.constraints, entity_to_geoid, sketch.entities)
     skip_coincident_ids.update(skip_redundant_ids)
 
     # Step 2: Add constraints
     for constraint_id, constraint in sketch.constraints.items():
-        # Skip Coincident constraints that are handled by Tangent resolution or are redundant
+        # Skip Coincident constraints that are handled by Tangent resolution
         if constraint_id in skip_coincident_ids:
-            history_commands.append(f"# Skipped Coincident (redundant or handled by Tangent): {constraint_id}")
+            history_commands.append(f"# Skipped Coincident (handled by Tangent): {constraint_id}")
             continue
         cmd = _add_constraint(constraint, constraint_id, fc_sketch, entity_to_geoid, sketch.entities, resolved_tangent_refs)
         history_commands.append(cmd)
@@ -1077,8 +1166,11 @@ if __name__ == '__main__':
 
     for i, seq in enumerate(tqdm(seq_data['sequences'])):
 
-        if 102 <= i:
+        if 1200 <= i:
             break
+
+        # if i != 314:
+        #     continue
 
         # if os.path.isfile(f"{output_dir}/{i}.svg"):
         #     print(f"{output_dir}/{i}.svg already exists. Skipping...")

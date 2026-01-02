@@ -135,14 +135,14 @@ class ConstraintARModule(L.LightningModule):
         return result
 
     def configure_optimizers(self):
-        base_lr = self.hparams.optim.learning_rate * self.hparams.batch_size / 128
+        base_lr = self.hparams.optim.learning_rate * self.hparams.data.batch_size / 128
 
         optim = torch.optim.AdamW(self.model.parameters(), lr=base_lr)
 
         if self.hparams.data.dataset_size is None:
             raise ValueError('config.data.dataset_size must be specified to create optimizers!')
 
-        steps_per_epoch = (self.hparams.data.dataset_size + self.hparams.batch_size - 1) // self.hparams.batch_size
+        steps_per_epoch = (self.hparams.data.dataset_size + self.hparams.data.batch_size - 1) // self.hparams.data.batch_size
 
         scheduler = torch.optim.lr_scheduler.OneCycleLR(
             optim,

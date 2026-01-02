@@ -104,10 +104,11 @@ def reconstruct_primitives(tokens, num_bins: int) -> datalib.Sketch:
         ent_params = sketch_utils.dequantize_params(ent_params, num_bins)
         ent_params = ent_params.tolist()
         ent = sketch_utils.entity_from_params(ent_params, clockwise=clockwise)
+        entity_id = str(idx + 1)  # 1-based entity ID
         if ent is not None:
-            ent.entityId = str(idx + 1)
+            ent.entityId = entity_id
             ent.isConstruction = isConstruction
-        sketch.entities[str(idx)] = ent
+        sketch.entities[entity_id] = ent  # Key matches entityId (1-based)
     return sketch
 
 
@@ -263,11 +264,18 @@ def reconstruct_sketch(
     # Reconstruct constraints
     constraint_list = reconstruct_constraints(c_val_tokens)
 
+
     # Subnode slot to subnode name mapping
+    # Slot corresponds to param token offset from entity type token.
+    # Constraint refs only use X coordinate slots (tokenize_constraints uses StartX, EndX, CenterX).
+    # Y coordinate slots should NOT appear - if they do, it's a bug.
+    # For Line: params = [StartX, StartY, EndX, EndY] → slot 1=start, slot 3=end
+    # For Arc: params = [CenterX, CenterY, StartX, StartY, EndX, EndY] → slot 1=center, 3=start, 5=end
+    # For Circle: params = [CenterX, CenterY, Radius] → slot 1=center
     subnode_slot_to_name = {
-        Arc: {1: 'center', 2: 'start', 3: 'end'},
+        Arc: {1: 'center', 3: 'start', 5: 'end'},
         Circle: {1: 'center'},
-        Line: {1: 'start', 2: 'end'},
+        Line: {1: 'start', 3: 'end'},
         Point: {}
     }
 
@@ -281,15 +289,25 @@ def reconstruct_sketch(
                 entity_id, subnode_slot = gather_to_entity[prim_tok_pos]
 
                 # Build reference string (e.g., "1" or "1.start")
+                # entity_id is 1-based (from gather_map which uses sketch.entities keys)
                 if entity_id >= 1 and entity_id <= len(entity_list):
-                    ent = entity_list[entity_id - 1]
+                    ent = entity_list[entity_id - 1]  # Convert 1-based to 0-based index
                     if ent is not None:
                         ent_type = type(ent)
                         subnode_name = subnode_slot_to_name.get(ent_type, {}).get(subnode_slot)
-                        if subnode_name:
+                        # entity_id is already 1-based, use directly
+                        if subnode_slot == 0:
+                            # Slot 0 = entity type token → edge reference
+                            ref_str = str(entity_id)
+                        elif subnode_name:
+                            # Valid X-coordinate slot → point reference
                             ref_str = f"{entity_id}.{subnode_name}"
                         else:
-                            ref_str = str(entity_id)
+                            # Unexpected slot (e.g., Y-coordinate) - this is a bug
+                            raise ValueError(
+                                f"Unexpected subnode_slot {subnode_slot} for entity type {ent_type.__name__}. "
+                                f"Only X-coordinate slots should be referenced: {subnode_slot_to_name.get(ent_type, {})}"
+                            )
                     else:
                         ref_str = str(entity_id)
                 else:

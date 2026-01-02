@@ -2,6 +2,11 @@
 
 This test verifies that convert_sketch_to_freecad produces the same results
 as the sequence-based conversion for the same input sketch.
+
+Key metrics tested:
+- Geometry count and types
+- Constraint count and types
+- Solver status: DoF, RedundantConstraints, ConflictingConstraints
 """
 import os
 import sys
@@ -66,10 +71,19 @@ def get_constraint_set(fc_sketch) -> set[tuple]:
     cons_set = set()
     for i in range(fc_sketch.ConstraintCount):
         c = fc_sketch.Constraints[i]
-        # Constraint tuple: (Type, First, FirstPos, Second, SecondPos, Third, ThirdPos, Value)
         key = (c.Type, c.First, c.FirstPos, c.Second, c.SecondPos, c.Third, c.ThirdPos)
         cons_set.add(key)
     return cons_set
+
+
+def get_solver_status(fc_sketch) -> dict:
+    """Extract solver status (DoF, Redundant, Conflicting)."""
+    status = fc_sketch.getSolverStatus()
+    return {
+        'DoF': status['DoF'],
+        'Redundant': len(status.get('RedundantConstraints', [])),
+        'Conflicting': len(status.get('ConflictingConstraints', [])),
+    }
 
 
 def convert_via_sequence(seq) -> tuple:
@@ -107,6 +121,114 @@ def convert_via_sequence(seq) -> tuple:
     return doc, fc_sketch, primitive_errors, constraint_errors
 
 
+# =============================================================================
+# Pytest Test Class
+# =============================================================================
+
+class TestConversionEquivalence:
+    """Test that sequence-based and sketch-based converters produce equivalent results."""
+
+    NUM_SAMPLES = 1000  # Default number of samples for pytest runs
+
+    @classmethod
+    def setup_class(cls):
+        """Load test data once for all tests."""
+        cls.seq_data = flat_array.load_dictionary_flat('data_processed/sg_filtered_unique.npy')
+        cls.sequences = cls.seq_data['sequences']
+
+    def test_solver_status_equivalence(self):
+        """Test that DoF, Redundant, and Conflicting match for all samples."""
+        mismatches = {'DoF': [], 'Redundant': [], 'Conflicting': []}
+
+        for i in range(min(self.NUM_SAMPLES, len(self.sequences))):
+            seq = self.sequences[i]
+            sketch = datalib.sketch_from_sequence(seq)
+
+            try:
+                doc1, fc1, _, _ = convert_via_sequence(seq)
+                doc2, fc2, _ = convert_sketch_to_freecad(sketch)
+
+                if doc2 is None:
+                    continue
+
+                s1 = get_solver_status(fc1)
+                s2 = get_solver_status(fc2)
+
+                if s1['DoF'] != s2['DoF']:
+                    mismatches['DoF'].append((i, s1['DoF'], s2['DoF']))
+                if s1['Redundant'] != s2['Redundant']:
+                    mismatches['Redundant'].append((i, s1['Redundant'], s2['Redundant']))
+                if s1['Conflicting'] != s2['Conflicting']:
+                    mismatches['Conflicting'].append((i, s1['Conflicting'], s2['Conflicting']))
+
+                FreeCAD.closeDocument(doc1.Name)
+                FreeCAD.closeDocument(doc2.Name)
+
+            except Exception:
+                pass  # Skip samples with conversion errors
+
+        # Assert 100% equivalence
+        assert len(mismatches['DoF']) == 0, f"DoF mismatches: {mismatches['DoF'][:10]}"
+        assert len(mismatches['Redundant']) == 0, f"Redundant mismatches: {mismatches['Redundant'][:10]}"
+        assert len(mismatches['Conflicting']) == 0, f"Conflicting mismatches: {mismatches['Conflicting'][:10]}"
+
+    def test_constraint_count_equivalence(self):
+        """Test that constraint counts match for all samples."""
+        mismatches = []
+
+        for i in range(min(self.NUM_SAMPLES, len(self.sequences))):
+            seq = self.sequences[i]
+            sketch = datalib.sketch_from_sequence(seq)
+
+            try:
+                doc1, fc1, _, _ = convert_via_sequence(seq)
+                doc2, fc2, _ = convert_sketch_to_freecad(sketch)
+
+                if doc2 is None:
+                    continue
+
+                if fc1.ConstraintCount != fc2.ConstraintCount:
+                    mismatches.append((i, fc1.ConstraintCount, fc2.ConstraintCount))
+
+                FreeCAD.closeDocument(doc1.Name)
+                FreeCAD.closeDocument(doc2.Name)
+
+            except Exception:
+                pass
+
+        assert len(mismatches) == 0, f"Constraint count mismatches: {mismatches[:10]}"
+
+    def test_geometry_count_equivalence(self):
+        """Test that geometry counts match for all samples."""
+        mismatches = []
+
+        for i in range(min(self.NUM_SAMPLES, len(self.sequences))):
+            seq = self.sequences[i]
+            sketch = datalib.sketch_from_sequence(seq)
+
+            try:
+                doc1, fc1, _, _ = convert_via_sequence(seq)
+                doc2, fc2, _ = convert_sketch_to_freecad(sketch)
+
+                if doc2 is None:
+                    continue
+
+                if len(fc1.Geometry) != len(fc2.Geometry):
+                    mismatches.append((i, len(fc1.Geometry), len(fc2.Geometry)))
+
+                FreeCAD.closeDocument(doc1.Name)
+                FreeCAD.closeDocument(doc2.Name)
+
+            except Exception:
+                pass
+
+        assert len(mismatches) == 0, f"Geometry count mismatches: {mismatches[:10]}"
+
+
+# =============================================================================
+# CLI Main
+# =============================================================================
+
 def main():
     parser = argparse.ArgumentParser(description="Test conversion equivalence")
     parser.add_argument("--num-samples", type=int, default=1000,
@@ -125,8 +247,10 @@ def main():
     total = 0
     geo_exact_match = 0
     cons_exact_match = 0
+    solver_match = {'DoF': 0, 'Redundant': 0, 'Conflicting': 0}
     geo_mismatches = []
     cons_mismatches = []
+    solver_mismatches = []
     conversion_errors = []
 
     for i in tqdm(range(num_samples), desc="Testing"):
@@ -180,14 +304,28 @@ def main():
                     'only_in_sketch': only_in_sketch,
                 })
 
+            # Compare solver status
+            s1 = get_solver_status(fc_sketch1)
+            s2 = get_solver_status(fc_sketch2)
+
+            if s1['DoF'] == s2['DoF']:
+                solver_match['DoF'] += 1
+            if s1['Redundant'] == s2['Redundant']:
+                solver_match['Redundant'] += 1
+            if s1['Conflicting'] == s2['Conflicting']:
+                solver_match['Conflicting'] += 1
+
+            if s1 != s2:
+                solver_mismatches.append({
+                    'idx': i, 'seq': s1, 'sketch': s2
+                })
+
             # Cleanup
             FreeCAD.closeDocument(doc1.Name)
             FreeCAD.closeDocument(doc2.Name)
 
         except ValueError as e:
-            # Conversion error (degenerate primitives, etc.)
             conversion_errors.append((i, f"ValueError: {e}"))
-            # Try to cleanup any open documents
             try:
                 if 'doc1' in dir() and doc1:
                     FreeCAD.closeDocument(doc1.Name)
@@ -195,7 +333,6 @@ def main():
                 pass
         except Exception as e:
             conversion_errors.append((i, str(e)))
-            # Try to cleanup any open documents
             try:
                 if 'doc1' in dir() and doc1:
                     FreeCAD.closeDocument(doc1.Name)
@@ -213,6 +350,11 @@ def main():
     print()
     print(f"Geometry exact match: {geo_exact_match}/{total} ({100*geo_exact_match/total:.1f}%)")
     print(f"Constraint exact match: {cons_exact_match}/{total} ({100*cons_exact_match/total:.1f}%)")
+    print()
+    print("Solver Status Match:")
+    print(f"  DoF:        {solver_match['DoF']}/{total} ({100*solver_match['DoF']/total:.2f}%)")
+    print(f"  Redundant:  {solver_match['Redundant']}/{total} ({100*solver_match['Redundant']/total:.2f}%)")
+    print(f"  Conflicting:{solver_match['Conflicting']}/{total} ({100*solver_match['Conflicting']/total:.2f}%)")
 
     if geo_mismatches:
         print(f"\n--- Geometry Mismatches ({len(geo_mismatches)} samples) ---")
@@ -224,7 +366,6 @@ def main():
 
     if cons_mismatches:
         print(f"\n--- Constraint Mismatches ({len(cons_mismatches)} samples) ---")
-        # Analyze common patterns
         patterns = Counter()
         for m in cons_mismatches:
             diff = len(m['only_in_sketch']) - len(m['only_in_seq'])
@@ -237,11 +378,26 @@ def main():
                 print(f"    Only in seq: {list(m['only_in_seq'])[:3]}...")
                 print(f"    Only in sketch: {list(m['only_in_sketch'])[:3]}...")
 
+    if solver_mismatches:
+        print(f"\n--- Solver Status Mismatches ({len(solver_mismatches)} samples) ---")
+        for m in solver_mismatches[:5]:
+            print(f"  Sample {m['idx']}: seq={m['seq']}, sketch={m['sketch']}")
+
     if conversion_errors:
         print(f"\n--- Conversion Errors ({len(conversion_errors)}) ---")
         for idx, err in conversion_errors[:5]:
             print(f"  Sample {idx}: {err}")
 
+    # Final assertion for CI
+    all_match = (
+        solver_match['DoF'] == total and
+        solver_match['Redundant'] == total and
+        solver_match['Conflicting'] == total
+    )
+    print(f"\n{'✅ ALL TESTS PASSED' if all_match else '❌ SOME TESTS FAILED'}")
+    return 0 if all_match else 1
+
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
+

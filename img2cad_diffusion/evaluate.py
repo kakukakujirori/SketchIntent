@@ -154,10 +154,12 @@ def evaluate(checkpoint_path: str, device: str = 'cuda', dump_dir: str | None = 
     model_module.eval()
 
     config = model_module.hparams
-    assert config.data.validation_fraction > 0
+    config.data.batch_size = 1  # overload
+    config.data.num_data_workers = 0  # overload
+    assert config.data.validation_fraction is not None and config.data.validation_fraction > 0
 
     print(f"Setting up dataset...")
-    datamodule = constraint_data.ConstraintDataModule(config.data, batch_size=1, num_workers=0) # Batch size 1 for simplified evaluation logic
+    datamodule = constraint_data.ConstraintDataModule(config.data)
     datamodule.setup()
     val_loader = datamodule.val_dataloader()
 

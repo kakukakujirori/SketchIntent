@@ -239,15 +239,18 @@ class ConstraintDataConfig(primitive_data.PrimitiveDataConfig):
     use_stop_padding: bool = False
     # Constraint ordering: "original", "sort_by_ref_id", or "random_shuffle"
     constraint_order: str = "original"
+    # dataloader-related configs
+    batch_size: int = 256
+    num_data_workers: int = 8
 
 
 class ConstraintDataModule(L.LightningDataModule):
-    def __init__(self, config: ConstraintDataConfig, batch_size: int, num_workers: int=8):
+    def __init__(self, config: ConstraintDataConfig):
         super().__init__()
 
-        self.batch_size = batch_size
         self.config = config
-        self.num_workers = num_workers
+        self.batch_size = config.batch_size
+        self.num_workers = config.num_data_workers
 
         self._dataset = None
         self._train_dataset = None

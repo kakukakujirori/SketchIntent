@@ -85,11 +85,11 @@ def main(config: constraint_models.ConstraintModelTrainingConfig):
     if config.data.fc_clusters_path is not None:
         config.data.fc_clusters_path = hydra.utils.to_absolute_path(config.data.fc_clusters_path)
 
-    data = constraint_data.ConstraintDataModule(
-        config.data,
-        max(1, config.batch_size // max(1, config.num_gpus)),
-        max(1, config.num_data_workers // max(1, config.num_gpus)),
-    )
+    # inverse-scale batch size and workers
+    config.data.batch_size = max(1, config.data.batch_size // max(1, config.num_gpus))
+    config.data.num_data_workers = max(1, config.data.num_data_workers // max(1, config.num_gpus))
+
+    data = constraint_data.ConstraintDataModule(config.data)
     data.setup()
 
     if data.has_fc_validation:
@@ -98,13 +98,13 @@ def main(config: constraint_models.ConstraintModelTrainingConfig):
     config.data.dataset_size = data.train_dataset_size
 
     # Select model based on config
-    if config.model.model_type == "ar":
+    if config.model.net.model_type == "ar":
         from img2cad_diffusion import constraint_models_ar
         model = constraint_models_ar.ConstraintARModule(config)
-    elif config.model.model_type == "mdd":
+    elif config.model.net.model_type == "mdd":
         model = constraint_models.ConstraintMDDModule(config)
     else:
-        raise ValueError(f"Unknown model_type: {config.model.model_type}. Expected 'ar' or 'mdd'.")
+        raise ValueError(f"Unknown model_type: {config.model.net.model_type}. Expected 'ar' or 'mdd'.")
 
     trainer = make_trainer(config)
 

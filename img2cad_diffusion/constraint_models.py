@@ -7,6 +7,7 @@ import lightning as L
 import torch
 import torch.nn.functional as F
 import torchmetrics
+from einops import rearrange
 
 from img2cad_diffusion import primitive_data
 from sketchgraphs_models.nn.summary import CohenKappa
@@ -14,18 +15,18 @@ from . import dit
 from .constraint_data import ConstraintDataConfig, ConstraintTokenInput
 from .detokenization import reconstruct_constraints
 from .losses import ConstraintLoss, ConstraintIoU
-from .prob_path import MaskProbPath
+from .prob_path import MaskProbPath, SamplingConfig
 from .tokens import PrimitiveToken, PrimitiveParamToken, ConstraintToken, ConstraintParamToken
+from .tokenization import CONSTRAINT_TOKEN_LEN
 
 
 # Function overload to not need 'modules'
 def generate_square_subsequent_mask(source: torch.Tensor) -> torch.Tensor:
     return source.new_full((source.shape[0], source.shape[0]), fill_value=float('-inf')).triu_(diagonal=1)
 
-
 @dataclasses.dataclass
-class ConstraintModelConfig:
-    """Configuration for the main constraint model.
+class ConstraintNetConfig:
+    """Configuration for the main constraint model architecture.
 
     Attributes
     ----------
@@ -44,6 +45,23 @@ class ConstraintModelConfig:
     num_heads: int = 4
     num_layers: int = 8
 
+@dataclasses.dataclass
+class ConstraintModelConfig:
+    """Configuration for the main constraint model.
+
+    Attributes
+    ----------
+    net
+        Configuration for the main constraint model architecture
+    constraint_blockwise_masking
+        Whether to use constraint-blockwise masking (only applicable to MDD)
+    use_hungarian_loss
+        Whether to use Hungarian matching for order-agnostic training
+    """
+    net: ConstraintNetConfig = dataclasses.field(default_factory=ConstraintNetConfig)
+    constraint_blockwise_masking: bool = False
+    use_hungarian_loss: bool = False
+
 
 @dataclasses.dataclass
 class OptimConfig:
@@ -57,13 +75,11 @@ class ConstraintModelTrainingConfig:
     data: ConstraintDataConfig = dataclasses.field(default_factory=ConstraintDataConfig)
     model: ConstraintModelConfig = dataclasses.field(default_factory=ConstraintModelConfig)
     optim: OptimConfig = dataclasses.field(default_factory=OptimConfig)
-    batch_size: int = 256
-    num_data_workers: int = 8
+    sampling: SamplingConfig = dataclasses.field(default_factory=SamplingConfig)
     max_epochs: int = 30
     num_gpus: int = 1
     mixed_precision: bool = False
     training_seed: int | None = 42  # Seed for reproducibility
-    use_hungarian_loss: bool = False  # Use Hungarian matching for order-agnostic training
     # Test-only mode
     test_only: bool = False  # If True, only run test with checkpoint
     checkpoint_path: str | None = None  # Path to checkpoint for test_only mode
@@ -281,11 +297,11 @@ class ConstraintMDDModule(L.LightningModule):
         self.model = ConstraintMDDModel(
             num_bins=self.hparams.data.num_position_bins,
             max_token_length=self.hparams.data.max_token_length,
-            embed_dim=self.hparams.model.embedding_dimension,
-            fc_size=self.hparams.model.hidden_size,
-            num_heads=self.hparams.model.num_heads,
-            num_layers=self.hparams.model.num_layers,
-            cond_dim=self.hparams.model.embedding_dimension
+            embed_dim=self.hparams.model.net.embedding_dimension,
+            fc_size=self.hparams.model.net.hidden_size,
+            num_heads=self.hparams.model.net.num_heads,
+            num_layers=self.hparams.model.net.num_layers,
+            cond_dim=self.hparams.model.net.embedding_dimension
         )
 
         self.criterion = torch.nn.CrossEntropyLoss(ignore_index=ConstraintToken.Pad)
@@ -314,7 +330,7 @@ class ConstraintMDDModule(L.LightningModule):
         # <<< PRISM <<<
 
         # Loss function (supports Hungarian matching)
-        self.loss_fn = ConstraintLoss(use_hungarian=getattr(config, 'use_hungarian_loss', False))
+        self.loss_fn = ConstraintLoss(use_hungarian=getattr(config.model, 'use_hungarian_loss', False))
 
     def _canonicalize_for_comparison(
         self,
@@ -426,14 +442,14 @@ class ConstraintMDDModule(L.LightningModule):
         return result
 
     def configure_optimizers(self):
-        base_lr = self.hparams.optim.learning_rate * self.hparams.batch_size / 128
+        base_lr = self.hparams.optim.learning_rate * self.hparams.data.batch_size / 128
 
         optim = torch.optim.AdamW(self.model.parameters(), lr=base_lr)
 
         if self.hparams.data.dataset_size is None:
             raise ValueError('config.data.dataset_size must be specified to create optimizers!')
 
-        steps_per_epoch = (self.hparams.data.dataset_size + self.hparams.batch_size - 1) // self.hparams.batch_size
+        steps_per_epoch = (self.hparams.data.dataset_size + self.hparams.data.batch_size - 1) // self.hparams.data.batch_size
 
         scheduler = torch.optim.lr_scheduler.OneCycleLR(
             optim,
@@ -471,10 +487,25 @@ class ConstraintMDDModule(L.LightningModule):
         # Prepare input for model
         target = batch["c_val"]
 
-        # Apply noise (masking) to constraint tokens only
-        # Generate mask indices once and apply to all constraint tensors
-        mask_indices = torch.rand_like(batch["c_val"], dtype=torch.float32) < move_chance
-        c_val_masked = torch.where(mask_indices, ConstraintToken.Mask, batch["c_val"])
+        # Apply noise (masking) to constraint tokens
+        if self.hparams.model.constraint_blockwise_masking:
+            assert self.hparams.data.align_constraint_token_length, "constraint_blockwise_masking requires align_constraint_token_length"
+            assert torch.all(batch["c_val"][:, 0] == ConstraintToken.Start)
+            b, token_num = batch["c_val"].shape
+            constraint_num = token_num // CONSTRAINT_TOKEN_LEN
+            c_val_block = rearrange(
+                batch["c_val"][:, 1:constraint_num * CONSTRAINT_TOKEN_LEN + 1],
+                "b (c_num c_tokens) -> b c_num c_tokens",
+                c_tokens=CONSTRAINT_TOKEN_LEN)
+            b, c_num, c_tokens = c_val_block.shape
+            mask_indices = torch.rand((b, c_num, 1), device=move_chance.device) < move_chance.reshape(-1, 1, 1)
+            c_val_block_masked = torch.where(mask_indices, ConstraintToken.Mask, c_val_block)
+            c_val_masked = batch["c_val"].clone()
+            c_val_masked[:, 1:constraint_num * CONSTRAINT_TOKEN_LEN + 1] = rearrange(c_val_block_masked, "b c_num c_tokens -> b (c_num c_tokens)")
+            mask_indices = c_val_masked == ConstraintToken.Mask
+        else:
+            mask_indices = torch.rand_like(batch["c_val"], dtype=torch.float32) < move_chance
+            c_val_masked = torch.where(mask_indices, ConstraintToken.Mask, batch["c_val"])
 
         # Create masked batch (primitives unchanged, constraints masked)
         masked_batch = ConstraintTokenInput(
@@ -581,7 +612,10 @@ class ConstraintMDDModule(L.LightningModule):
             # Generate samples
             start_tokens = [ConstraintToken.Start]
             samples, intermediates = self.ProbPath.generate_sample(
-                batch=batch, num_steps=self.inference_sampling_steps, start_tokens=start_tokens
+                batch=batch,
+                num_steps=self.inference_sampling_steps,
+                start_tokens=start_tokens,
+                constraint_blockwise_masking=self.hparams.model.constraint_blockwise_masking,
             )
 
             # Evaluate
