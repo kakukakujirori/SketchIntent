@@ -318,7 +318,7 @@ class TestGeometryStability:
             sketch = datalib.sketch_from_sequence(seq)
 
             try:
-                doc, fc_sketch, _ = convert_sketch_to_freecad(sketch)
+                doc, fc_sketch, _, _ = convert_sketch_to_freecad(sketch)
                 if doc is None:
                     continue
 
@@ -346,7 +346,7 @@ class TestGeometryStability:
             sketch = datalib.sketch_from_sequence(seq)
 
             try:
-                doc, fc_sketch, _ = convert_sketch_to_freecad(sketch)
+                doc, fc_sketch, _, _ = convert_sketch_to_freecad(sketch)
                 if doc is None:
                     continue
 
@@ -411,7 +411,7 @@ def main():
             if args.use_sequence:
                 doc, fc_sketch = convert_via_sequence(seq)
             else:
-                doc, fc_sketch, _ = convert_sketch_to_freecad(sketch)
+                doc, fc_sketch, _, _ = convert_sketch_to_freecad(sketch)
                 if doc is None:
                     conversion_errors.append((i, "Conversion returned None"))
                     continue
@@ -432,6 +432,7 @@ def main():
             # All samples should be stable since original SketchGraphs data already satisfies constraints
             solver_status = fc_sketch.getSolverStatus()
             dof = solver_status['DoF']
+            malformed = len(solver_status.get('MalformedConstraints', []))
             redundant = len(solver_status.get('RedundantConstraints', []))
             conflicts = len(solver_status.get('ConflictingConstraints', []))
 
@@ -448,6 +449,7 @@ def main():
                 unstable_samples.append({
                     'idx': i,
                     'dof': dof,
+                    'malformed': malformed,
                     'redundant': redundant,
                     'conflicts': conflicts,
                     'errors': errors,
@@ -476,7 +478,7 @@ def main():
     if unstable_samples:
         print(f"\n--- Geometry Collapse Detected ({len(unstable_samples)}) ---")
         for sample in unstable_samples[:10]:
-            print(f"  Sample {sample['idx']} (DoF={sample['dof']}, Red={sample['redundant']}, Con={sample['conflicts']}):")
+            print(f"  Sample {sample['idx']} (DoF={sample['dof']}, Red={sample['redundant']}, Con={sample['conflicts']}, Mal={sample['malformed']}):")
             for err in sample['errors'][:3]:
                 print(f"    - {err}")
 

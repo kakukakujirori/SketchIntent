@@ -29,6 +29,34 @@ from sketchgraphs.data import flat_array, Arc, Circle, Line, Point, Sketch
 
 
 # =============================================================================
+# Custom Exceptions
+# =============================================================================
+
+class FreeCADConversionError(Exception):
+    """Exception raised when FreeCAD conversion fails.
+
+    Attributes:
+        phase: 'primitive' or 'constraint'
+        entity_id: Entity ID if primitive error (e.g., '1', '2')
+        constraint_id: Constraint ID if constraint error (e.g., 'c0', 'c1')
+        original_exception: The original exception that was raised
+    """
+    def __init__(
+        self,
+        message: str,
+        phase: str,
+        entity_id: str | None = None,
+        constraint_id: str | None = None,
+        original_exception: Exception | None = None,
+    ):
+        super().__init__(message)
+        self.phase = phase
+        self.entity_id = entity_id
+        self.constraint_id = constraint_id
+        self.original_exception = original_exception
+
+
+# =============================================================================
 # Unit Conversion
 # =============================================================================
 
@@ -917,7 +945,7 @@ def _add_constraint(
 def convert_sketch_to_freecad(
     sketch: Sketch,
     doc_name: str = "SketchDoc",
-) -> tuple[FreeCAD.Document, "Sketcher.SketchObject", list[str]]:
+) -> tuple[FreeCAD.Document, "Sketcher.SketchObject", list[str], dict[int, str]]:
     """Convert a SketchGraphs Sketch object directly to FreeCAD sketch.
 
     Parameters
@@ -929,8 +957,9 @@ def convert_sketch_to_freecad(
 
     Returns
     -------
-    tuple[FreeCAD.Document, Sketcher.SketchObject]
-        The FreeCAD document and sketch object, or (None, None) if failed.
+    tuple[FreeCAD.Document, Sketcher.SketchObject, list[str], dict[int, str]]
+        The FreeCAD document and sketch object, history commands, and constraint mapping.
+        Mapping is {freecad_constraint_index: original_constraint_id}.
     """
     doc = FreeCAD.newDocument(doc_name)
     body = doc.addObject('PartDesign::Body', 'Body')
@@ -956,7 +985,16 @@ def convert_sketch_to_freecad(
     # Step 1: Add primitives
     for entity_id_str, entity in sketch.entities.items():
         entity_idx = int(entity_id_str)
-        cmd = _add_primitive(entity_idx, entity, fc_sketch, entity_to_geoid)
+        try:
+            cmd = _add_primitive(entity_idx, entity, fc_sketch, entity_to_geoid)
+        except Exception as e:
+            FreeCAD.closeDocument(doc.Name)
+            raise FreeCADConversionError(
+                f"Failed to add primitive entity_id={entity_id_str}: {e}",
+                phase="primitive",
+                entity_id=entity_id_str,
+                original_exception=e,
+            ) from e
         history_commands.append(cmd)
 
     # Step 1.5: Pre-process Tangent+Coincident pairs
@@ -969,18 +1007,37 @@ def convert_sketch_to_freecad(
     skip_coincident_ids.update(skip_redundant_ids)
 
     # Step 2: Add constraints
+    constraint_mapping: dict[int, str] = {}
+
     for constraint_id, constraint in sketch.constraints.items():
         # Skip Coincident constraints that are handled by Tangent resolution
         if constraint_id in skip_coincident_ids:
             history_commands.append(f"# Skipped Coincident (handled by Tangent): {constraint_id}")
             continue
-        cmd = _add_constraint(constraint, constraint_id, fc_sketch, entity_to_geoid, sketch.entities, resolved_tangent_refs)
+
+        count_before = int(fc_sketch.ConstraintCount)
+        try:
+            cmd = _add_constraint(constraint, constraint_id, fc_sketch, entity_to_geoid, sketch.entities, resolved_tangent_refs)
+        except Exception as e:
+            FreeCAD.closeDocument(doc.Name)
+            raise FreeCADConversionError(
+                f"Failed to add constraint {constraint_id}: {e}",
+                phase="constraint",
+                constraint_id=constraint_id,
+                original_exception=e,
+            ) from e
+        count_after = int(fc_sketch.ConstraintCount)
+
         history_commands.append(cmd)
+
+        # Map new constraints to the original constraint_id
+        for i in range(count_before, count_after):
+            constraint_mapping[i] = constraint_id
 
     doc.recompute()
     history_commands.append("doc.recompute()")
 
-    return doc, fc_sketch, history_commands
+    return doc, fc_sketch, history_commands, constraint_mapping
 
 
 def draw_svg(
@@ -1182,7 +1239,7 @@ if __name__ == '__main__':
         plt.close(fig)
 
         try:
-            doc, fc_sketch, history_commands = convert_sketch_to_freecad(sketch)
+            doc, fc_sketch, history_commands, mapping = convert_sketch_to_freecad(sketch)
 
             # dump paths
             output_py_path=f"{output_dir}/{i}.py"

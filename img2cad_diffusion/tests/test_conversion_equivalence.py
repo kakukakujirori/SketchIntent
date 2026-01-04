@@ -81,6 +81,7 @@ def get_solver_status(fc_sketch) -> dict:
     status = fc_sketch.getSolverStatus()
     return {
         'DoF': status['DoF'],
+        'Malformed': len(status.get('MalformedConstraints', [])),
         'Redundant': len(status.get('RedundantConstraints', [])),
         'Conflicting': len(status.get('ConflictingConstraints', [])),
     }
@@ -146,7 +147,7 @@ class TestConversionEquivalence:
 
             try:
                 doc1, fc1, _, _ = convert_via_sequence(seq)
-                doc2, fc2, _ = convert_sketch_to_freecad(sketch)
+                doc2, fc2, _, _ = convert_sketch_to_freecad(sketch)
 
                 if doc2 is None:
                     continue
@@ -182,7 +183,7 @@ class TestConversionEquivalence:
 
             try:
                 doc1, fc1, _, _ = convert_via_sequence(seq)
-                doc2, fc2, _ = convert_sketch_to_freecad(sketch)
+                doc2, fc2, _, _ = convert_sketch_to_freecad(sketch)
 
                 if doc2 is None:
                     continue
@@ -208,7 +209,7 @@ class TestConversionEquivalence:
 
             try:
                 doc1, fc1, _, _ = convert_via_sequence(seq)
-                doc2, fc2, _ = convert_sketch_to_freecad(sketch)
+                doc2, fc2, _, _ = convert_sketch_to_freecad(sketch)
 
                 if doc2 is None:
                     continue
@@ -262,11 +263,7 @@ def main():
             doc1, fc_sketch1, prim_errs1, cons_errs1 = convert_via_sequence(seq)
 
             # Sketch-based conversion
-            doc2, fc_sketch2, _history = convert_sketch_to_freecad(sketch)
-            if doc2 is None:
-                conversion_errors.append((i, "Sketch-based conversion returned None"))
-                FreeCAD.closeDocument(doc1.Name)
-                continue
+            doc2, fc_sketch2, _history, _ = convert_sketch_to_freecad(sketch)
 
             total += 1
 

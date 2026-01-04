@@ -1,12 +1,21 @@
+from __future__ import annotations
+
 import copy
 import dataclasses
-import torch
 import math
+from typing import TYPE_CHECKING
+
+import torch
 import torch.nn.functional as F
 from einops import rearrange
 from tqdm import tqdm
+
 from img2cad_diffusion.constraint_data import ConstraintTokenInput
 from img2cad_diffusion.tokens import ConstraintToken, PrimitiveToken
+from img2cad_diffusion.tokenization import CONSTRAINT_TOKEN_LEN
+
+if TYPE_CHECKING:
+    from img2cad_diffusion.constraint_models import ConstraintMDDModule, LogLinearNoise
 
 
 def _sample_categorical(categorical_probs: torch.Tensor) -> torch.Tensor:
@@ -41,7 +50,7 @@ class SamplingConfig:
 
 class MaskProbPath:
     """Sampler for Masked Discrete Diffusion."""
-    def __init__(self, model: torch.nn.Module, config: SamplingConfig, noise_scheduler):
+    def __init__(self, model: ConstraintMDDModule, config: SamplingConfig, noise_scheduler: LogLinearNoise):
         """
         Args:
             model: The ConstraintMDDModel.
@@ -78,7 +87,7 @@ class MaskProbPath:
             self.nucleus_p = 1.0
             self.dfm = False
 
-        self.pad_index = ConstraintToken.Pad
+        self.pad_index = ConstraintToken.Stop if self.model.hparams.data.use_stop_padding else ConstraintToken.Pad
         self.mask_index = ConstraintToken.Mask
         self.noise = noise_scheduler
         self.neg_infinity = -1e6
@@ -184,17 +193,13 @@ class MaskProbPath:
     def _topk_static_update(
         self,
         batch: ConstraintTokenInput,
-        t: float | torch.Tensor,
+        p_x0: torch.Tensor,
         k: int,
-        step: int,
         fixed_tokens: torch.Tensor | None,
         constraint_blockwise_masking: bool = False,
     ) -> ConstraintTokenInput:
         x = batch['c_val']
-        sigma_t, _ = self.noise(t)
         masks = (x == self.mask_index)
-
-        p_x0, logits = self._compute_model_outputs(batch, sigma_t)
 
         # Nucleus sampling for x0 prediction
         if self.nucleus_p < 1.0:
@@ -227,22 +232,18 @@ class MaskProbPath:
     def _tau_leaping_update(
         self,
         batch: ConstraintTokenInput,
-        t: float | torch.Tensor,
+        p_x0: torch.Tensor,
+        rate_t: torch.Tensor,
         dt: float,
         fixed_tokens: torch.Tensor | None,
         constraint_blockwise_masking: bool = False,
     ) -> ConstraintTokenInput:
         x = batch['c_val']
-        sigma_t, rate_t = self.noise(t)
         masks = (x == self.mask_index)
 
-        p_x0, logits = self._compute_model_outputs(batch, sigma_t)
         new_token_indices = p_x0.argmax(dim=-1) # [B, L]
 
         if constraint_blockwise_masking:
-            from .tokenization import CONSTRAINT_TOKEN_LEN
-            BLOCK_SIZE = CONSTRAINT_TOKEN_LEN # 4
-
             B, L = p_x0.shape[0], p_x0.shape[1]
 
             # Get max probabilities for each token position
@@ -257,13 +258,13 @@ class MaskProbPath:
             # Exclude the first token (Start) from block processing
             body_start_idx = 1
             num_tokens_in_body = L - body_start_idx
-            num_blocks = num_tokens_in_body // BLOCK_SIZE
-            block_aligned_len = num_blocks * BLOCK_SIZE
+            num_blocks = num_tokens_in_body // CONSTRAINT_TOKEN_LEN
+            block_aligned_len = num_blocks * CONSTRAINT_TOKEN_LEN
             body_end_idx = body_start_idx + block_aligned_len
 
             # Extract probabilities for the block-aligned body
             body_token_max_probs = token_max_probs[:, body_start_idx : body_end_idx]
-            body_token_max_probs = body_token_max_probs.reshape(B, num_blocks, BLOCK_SIZE)
+            body_token_max_probs = body_token_max_probs.reshape(B, num_blocks, CONSTRAINT_TOKEN_LEN)
 
             # Calculate block rates as product of token probabilities within each block
             # This represents the joint probability of all tokens in a block being unmasked to their most likely value
@@ -277,7 +278,7 @@ class MaskProbPath:
 
             # Expand block counts back to token level for the body segment
             # If a block has an event, all its tokens are considered to have an event.
-            token_counts_body = block_counts.unsqueeze(-1).expand(-1, -1, BLOCK_SIZE).reshape(B, block_aligned_len)
+            token_counts_body = block_counts.unsqueeze(-1).expand(-1, -1, CONSTRAINT_TOKEN_LEN).reshape(B, block_aligned_len)
 
             # Initialize full token counts tensor
             counts = torch.zeros_like(x, dtype=torch.long)
@@ -326,9 +327,108 @@ class MaskProbPath:
         x_next[update_mask] = new_token_indices[update_mask]
 
         if fixed_tokens is not None:
-             x_next = torch.where(fixed_tokens, x, x_next)
+            x_next = torch.where(fixed_tokens, x, x_next)
 
         batch['c_val'] = x_next
+        return batch
+
+    def _apply_solver_feedback(
+        self,
+        batch: ConstraintTokenInput,
+        p_x0: torch.Tensor,
+        num_bins: int,
+        max_solver_iters: int = 5,
+        scoot_valid_constraints: bool = False,
+        strip_first_stop_token: bool = False,
+    ) -> ConstraintTokenInput:
+        from img2cad_diffusion.convert_sketch_to_freecad import FreeCADConversionError
+        from img2cad_diffusion.detokenization import reconstruct_constraints, reconstruct_sketch
+        from img2cad_diffusion.solver_feedback import SolverStatus, convert_sketch_to_freecad, get_solver_status
+        import FreeCAD
+
+        if not self.model.hparams.model.align_constraint_token_length:
+            raise ValueError("align_constraint_token_length must be True")
+
+        x = batch['c_val'].clone()
+        B, L = x.shape
+
+        for b in range(B):
+            prim_tokens = batch['val'][b]
+            sample_x = x[b]
+
+            # STEP 1: Mask syntax-error constraints
+            valid_constraints, invalid_constraints = reconstruct_constraints(
+                sample_x.cpu().numpy(),
+                token_len_per_constraint=CONSTRAINT_TOKEN_LEN,
+            )
+            for constraint_type, refs, (start, end) in invalid_constraints:
+                sample_x[start:end] = self.mask_index
+
+            # STEP2: MASK solver-alerting constraints
+            sketch = reconstruct_sketch(
+                prim_tokens.cpu().numpy(),
+                sample_x.cpu().numpy(),
+                num_bins,
+                token_len_per_constraint=CONSTRAINT_TOKEN_LEN,
+            )
+
+            status = SolverStatus()
+            removed_constraint_ids: list[int] = []
+
+            for _ in range(max_solver_iters):
+                try:
+                    doc, fc_sketch, _, fc_mapping = convert_sketch_to_freecad(sketch, doc_name="SolverEval")
+                except FreeCADConversionError as e:
+                    # If a constraint caused the error, remove it and retry
+                    if e.phase == "constraint":
+                        cid = e.constraint_id
+                        if cid in sketch.constraints:
+                            del sketch.constraints[cid]
+                            removed_constraint_ids.append(int(cid[1:]))
+                            continue  # Retry conversion
+                    # If primitive error or unrecoverable, skip this sample
+                    print(f"[_apply_solver_feedback] Error: {e}")
+                    break
+                except Exception as e:
+                    print(f"[_apply_solver_feedback] Unexpected error: {e}")
+                    break
+
+                status = get_solver_status(fc_sketch, fc_mapping)
+                FreeCAD.closeDocument(doc.Name)
+
+                # Get problem constraints
+                problem_indices = status.MappedConflictingIndices + status.MappedRedundantIndices + status.MappedMalformedIndices
+                if not problem_indices:
+                    break
+
+                # Find least confident constraint to mask
+                min_conf = float('inf')
+                target_idx = -1
+
+                for constraint_idx in problem_indices:
+                    constraint_type, constraint_refs, (start_pos, end_pos) = valid_constraints[constraint_idx]
+
+                    # Calculate confidence as product of p(x0|xt)
+                    chunk_probs = p_x0[b, start_pos:end_pos, :]
+                    chunk_tokens = sample_x[start_pos:end_pos]
+                    token_probs = chunk_probs.gather(dim=-1, index=chunk_tokens.unsqueeze(1)).squeeze(1)
+                    score = token_probs.prod().item()
+
+                    if score < min_conf:
+                        min_conf = score
+                        target_idx = constraint_idx
+
+                # Remove constraint from Sketch
+                del sketch.constraints[f"c{target_idx}"]
+                removed_constraint_ids.append(target_idx)
+
+            for cid in removed_constraint_ids:
+                _, _, (start_pos, end_pos) = valid_constraints[cid]
+                sample_x[start_pos:end_pos] = self.mask_index
+
+            x[b] = sample_x
+
+        batch['c_val'] = x
         return batch
 
     @staticmethod
@@ -340,15 +440,7 @@ class MaskProbPath:
         current_step: int,
     ) -> int:
         # Linearly decrease the number of masks (or increase number of clean tokens)
-        # We want k (clean tokens) to go from 0 to L
-        # Or masked tokens to go from L to 0
-        # This implementation seems to calculate "number of clean tokens"
-        # Adjusted for this specific task where we start fully masked usually.
-
-        # Simple linear schedule for standard topk:
-        # k = ceil(L * (t+1)/T)
-
-        model_length = total_mask_tokens # assuming full mask start
+        model_length = total_mask_tokens
 
         if current_step < remasking_s_on:
             k = math.ceil((model_length / total_steps) * (current_step + 1))
@@ -405,24 +497,40 @@ class MaskProbPath:
         for i in tqdm(range(num_steps), desc="Sampling"):
             t = timesteps[i] * torch.ones(b, 1, device=device)
 
-            if self.method == 'tau_leaping':
+            # predict p(x0|xt)
+            sigma_t, rate_t = self.noise(t)
+            p_x0, _ = self._compute_model_outputs(batch, sigma_t)
+
+            # update to x_{t-1} (NOTE: batch['c_val'] must be a partially masked for input in order to see the mask token positions)
+            if self.method.startswith('tau_leaping'):
                 batch = self._tau_leaping_update(
                     batch,
-                    t,
+                    p_x0,
+                    rate_t,
                     1.0/num_steps,
                     fixed_tokens=fixed_tokens,
                     constraint_blockwise_masking=constraint_blockwise_masking)
-            elif self.method == 'topk_static':
+            elif self.method.startswith('topk_static'):
                 k = self._schedule_k(total_tokens, num_steps, self.loop_step_on, self.loop_steps, i)
                 batch = self._topk_static_update(
                     batch,
-                    t,
+                    p_x0,
                     k,
-                    step=i,
                     fixed_tokens=fixed_tokens,
                     constraint_blockwise_masking=constraint_blockwise_masking)
             else:
                 raise NotImplementedError(f"Sampling method {self.method} not implemented")
+
+            # Solver feedback (Remasking)
+            if self.method.endswith('solver_feedback'):
+                batch = self._apply_solver_feedback(
+                    batch,
+                    p_x0,
+                    num_bins=self.model.hparams.data.num_position_bins,
+                    max_solver_iters=5,
+                    scoot_valid_constraints=False,
+                    strip_first_stop_token=False,
+                )
 
             intermediates.append(batch['c_val'].clone())
 

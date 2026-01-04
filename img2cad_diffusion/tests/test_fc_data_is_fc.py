@@ -4,7 +4,8 @@ import torch
 from tqdm import tqdm
 
 from img2cad_diffusion.constraint_data import ConstraintDataset, PrimitiveNoiseConfig
-from img2cad_diffusion.solver_feedback import evaluate_constraints_batch, HAS_FREECAD
+from img2cad_diffusion.solver_feedback import HAS_FREECAD
+from img2cad_diffusion.tokenization import CONSTRAINT_TOKEN_LEN
 
 
 def test_fc_data_is_fc(
@@ -127,10 +128,11 @@ def test_fc_data_remains_fc_through_tokenization(
             break
 
         try:
-            doc, fc_sketch = tokens_to_freecad_sketch(
+            doc, fc_sketch, _, _ = tokens_to_freecad_sketch(
                 batch['val'][0],  # Remove batch dim
                 batch['c_val'][0],
                 num_position_bins,
+                token_len_per_constraint=CONSTRAINT_TOKEN_LEN if full_dataset.align_constraint_token_length else None,
             )
 
             if doc is None:
@@ -138,9 +140,9 @@ def test_fc_data_remains_fc_through_tokenization(
                 continue
 
             status = get_solver_status(fc_sketch)
-            dof = status['DoF']
-            conflict = len(status['ConflictingConstraints'])
-            redundant = len(status['RedundantConstraints'])
+            dof = status.DoF
+            conflict = len(status.ConflictingConstraints)
+            redundant = len(status.RedundantConstraints)
 
             # FC discovery uses DoF == 2 only
             if dof == 2:

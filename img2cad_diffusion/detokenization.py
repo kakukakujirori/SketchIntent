@@ -116,13 +116,11 @@ def reconstruct_primitives(tokens, num_bins: int) -> datalib.Sketch:
 # Constraint Detokenization
 # =============================================================================
 
-def validate_constraints(constraint_token: ConstraintToken, references: list[int]) -> bool:
-    """Check if constraint has valid number of references."""
-    return len(references) in CONSTRAINT_ACCEPTABLE_REF_COUNTS.get(constraint_token, set())
-
-
-def reconstruct_constraints(c_val_tokens: np.ndarray, remove_invalid_constraints: bool = True) -> list[tuple[ConstraintToken, list[int]]]:
-    """Convert constraint tokens back to (constraint_type, gather_indices) pairs.
+def reconstruct_constraints(c_val_tokens: np.ndarray, token_len_per_constraint: int | None = None) -> tuple[
+        list[tuple[ConstraintToken, list[int], tuple[int, int]]],
+        list[tuple[ConstraintToken, list[int], tuple[int, int]]],
+    ]:
+    """Convert constraint tokens back to (constraint_type, reference_indices, token_[start,end]_pos) pairs.
 
     This function is the inverse of tokenize_constraints for the value tokens.
     It parses the token sequence and extracts constraint types with their
@@ -133,55 +131,119 @@ def reconstruct_constraints(c_val_tokens: np.ndarray, remove_invalid_constraints
     c_val_tokens : np.ndarray
         The constraint value token sequence (c_val from tokenization).
         Should contain [Start, <constraints...>, Stop, <padding>].
+    token_len_per_constraint : int | None
+        The number of tokens per constraint. If None, the number of tokens
+        is variable per constraint, and is inferred from the token sequence.
 
     Returns
     -------
-    list[tuple[ConstraintToken, list[int]]]
-        List of (constraint_type, [gather_idx1, gather_idx2, ...]) tuples.
-        Each gather_idx is an index into the primitive token positions.
+    valid_constraint_list: list[tuple[ConstraintToken, list[int], tuple[int, int]]]
+        List of valid constraint tuples, including token ranges [start_pos, end_pos).
+    invalid_constraint_list: list[tuple[ConstraintToken, list[int], tuple[int, int]]]
+        List of invalid constraint tuples, including token ranges [start_pos, end_pos).
     """
-    constraints = []
+    valid_constraints = []
+    invalid_constraints = []
+    seen_valid_constraints = set()
+
     current_constraint = None
     current_refs = []
+    current_start_pos = -1
 
-    def may_add_constraint(current_constraint: ConstraintToken | None, current_refs: list[int]):
+    def validate_constraints(constraint_token: int, references: list[int]) -> bool:
+        """Check if constraint has valid number of references."""
+        # Is the constraint token valid?
+        if constraint_token < 0 or len(ConstraintToken) <= constraint_token:
+            return False
+        # Are the references in a valid range?
+        if any(ref < 0 for ref in references):
+            return False
+        # Are the reference num acceptable?
+        if len(references) not in CONSTRAINT_ACCEPTABLE_REF_COUNTS.get(ConstraintToken(constraint_token), set()):
+            return False
+        # Is the constraint already seen?
+        if (constraint_token, tuple(sorted(references))) in seen_valid_constraints:
+            return False
+        # Pass all checks
+        return True
+
+    def may_add_constraint(
+        current_constraint: int | None,
+        current_refs: list[int],
+        start_pos: int,
+        end_pos: int,
+    ):
         # Save previous constraint if exists
         if current_constraint is not None:
+            item = (ConstraintToken(current_constraint), current_refs, (start_pos, end_pos))
             is_valid = validate_constraints(current_constraint, current_refs)
-            if not is_valid:
-                how_to_handle_comment = 'Removing...' if remove_invalid_constraints else 'Leaving it as it is...'
-                print(f"[reconstruct_constraints] Warning: Invalid token sequence detected (type: {current_constraint}, ref: {current_refs}). {how_to_handle_comment}")
-            if (not remove_invalid_constraints) or is_valid:
-                constraints.append((current_constraint, current_refs))
-        # Start new constraint
-        return ConstraintToken(token), []
+            if is_valid:
+                valid_constraints.append(item)
+                seen_valid_constraints.add((current_constraint, tuple(sorted(current_refs))))
+            else:
+                invalid_constraints.append(item)
 
-    for token in c_val_tokens:
-        token = int(token)
+    if token_len_per_constraint is None:
+        # Variable length per constraint
+        for idx, token in enumerate(c_val_tokens):
+            token = int(token)
 
-        # Skip padding, mask, and inner padding tokens
-        if (token == ConstraintToken.Pad or \
-            token == ConstraintToken.Mask or \
-            token == ConstraintToken.InnerPad):
-            continue
+            # Skip padding, mask, and inner padding tokens
+            if (token == ConstraintToken.Pad or \
+                token == ConstraintToken.Mask or \
+                token == ConstraintToken.InnerPad):
+                continue
 
-        # Control tokens
-        if token == ConstraintToken.Start:
-            continue
-        if token == ConstraintToken.Stop:
-            # Finalize last constraint if any
-            _, _ = may_add_constraint(current_constraint, current_refs)
-            break
+            # Control tokens
+            if token == ConstraintToken.Start:
+                continue
+            if token == ConstraintToken.Stop:
+                # Finalize last constraint if any
+                may_add_constraint(current_constraint, current_refs, current_start_pos, idx)
+                break
 
-        # Check if this is a constraint type token (4-16)
-        if token < len(ConstraintToken):
-            current_constraint, current_refs = may_add_constraint(current_constraint, current_refs)
-        else:
-            # This is a reference token: gather_idx = token - len(ConstraintToken)
-            gather_idx = token - len(ConstraintToken)
-            current_refs.append(gather_idx)
+            # Check if this is a constraint type token
+            if token < len(ConstraintToken):
+                # Finalize previous constraint
+                may_add_constraint(current_constraint, current_refs, current_start_pos, idx)
+                # Start new constraint
+                current_constraint = ConstraintToken(token)
+                current_refs = []
+                current_start_pos = idx
+            else:
+                # This is a reference token: gather_idx = token - len(ConstraintToken)
+                gather_idx = token - len(ConstraintToken)
+                current_refs.append(gather_idx)
 
-    return constraints
+    else:
+        if token_len_per_constraint <= 0:
+            raise ValueError("token_len_per_constraint must be positive")
+
+        start_idx = 1 if c_val_tokens[0] == ConstraintToken.Start else 0
+
+        for idx in range(start_idx, len(c_val_tokens), token_len_per_constraint):
+            current_constraint = int(c_val_tokens[idx])
+            current_start_pos = idx
+            current_refs = [
+                int(ref_token) - len(ConstraintToken)
+                for ref_token in c_val_tokens[idx + 1 : idx + token_len_per_constraint]
+                if ref_token != ConstraintToken.InnerPad]
+
+            # Skip padding and mask tokens
+            if (current_constraint == ConstraintToken.Pad or \
+                current_constraint == ConstraintToken.Mask):
+                continue
+
+            # Control tokens
+            if current_constraint == ConstraintToken.Start:
+                continue
+            if current_constraint == ConstraintToken.Stop:
+                break
+
+            # may be a constraint block
+            may_add_constraint(current_constraint, current_refs, current_start_pos, current_start_pos + token_len_per_constraint)
+
+    return valid_constraints, invalid_constraints
 
 
 def build_gather_idx_mapping(
@@ -228,7 +290,8 @@ def build_gather_idx_mapping(
 def reconstruct_sketch(
     prim_val_tokens: np.ndarray,
     c_val_tokens: np.ndarray,
-    num_bins: int
+    num_bins: int,
+    token_len_per_constraint: int | None,
 ) -> datalib.Sketch:
     """Reconstruct a Sketch with entities and constraints from tokens.
 
@@ -243,6 +306,8 @@ def reconstruct_sketch(
         The constraint value token sequence (from tokenize_constraints).
     num_bins : int
         Number of bins used for primitive quantization.
+    token_len_per_constraint : int | None
+        Number of tokens per constraint. If None, variable length per constraint.
 
     Returns
     -------
@@ -262,8 +327,7 @@ def reconstruct_sketch(
     gather_to_entity = build_gather_idx_mapping(gather_map)
 
     # Reconstruct constraints
-    constraint_list = reconstruct_constraints(c_val_tokens)
-
+    constraint_list, _ = reconstruct_constraints(c_val_tokens, token_len_per_constraint)
 
     # Subnode slot to subnode name mapping
     # Slot corresponds to param token offset from entity type token.
@@ -281,7 +345,7 @@ def reconstruct_sketch(
 
     # Add constraints to sketch
     entity_list = list(sketch.entities.values())
-    for constraint_idx, (constraint_type, gather_refs) in enumerate(constraint_list):
+    for constraint_idx, (constraint_type, gather_refs, _) in enumerate(constraint_list):
         # Convert gather refs to entity reference strings
         params = []
         for ref_idx, prim_tok_pos in enumerate(gather_refs):

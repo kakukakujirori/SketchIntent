@@ -13,7 +13,6 @@ from img2cad_diffusion import primitive_data
 from sketchgraphs_models.nn.summary import CohenKappa
 from . import dit
 from .constraint_data import ConstraintDataConfig, ConstraintTokenInput
-from .detokenization import reconstruct_constraints
 from .losses import ConstraintLoss, ConstraintIoU
 from .prob_path import MaskProbPath, SamplingConfig
 from .tokens import PrimitiveToken, PrimitiveParamToken, ConstraintToken, ConstraintParamToken
@@ -326,7 +325,7 @@ class ConstraintMDDModule(L.LightningModule):
         self.sampling_eps = 0.001
         self.inference_sampling_steps = 50
 
-        self.ProbPath = MaskProbPath(self, config, self.noise)
+        self.ProbPath = MaskProbPath(self, config.sampling, self.noise)
         # <<< PRISM <<<
 
         # Loss function (supports Hungarian matching)
@@ -346,6 +345,9 @@ class ConstraintMDDModule(L.LightningModule):
             (preds_canonical, target_canonical, relevant_idxs)
         """
         from .tokenization import CONSTRAINT_TOKEN_LEN
+
+        if not self.hparams.data.align_constraint_token_length:
+            raise NotImplementedError("[_canonicalize_for_comparison] assumes fixed constraint blok length FOR NOW.")
 
         B, L = target.shape
         block_size = CONSTRAINT_TOKEN_LEN  # 4

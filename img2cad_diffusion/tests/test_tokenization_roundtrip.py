@@ -11,7 +11,7 @@ from sketchgraphs.data import Arc, Circle, Line, Point
 import sketchgraphs.data as datalib
 from sketchgraphs.data import flat_array as fa
 
-from img2cad_diffusion.tokenization import tokenize_primitives, tokenize_sketch, tokenize_constraints
+from img2cad_diffusion.tokenization import tokenize_primitives, tokenize_sketch, tokenize_constraints, CONSTRAINT_TOKEN_LEN
 from img2cad_diffusion.detokenization import reconstruct_primitives, reconstruct_constraints, reconstruct_sketch
 
 
@@ -263,11 +263,12 @@ class TestConstraintRoundtrip:
             prim_tokens, gather_map = tokenize_primitives(sketch, NUM_BINS, max_length=None)
 
             # Step 2: Tokenize constraints using tokenize_constraints directly
-            constr_tokens = tokenize_constraints(sketch, gather_map, max_length=None)
+            constr_tokens = tokenize_constraints(sketch, gather_map, max_length=None, align_token_length=True)
 
             # Step 3: Detokenize constraints
             c_val = constr_tokens['val']
-            reconstructed_constraints = reconstruct_constraints(c_val)
+            reconstructed_constraints, invalid_constraints = reconstruct_constraints(c_val, token_len_per_constraint=CONSTRAINT_TOKEN_LEN)
+            assert len(invalid_constraints) == 0
 
             # Get expected constraints (excluding External refs)
             expected_pairs = get_expected_constraint_pairs(sketch, gather_map)
@@ -279,7 +280,7 @@ class TestConstraintRoundtrip:
 
             # Convert reconstructed to same format for comparison
             recon_pairs = []
-            for c_type, refs in reconstructed_constraints:
+            for c_type, refs, _ in reconstructed_constraints:
                 sorted_refs = tuple(sorted(refs))
                 recon_pairs.append((c_type.name, sorted_refs))
 
@@ -330,13 +331,14 @@ class TestFullSketchRoundtrip:
             sketch_utils.normalize_sketch(sketch)
 
             # Tokenize full sketch
-            result = tokenize_sketch(sketch, NUM_BINS, max_length=None)
+            result = tokenize_sketch(sketch, NUM_BINS, max_length=None, align_constraint_token_length=True)
 
             # Reconstruct sketch with constraints
             recon_sketch = reconstruct_sketch(
                 result.prim_tokens['val'],
                 result.constr_tokens['val'],
-                NUM_BINS
+                NUM_BINS,
+                token_len_per_constraint=CONSTRAINT_TOKEN_LEN,
             )
 
             # Verify we got a sketch back with entities and constraints
