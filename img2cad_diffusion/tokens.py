@@ -51,7 +51,7 @@ class ConstraintToken(enum.IntEnum):
     Coincident = 4
     Concentric = 5
     Equal = 6
-    Fix = 7
+    Fix = 7  # FIXME: BETTER TO REMOVE?
     Horizontal = 8
     Midpoint = 9
     Normal = 10

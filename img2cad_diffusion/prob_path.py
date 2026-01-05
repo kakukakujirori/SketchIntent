@@ -87,7 +87,7 @@ class MaskProbPath:
             self.nucleus_p = 1.0
             self.dfm = False
 
-        self.pad_index = ConstraintToken.Stop if self.model.hparams.data.use_stop_padding else ConstraintToken.Pad
+        self.pad_index = ConstraintToken.Pad  # NOTE: Even if use_stop_padding is True, we use Pad for padding (since we set logits[:, :, self.pad_index] = self.neg_infinity)
         self.mask_index = ConstraintToken.Mask
         self.noise = noise_scheduler
         self.neg_infinity = -1e6
@@ -346,7 +346,7 @@ class MaskProbPath:
         from img2cad_diffusion.solver_feedback import SolverStatus, convert_sketch_to_freecad, get_solver_status
         import FreeCAD
 
-        if not self.model.hparams.model.align_constraint_token_length:
+        if not self.model.hparams.data.align_constraint_token_length:
             raise ValueError("align_constraint_token_length must be True")
 
         x = batch['c_val'].clone()

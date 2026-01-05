@@ -203,7 +203,6 @@ class ConstraintLoss:
         self,
         pred_logits: torch.Tensor,
         gt_blocks: torch.Tensor,
-        input_blocks: torch.Tensor,
         mask_blocks: torch.Tensor,
     ) -> torch.Tensor:
         """Compute cost matrix for Hungarian matching (vectorized).
@@ -211,7 +210,6 @@ class ConstraintLoss:
         Args:
             pred_logits: [B, N, 4, V] predicted logits for each block
             gt_blocks: [B, N, 4] ground truth token values
-            input_blocks: [B, N, 4] input token values (unmasked positions have GT)
             mask_blocks: [B, N, 4] boolean mask (True = masked position)
 
         Returns:
@@ -226,7 +224,7 @@ class ConstraintLoss:
 
         # For unmasked positions, replace with one-hot
         # Create one-hot for input tokens: [B, N, 4, V]
-        one_hot_input = F.one_hot(input_blocks.long(), num_classes=V).float()
+        one_hot_input = F.one_hot(gt_blocks.long(), num_classes=V).float()
 
         # Expand mask to [B, N, 4, V] for broadcasting
         mask_expanded = mask_blocks.unsqueeze(-1).expand(-1, -1, -1, V)
@@ -301,14 +299,11 @@ class ConstraintLoss:
         gt_blocks = self._reshape_to_blocks(target, is_logits=False)   # [B, N, 4]
         mask_blocks = self._reshape_to_blocks(mask_indices, is_logits=False)  # [B, N, 4]
 
-        # Input blocks = where mask is False, the original GT is visible
-        input_blocks = gt_blocks.clone()  # Input = GT at unmasked positions
-
         N = pred_logits.shape[1]
         block_tokens = N * self.block_size  # How many tokens are covered by blocks
 
         # Compute cost matrix
-        cost_matrix = self._compute_cost_matrix(pred_logits, gt_blocks, input_blocks, mask_blocks)
+        cost_matrix = self._compute_cost_matrix(pred_logits, gt_blocks, mask_blocks)
 
         # Hungarian matching
         matched_indices = self._hungarian_match(cost_matrix)  # [B, N]

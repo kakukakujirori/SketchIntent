@@ -209,7 +209,7 @@ def tokenize_constraints(
     """Tokenize sketch constraints.
 
     Uses sketch.constraints (not sequence EdgeOps) for cleaner access.
-    Constraints are sorted by minimum reference token position for canonical ordering.
+    Constraints can be reordered based on constraint_order.
 
     Parameters
     ----------
@@ -219,6 +219,8 @@ def tokenize_constraints(
         Entity -> token position mapping from tokenize_primitives.
     max_length : int | None
         Max sequence length.
+    uniquify_val_tokens : bool
+        If True, reference primitive indices are offset by len(ConstraintToken) to differentiate from constraint type tokens.
     constraint_order : str
         Constraint ordering: "original" (sequence order), "sort_by_ref_id" (canonical),
         or "random_shuffle" (random each call).
@@ -399,8 +401,8 @@ def tokenize_constraints(
 
     return {
         'val': _pad_or_truncate(np.array(val_tokens, dtype=np.int64), max_length, tail_pad_value),
-        'coord': _pad_or_truncate(np.array(coord_tokens, dtype=np.int64), max_length, tail_pad_value),
-        'pos': _pad_or_truncate(np.array(pos_tokens, dtype=np.int64), max_length, tail_pad_value),
+        'coord': _pad_or_truncate(np.array(coord_tokens, dtype=np.int64), max_length, pad_value=ConstraintParamToken.Pad),
+        'pos': _pad_or_truncate(np.array(pos_tokens, dtype=np.int64), max_length, pad_value=0),
     }
 
 

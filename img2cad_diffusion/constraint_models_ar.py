@@ -6,6 +6,7 @@ import lightning as L
 import torch
 import torch.nn.functional as F
 import torchmetrics
+from tqdm import tqdm
 
 from sketchgraphs_models.nn.summary import CohenKappa
 from .constraint_data import ConstraintTokenInput
@@ -93,10 +94,10 @@ class ConstraintARModule(L.LightningModule):
         self.model = ConstraintARModel(
             num_bins=self.hparams.data.num_position_bins,
             max_token_length=self.hparams.data.max_token_length,
-            embed_dim=self.hparams.model.embedding_dimension,
-            fc_size=self.hparams.model.hidden_size,
-            num_heads=self.hparams.model.num_heads,
-            num_layers=self.hparams.model.num_layers)
+            embed_dim=self.hparams.model.net.embedding_dimension,
+            fc_size=self.hparams.model.net.hidden_size,
+            num_heads=self.hparams.model.net.num_heads,
+            num_layers=self.hparams.model.net.num_layers)
 
         self.criterion = torch.nn.CrossEntropyLoss(ignore_index=ConstraintToken.Pad)
 
@@ -211,6 +212,46 @@ class ConstraintARModule(L.LightningModule):
 
         return kappa, iou, accuracy
 
+    def generate_sample(
+        self,
+        batch: ConstraintTokenInput,
+        max_len: int,
+        dtype: torch.dtype = torch.long,
+    ) -> torch.Tensor:
+        # Start with just START token, rest is zeros (will be filled)
+        batch_size = batch['val'].shape[0]
+        generated = torch.full((batch_size, max_len), ConstraintToken.Pad,
+                            device=self.device, dtype=dtype)
+        generated[:, 0] = ConstraintToken.Start
+
+        # Autoregressive generation
+        for pos in tqdm(range(max_len - 1), desc="Sampling"):
+            # Create batch with current generated tokens
+            gen_batch = {
+                'val': batch['val'],
+                'coord': batch['coord'],
+                'pos': batch['pos'],
+                'c_val': generated,
+            }
+
+            # Forward pass
+            output = self.model(gen_batch)  # [B, L, V]
+
+            # Sample next token at position pos
+            next_token_logits = output[:, pos, :]  # [B, V]
+            next_token_logits[:, ConstraintToken.Mask] = -torch.inf
+            next_token = torch.distributions.Categorical(logits=next_token_logits).sample()
+
+            # Fill in position pos+1
+            generated[:, pos + 1] = next_token
+
+            # Early stopping if all sequences have generated STOP
+            if (generated == ConstraintToken.Stop).any(dim=1).all():
+                break
+
+        return generated
+
+
     def training_step(self, batch: ConstraintTokenInput, batch_idx: int):
         loss, preds, target = self._compute_loss(batch)
         kappa, iou, acc = self._compute_metrics(preds, target, dataloader_idx=0)
@@ -254,37 +295,8 @@ class ConstraintARModule(L.LightningModule):
 
             # Get target and sequence length
             target = batch['c_val']
-            batch_size, max_len = target.shape
-
-            # Start with just START token, rest is zeros (will be filled)
-            generated = torch.full((batch_size, max_len), ConstraintToken.Pad,
-                                device=self.device, dtype=target.dtype)
-            generated[:, 0] = ConstraintToken.Start
-
-            # Autoregressive generation
-            for pos in range(max_len - 1):
-                # Create batch with current generated tokens
-                gen_batch = {
-                    'val': batch['val'],
-                    'coord': batch['coord'],
-                    'pos': batch['pos'],
-                    'c_val': generated,
-                }
-
-                # Forward pass
-                output = self.model(gen_batch)  # [B, L, V]
-
-                # Sample next token at position pos
-                next_token_logits = output[:, pos, :]  # [B, V]
-                next_token_logits[:, ConstraintToken.Mask] = -torch.inf
-                next_token = torch.distributions.Categorical(logits=next_token_logits).sample()
-
-                # Fill in position pos+1
-                generated[:, pos + 1] = next_token
-
-                # Early stopping if all sequences have generated STOP
-                if (generated == ConstraintToken.Stop).any(dim=1).all():
-                    break
+            _, max_len = target.shape
+            generated = self.generate_sample(batch, max_len, dtype=target.dtype)
 
             # Compute metrics for validation
             kappa = self.kappa_metric_gen[loader_idx]
@@ -346,28 +358,8 @@ class ConstraintARModule(L.LightningModule):
 
             # Get target and sequence length
             target = batch['c_val']
-            batch_size = target.shape[0]
-            max_len = target.shape[1]
-
-            # Autoregressive generation
-            generated = torch.full((batch_size, max_len), ConstraintToken.Pad,
-                                   device=self.device, dtype=target.dtype)
-            generated[:, 0] = ConstraintToken.Start
-
-            for pos in range(max_len - 1):
-                gen_batch = {
-                    'val': batch['val'],
-                    'coord': batch['coord'],
-                    'pos': batch['pos'],
-                    'c_val': generated,
-                }
-                output = self.model(gen_batch)
-                next_token_logits = output[:, pos, :]
-                next_token = torch.distributions.Categorical(logits=next_token_logits).sample()
-                generated[:, pos + 1] = next_token
-
-                if (generated == ConstraintToken.Stop).any(dim=1).all():
-                    break
+            batch_size, max_len = target.shape
+            generated = self.generate_sample(batch, max_len, dtype=target.dtype)
 
             # Compute metrics (use separate metrics per loader)
             relevant_idxs = (target != ConstraintToken.Pad)
@@ -409,4 +401,3 @@ class ConstraintARModule(L.LightningModule):
                     )
                     if solver_results:
                         print(f"Solver Report (test{suffix}): {solver_results}")
-

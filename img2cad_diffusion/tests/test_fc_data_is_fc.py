@@ -84,7 +84,7 @@ def test_fc_data_remains_fc_through_tokenization(
     sequence_file: str,
     fc_json_path: str,
     num_position_bins: int = 64,
-    max_token_length: int = 130,
+    max_token_length: int = 256,  # NOTE: Make it larger than 130 to avoid information loss through tokenization
     test_sample_num: int = 1000,
 ):
     """Test that FC data remains fully constrained (DoF==2) after tokenization/detokenization.

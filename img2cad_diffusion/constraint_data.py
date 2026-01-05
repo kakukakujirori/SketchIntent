@@ -218,6 +218,7 @@ class ConstraintDataset(torch.utils.data.Dataset):
             'c_val': torch.from_numpy(result.constr_tokens['val']),
             # 'c_coord': torch.from_numpy(result.constr_tokens['coord']),
             # 'c_pos': torch.from_numpy(result.constr_tokens['pos']),
+            # 'data_index': torch.tensor([index]),                         # NOTE: Uncomment during debug
         }
 
     def __len__(self) -> int:

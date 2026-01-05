@@ -22,23 +22,22 @@ class TestHungarianMatching:
         torch.manual_seed(42)
         pred_logits = torch.randn(B, N, block_size, V)
         gt_blocks = torch.randint(0, V, (B, N, block_size))
-        input_blocks = gt_blocks.clone()  # For simplicity, input = GT
         mask_blocks = torch.rand(B, N, block_size) > 0.3  # ~70% masked
 
         # Compute using vectorized implementation
         cost_vectorized = loss_fn._compute_cost_matrix(
-            pred_logits, gt_blocks, input_blocks, mask_blocks
+            pred_logits, gt_blocks, mask_blocks
         )
 
         # Compute using naive brute-force implementation
         cost_brute = self._compute_cost_brute_force(
-            pred_logits, gt_blocks, input_blocks, mask_blocks, V
+            pred_logits, gt_blocks, mask_blocks, V
         )
 
         # Should match
         torch.testing.assert_close(cost_vectorized, cost_brute, rtol=1e-4, atol=1e-4)
 
-    def _compute_cost_brute_force(self, pred_logits, gt_blocks, input_blocks, mask_blocks, V):
+    def _compute_cost_brute_force(self, pred_logits, gt_blocks, mask_blocks, V):
         """Naive O(B*N*N*4) implementation for reference."""
         import torch.nn.functional as F
 
@@ -53,7 +52,7 @@ class TestHungarianMatching:
                     if mask_blocks[b, i, k]:
                         pred_probs[k] = F.softmax(pred_logits[b, i, k], dim=-1)
                     else:
-                        pred_probs[k, input_blocks[b, i, k]] = 1.0
+                        pred_probs[k, gt_blocks[b, i, k]] = 1.0
 
                 for j in range(N):
                     # Compute CE against GT block j

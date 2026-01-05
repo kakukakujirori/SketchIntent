@@ -191,7 +191,7 @@ class ConstraintMDDModel(torch.nn.Module):
         self.sigma_map = dit.TimestepEmbedder(cond_dim)
         self.embed_dim = embed_dim
 
-    def _embed_tokens(self, src: dict[str, torch.Tensor]):
+    def _embed_tokens(self, src: ConstraintTokenInput):
         """Embed primitive and constraint tokens.
 
         Returns:
@@ -226,7 +226,7 @@ class ConstraintMDDModel(torch.nn.Module):
 
         return c_embeddings, p_embeddings
 
-    def forward(self, src: dict[str, torch.Tensor], sigma: torch.Tensor):
+    def forward(self, src: ConstraintTokenInput, sigma: torch.Tensor):
         # Embed tokens
         c_embeddings, p_embeddings = self._embed_tokens(src)
 
@@ -329,7 +329,10 @@ class ConstraintMDDModule(L.LightningModule):
         # <<< PRISM <<<
 
         # Loss function (supports Hungarian matching)
-        self.loss_fn = ConstraintLoss(use_hungarian=getattr(config.model, 'use_hungarian_loss', False))
+        use_hungarian = getattr(config.model, 'use_hungarian_loss', False)
+        if use_hungarian:
+            assert config.data.align_constraint_token_length
+        self.loss_fn = ConstraintLoss(use_hungarian=use_hungarian)
 
     def _canonicalize_for_comparison(
         self,
