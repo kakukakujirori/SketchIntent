@@ -724,16 +724,20 @@ def resolve_subnodes(seq: list[NodeOp | EdgeOp]) -> dict[int, tuple[int, int]]:
 
 def resolve_redundant_coincident(seq: list[NodeOp | EdgeOp], node_idx_map: dict[int, tuple[int, int]], debug: bool = False) -> list[NodeOp | EdgeOp]:
     """
-    PointOnObject(primitive_idx, primitive_point_pos, curve_idx) and Coincident(primitive_idx, primitive_point_pos, curve_idx, curve_point_pos) are deemed redundant.
-    This function detects these two pairs and disable the former.
-    NOTE: The former is also Coincident in Onshape.
+    PointOnObject(primitive_idx, primitive_point_pos, curve_idx) is redundant ONLY if
+    Point-Point(primitive_idx, primitive_point_pos, curve_idx, curve_point_pos) exists
+    for the SAME point position on primitive_idx.
+
+    Different points (center vs start vs end) are INDEPENDENT and should all be kept.
     """
     sort_idx = lambda idx1, pt1, ref1, idx2, pt2, ref2: (idx1, pt1, ref1, idx2, pt2, ref2) if idx1 <= idx2 else (idx2, pt2, ref2, idx1, pt1, ref1)
 
     seq = copy.deepcopy(seq)
 
-    # Scan for Coincident
-    coincident_map = {}
+    # First pass: collect all Coincident constraints grouped by (idx1, idx2)
+    geo_pair_map: dict[tuple[int, int], list] = {}
+    # Each entry: (pt1, ref1, pt2, ref2, op_idx)
+
     for coincident_op_idx, op in enumerate(seq):
         if isinstance(op, EdgeOp) and op.label == ConstraintType.Coincident:
             op = deduplicate_refs(op)
@@ -748,21 +752,47 @@ def resolve_redundant_coincident(seq: list[NodeOp | EdgeOp], node_idx_map: dict[
 
             # self redundancy
             if idx1 == idx2:
-                seq[coincident_op_idx] = EdgeOp(ConstraintType.Coincident, references=(ref1, ref2), parameters={"disable": True})
+                seq[coincident_op_idx] = EdgeOp(ConstraintType.Coincident, references=(refs[0], refs[1]), parameters={"disable": True})
                 continue
 
-            # cross redundancy
-            if (idx1, idx2) in coincident_map:
-                pt1_prev, ref1_prev, pt2_prev, ref2_prev, coincident_op_idx_prev = coincident_map[(idx1, idx2)]
-                if pt1 > 0 and pt2 > 0:
-                    coincident_map[(idx1, idx2)] = (pt1, ref1, pt2, ref2, coincident_op_idx)
-                    seq[coincident_op_idx_prev] = EdgeOp(ConstraintType.Coincident, references=(ref1_prev, ref2_prev), parameters={"disable": True})
-                elif pt1_prev > 0 and pt2_prev > 0:
-                    seq[coincident_op_idx] = EdgeOp(ConstraintType.Coincident, references=(ref1, ref2), parameters={"disable": True})
-                else:
-                    if debug: print(f"[resolve_redundant_coincident] WARNING: Double PointOnLine detected ({idx1=}, {idx2=} / {pt1=}, {pt2=} / {pt1_prev=}, {pt2_prev=})")
-            else:
-                coincident_map[(idx1, idx2)] = (pt1, ref1, pt2, ref2, coincident_op_idx)
+            key = (idx1, idx2)
+            if key not in geo_pair_map:
+                geo_pair_map[key] = []
+            geo_pair_map[key].append((pt1, ref1, pt2, ref2, coincident_op_idx))
+
+    # Second pass: for each geo pair, identify truly redundant PointOnObject constraints
+    for key, entries in geo_pair_map.items():
+        if len(entries) <= 1:
+            continue
+
+        idx1, idx2 = key
+
+        # Collect all Point-Point constraints and their point references
+        point_point_points: dict[int, set[int]] = {}
+        for pt1, ref1, pt2, ref2, op_idx in entries:
+            if pt1 > 0 and pt2 > 0:
+                # This is Point-Point
+                if idx1 not in point_point_points:
+                    point_point_points[idx1] = set()
+                if idx2 not in point_point_points:
+                    point_point_points[idx2] = set()
+                point_point_points[idx1].add(pt1)
+                point_point_points[idx2].add(pt2)
+
+        # Disable PointOnObject only if its point is covered by a Point-Point
+        for pt1, ref1, pt2, ref2, op_idx in entries:
+            is_point_on_object = (pt1 == 0) != (pt2 == 0)  # Exactly one is 0
+            if is_point_on_object:
+                # Get the point reference from PointOnObject
+                point_idx = idx1 if pt1 > 0 else idx2
+                point_pt = pt1 if pt1 > 0 else pt2
+
+                # Check if this specific point is covered by a Point-Point
+                if point_idx in point_point_points and point_pt in point_point_points[point_idx]:
+                    # Get original refs from seq
+                    orig_op = seq[op_idx]
+                    if isinstance(orig_op, EdgeOp):
+                        seq[op_idx] = EdgeOp(ConstraintType.Coincident, references=orig_op.references, parameters={"disable": True})
 
     return seq
 

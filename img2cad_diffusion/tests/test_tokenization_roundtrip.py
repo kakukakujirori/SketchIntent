@@ -174,7 +174,16 @@ def get_expected_constraint_pairs(sketch, gather_map) -> list:
 
         result.append((constraint_type_name, sorted_refs))
 
-    return result
+    # Deduplicate constraints (matching reconstruct_constraints behavior)
+    # Source data may have duplicate constraints (e.g., c_19 and c_20 both Coincident(36, 1.start))
+    seen = set()
+    deduplicated = []
+    for pair in result:
+        if pair not in seen:
+            seen.add(pair)
+            deduplicated.append(pair)
+
+    return deduplicated
 
 
 class TestPrimitiveRoundtrip:
@@ -268,7 +277,13 @@ class TestConstraintRoundtrip:
             # Step 3: Detokenize constraints
             c_val = constr_tokens['val']
             reconstructed_constraints, invalid_constraints = reconstruct_constraints(c_val, token_len_per_constraint=CONSTRAINT_TOKEN_LEN)
-            assert len(invalid_constraints) == 0
+            # Note: Source data may have duplicate constraints which are correctly
+            # marked as invalid (deduplicated). We only fail on truly invalid constraints
+            # (wrong ref count, out-of-range refs, etc.), not duplicates.
+            # Duplicates have the same (constraint_type, sorted(refs)) as a valid constraint.
+            valid_keys = {(c[0], tuple(sorted(c[1]))) for c in reconstructed_constraints}
+            truly_invalid = [c for c in invalid_constraints if (c[0], tuple(sorted(c[1]))) not in valid_keys]
+            assert len(truly_invalid) == 0, f"Seq {i}: Truly invalid constraints: {truly_invalid}"
 
             # Get expected constraints (excluding External refs)
             expected_pairs = get_expected_constraint_pairs(sketch, gather_map)

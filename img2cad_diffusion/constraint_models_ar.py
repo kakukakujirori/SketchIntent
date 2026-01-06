@@ -10,8 +10,8 @@ from tqdm import tqdm
 
 from sketchgraphs_models.nn.summary import CohenKappa
 from .constraint_data import ConstraintTokenInput
-from .constraint_models import PrimitiveModel, generate_square_subsequent_mask, ConstraintModelTrainingConfig
-from .losses import ConstraintIoU
+from .constraint_models import PrimitiveModel, ConstraintModelTrainingConfig
+from .iou import ConstraintIoU
 from .tokens import ConstraintToken
 
 
@@ -72,8 +72,6 @@ class ConstraintARModel(torch.nn.Module):
         # Embed
         c_embeddings, p_embeddings = self._embed_tokens(src)
         # Pass to transformer with causal mask
-        # Note: generate_square_subsequent_mask expects shape[0] to be seq_len,
-        # but c_embeddings is [B, S, D], so we need to use shape[1]
         seq_len = c_embeddings.shape[1]
         tgt_mask = c_embeddings.new_full((seq_len, seq_len), fill_value=float('-inf')).triu_(diagonal=1)
         output = self.trans_decoder(c_embeddings, p_embeddings, tgt_mask)

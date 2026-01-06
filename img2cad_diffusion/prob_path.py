@@ -37,6 +37,8 @@ def _sample_categorical(categorical_probs: torch.Tensor) -> torch.Tensor:
 class SamplingConfig:
     steps: int = 64
     method: str = 'tau_leaping' # 'topk_static', 'tau_leaping'
+    N_tokenwise_unmasking: int = CONSTRAINT_TOKEN_LEN
+    N_token_prefix: int = 1  # Start token
     noise_removal: bool = True
     sample_batch_size: int = 16 # Not strictly used if batch is provided
     # PRISM specific params
@@ -161,7 +163,7 @@ class MaskProbPath:
         k: int,
         x0: torch.Tensor,
         fixed_tokens: torch.Tensor | None,
-        constraint_blockwise_masking: bool = False,
+        N_tokenwise_unmasking: int = 1,
     ) -> torch.Tensor:
         # Select k tokens to keep (or rather, select tokens such that we have k clean ones)
         # If we have N fixed/clean tokens already, and we want K total clean tokens,
@@ -169,7 +171,7 @@ class MaskProbPath:
 
         # p_x0: [B, L, V]
         # masks: [B, L] (True if masked)
-        if constraint_blockwise_masking:
+        if N_tokenwise_unmasking > 1:
             raise NotImplementedError("Blockwise masking is not supported yet for _select_k_tokens")
         else:
             token_score = self._score_tokens(p_x0, masks, x0, fixed_tokens)
@@ -196,7 +198,7 @@ class MaskProbPath:
         p_x0: torch.Tensor,
         k: int,
         fixed_tokens: torch.Tensor | None,
-        constraint_blockwise_masking: bool = False,
+        N_tokenwise_unmasking: int = 1,
     ) -> ConstraintTokenInput:
         x = batch['c_val']
         masks = (x == self.mask_index)
@@ -215,7 +217,7 @@ class MaskProbPath:
             x0_theta = _sample_categorical(p_x0)
 
         # Select k tokens to be clean
-        clean_token_filter = self._select_k_tokens(p_x0, masks, k, x0_theta, fixed_tokens, constraint_blockwise_masking)
+        clean_token_filter = self._select_k_tokens(p_x0, masks, k, x0_theta, fixed_tokens, N_tokenwise_unmasking)
 
         # Update x: where filter is True (keep clean), use predicted x0; else mask
         x_next = torch.where(clean_token_filter, x0_theta, self.mask_index)
@@ -236,14 +238,14 @@ class MaskProbPath:
         rate_t: torch.Tensor,
         dt: float,
         fixed_tokens: torch.Tensor | None,
-        constraint_blockwise_masking: bool = False,
+        N_tokenwise_unmasking: int = 1,
     ) -> ConstraintTokenInput:
         x = batch['c_val']
         masks = (x == self.mask_index)
 
         new_token_indices = p_x0.argmax(dim=-1) # [B, L]
 
-        if constraint_blockwise_masking:
+        if N_tokenwise_unmasking > 1:
             B, L = p_x0.shape[0], p_x0.shape[1]
 
             # Get max probabilities for each token position
@@ -258,13 +260,13 @@ class MaskProbPath:
             # Exclude the first token (Start) from block processing
             body_start_idx = 1
             num_tokens_in_body = L - body_start_idx
-            num_blocks = num_tokens_in_body // CONSTRAINT_TOKEN_LEN
-            block_aligned_len = num_blocks * CONSTRAINT_TOKEN_LEN
+            num_blocks = num_tokens_in_body // N_tokenwise_unmasking
+            block_aligned_len = num_blocks * N_tokenwise_unmasking
             body_end_idx = body_start_idx + block_aligned_len
 
             # Extract probabilities for the block-aligned body
             body_token_max_probs = token_max_probs[:, body_start_idx : body_end_idx]
-            body_token_max_probs = body_token_max_probs.reshape(B, num_blocks, CONSTRAINT_TOKEN_LEN)
+            body_token_max_probs = body_token_max_probs.reshape(B, num_blocks, N_tokenwise_unmasking)
 
             # Calculate block rates as product of token probabilities within each block
             # This represents the joint probability of all tokens in a block being unmasked to their most likely value
@@ -278,7 +280,7 @@ class MaskProbPath:
 
             # Expand block counts back to token level for the body segment
             # If a block has an event, all its tokens are considered to have an event.
-            token_counts_body = block_counts.unsqueeze(-1).expand(-1, -1, CONSTRAINT_TOKEN_LEN).reshape(B, block_aligned_len)
+            token_counts_body = block_counts.unsqueeze(-1).expand(-1, -1, N_tokenwise_unmasking).reshape(B, block_aligned_len)
 
             # Initialize full token counts tensor
             counts = torch.zeros_like(x, dtype=torch.long)
@@ -293,7 +295,7 @@ class MaskProbPath:
             # If they are masked and not fixed, they will remain masked.
             # This is a simplification assuming Start/Stop/Padding are usually fixed or not part of dynamic unmasking.
 
-        else:
+        elif N_tokenwise_unmasking == 1:
             # Token-wise logic
             unmask_rate = p_x0 * rate_t.unsqueeze(-1) # [B, L, V]
             raw_counts = torch.poisson(unmask_rate * dt).long() # [B, L, V]
@@ -306,6 +308,9 @@ class MaskProbPath:
             counts = raw_counts.sum(dim=-1) # [B, L]
 
             # new_token_indices is already p_x0.argmax(dim=-1) which is correct for token-wise.
+
+        else:
+            raise ValueError("N_tokenwise_unmasking must be 1 or greater.")
 
         # Common Update Logic for both blockwise and token-wise
         # `counts` here is [B, L] representing "number of unmask events for this position"
@@ -457,7 +462,7 @@ class MaskProbPath:
         batch: ConstraintTokenInput,
         num_steps: int = 64,
         start_tokens: list[int] | None = None,
-        constraint_blockwise_masking: bool = False,
+        N_tokenwise_unmasking: int = 1,
     ) -> tuple[torch.Tensor, list[torch.Tensor]]:
         """
         Generate samples using the Discrete Diffusion process.
@@ -465,6 +470,7 @@ class MaskProbPath:
             batch: Initial batch containing primitives and 'c_val' (which serves as ground truth target usually, but here we mask it).
             num_steps: Number of diffusion steps.
             start_tokens: List of tokens to fix at the beginning of the sequence.
+            N_tokenwise_unmasking: N-consecutive tokens are unmasked at one time
         """
         batch = copy.deepcopy(batch)
 
@@ -509,7 +515,7 @@ class MaskProbPath:
                     rate_t,
                     1.0/num_steps,
                     fixed_tokens=fixed_tokens,
-                    constraint_blockwise_masking=constraint_blockwise_masking)
+                    N_tokenwise_unmasking=N_tokenwise_unmasking)
             elif self.method.startswith('topk_static'):
                 k = self._schedule_k(total_tokens, num_steps, self.loop_step_on, self.loop_steps, i)
                 batch = self._topk_static_update(
@@ -517,7 +523,7 @@ class MaskProbPath:
                     p_x0,
                     k,
                     fixed_tokens=fixed_tokens,
-                    constraint_blockwise_masking=constraint_blockwise_masking)
+                    N_tokenwise_unmasking=N_tokenwise_unmasking)
             else:
                 raise NotImplementedError(f"Sampling method {self.method} not implemented")
 

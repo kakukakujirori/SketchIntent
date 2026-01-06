@@ -365,10 +365,10 @@ def _resolve_tangent(
     skip_coincident_ids: set[str] = set()
     resolved_tangent_refs: dict[str, list[tuple[int, int]]] = {}
 
-    # Build Coincident map: (geo1_id, geo2_id) -> (refs_parsed, coincident_id)
+    # Build Coincident map: (geo1_id, geo2_id) -> list of (refs_parsed, coincident_id)
     # refs_parsed is [(geo1, pt1), (geo2, pt2)] in constraint order
-    # Now handles cases where one ref has subnode and one doesn't (e.g., Circle + Line.end)
-    coincident_map: dict[tuple[int, int], tuple[list[tuple[int, int]], str]] = {}
+    # Store ALL Coincident constraints for each geo pair (don't overwrite)
+    coincident_map: dict[tuple[int, int], list[tuple[list[tuple[int, int]], str]]] = {}
     for cid, c in constraints.items():
         if c.constraint_type.name == 'Coincident':
             refs_parsed = []  # List of (geo_id, pt_id)
@@ -416,16 +416,9 @@ def _resolve_tangent(
                 if pt1 > 0 or pt2 > 0:
                     # Use normalized key for lookup, but store full refs_parsed
                     key = (min(geo1, geo2), max(geo1, geo2))
-                    # Prioritize point-point over point-edge (like Sequence converter)
-                    if key in coincident_map:
-                        existing_refs, _ = coincident_map[key]
-                        existing_pt1 = existing_refs[0][1]
-                        existing_pt2 = existing_refs[1][1]
-                        # Only replace if current is point-point and existing is not
-                        if pt1 > 0 and pt2 > 0 and not (existing_pt1 > 0 and existing_pt2 > 0):
-                            coincident_map[key] = (refs_parsed, cid)
-                    else:
-                        coincident_map[key] = (refs_parsed, cid)
+                    if key not in coincident_map:
+                        coincident_map[key] = []
+                    coincident_map[key].append((refs_parsed, cid))
 
     # Find Tangent constraints that have matching Coincident
     for tid, t in constraints.items():
@@ -445,12 +438,28 @@ def _resolve_tangent(
             if len(geo_ids) == 2:
                 key = (min(geo_ids[0], geo_ids[1]), max(geo_ids[0], geo_ids[1]))
                 if key in coincident_map:
-                    refs_parsed, coincident_id = coincident_map[key]
-                    # Sort refs_parsed so smaller geo_id comes first (like Sequence converter)
-                    if refs_parsed[0][0] > refs_parsed[1][0]:
-                        refs_parsed = [refs_parsed[1], refs_parsed[0]]
-                    resolved_tangent_refs[tid] = refs_parsed
-                    skip_coincident_ids.add(coincident_id)
+                    # Find the best Coincident to use (prioritize point-point)
+                    candidates = coincident_map[key]
+                    best_refs = None
+                    best_cid = None
+                    for refs_parsed, cid in candidates:
+                        pt1, pt2 = refs_parsed[0][1], refs_parsed[1][1]
+                        if pt1 > 0 and pt2 > 0:
+                            # Point-point: prefer this
+                            best_refs = refs_parsed
+                            best_cid = cid
+                            break
+                        elif best_refs is None:
+                            # First candidate as fallback
+                            best_refs = refs_parsed
+                            best_cid = cid
+
+                    if best_refs is not None:
+                        # Sort refs_parsed so smaller geo_id comes first (like Sequence converter)
+                        if best_refs[0][0] > best_refs[1][0]:
+                            best_refs = [best_refs[1], best_refs[0]]
+                        resolved_tangent_refs[tid] = best_refs
+                        skip_coincident_ids.add(best_cid)
 
     return skip_coincident_ids, resolved_tangent_refs
 
@@ -474,8 +483,9 @@ def _resolve_redundant_coincident(
     """
     skip_coincident_ids: set[str] = set()
 
-    # Parse all Coincident constraints: (geo1, geo2) -> [(pt1, pt2, cid), ...]
-    coincident_map: dict[tuple[int, int], list[tuple[int, int, str]]] = {}
+    # Parse all Coincident constraints grouped by (geo1, geo2)
+    # Then check if PointOnObject is redundant (when Point-Point exists for same point)
+    geo_pair_map: dict[tuple[int, int], list[tuple[int, int, str]]] = {}
 
     for cid, c in constraints.items():
         if c.constraint_type.name == 'Coincident':
@@ -499,7 +509,6 @@ def _resolve_redundant_coincident(
                             if base_idx in entity_to_geoid:
                                 geo_id = entity_to_geoid[base_idx]
                                 # Point entity (no subnode) should use pt_id=1, not 0
-                                # Note: entities keys are str, base_idx is int
                                 entity = entities.get(str(base_idx)) or entities.get(base_idx)
                                 if entity is not None and type(entity).__name__ == 'Point':
                                     refs_parsed.append((geo_id, 1))
@@ -515,30 +524,44 @@ def _resolve_redundant_coincident(
                 if geo1 > geo2:
                     geo1, pt1, geo2, pt2 = geo2, pt2, geo1, pt1
                 key = (geo1, geo2)
-                if key not in coincident_map:
-                    coincident_map[key] = []
-                coincident_map[key].append((pt1, pt2, cid))
+                if key not in geo_pair_map:
+                    geo_pair_map[key] = []
+                geo_pair_map[key].append((pt1, pt2, cid))
 
-    # For each geo pair with multiple Coincident, keep Point-Point, skip PointOnObject
-    for key, entries in coincident_map.items():
+    # For each geo pair, check if PointOnObject is truly redundant
+    # Redundancy: PointOnObject(geo1.ptX, geo2) is redundant ONLY if
+    # Point-Point(geo1.ptX, geo2.ptY) exists for the SAME ptX
+    # Different points (center vs start vs end) are INDEPENDENT and should all be kept
+    for key, entries in geo_pair_map.items():
         if len(entries) <= 1:
             continue
 
-        # Find the best entry (Point-Point preferred)
-        best_entry = None
+        # Collect all Point-Point constraints and their point references
+        # point_point_points[geo_id] = set of pt values that have Point-Point constraints
+        point_point_points: dict[int, set[int]] = {}
         for pt1, pt2, cid in entries:
             if pt1 > 0 and pt2 > 0:
-                best_entry = (pt1, pt2, cid)
-                break
+                # This is Point-Point
+                geo1, geo2 = key
+                if geo1 not in point_point_points:
+                    point_point_points[geo1] = set()
+                if geo2 not in point_point_points:
+                    point_point_points[geo2] = set()
+                point_point_points[geo1].add(pt1)
+                point_point_points[geo2].add(pt2)
 
-        # If no Point-Point found, keep ALL PointOnObject constraints (matching sequence behavior)
-        if best_entry is None:
-            continue  # Don't skip any
-
-        # Skip all entries except the best (Point-Point)
+        # Skip PointOnObject only if its point is covered by a Point-Point
         for pt1, pt2, cid in entries:
-            if cid != best_entry[2]:
-                skip_coincident_ids.add(cid)
+            is_point_on_object = (pt1 == 0) != (pt2 == 0)  # Exactly one is 0
+            if is_point_on_object:
+                geo1, geo2 = key
+                # Get the point reference from PointOnObject
+                point_geo = geo1 if pt1 > 0 else geo2
+                point_pt = pt1 if pt1 > 0 else pt2
+
+                # Check if this specific point is covered by a Point-Point
+                if point_geo in point_point_points and point_pt in point_point_points[point_geo]:
+                    skip_coincident_ids.add(cid)
 
     return skip_coincident_ids
 

@@ -44,6 +44,8 @@ def make_trainer(config: constraint_models.ConstraintModelTrainingConfig) -> pl.
 
     trainer_kwargs = {
         'max_epochs': config.max_epochs,
+        # 'limit_train_batches': 10,
+        # 'limit_val_batches': 10,
     }
 
     if config.num_gpus > 0:
