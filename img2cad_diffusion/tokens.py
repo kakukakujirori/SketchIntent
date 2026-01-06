@@ -70,6 +70,10 @@ class ConstraintToken(enum.IntEnum):
     # Special tokens
     InnerPad = 22  # Padding within fixed-length constraint blocks (loss computed)
 
+    @classmethod
+    def has_value(cls, value):
+        return value in [i.value for i in cls]
+
 
 # Mapping from constraint type to acceptable number of references
 # Used for validation during detokenization

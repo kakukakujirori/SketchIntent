@@ -7,6 +7,7 @@ This module provides the inverse operations of tokenization.py:
 
 For tokenization (Sketch -> tokens), see tokenization.py.
 """
+from jinja2.nodes import Const
 import numpy as np
 
 import sketchgraphs.data as datalib
@@ -174,14 +175,20 @@ def reconstruct_constraints(c_val_tokens: np.ndarray, token_len_per_constraint: 
         end_pos: int,
     ):
         # Save previous constraint if exists
-        if current_constraint is not None:
-            item = (ConstraintToken(current_constraint), current_refs, (start_pos, end_pos))
-            is_valid = validate_constraints(current_constraint, current_refs)
-            if is_valid:
-                valid_constraints.append(item)
-                seen_valid_constraints.add((current_constraint, tuple(sorted(current_refs))))
-            else:
-                invalid_constraints.append(item)
+        if current_constraint is None:
+            return
+        if not ConstraintToken.has_value(current_constraint):
+            invalid_constraints.append((current_constraint, current_refs, (start_pos, end_pos)))
+            return
+
+        item = (ConstraintToken(current_constraint), current_refs, (start_pos, end_pos))
+        is_valid = validate_constraints(current_constraint, current_refs)
+        if is_valid:
+            valid_constraints.append(item)
+            seen_valid_constraints.add((current_constraint, tuple(sorted(current_refs))))
+        else:
+            invalid_constraints.append(item)
+        return
 
     if token_len_per_constraint is None:
         # Variable length per constraint

@@ -5,7 +5,7 @@ from torchmetrics.functional.classification import multiclass_accuracy
 from img2cad_diffusion.constraint_models import ConstraintMDDModule
 from img2cad_diffusion.constraint_models_ar import ConstraintARModule
 from img2cad_diffusion.constraint_data import ConstraintDataModule, ConstraintTokenInput
-from img2cad_diffusion.solver_feedback import tokens_to_freecad_sketch, get_solver_status, HAS_FREECAD
+from img2cad_diffusion.solver_feedback import tokens_to_freecad_sketch, get_solver_status, HAS_FREECAD, FreeCADConversionError
 from img2cad_diffusion.tokens import ConstraintToken, CONSTRAINT_ACCEPTABLE_REF_COUNTS
 from img2cad_diffusion.tokenization import CONSTRAINT_TOKEN_LEN
 
@@ -113,6 +113,7 @@ def qualitative_eval(
             model_module.ProbPath.noise_removal = False
         else:
             model_module.ProbPath.method = 'tau_leaping'
+            # model_module.ProbPath.noise_removal = False
 
         torch.manual_seed(seed)
         pred_sample, pred_intermediates = model_module.ProbPath.generate_sample(
@@ -183,6 +184,7 @@ def quantitative_eval(
             model_module.ProbPath.noise_removal = False
         else:
             model_module.ProbPath.method = 'tau_leaping'
+            # model_module.ProbPath.noise_removal = False
 
         torch.manual_seed(seed)
         pred_sample, pred_intermediates = model_module.ProbPath.generate_sample(
@@ -215,6 +217,7 @@ def quantitative_eval(
     iou_total = 0
     precision_total = 0
     recall_total = 0
+    valid_total = 0
 
     for i, (gt, pred) in enumerate(zip(gt_tokens, pred_sample)):
         gt_constraints = print_constraints_readable(gt, prefix="  ", blind=True)
@@ -225,11 +228,28 @@ def quantitative_eval(
         precision_total += len(intersection) / max(1, len(pred_constraints))
         recall_total += len(intersection) / max(1, len(gt_constraints))
 
+        # Evaluate prediction with FreeCAD
+        try:
+            doc, fc_sketch, history_commands,mapping = tokens_to_freecad_sketch(
+                batch['val'][i],
+                pred,
+                config.data.num_position_bins,
+                token_len_per_constraint=CONSTRAINT_TOKEN_LEN,
+            )
+            pred_status = get_solver_status(fc_sketch, mapping)
+            FreeCAD.closeDocument(doc.Name)
+            if not (pred_status.MalformedConstraints or pred_status.ConflictingConstraints or pred_status.RedundantConstraints):
+                valid_total += 1
+        except FreeCADConversionError as e:
+            continue
+
+
     iou_total /= len(gt_tokens)
     precision_total /= len(gt_tokens)
     recall_total /= len(gt_tokens)
+    valid_total /= len(gt_tokens)
 
-    return acc_total, iou_total, precision_total, recall_total
+    return acc_total, iou_total, precision_total, recall_total, valid_total
 
 
 if __name__ == '__main__':
@@ -292,14 +312,16 @@ if __name__ == '__main__':
         iou_total = 0
         precision_total = 0
         recall_total = 0
+        valid_ratio_total = 0
         cnt = 0
         for batch in dataloader:
             batch = {k: v.to(args.device) for k, v in batch.items()}
-            acc, iou, precision, recall = quantitative_eval(module, batch, args.solver_feedback, args.seed)
+            acc, iou, precision, recall, valid_ratio = quantitative_eval(module, batch, args.solver_feedback, args.seed)
             acc_total += acc
             iou_total += iou
             precision_total += precision
             recall_total += recall
+            valid_ratio_total += valid_ratio
             cnt += 1
             break  # NOTE: SINCE IT'S VERY TIME CONSUMING!!!
         print(f"{'='*80}")
@@ -307,4 +329,5 @@ if __name__ == '__main__':
         print(f"IoU       (Intersection / Union):        {iou_total / cnt}")
         print(f"Precision (Intersection / Prediction):   {precision_total / cnt}")
         print(f"Recall    (Intersection / Ground Truth): {recall_total / cnt}")
+        print(f"Valid Ratio:                             {valid_ratio_total / cnt}")
         print(f"{'='*80}")
