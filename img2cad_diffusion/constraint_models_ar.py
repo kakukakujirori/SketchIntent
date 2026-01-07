@@ -13,6 +13,7 @@ from .constraint_data import ConstraintTokenInput
 from .constraint_models import PrimitiveModel, ConstraintModelTrainingConfig
 from .iou import ConstraintIoU
 from .tokens import ConstraintToken
+from .tokenization import CONSTRAINT_TOKEN_LEN
 
 
 class ConstraintARModel(torch.nn.Module):
@@ -104,19 +105,26 @@ class ConstraintARModule(L.LightningModule):
         # Metrics for step-by-step evaluation (0 => normal data, 1 => fully constrained data)
         self.kappa_metric = torch.nn.ModuleList([CohenKappa(num_pointer_targets) for _ in range(2)])
         self.accuracy_metric = torch.nn.ModuleList([torchmetrics.Accuracy(task='multiclass', num_classes=num_pointer_targets) for _ in range(2)])
-        self.iou_metric = torch.nn.ModuleList([ConstraintIoU() for _ in range(2)])
+        self.set_metrics = torch.nn.ModuleList(
+            [ConstraintIoU(token_num_per_block=CONSTRAINT_TOKEN_LEN, token_prefix_len=1) for _ in range(2)]
+        )
 
         # Metrics for full-generation task (0 => normal data, 1 => fully constrained data)
         self.kappa_metric_gen = torch.nn.ModuleList([CohenKappa(num_pointer_targets) for _ in range(2)])
         self.accuracy_metric_gen = torch.nn.ModuleList([torchmetrics.Accuracy(task='multiclass', num_classes=num_pointer_targets) for _ in range(2)])
-        self.iou_metric_gen = torch.nn.ModuleList([ConstraintIoU() for _ in range(2)])
+        self.set_metrics_gen = torch.nn.ModuleList(
+            [ConstraintIoU(token_num_per_block=CONSTRAINT_TOKEN_LEN, token_prefix_len=1) for _ in range(2)]
+        )
 
     @staticmethod
     def _format_constraint_sequence(tokens, max_show: int | None = None) -> list[str]:
+        """Format constraint tokens for display."""
         result = []
         for tok in tokens:
             tok_val = int(tok)
-            if tok_val == ConstraintToken.Pad:
+            if tok_val == ConstraintToken.Mask:  # NOTE: Unused
+                result.append("[MASK]")
+            elif tok_val == ConstraintToken.Pad:
                 break
             elif tok_val == ConstraintToken.Start:
                 result.append("[START]")
@@ -187,28 +195,41 @@ class ConstraintARModule(L.LightningModule):
         self,
         preds: torch.Tensor,
         target: torch.Tensor,
+        generated_from_scratch: bool = False,
         dataloader_idx: int = 0,
-    ) -> tuple[CohenKappa, ConstraintIoU, torchmetrics.Accuracy]:
+    ) -> dict[str, torch.Tensor]:
         """Update metrics for the given dataloader.
 
         Args:
             preds: Predicted tokens [B, L]
             target: Ground truth tokens [B, L]
+            generated_from_scratch: If True, use _gen metrics
             dataloader_idx: 0 for normal, 1 for FC
 
         Returns:
-            (kappa_metric, iou_metric, accuracy)
+            Dict with 'kappa', 'accuracy', 'iou', 'precision', 'recall'
         """
-        kappa = self.kappa_metric[dataloader_idx]
-        accuracy = self.accuracy_metric[dataloader_idx]
-        iou = self.iou_metric[dataloader_idx]
+        if generated_from_scratch:
+            kappa = self.kappa_metric_gen[dataloader_idx]
+            accuracy = self.accuracy_metric_gen[dataloader_idx]
+            set_metric = self.set_metrics_gen[dataloader_idx]
+        else:
+            kappa = self.kappa_metric[dataloader_idx]
+            accuracy = self.accuracy_metric[dataloader_idx]
+            set_metric = self.set_metrics[dataloader_idx]
 
         relevant_idxs = (target != ConstraintToken.Pad)
         kappa(preds[relevant_idxs], target[relevant_idxs])
         accuracy(preds[relevant_idxs], target[relevant_idxs])
-        iou(preds, target)
+        set_metric(preds, target)  # Set metrics work on full sequences (constraint-level)
 
-        return kappa, iou, accuracy
+        metrics = {
+            "kappa": kappa.compute(),
+            "accuracy": accuracy.compute(),
+            **set_metric.compute(),  # iou, precision, recall
+        }
+
+        return metrics
 
     def generate_sample(
         self,
@@ -252,21 +273,22 @@ class ConstraintARModule(L.LightningModule):
 
     def training_step(self, batch: ConstraintTokenInput, batch_idx: int):
         loss, preds, target = self._compute_loss(batch)
-        kappa, iou, acc = self._compute_metrics(preds, target, dataloader_idx=0)
+        metrics = self._compute_metrics(preds, target, dataloader_idx=0)
 
-        self.log('loss', loss)
-        self.log('kappa', kappa, prog_bar=True)
+        self.log('train/loss', loss)
+        for metric_key, metric_value in metrics.items():
+            self.log(f'train/{metric_key}', metric_value, prog_bar=True)
 
         return loss
 
     def validation_step(self, batch: ConstraintTokenInput, batch_idx: int, dataloader_idx: int = 0):
         loss, preds, target = self._compute_loss(batch)
-        kappa, iou, acc = self._compute_metrics(preds, target, dataloader_idx=dataloader_idx)
+        metrics = self._compute_metrics(preds, target, dataloader_idx=dataloader_idx)
 
         suffix = '_fc' if dataloader_idx == 1 else ''
         self.log(f'validation/loss{suffix}', loss, add_dataloader_idx=False, sync_dist=True)
-        self.log(f'validation/kappa{suffix}', kappa, add_dataloader_idx=False, sync_dist=True)
-        self.log(f'validation/iou{suffix}', iou, add_dataloader_idx=False, sync_dist=True)
+        for metric_key, metric_value in metrics.items():
+            self.log(f'validation/{metric_key}{suffix}', metric_value, add_dataloader_idx=False, sync_dist=True)
 
     @torch.no_grad()
     def on_validation_epoch_end(self):
@@ -297,19 +319,11 @@ class ConstraintARModule(L.LightningModule):
             generated = self.generate_sample(batch, max_len, dtype=target.dtype)
 
             # Compute metrics for validation
-            kappa = self.kappa_metric_gen[loader_idx]
-            accuracy = self.accuracy_metric_gen[loader_idx]
-            iou = self.iou_metric_gen[loader_idx]
-
-            relevant_idxs = (target != ConstraintToken.Pad)
-            kappa(generated[relevant_idxs], target[relevant_idxs])
-            accuracy(generated[relevant_idxs], target[relevant_idxs])
-            iou(generated, target)
+            metrics = self._compute_metrics(generated, target, generated_from_scratch=True, dataloader_idx=loader_idx)
 
             suffix = '_fc' if loader_idx == 1 else ''
-            self.log(f'validation_gen/kappa{suffix}', kappa, add_dataloader_idx=False, sync_dist=True)
-            self.log(f'validation_gen/accuracy{suffix}', accuracy, add_dataloader_idx=False, sync_dist=True)
-            self.log(f'validation_gen/iou{suffix}', iou, add_dataloader_idx=False, sync_dist=True)
+            for metric_name, metric_value in metrics.items():
+                self.log(f'validation_gen/{metric_name}{suffix}', metric_value, add_dataloader_idx=False, sync_dist=True)
 
             # Print comparison on rank 0
             if self.global_rank == 0:
@@ -326,13 +340,12 @@ class ConstraintARModule(L.LightningModule):
 
     def test_step(self, batch: ConstraintTokenInput, batch_idx: int, dataloader_idx: int = 0):
         loss, preds, target = self._compute_loss(batch)
-        kappa, iou, acc = self._compute_metrics(preds, target, dataloader_idx=dataloader_idx)
+        metrics = self._compute_metrics(preds, target, dataloader_idx=dataloader_idx)
 
-        # Use add_dataloader_idx=True (default) for side-by-side comparison in table
-        self.log('test/loss', loss, sync_dist=True)
-        self.log('test/kappa', kappa, sync_dist=True)
-        self.log('test/iou', iou, sync_dist=True)
-        self.log('test/accuracy', acc, sync_dist=True)
+        suffix = '_fc' if dataloader_idx == 1 else ''
+        self.log(f'test/loss{suffix}', loss, add_dataloader_idx=False, sync_dist=True)
+        for metric_key, metric_value in metrics.items():
+            self.log(f'test/{metric_key}{suffix}', metric_value, add_dataloader_idx=False, sync_dist=True)
 
     @torch.no_grad()
     def on_test_epoch_end(self):
@@ -359,20 +372,13 @@ class ConstraintARModule(L.LightningModule):
             batch_size, max_len = target.shape
             generated = self.generate_sample(batch, max_len, dtype=target.dtype)
 
-            # Compute metrics (use separate metrics per loader)
-            relevant_idxs = (target != ConstraintToken.Pad)
-            kappa = self.kappa_metric_gen[loader_idx]
-            accuracy = self.accuracy_metric_gen[loader_idx]
-            iou = self.iou_metric_gen[loader_idx]
-            kappa(generated[relevant_idxs], target[relevant_idxs])
-            accuracy(generated[relevant_idxs], target[relevant_idxs])
-            iou(generated, target)
+            # Compute metrics
+            metrics = self._compute_metrics(generated, target, generated_from_scratch=True, dataloader_idx=loader_idx)
 
             # Use different names for each loader since on_test_epoch_end is called once
             suffix = '' if loader_idx == 0 else '_fc'
-            self.log(f'test_gen/kappa{suffix}', kappa, add_dataloader_idx=False, sync_dist=True)
-            self.log(f'test_gen/accuracy{suffix}', accuracy, add_dataloader_idx=False, sync_dist=True)
-            self.log(f'test_gen/iou{suffix}', iou, add_dataloader_idx=False, sync_dist=True)
+            for metric_name, metric_value in metrics.items():
+                self.log(f'test_gen/{metric_name}{suffix}', metric_value, add_dataloader_idx=False, sync_dist=True)
 
             # Print samples on rank 0
             if self.global_rank == 0:

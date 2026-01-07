@@ -120,7 +120,7 @@ def qualitative_eval(
             batch.copy(),
             num_steps=64,
             start_tokens=[int(ConstraintToken.Start)],
-            constraint_blockwise_masking=True
+            N_tokenwise_unmasking=CONSTRAINT_TOKEN_LEN,
         )
     elif isinstance(model_module, ConstraintARModule):
         torch.manual_seed(seed)
@@ -191,7 +191,7 @@ def quantitative_eval(
             batch.copy(),
             num_steps=64,
             start_tokens=[int(ConstraintToken.Start)],
-            constraint_blockwise_masking=True
+            N_tokenwise_unmasking=CONSTRAINT_TOKEN_LEN,
         )
     elif isinstance(model_module, ConstraintARModule):
         torch.manual_seed(seed)

@@ -1,8 +1,6 @@
 import math
 import typing
 
-import flash_attn
-import flash_attn.layers.rotary
 import huggingface_hub
 import omegaconf
 import torch

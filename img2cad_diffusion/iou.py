@@ -6,7 +6,7 @@ order-agnostic training.
 import torch
 import torchmetrics
 
-from .tokens import ConstraintToken
+from .tokens import ConstraintToken, CONSTRAINT_ACCEPTABLE_REF_COUNTS
 
 
 class ConstraintIoU(torchmetrics.Metric):
@@ -20,8 +20,10 @@ class ConstraintIoU(torchmetrics.Metric):
     - Number of samples (for averaging precision/recall per sample)
     """
 
-    def __init__(self, **kwargs):
+    def __init__(self, token_num_per_block: int | None, token_prefix_len: int, **kwargs):
         super().__init__(**kwargs)
+        self.block_size = token_num_per_block
+        self.prefix_len = token_prefix_len
         self.add_state("total_intersection", default=torch.tensor(0.0), dist_reduce_fx="sum")
         self.add_state("total_pred", default=torch.tensor(0.0), dist_reduce_fx="sum")
         self.add_state("total_target", default=torch.tensor(0.0), dist_reduce_fx="sum")
@@ -38,8 +40,8 @@ class ConstraintIoU(torchmetrics.Metric):
         B = pred_tokens.shape[0]
 
         for b in range(B):
-            pred_set = _tokens_to_constraint_set(pred_tokens[b])
-            target_set = _tokens_to_constraint_set(target_tokens[b])
+            pred_set = self._tokens_to_constraint_set(pred_tokens[b])
+            target_set = self._tokens_to_constraint_set(target_tokens[b])
 
             intersection = pred_set & target_set
             union = pred_set | target_set
@@ -50,66 +52,92 @@ class ConstraintIoU(torchmetrics.Metric):
             self.total_union += len(union)
             self.num_samples += 1
 
-    def compute(self) -> torch.Tensor:
-        """Compute IoU.
+    def compute(self) -> dict[str, torch.Tensor]:
+        """Compute IoU, precision, and recall.
 
         Returns:
-            IoU as a tensor
+            Dict with 'iou', 'precision', 'recall' tensors
         """
         # Avoid division by zero
         iou = self.total_intersection / self.total_union.clamp(min=1)
-        return iou
+        precision = self.total_intersection / self.total_pred.clamp(min=1)
+        recall = self.total_intersection / self.total_target.clamp(min=1)
+        return {"iou": iou, "precision": precision, "recall": recall}
 
+    def _tokens_to_constraint_set(self, tokens: torch.Tensor) -> set:
+        """Convert token sequence to set of constraint tuples.
 
-def _tokens_to_constraint_set(tokens: torch.Tensor) -> set:
-    """Convert token sequence to set of constraint tuples.
+        If self.block_size = None, detects constraint boundaries by looking for constraint type tokens
+        (Coincident through Vertical), rather than assuming fixed block sizes.
 
-    Detects constraint boundaries by looking for constraint type tokens
-    (Coincident through Vertical), rather than assuming fixed block sizes.
+        Args:
+            tokens: [L] token sequence (single example)
 
-    Args:
-        tokens: [L] token sequence (single example)
+        Returns:
+            Set of (constraint_type, (sorted_refs...)) tuples
+        """
+        if len(tokens.shape) != 1:
+            raise ValueError(f"Expected 1D tensor, got {tokens.shape}")
+        tokens = tokens.cpu().numpy().tolist()
+        constraints = set()
 
-    Returns:
-        Set of (constraint_type, (sorted_refs...)) tuples
-    """
-    if len(tokens.shape) != 1:
-        raise ValueError(f"Expected 1D tensor, got {tokens.shape}")
-    tokens = tokens.cpu().numpy()
-    constraints = set()
+        if self.block_size is None:
+            current_type = None
+            current_refs = []
 
-    current_type = None
-    current_refs = []
+            for tok in tokens:
+                tok = int(tok)
 
-    for tok in tokens:
-        tok = int(tok)
+                if tok == ConstraintToken.Pad:
+                    continue
+                if tok == ConstraintToken.Mask:
+                    raise ValueError(f"Mask token found in the evaluation token.")
+                if tok == ConstraintToken.Stop:
+                    break
+                if tok == ConstraintToken.InnerPad:
+                    continue
 
-        if tok == ConstraintToken.Pad:
-            continue
-        if tok == ConstraintToken.Mask:
-            raise ValueError(f"Mask token found in the evaluation token.")
-        if tok == ConstraintToken.Stop:
-            break
-        if tok == ConstraintToken.InnerPad:
-            continue
+                if tok < len(ConstraintToken):
+                    assert tok != ConstraintToken.InnerPad
+                    # Save previous constraint if exists
+                    if current_type is not None:
+                        constraint_tuple = (current_type, tuple(sorted(current_refs)))
+                        constraints.add(constraint_tuple)
+                    # Start new constraint
+                    current_type = tok
+                    current_refs = []
+                else:
+                    # This is a reference token
+                    ref_idx = tok - len(ConstraintToken)
+                    current_refs.append(ref_idx)
 
-        if tok < len(ConstraintToken):
-            assert tok != ConstraintToken.InnerPad
-            # Save previous constraint if exists
+            # Don't forget the last constraint
             if current_type is not None:
                 constraint_tuple = (current_type, tuple(sorted(current_refs)))
                 constraints.add(constraint_tuple)
-            # Start new constraint
-            current_type = tok
-            current_refs = []
+
         else:
-            # This is a reference token
-            ref_idx = tok - len(ConstraintToken)
-            current_refs.append(ref_idx)
+            assert self.block_size > 0
 
-    # Don't forget the last constraint
-    if current_type is not None:
-        constraint_tuple = (current_type, tuple(sorted(current_refs)))
-        constraints.add(constraint_tuple)
+            idx = self.prefix_len
+            while idx < len(tokens):
+                block = tokens[idx:idx+self.block_size]
+                idx += self.block_size
 
-    return constraints
+                # skip invalid constraints
+                if len(block) < self.block_size:
+                    break
+                if block[0] in [ConstraintToken.Pad, ConstraintToken.Stop, ConstraintToken.Mask, ConstraintToken.InnerPad]:
+                    continue
+                if block[0] >= len(ConstraintToken):
+                    continue
+                while block[-1] in [ConstraintToken.InnerPad]:
+                    block = block[:-1]
+                if not all(b >= len(ConstraintToken) for b in block[1:]):
+                    continue
+                if len(block[1:]) not in CONSTRAINT_ACCEPTABLE_REF_COUNTS[ConstraintToken(block[0])]:
+                    continue
+                block = block[:1] + sorted(block[1:])
+                constraints.add(tuple(block))
+
+        return constraints

@@ -315,7 +315,9 @@ class ConstraintMDDModule(L.LightningModule):
             len(self.hparams.model.token_masking_probs) == \
             len(self.hparams.model.gt_reordering_strategies)
         self.token_masking = TokenMasking(mask_id=ConstraintToken.Mask)
-        self.gt_reordering = TokenReordering(token_num_per_block=CONSTRAINT_TOKEN_LEN, token_prefix_len=1)
+        self.token_reordering = TokenReordering(
+            token_num_per_block=CONSTRAINT_TOKEN_LEN,
+            token_prefix_len=1)
 
         self.criterion = torch.nn.CrossEntropyLoss(ignore_index=ConstraintToken.Pad, reduction='none')
 
@@ -325,12 +327,16 @@ class ConstraintMDDModule(L.LightningModule):
         # Metrics for mask-filling task (0 => normal data, 1 => fully constrained data)
         self.kappa_metric = torch.nn.ModuleList([CohenKappa(num_pointer_targets) for _ in range(2)])
         self.accuracy_metric = torch.nn.ModuleList([torchmetrics.Accuracy(task='multiclass', num_classes=num_pointer_targets) for _ in range(2)])
-        self.iou_metric = torch.nn.ModuleList([ConstraintIoU() for _ in range(2)])
+        self.set_metrics = torch.nn.ModuleList(
+            [ConstraintIoU(token_num_per_block=CONSTRAINT_TOKEN_LEN, token_prefix_len=1) for _ in range(2)]
+        )
 
         # Metrics for full-geneartion task (0 => normal data, 1 => fully constrained data)
         self.kappa_metric_gen = torch.nn.ModuleList([CohenKappa(num_pointer_targets) for _ in range(2)])
         self.accuracy_metric_gen = torch.nn.ModuleList([torchmetrics.Accuracy(task='multiclass', num_classes=num_pointer_targets) for _ in range(2)])
-        self.iou_metric_gen = torch.nn.ModuleList([ConstraintIoU() for _ in range(2)])
+        self.set_metrics_gen = torch.nn.ModuleList(
+            [ConstraintIoU(token_num_per_block=CONSTRAINT_TOKEN_LEN, token_prefix_len=1) for _ in range(2)]
+        )
 
         # >>> PRISM >>>
         self.noise = LogLinearNoise()
@@ -339,93 +345,6 @@ class ConstraintMDDModule(L.LightningModule):
 
         self.ProbPath = MaskProbPath(self, config.sampling, self.noise)
         # <<< PRISM <<<
-
-    def _canonicalize_for_comparison(
-        self,
-        preds: torch.Tensor,
-        target: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Canonicalize sequences for comparison and compute relevant indices.
-
-        For Hungarian mode: sorts constraint blocks by min reference.
-        Computes relevant_idxs based on padding type (STOP or PAD).
-
-        Returns:
-            (preds_canonical, target_canonical, relevant_idxs)
-        """
-        from .tokenization import CONSTRAINT_TOKEN_LEN
-
-        if not self.hparams.data.align_constraint_token_length:
-            raise NotImplementedError("[_canonicalize_for_comparison] assumes fixed constraint blok length FOR NOW.")
-
-        B, L = target.shape
-        block_size = CONSTRAINT_TOKEN_LEN  # 4
-        n_blocks = (L - 1) // block_size  # Exclude START token
-
-
-        def sort_by_min_ref(tokens: torch.Tensor) -> torch.Tensor:
-            """Sort constraint blocks by minimum reference index.
-
-            Only sorts valid constraint blocks (before first STOP token).
-            Everything at or after the first STOP is left unchanged.
-            """
-            # Find first STOP position in entire sequence (not just block boundaries)
-            is_stop = (tokens == ConstraintToken.Stop)
-            is_stop_padded = F.pad(is_stop, (0, 1), value=True)
-            first_stop_pos = is_stop_padded.long().argmax(dim=1)  # [B]
-
-            # Calculate which block contains the first STOP (0-indexed)
-            # Block i covers positions [1 + i*block_size, 1 + (i+1)*block_size)
-            first_stop_block = (first_stop_pos - 1) // block_size  # [B]
-            first_stop_block = first_stop_block.clamp(min=0, max=n_blocks)
-
-            # Extract blocks: [B, L] -> [B, N, 4] (skip START at position 0)
-            blocks = tokens[:, 1:1 + n_blocks * block_size].reshape(B, n_blocks, block_size)
-
-            # Get min ref for each block (refs are tokens >= num_constraint_tokens)
-            refs = blocks[:, :, 1:]  # [B, N, 3] - skip constraint type
-            num_c_tokens = len(ConstraintToken)
-            is_ref = refs >= num_c_tokens
-            ref_values = torch.where(is_ref, refs - num_c_tokens, torch.tensor(9999, device=tokens.device))
-            min_ref = ref_values.min(dim=-1).values  # [B, N]
-
-            # Mask out blocks at or after first STOP so they stay in place
-            block_range = torch.arange(n_blocks, device=tokens.device).unsqueeze(0)  # [1, N]
-            is_valid_block = block_range < first_stop_block.unsqueeze(1)  # [B, N]
-            # Give invalid blocks their original position as sort key (so they stay put)
-            min_ref = torch.where(is_valid_block, min_ref, block_range.float() + 10000)
-
-            # Sort blocks by min_ref
-            sorted_indices = min_ref.argsort(dim=-1)  # [B, N]
-            sorted_blocks = torch.gather(blocks, 1, sorted_indices.unsqueeze(-1).expand(-1, -1, block_size))
-
-            # Reconstruct: [START] + sorted_blocks + remaining
-            sorted_tokens = tokens.clone()
-            sorted_tokens[:, 1:1 + n_blocks * block_size] = sorted_blocks.reshape(B, -1)
-            return sorted_tokens
-
-        # Sort if Hungarian mode (order-agnostic comparison)
-        if False:#self.loss_fn.use_hungarian:
-            preds_canonical = sort_by_min_ref(preds)
-            target_canonical = sort_by_min_ref(target)
-        else:
-            preds_canonical = preds
-            target_canonical = target
-
-        # Compute relevant_idxs based on padding type
-        if self.hparams.data.use_stop_padding:
-            # With STOP padding: include positions up to and including first STOP
-            # Add sentinel at end so argmax always finds a STOP
-            is_stop = (target_canonical == ConstraintToken.Stop)
-            is_stop_padded = F.pad(is_stop, (0, 1), value=True)  # [B, L+1]
-            first_stop_pos = is_stop_padded.long().argmax(dim=1)  # [B]
-            pos_range = torch.arange(L, device=target_canonical.device).unsqueeze(0)
-            relevant_idxs = pos_range <= first_stop_pos.unsqueeze(1)
-        else:
-            # With PAD padding: exclude all Pad tokens
-            relevant_idxs = (target_canonical != ConstraintToken.Pad)
-
-        return preds_canonical, target_canonical, relevant_idxs
 
     @staticmethod
     def _format_constraint_sequence(tokens, max_show: int | None = None) -> list[str]:
@@ -479,8 +398,14 @@ class ConstraintMDDModule(L.LightningModule):
     def forward(self, batch: ConstraintTokenInput, sigma: torch.Tensor | None = None) -> torch.Tensor:
         return self.model(batch, sigma)
 
-    def _compute_loss(self, batch: ConstraintTokenInput) -> tuple[
-        torch.Tensor, list[torch.Tensor], list[torch.Tensor], list[torch.Tensor]
+    def _compute_loss(
+        self,
+        batch: ConstraintTokenInput,
+        masking_strategy: str,
+        masking_prob: float | str,
+        gt_reordering_strategy: str,
+    ) -> tuple[
+        torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor
     ]:
         # Prepare input for model
         target = batch["c_val"]
@@ -489,144 +414,174 @@ class ConstraintMDDModule(L.LightningModule):
         c_val_masked_batch = []
         mask_batch = []
         sigma_batch = []
-        for masking_strategy, masking_prob in zip(self.hparams.model.token_masking_strategies, self.hparams.model.token_masking_probs):
 
-            # Sample t
-            batch_size = target.shape[0]
-            _eps_0 = 1e-3  # TODO: MAGIC NUMBER
-            if isinstance(masking_prob, float):
-                move_chance = torch.tensor([masking_prob] * batch_size, device=target.device)
-                t = move_chance / (1 - _eps_0)  # move_chance = (1-eps) * t for LogLinearNoise
-                sigma, dsigma = self.noise(t)
-            else:
-                _eps_t = torch.rand((batch_size,), device=target.device)
-                if 'antithetic' in masking_prob:
-                    offset = torch.arange(batch_size, device=target.device) / batch_size
-                    _eps_t = (_eps_t / batch_size + offset) % 1
-                t = (1 - _eps_0) * _eps_t + _eps_0
-                if 'importance' in masking_prob:
-                    t = self.noise.importance_sampling_transformation(t)
-                sigma, dsigma = self.noise(t)
-                move_chance = 1 - torch.exp(-sigma[:, None]) # (1-eps) * t for LogLinearNoise
+        # Sample t
+        batch_size = target.shape[0]
+        _eps_0 = 1e-3  # TODO: MAGIC NUMBER
+        if isinstance(masking_prob, str):
+            _eps_t = torch.rand((batch_size,), device=target.device)
+            if 'antithetic' in masking_prob:
+                offset = torch.arange(batch_size, device=target.device) / batch_size
+                _eps_t = (_eps_t / batch_size + offset) % 1
+            t = (1 - _eps_0) * _eps_t + _eps_0
+            if 'importance' in masking_prob:
+                t = self.noise.importance_sampling_transformation(t)
+            sigma, dsigma = self.noise(t)
+            move_chance = 1 - torch.exp(-sigma[:, None]) # (1-eps) * t for LogLinearNoise
+        elif isinstance(masking_prob, float):
+            move_chance = torch.tensor([masking_prob] * batch_size, device=target.device)
+            t = move_chance / (1 - _eps_0)  # move_chance = (1-eps) * t for LogLinearNoise
+            sigma, dsigma = self.noise(t)
+        else:
+            raise ValueError(f"Invalid masking_prob: {masking_prob}")
 
-            # Masking
-            c_val_masked, mask = self.token_masking(
-                tokens=batch["c_val"],
-                mask_prob=move_chance,
-                token_prefix_len=1,
-                strategy=masking_strategy)
-
-            # Append
-            sigma_batch.append(sigma)
-            c_val_masked_batch.append(c_val_masked)
-            mask_batch.append(mask)
+        # Masking
+        c_val_masked, mask = self.token_masking(
+            tokens=batch["c_val"],
+            mask_prob=move_chance,
+            token_prefix_len=1,
+            strategy=masking_strategy)
 
         # Create masked batch (primitives unchanged, constraints masked)
-        input_batch = ConstraintTokenInput(
-            val = batch['val'].repeat(len(mask_batch), 1),
-            coord = batch['coord'].repeat(len(mask_batch), 1),
-            pos = batch['pos'].repeat(len(mask_batch), 1),
-            c_val = torch.cat(c_val_masked_batch, dim=0),
+        batch_masked = ConstraintTokenInput(
+            val = batch['val'],
+            coord = batch['coord'],
+            pos = batch['pos'],
+            c_val = c_val_masked,
         )
 
         # model forward pass
-        output_logits_batch = self.model.forward(input_batch, torch.cat(sigma_batch, dim=0))  # [B, L, C] -> logits
-        output_logits_batch = torch.chunk(output_logits_batch, len(mask_batch), dim=0)
+        output_logits = self.model.forward(batch_masked, sigma)  # [B, L, C] -> logits
 
-        # GT reordering + Loss
-        total_loss = torch.tensor(0.0, device=self.device)
+        # GT reordering
+        target_reordered = self.token_reordering(target, output_logits, mask, gt_reordering_strategy)
+
+        # Loss
         reweighting = 1 / t.unsqueeze(-1).expand(-1, target.size(1))  # NOTE: the reweighting term = 1/t for LogLinearNoise
-        pred_batch = []
-        target_reordered_batch = []
+        loss = self.criterion(
+            output_logits[mask],
+            target_reordered[mask],
+        ) * reweighting[mask]
+        loss = loss.sum() / (target_reordered.shape[0] * target_reordered.shape[1])
 
-        assert len(output_logits_batch) == \
-            len(mask_batch) == \
-            len(self.hparams.model.gt_reordering_strategies), \
-            f"{len(output_logits_batch)=}, {len(mask_batch)=}, {len(self.hparams.model.gt_reordering_strategies)=}"
-        for output_logits, mask, reordering_strategy in zip(output_logits_batch, mask_batch, self.hparams.model.gt_reordering_strategies):
-            # GT reordering
-            target_reordered = self.gt_reordering(target, output_logits, mask, reordering_strategy)
-            target_reordered_batch.append(target_reordered)
+        # Pred
+        with torch.no_grad():
+            output_logits_for_pred = output_logits.clone()
+            output_logits_for_pred[:, :, ConstraintToken.Mask] = -torch.inf
+            preds = torch.distributions.Categorical(logits=output_logits_for_pred).sample()
 
-            # Loss
-            loss = self.criterion(
-                output_logits[mask],
-                target_reordered[mask],
-            ) * reweighting[mask]
-            total_loss += loss.sum() / (target_reordered.shape[0] * target_reordered.shape[1])
-
-            # Pred
-            with torch.no_grad():
-                output_logits_for_pred = output_logits.clone()
-                output_logits_for_pred[:, :, ConstraintToken.Mask] = -torch.inf
-                preds = torch.distributions.Categorical(logits=output_logits_for_pred).sample()
-                pred_batch.append(preds)
-
-        return total_loss, pred_batch, target_reordered_batch, mask_batch
+        return loss, preds, target_reordered, mask
 
     def _compute_metrics(
         self,
         preds: torch.Tensor,
         target: torch.Tensor,
-        mask_indices: torch.Tensor,
+        mask: torch.Tensor | None,
+        ignore_pred_tokens_after_stop: bool,
+        generated_from_scratch: bool = False,
         dataloader_idx: int = 0,
-    ) -> tuple[CohenKappa, ConstraintIoU, torch.Tensor, torch.Tensor]:
-        """Update metrics and compute accuracies for the given dataloader.
+    ) -> tuple[dict[str, torch.Tensor], torch.Tensor, torch.Tensor]:
+        """Compute metrics and return sorted sequences.
 
         Args:
             preds: Predicted tokens [B, L]
             target: Ground truth tokens [B, L]
-            mask_indices: Boolean mask indicating which positions were masked [B, L]
+            mask: Boolean mask [B, L] indicating which positions were masked in preds, or None for full generation
+            ignore_pred_tokens_after_stop: Whether to ignore predictions after STOP token
+            generated_from_scratch: If True, use _gen metrics
             dataloader_idx: 0 for normal, 1 for FC validation
 
         Returns:
-            (kappa_metric, iou_metric, masked_acc, unmasked_acc)
+            Tuple of:
+                - Dict with 'kappa', 'accuracy', 'iou', 'precision', 'recall' (and 'masked_acc', 'unmasked_acc' if mask_indices provided)
+                - preds_sorted: Canonically sorted predictions
+                - target_sorted: Canonically sorted targets
         """
-        preds_for_metric, target_for_metric, relevant_idxs = self._canonicalize_for_comparison(preds, target)
+        canonicalize_strategy = "canonical_with_tail_strip" if ignore_pred_tokens_after_stop else "canonical_full"
+        preds_sorted = self.token_reordering(preds, None, None, canonicalize_strategy)
+        target_sorted = self.token_reordering(target, None, None, "canonical_with_tail_strip")
 
-        kappa = self.kappa_metric[dataloader_idx]
-        accuracy = self.accuracy_metric[dataloader_idx]
-        iou = self.iou_metric[dataloader_idx]
+        # identify valid tokens
+        first_stop_idx = self.token_reordering.get_first_stop_idx(target_sorted)
+        valid_token_mask = torch.arange(preds_sorted.shape[1], device=preds_sorted.device).reshape(1, -1) <= first_stop_idx.reshape(-1, 1)
 
-        kappa(preds_for_metric[relevant_idxs], target_for_metric[relevant_idxs])
-        accuracy(preds_for_metric[relevant_idxs], target_for_metric[relevant_idxs])
-        iou(preds, target)  # IoU works on full sequences (constraint-level)
+        if generated_from_scratch:
+            kappa = self.kappa_metric_gen[dataloader_idx]
+            accuracy = self.accuracy_metric_gen[dataloader_idx]
+            set_metric = self.set_metrics_gen[dataloader_idx]
+        else:
+            kappa = self.kappa_metric[dataloader_idx]
+            accuracy = self.accuracy_metric[dataloader_idx]
+            set_metric = self.set_metrics[dataloader_idx]
 
-        # Compute masked/unmasked accuracy
-        masked_relevant = mask_indices & relevant_idxs
-        unmasked_relevant = (~mask_indices) & relevant_idxs
-        masked_acc = (preds_for_metric[masked_relevant] == target_for_metric[masked_relevant]).float().mean()
-        unmasked_acc = (preds_for_metric[unmasked_relevant] == target_for_metric[unmasked_relevant]).float().mean()
+        kappa(preds_sorted[valid_token_mask], target_sorted[valid_token_mask])
+        accuracy(preds_sorted[valid_token_mask], target_sorted[valid_token_mask])
+        set_metric(preds, target)  # Set metrics work on full sequences (constraint-level)
 
-        return kappa, iou, masked_acc, unmasked_acc
+        metrics = {
+            "kappa": kappa.compute(),
+            "accuracy": accuracy.compute(),
+            **set_metric.compute(),  # iou, precision, recall
+        }
+
+        # Compute masked/unmasked accuracy if mask is provided
+        if mask is not None:
+            masked_relevant = mask * valid_token_mask
+            unmasked_relevant = (~mask) * valid_token_mask
+            metrics["masked_acc"] = (preds_sorted[masked_relevant] == target_sorted[masked_relevant]).float().mean()
+            metrics["unmasked_acc"] = (preds_sorted[unmasked_relevant] == target_sorted[unmasked_relevant]).float().mean()
+
+        return metrics, preds_sorted, target_sorted
+
+    def _compute_all_strategies(self, batch: ConstraintTokenInput, dataloader_idx: int = 0) -> tuple[list[torch.Tensor], dict[str, list]]:
+        loss_list = []
+        metrics: dict[str, list] = {}
+
+        for masking_strategy, masking_prob, reordering_strategy in zip(
+            self.hparams.model.token_masking_strategies,
+            self.hparams.model.token_masking_probs,
+            self.hparams.model.gt_reordering_strategies):
+
+            loss, preds, target_reordered, mask = self._compute_loss(batch, masking_strategy, masking_prob, reordering_strategy)
+            step_metrics, _, _ = self._compute_metrics(preds, target_reordered, mask,
+                                                        ignore_pred_tokens_after_stop=(reordering_strategy != "hungarian"),
+                                                        dataloader_idx=dataloader_idx)
+
+            loss_list.append(loss)
+            for key, value in step_metrics.items():
+                if key not in metrics:
+                    metrics[key] = []
+                metrics[key].append(value)
+
+        return loss_list, metrics
 
     def training_step(self, batch: ConstraintTokenInput, batch_idx: int):
-        loss, preds_batch, target_batch, mask_batch = self._compute_loss(batch)
+        loss_list, metrics = self._compute_all_strategies(batch)
+        total_loss = sum(loss_list)
 
-        self.log('loss', loss)
+        self.log('train/loss', total_loss)
+        for i, loss_per_strategy in enumerate(loss_list):
+            self.log(f'train/loss/{i}', loss_per_strategy, prog_bar=True)
 
-        for i, (preds, target, mask) in enumerate(zip(preds_batch, target_batch, mask_batch)):
-            kappa, iou, masked_acc, unmasked_acc = self._compute_metrics(preds, target, mask, dataloader_idx=0)
+        for metric_key, metric_values in metrics.items():
+            for i, metric_per_strategy in enumerate(metric_values):
+                self.log(f'train/{metric_key}/{i}', metric_per_strategy, prog_bar=True)
 
-            self.log(f'kappa/{i}', kappa, prog_bar=True)
-            self.log(f'acc_masked/{i}', masked_acc, prog_bar=True)
-            self.log(f'acc_unmasked/{i}', unmasked_acc, prog_bar=True)
-
-        return loss
+        return total_loss
 
     def validation_step(self, batch: ConstraintTokenInput, batch_idx: int, dataloader_idx: int = 0):
-        loss, preds_batch, target_batch, mask_batch = self._compute_loss(batch)
+        loss_list, metrics = self._compute_all_strategies(batch, dataloader_idx=dataloader_idx)
+        total_loss = sum(loss_list)
 
         suffix = '_fc' if dataloader_idx == 1 else ''
-        self.log(f'validation/loss{suffix}', loss, add_dataloader_idx=False, sync_dist=True)
 
-        for i, (preds, target, mask) in enumerate(zip(preds_batch, target_batch, mask_batch)):
-            kappa, iou, masked_acc, unmasked_acc = self._compute_metrics(preds, target, mask, dataloader_idx=dataloader_idx)
+        self.log(f'validation/loss{suffix}', total_loss)
+        for i, loss_per_strategy in enumerate(loss_list):
+            self.log(f'validation/loss{suffix}/{i}', loss_per_strategy, add_dataloader_idx=False, sync_dist=True)
 
-            self.log(f'validation/kappa{suffix}/{i}', kappa, add_dataloader_idx=False, sync_dist=True)
-            self.log(f'validation/iou{suffix}/{i}', iou, add_dataloader_idx=False, sync_dist=True)
-            self.log(f'validation/acc_masked{suffix}/{i}', masked_acc, add_dataloader_idx=False, sync_dist=True)
-            self.log(f'validation/acc_unmasked{suffix}/{i}', unmasked_acc, add_dataloader_idx=False, sync_dist=True)
+        for metric_key, metric_values in metrics.items():
+            for i, metric_per_strategy in enumerate(metric_values):
+                self.log(f'validation/{metric_key}{suffix}/{i}', metric_per_strategy, add_dataloader_idx=False, sync_dist=True)
 
     def on_validation_epoch_end(self):
         """
@@ -660,22 +615,21 @@ class ConstraintMDDModule(L.LightningModule):
                 N_tokenwise_unmasking=CONSTRAINT_TOKEN_LEN,
             )
 
-            # Evaluate
-            kappa = self.kappa_metric_gen[loader_idx]
-            accuracy = self.accuracy_metric_gen[loader_idx]
-            iou = self.iou_metric_gen[loader_idx]
-
             target = batch['c_val']
-            samples_for_metric, target_for_metric, relevant_idxs = self._canonicalize_for_comparison(samples, target)
 
-            kappa(samples_for_metric[relevant_idxs], target_for_metric[relevant_idxs])
-            accuracy(samples_for_metric[relevant_idxs], target_for_metric[relevant_idxs])
-            iou(samples, target)
+            # Compute metrics
+            ignore_pred_tokens_after_stop = "hungarian" not in self.hparams.model.token_masking_strategies
+            metrics, samples_sorted, target_sorted = self._compute_metrics(
+                samples, target, mask=None,
+                ignore_pred_tokens_after_stop=ignore_pred_tokens_after_stop,
+                generated_from_scratch=True,
+                dataloader_idx=loader_idx,
+            )
 
+            # Log metrics
             suffix = '_fc' if loader_idx == 1 else ''
-            self.log(f'validation_gen/kappa{suffix}', kappa, add_dataloader_idx=False, sync_dist=True)
-            self.log(f'validation_gen/accuracy{suffix}', accuracy, add_dataloader_idx=False, sync_dist=True)
-            self.log(f'validation_gen/iou{suffix}', iou, add_dataloader_idx=False, sync_dist=True)
+            for metric_name, metric_value in metrics.items():
+                self.log(f'validation_gen/{metric_name}{suffix}', metric_value, add_dataloader_idx=False, sync_dist=True)
 
             # Print samples
             if self.global_rank == 0:
@@ -700,24 +654,24 @@ class ConstraintMDDModule(L.LightningModule):
 
                     # Show the final result and GT
                     print("  " + "-"*40)
-                    print(f"  {display_label_gen:15}: {self._format_constraint_sequence(samples_for_metric[i].cpu().numpy())}")
-                    print(f"  {display_label_gt:15}: {self._format_constraint_sequence(target_for_metric[i].cpu().numpy())}")
+                    print(f"  {display_label_gen:15}: {self._format_constraint_sequence(samples_sorted[i].cpu().numpy())}")
+                    print(f"  {display_label_gt:15}: {self._format_constraint_sequence(target_sorted[i].cpu().numpy())}")
 
                 print("="*80 + "\n")
 
     def test_step(self, batch: ConstraintTokenInput, batch_idx: int, dataloader_idx: int = 0):
-        loss, preds_batch, target_batch, mask_batch = self._compute_loss(batch)
+        loss_list, metrics = self._compute_all_strategies(batch, dataloader_idx=dataloader_idx)
+        total_loss = sum(loss_list)
 
-        self.log(f'test/loss', loss, sync_dist=True)
+        suffix = '_fc' if dataloader_idx == 1 else ''
 
-        for i, (preds, target, mask) in enumerate(zip(preds_batch, target_batch, mask_batch)):
-            kappa, iou, masked_acc, unmasked_acc = self._compute_metrics(preds, target, mask, dataloader_idx=dataloader_idx)
+        self.log(f'test/loss{suffix}', total_loss)
+        for i, loss_per_strategy in enumerate(loss_list):
+            self.log(f'test/loss{suffix}/{i}', loss_per_strategy, add_dataloader_idx=False, sync_dist=True)
 
-            # Use add_dataloader_idx=True (default) for side-by-side comparison in table
-            self.log(f'test/kappa/{i}', kappa, sync_dist=True)
-            self.log(f'test/iou/{i}', iou, sync_dist=True)
-            self.log(f'test/acc_masked/{i}', masked_acc, sync_dist=True)
-            self.log(f'test/acc_unmasked/{i}', unmasked_acc, sync_dist=True)
+        for metric_key, metric_values in metrics.items():
+            for i, metric_per_strategy in enumerate(metric_values):
+                self.log(f'test/{metric_key}{suffix}/{i}', metric_per_strategy, add_dataloader_idx=False, sync_dist=True)
 
     def on_test_epoch_end(self):
         """
@@ -745,26 +699,27 @@ class ConstraintMDDModule(L.LightningModule):
             # Generate samples
             start_tokens = [ConstraintToken.Start]
             samples, intermediates = self.ProbPath.generate_sample(
-                batch=batch, num_steps=self.inference_sampling_steps, start_tokens=start_tokens
+                batch=batch,
+                num_steps=self.inference_sampling_steps,
+                start_tokens=start_tokens,
+                N_tokenwise_unmasking=CONSTRAINT_TOKEN_LEN,
             )
 
-            # Evaluate
-            kappa = self.kappa_metric_gen[loader_idx]
-            accuracy = self.accuracy_metric_gen[loader_idx]
-            iou = self.iou_metric_gen[loader_idx]
-
             target = batch['c_val']
-            samples_for_metric, target_for_metric, relevant_idxs = self._canonicalize_for_comparison(samples, target)
 
-            kappa(samples_for_metric[relevant_idxs], target_for_metric[relevant_idxs])
-            accuracy(samples_for_metric[relevant_idxs], target_for_metric[relevant_idxs])
-            iou(samples, target)
+            # Compute metrics
+            ignore_pred_tokens_after_stop = "hungarian" not in self.hparams.model.token_masking_strategies
+            metrics, samples_sorted, target_sorted = self._compute_metrics(
+                samples, target, mask=None,
+                ignore_pred_tokens_after_stop=ignore_pred_tokens_after_stop,
+                generated_from_scratch=True,
+                dataloader_idx=loader_idx,
+            )
 
-            # Use different names for each loader since on_test_epoch_end is called once
+            # Log metrics
             suffix = '_fc' if loader_idx == 1 else ''
-            self.log(f'test_gen/kappa{suffix}', kappa, add_dataloader_idx=False, sync_dist=True)
-            self.log(f'test_gen/accuracy{suffix}', accuracy, add_dataloader_idx=False, sync_dist=True)
-            self.log(f'test_gen/iou{suffix}', iou, add_dataloader_idx=False, sync_dist=True)
+            for metric_name, metric_value in metrics.items():
+                self.log(f'test_gen/{metric_name}{suffix}', metric_value, add_dataloader_idx=False, sync_dist=True)
 
             # Print samples
             if self.global_rank == 0:
@@ -789,8 +744,8 @@ class ConstraintMDDModule(L.LightningModule):
 
                     # Show the final result and GT
                     print("  " + "-"*40)
-                    print(f"  {display_label_gen:15}: {self._format_constraint_sequence(samples_for_metric[i].cpu().numpy())}")
-                    print(f"  {display_label_gt:15}: {self._format_constraint_sequence(target_for_metric[i].cpu().numpy())}")
+                    print(f"  {display_label_gen:15}: {self._format_constraint_sequence(samples_sorted[i].cpu().numpy())}")
+                    print(f"  {display_label_gt:15}: {self._format_constraint_sequence(target_sorted[i].cpu().numpy())}")
 
                 print("="*80 + "\n")
 

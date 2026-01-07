@@ -4,17 +4,22 @@ import torch.nn.functional as F
 from einops import rearrange
 from scipy.optimize import linear_sum_assignment
 
+from img2cad_diffusion.tokens import ConstraintToken
+
 
 class TokenReordering:
     def __init__(self, token_num_per_block: int = 1, token_prefix_len: int = 0):
         self.block_size = token_num_per_block
         self.prefix_len = token_prefix_len
 
+    @torch.no_grad()  # NOTE: query_tokens must not be model prediction results during training!!!
     def __call__(self, query_tokens: torch.Tensor, ref_logits: torch.Tensor | None, ref_mask: torch.Tensor | None, strategy: str) -> torch.Tensor:
         if strategy == 'none':
             return query_tokens
-        elif strategy == 'alphabetical':
-            return self.alphabetical_sorting(query_tokens.detach())
+        elif strategy == 'canonical_with_tail_strip':
+            return self.canonical_sorting(query_tokens.detach(), ignore_tokens_after_first_stop=True)
+        elif strategy == 'canonical_full':
+            return self.canonical_sorting(query_tokens.detach(), ignore_tokens_after_first_stop=False)
         elif strategy == 'hungarian':
             if not isinstance(ref_logits, torch.Tensor) or not isinstance(ref_mask, torch.Tensor):
                 raise ValueError("'hungarian' strategy requires ref_logits and ref_mask.")
@@ -22,8 +27,48 @@ class TokenReordering:
         else:
             raise ValueError(f"Unknown strategy: {strategy}")
 
-    def alphabetical_sorting(self, tokens: torch.Tensor) -> torch.Tensor:
-        raise NotImplementedError
+    @staticmethod
+    def get_first_stop_idx(tokens: torch.Tensor):
+        assert len(tokens.shape) == 2, "Tokens shape must be [B, L]."
+        is_stop_padded = F.pad(tokens == ConstraintToken.Stop, (0, 1), value=True)
+        first_stop_pos = is_stop_padded.long().argmax(dim=1).reshape(-1, 1)
+        return first_stop_pos
+
+    def canonical_sorting(self, tokens: torch.Tensor, ignore_tokens_after_first_stop: bool) -> torch.Tensor:
+        """
+        tokens are block-wise sorted in the alpha-numeric order.
+            - If ignore_tokens_after_stop=True, all the tokens after the first STOP are appended at the tail in the same order.
+            - If False, only the blocks containing STOP or PAD are appended at the tail in the same order.
+        """
+        if tokens.dtype != torch.long:
+            raise ValueError(f"tokens.dtype must be long, but got {tokens.dtype}")
+
+        B, L = tokens.shape
+        end_idx = self.prefix_len + ((L - self.prefix_len) // self.block_size) * self.block_size
+        tokens_to_sort = tokens[:, self.prefix_len:end_idx]
+
+        # Prepare keys for lexicographic sort
+        vocab_size = int(tokens.max().item()) + 1
+        pack_multiplier = vocab_size ** torch.arange(self.block_size - 1, -1, -1, device=tokens.device)
+        blocks_to_sort = tokens_to_sort.reshape(B, -1, self.block_size)
+        blocks_to_sort_packed = (blocks_to_sort * pack_multiplier).sum(dim=2)
+
+        # STOP + Invalid tokens want to come last
+        if ignore_tokens_after_first_stop:
+            # Fill tokens after the first stop token by torch.long.max
+            first_stop_pos = self.get_first_stop_idx(tokens_to_sort)
+            invalid_tokens = (first_stop_pos <= torch.arange(tokens_to_sort.shape[1], device=tokens.device).reshape(1, -1))
+        else:
+            invalid_tokens = (tokens_to_sort == ConstraintToken.Stop) | (tokens_to_sort == ConstraintToken.Pad)
+
+        # lexicographic sort
+        invalid_blocks = invalid_tokens.reshape(B, -1, self.block_size).any(dim=2)
+        blocks_to_sort_packed[invalid_blocks] = torch.iinfo(blocks_to_sort_packed.dtype).max
+        sort_indices = blocks_to_sort_packed.sort(dim=1, stable=True).indices
+
+        ret = tokens.detach().clone()
+        ret[:, self.prefix_len:end_idx] = blocks_to_sort.gather(dim=1, index=sort_indices.unsqueeze(-1).expand_as(blocks_to_sort)).reshape(B, -1)
+        return ret
 
     def hungarian_match(self, query_tokens: torch.Tensor, ref_logits: torch.Tensor, ref_mask: torch.Tensor) -> torch.Tensor:
         # Reshape to blocks (skip START token)
