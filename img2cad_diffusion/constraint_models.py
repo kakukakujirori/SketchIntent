@@ -324,17 +324,12 @@ class ConstraintMDDModule(L.LightningModule):
         # num_pointer_targets = p_embeddings vocabulary size = len(ConstraintToken) + max_token_length
         num_pointer_targets = len(ConstraintToken) + self.hparams.data.max_token_length
 
-        # Metrics for mask-filling task (0 => normal data, 1 => fully constrained data)
+        # Metrics (0 => normal data, 1 => fully constrained data)
+        # Used for both step-by-step and full-generation evaluation
+        # Call _reset_metrics() before each use context (train epoch, val epoch, val_gen, test, etc.)
         self.kappa_metric = torch.nn.ModuleList([CohenKappa(num_pointer_targets) for _ in range(2)])
         self.accuracy_metric = torch.nn.ModuleList([torchmetrics.Accuracy(task='multiclass', num_classes=num_pointer_targets) for _ in range(2)])
         self.set_metrics = torch.nn.ModuleList(
-            [ConstraintIoU(token_num_per_block=CONSTRAINT_TOKEN_LEN, token_prefix_len=1) for _ in range(2)]
-        )
-
-        # Metrics for full-geneartion task (0 => normal data, 1 => fully constrained data)
-        self.kappa_metric_gen = torch.nn.ModuleList([CohenKappa(num_pointer_targets) for _ in range(2)])
-        self.accuracy_metric_gen = torch.nn.ModuleList([torchmetrics.Accuracy(task='multiclass', num_classes=num_pointer_targets) for _ in range(2)])
-        self.set_metrics_gen = torch.nn.ModuleList(
             [ConstraintIoU(token_num_per_block=CONSTRAINT_TOKEN_LEN, token_prefix_len=1) for _ in range(2)]
         )
 
@@ -478,7 +473,6 @@ class ConstraintMDDModule(L.LightningModule):
         target: torch.Tensor,
         mask: torch.Tensor | None,
         ignore_pred_tokens_after_stop: bool,
-        generated_from_scratch: bool = False,
         dataloader_idx: int = 0,
     ) -> tuple[dict[str, torch.Tensor], torch.Tensor, torch.Tensor]:
         """Compute metrics and return sorted sequences.
@@ -488,12 +482,11 @@ class ConstraintMDDModule(L.LightningModule):
             target: Ground truth tokens [B, L]
             mask: Boolean mask [B, L] indicating which positions were masked in preds, or None for full generation
             ignore_pred_tokens_after_stop: Whether to ignore predictions after STOP token
-            generated_from_scratch: If True, use _gen metrics
             dataloader_idx: 0 for normal, 1 for FC validation
 
         Returns:
             Tuple of:
-                - Dict with 'kappa', 'accuracy', 'iou', 'precision', 'recall' (and 'masked_acc', 'unmasked_acc' if mask_indices provided)
+                - Dict with 'kappa', 'accuracy', 'iou', 'precision', 'recall' (and 'masked_acc', 'unmasked_acc' if mask provided)
                 - preds_sorted: Canonically sorted predictions
                 - target_sorted: Canonically sorted targets
         """
@@ -505,23 +498,19 @@ class ConstraintMDDModule(L.LightningModule):
         first_stop_idx = self.token_reordering.get_first_stop_idx(target_sorted)
         valid_token_mask = torch.arange(preds_sorted.shape[1], device=preds_sorted.device).reshape(1, -1) <= first_stop_idx.reshape(-1, 1)
 
-        if generated_from_scratch:
-            kappa = self.kappa_metric_gen[dataloader_idx]
-            accuracy = self.accuracy_metric_gen[dataloader_idx]
-            set_metric = self.set_metrics_gen[dataloader_idx]
-        else:
-            kappa = self.kappa_metric[dataloader_idx]
-            accuracy = self.accuracy_metric[dataloader_idx]
-            set_metric = self.set_metrics[dataloader_idx]
+        kappa = self.kappa_metric[dataloader_idx]
+        accuracy = self.accuracy_metric[dataloader_idx]
+        set_metric = self.set_metrics[dataloader_idx]
 
-        kappa(preds_sorted[valid_token_mask], target_sorted[valid_token_mask])
-        accuracy(preds_sorted[valid_token_mask], target_sorted[valid_token_mask])
-        set_metric(preds, target)  # Set metrics work on full sequences (constraint-level)
+        # forward() updates internal state AND returns per-batch value
+        kappa_val = kappa(preds_sorted[valid_token_mask], target_sorted[valid_token_mask])
+        accuracy_val = accuracy(preds_sorted[valid_token_mask], target_sorted[valid_token_mask])
+        set_metrics_val = set_metric(preds, target)  # Returns {"iou": ..., "precision": ..., "recall": ...}
 
         metrics = {
-            "kappa": kappa.compute(),
-            "accuracy": accuracy.compute(),
-            **set_metric.compute(),  # iou, precision, recall
+            "kappa": kappa_val,
+            "accuracy": accuracy_val,
+            **set_metrics_val,  # iou, precision, recall (per-batch)
         }
 
         # Compute masked/unmasked accuracy if mask is provided
@@ -555,6 +544,21 @@ class ConstraintMDDModule(L.LightningModule):
 
         return loss_list, metrics
 
+    def _reset_metrics(self):
+        """Reset all metrics to prevent accumulation across epochs."""
+        for kappa in self.kappa_metric:
+            kappa.reset()
+        for acc in self.accuracy_metric:
+            acc.reset()
+        for sm in self.set_metrics:
+            sm.reset()
+
+    def on_train_epoch_start(self):
+        self._reset_metrics()
+
+    def on_validation_epoch_start(self):
+        self._reset_metrics()
+
     def training_step(self, batch: ConstraintTokenInput, batch_idx: int):
         loss_list, metrics = self._compute_all_strategies(batch)
         total_loss = sum(loss_list)
@@ -575,7 +579,7 @@ class ConstraintMDDModule(L.LightningModule):
 
         suffix = '_fc' if dataloader_idx == 1 else ''
 
-        self.log(f'validation/loss{suffix}', total_loss)
+        self.log(f'validation/loss{suffix}', total_loss, add_dataloader_idx=False, sync_dist=True)
         for i, loss_per_strategy in enumerate(loss_list):
             self.log(f'validation/loss{suffix}/{i}', loss_per_strategy, add_dataloader_idx=False, sync_dist=True)
 
@@ -587,7 +591,7 @@ class ConstraintMDDModule(L.LightningModule):
         """
         - Load a batch from each validation dataloader
         - Generate samples using the full denoising process
-        - Compute kappa_gen, accuracy_gen, iou_gen for each dataloader
+        - Compute generation metrics for each dataloader
         """
         val_loaders = self.trainer.val_dataloaders
         if val_loaders is None:
@@ -596,6 +600,9 @@ class ConstraintMDDModule(L.LightningModule):
         # Handle single dataloader vs list
         if not isinstance(val_loaders, list):
             val_loaders = [val_loaders]
+
+        # Reset metrics before generation evaluation
+        self._reset_metrics()
 
         for loader_idx, loader in enumerate(val_loaders):
             try:
@@ -622,7 +629,6 @@ class ConstraintMDDModule(L.LightningModule):
             metrics, samples_sorted, target_sorted = self._compute_metrics(
                 samples, target, mask=None,
                 ignore_pred_tokens_after_stop=ignore_pred_tokens_after_stop,
-                generated_from_scratch=True,
                 dataloader_idx=loader_idx,
             )
 
@@ -677,7 +683,7 @@ class ConstraintMDDModule(L.LightningModule):
         """
         - Load a batch from each test dataloader
         - Generate samples using the full denoising process
-        - Compute kappa_gen, accuracy_gen, iou_gen for each dataloader
+        - Compute generation metrics for each dataloader
         """
         test_loaders = self.trainer.test_dataloaders
         if test_loaders is None:
@@ -686,6 +692,9 @@ class ConstraintMDDModule(L.LightningModule):
         # Handle single dataloader vs list
         if not isinstance(test_loaders, list):
             test_loaders = [test_loaders]
+
+        # Reset metrics before generation evaluation
+        self._reset_metrics()
 
         for loader_idx, loader in enumerate(test_loaders):
             try:
@@ -712,7 +721,6 @@ class ConstraintMDDModule(L.LightningModule):
             metrics, samples_sorted, target_sorted = self._compute_metrics(
                 samples, target, mask=None,
                 ignore_pred_tokens_after_stop=ignore_pred_tokens_after_stop,
-                generated_from_scratch=True,
                 dataloader_idx=loader_idx,
             )
 

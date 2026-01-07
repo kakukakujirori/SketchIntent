@@ -102,18 +102,13 @@ class ConstraintARModule(L.LightningModule):
 
         num_pointer_targets = len(ConstraintToken) + self.hparams.data.max_token_length
 
-        # Metrics for step-by-step evaluation (0 => normal data, 1 => fully constrained data)
+        # Metrics (0 => normal data, 1 => fully constrained data)
+        # Used for both step-by-step and full-generation evaluation
+        # Call _reset_metrics() before each use context (train epoch, val epoch, val_gen, test, etc.)
         self.kappa_metric = torch.nn.ModuleList([CohenKappa(num_pointer_targets) for _ in range(2)])
         self.accuracy_metric = torch.nn.ModuleList([torchmetrics.Accuracy(task='multiclass', num_classes=num_pointer_targets) for _ in range(2)])
         self.set_metrics = torch.nn.ModuleList(
-            [ConstraintIoU(token_num_per_block=CONSTRAINT_TOKEN_LEN, token_prefix_len=1) for _ in range(2)]
-        )
-
-        # Metrics for full-generation task (0 => normal data, 1 => fully constrained data)
-        self.kappa_metric_gen = torch.nn.ModuleList([CohenKappa(num_pointer_targets) for _ in range(2)])
-        self.accuracy_metric_gen = torch.nn.ModuleList([torchmetrics.Accuracy(task='multiclass', num_classes=num_pointer_targets) for _ in range(2)])
-        self.set_metrics_gen = torch.nn.ModuleList(
-            [ConstraintIoU(token_num_per_block=CONSTRAINT_TOKEN_LEN, token_prefix_len=1) for _ in range(2)]
+            [ConstraintIoU(token_num_per_block=CONSTRAINT_TOKEN_LEN, token_prefix_len=0) for _ in range(2)]
         )
 
     @staticmethod
@@ -140,6 +135,21 @@ class ConstraintARModule(L.LightningModule):
         if max_show and len(result) > max_show:
             return result[:max_show] + [f"... (+{len(result) - max_show} more)"]
         return result
+
+    def _reset_metrics(self):
+        """Reset all metrics to prevent accumulation across epochs."""
+        for kappa in self.kappa_metric:
+            kappa.reset()
+        for acc in self.accuracy_metric:
+            acc.reset()
+        for sm in self.set_metrics:
+            sm.reset()
+
+    def on_train_epoch_start(self):
+        self._reset_metrics()
+
+    def on_validation_epoch_start(self):
+        self._reset_metrics()
 
     def configure_optimizers(self):
         base_lr = self.hparams.optim.learning_rate * self.hparams.data.batch_size / 128
@@ -195,38 +205,34 @@ class ConstraintARModule(L.LightningModule):
         self,
         preds: torch.Tensor,
         target: torch.Tensor,
-        generated_from_scratch: bool = False,
         dataloader_idx: int = 0,
     ) -> dict[str, torch.Tensor]:
-        """Update metrics for the given dataloader.
+        """Compute metrics for the given dataloader.
 
         Args:
-            preds: Predicted tokens [B, L]
-            target: Ground truth tokens [B, L]
-            generated_from_scratch: If True, use _gen metrics
+            preds: Predicted tokens [B, L] (should NOT have START token prefix)
+            target: Ground truth tokens [B, L] (should NOT have START token prefix)
             dataloader_idx: 0 for normal, 1 for FC
 
         Returns:
             Dict with 'kappa', 'accuracy', 'iou', 'precision', 'recall'
         """
-        if generated_from_scratch:
-            kappa = self.kappa_metric_gen[dataloader_idx]
-            accuracy = self.accuracy_metric_gen[dataloader_idx]
-            set_metric = self.set_metrics_gen[dataloader_idx]
-        else:
-            kappa = self.kappa_metric[dataloader_idx]
-            accuracy = self.accuracy_metric[dataloader_idx]
-            set_metric = self.set_metrics[dataloader_idx]
+        kappa = self.kappa_metric[dataloader_idx]
+        accuracy = self.accuracy_metric[dataloader_idx]
+        set_metric = self.set_metrics[dataloader_idx]
 
+        # Kappa/accuracy on non-pad tokens
         relevant_idxs = (target != ConstraintToken.Pad)
-        kappa(preds[relevant_idxs], target[relevant_idxs])
-        accuracy(preds[relevant_idxs], target[relevant_idxs])
-        set_metric(preds, target)  # Set metrics work on full sequences (constraint-level)
+        kappa_val = kappa(preds[relevant_idxs], target[relevant_idxs])
+        accuracy_val = accuracy(preds[relevant_idxs], target[relevant_idxs])
+
+        # IoU on full sequences (ConstraintIoU uses token_prefix_len=0, no START expected)
+        set_metrics_val = set_metric(preds, target)
 
         metrics = {
-            "kappa": kappa.compute(),
-            "accuracy": accuracy.compute(),
-            **set_metric.compute(),  # iou, precision, recall
+            "kappa": kappa_val,
+            "accuracy": accuracy_val,
+            **set_metrics_val,  # iou, precision, recall
         }
 
         return metrics
@@ -304,6 +310,9 @@ class ConstraintARModule(L.LightningModule):
         if not isinstance(val_loaders, list):
             val_loaders = [val_loaders]
 
+        # Reset metrics before generation evaluation
+        self._reset_metrics()
+
         for loader_idx, loader in enumerate(val_loaders):
             try:
                 val_iter = next(iter(loader))
@@ -318,8 +327,8 @@ class ConstraintARModule(L.LightningModule):
             _, max_len = target.shape
             generated = self.generate_sample(batch, max_len, dtype=target.dtype)
 
-            # Compute metrics for validation
-            metrics = self._compute_metrics(generated, target, generated_from_scratch=True, dataloader_idx=loader_idx)
+            # Compute metrics for validation (skip START token at index 0)
+            metrics = self._compute_metrics(generated[:, 1:], target[:, 1:], dataloader_idx=loader_idx)
 
             suffix = '_fc' if loader_idx == 1 else ''
             for metric_name, metric_value in metrics.items():
@@ -358,6 +367,9 @@ class ConstraintARModule(L.LightningModule):
         if not isinstance(test_loaders, list):
             test_loaders = [test_loaders]
 
+        # Reset metrics before generation evaluation
+        self._reset_metrics()
+
         for loader_idx, loader in enumerate(test_loaders):
             try:
                 test_iter = next(iter(loader))
@@ -372,8 +384,8 @@ class ConstraintARModule(L.LightningModule):
             batch_size, max_len = target.shape
             generated = self.generate_sample(batch, max_len, dtype=target.dtype)
 
-            # Compute metrics
-            metrics = self._compute_metrics(generated, target, generated_from_scratch=True, dataloader_idx=loader_idx)
+            # Compute metrics (skip START token at index 0)
+            metrics = self._compute_metrics(generated[:, 1:], target[:, 1:], dataloader_idx=loader_idx)
 
             # Use different names for each loader since on_test_epoch_end is called once
             suffix = '' if loader_idx == 0 else '_fc'
