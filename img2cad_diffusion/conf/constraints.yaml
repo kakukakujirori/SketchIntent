@@ -1,9 +1,9 @@
 # @package _global_
 
 model:
-  token_masking_strategies: ["4-tokenwise", "tokenwise"]
-  token_masking_probs: ["antithetic", 0.25]
-  gt_reordering_strategies: ["hungarian", "none"]
+  token_masking_strategies: ["4-tokenwise-causal"]
+  token_masking_probs: ["antithetic"]
+  gt_reordering_strategies: ["hungarian_frontier"]
   net:
     model_type: mdd  # "ar" or "mdd"
     num_heads: 8
@@ -34,7 +34,7 @@ data:
 
 sampling:
   steps: 64
-  method: tau_leaping
+  method: frontier_tau_leaping
 
 mixed_precision: True
 num_gpus: 2

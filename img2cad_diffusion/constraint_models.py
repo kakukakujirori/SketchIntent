@@ -448,15 +448,19 @@ class ConstraintMDDModule(L.LightningModule):
         # model forward pass
         output_logits = self.model.forward(batch_masked, sigma)  # [B, L, C] -> logits
 
-        # GT reordering
-        target_reordered = self.token_reordering(target, output_logits, mask, gt_reordering_strategy)
+        # GT reordering + potential mask truncation
+        target_reordered, mask_for_loss = self.token_reordering(target, output_logits, mask, gt_reordering_strategy)
 
         # Loss
-        reweighting = 1 / t.unsqueeze(-1).expand(-1, target.size(1))  # NOTE: the reweighting term = 1/t for LogLinearNoise
+        if gt_reordering_strategy == "hungarian_frontier":
+            reweighting = torch.ones_like(t).unsqueeze(-1).expand(-1, target.size(1))  # TODO: NEED THEORETICAL JUSTIFICATION
+        else:
+            reweighting = 1 / t.unsqueeze(-1).expand(-1, target.size(1))  # NOTE: the reweighting term = 1/t for LogLinearNoise
+
         loss = self.criterion(
-            output_logits[mask],
-            target_reordered[mask],
-        ) * reweighting[mask]
+            output_logits[mask_for_loss],
+            target_reordered[mask_for_loss],
+        ) * reweighting[mask_for_loss]
         loss = loss.sum() / (target_reordered.shape[0] * target_reordered.shape[1])
 
         # Pred
@@ -491,8 +495,8 @@ class ConstraintMDDModule(L.LightningModule):
                 - target_sorted: Canonically sorted targets
         """
         canonicalize_strategy = "canonical_with_tail_strip" if ignore_pred_tokens_after_stop else "canonical_full"
-        preds_sorted = self.token_reordering(preds, None, None, canonicalize_strategy)
-        target_sorted = self.token_reordering(target, None, None, "canonical_with_tail_strip")
+        preds_sorted, _ = self.token_reordering(preds, None, None, canonicalize_strategy)
+        target_sorted, _ = self.token_reordering(target, None, None, "canonical_with_tail_strip")
 
         # identify valid tokens
         first_stop_idx = self.token_reordering.get_first_stop_idx(target_sorted)
@@ -619,7 +623,7 @@ class ConstraintMDDModule(L.LightningModule):
                 batch=batch,
                 num_steps=self.inference_sampling_steps,
                 start_tokens=start_tokens,
-                N_tokenwise_unmasking=CONSTRAINT_TOKEN_LEN,
+                N_tokenwise_unmasking=CONSTRAINT_TOKEN_LEN if f"{CONSTRAINT_TOKEN_LEN}-tokenwise" in self.hparams.model.token_masking_strategies else 1,
             )
 
             target = batch['c_val']
