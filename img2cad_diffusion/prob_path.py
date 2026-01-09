@@ -235,8 +235,7 @@ class MaskProbPath:
         self,
         batch: ConstraintTokenInput,
         p_x0: torch.Tensor,
-        rate_t: torch.Tensor,
-        dt: float,
+        delta_sigma: torch.Tensor,
         fixed_tokens: torch.Tensor | None,
         N_tokenwise_unmasking: int = 1,
     ) -> ConstraintTokenInput:
@@ -272,11 +271,12 @@ class MaskProbPath:
             # This represents the joint probability of all tokens in a block being unmasked to their most likely value
             block_rates_body = body_token_max_probs.prod(dim=-1) # [B, NumBlocks]
 
-            # Apply the global unmasking rate (rate_t) to the block rates
-            block_poisson_rates = block_rates_body * rate_t # [B, NumBlocks]
+            # Apply delta_sigma as the Poisson rate (this is the expected unmask probability change)
+            # delta_sigma is ~0.02 per step for 50 steps (uniform across all steps)
+            block_poisson_rates = block_rates_body * delta_sigma # [B, NumBlocks]
 
             # Sample Poisson events at the block level
-            block_counts = torch.poisson(block_poisson_rates * dt).long() # [B, NumBlocks]
+            block_counts = torch.poisson(block_poisson_rates).long() # [B, NumBlocks]
 
             # Expand block counts back to token level for the body segment
             # If a block has an event, all its tokens are considered to have an event.
@@ -297,8 +297,9 @@ class MaskProbPath:
 
         elif N_tokenwise_unmasking == 1:
             # Token-wise logic
-            unmask_rate = p_x0 * rate_t.unsqueeze(-1) # [B, L, V]
-            raw_counts = torch.poisson(unmask_rate * dt).long() # [B, L, V]
+            # Use delta_sigma as the Poisson rate (uniform ~0.02 per step)
+            unmask_rate = p_x0 * delta_sigma.unsqueeze(-1) # [B, L, V]
+            raw_counts = torch.poisson(unmask_rate).long() # [B, L, V]
 
             # Zero out counts for special tokens (Pad, Mask itself)
             raw_counts[..., self.pad_index] = 0
@@ -331,6 +332,112 @@ class MaskProbPath:
         update_mask = one_event & masks
         x_next[update_mask] = new_token_indices[update_mask]
 
+        if fixed_tokens is not None:
+            x_next = torch.where(fixed_tokens, x, x_next)
+
+        batch['c_val'] = x_next
+        return batch
+
+    def _frontier_tau_leaping_update(
+        self,
+        batch: ConstraintTokenInput,
+        p_x0: torch.Tensor,
+        delta_sigma: torch.Tensor,
+        fixed_tokens: torch.Tensor | None,
+        block_size: int = CONSTRAINT_TOKEN_LEN,
+        token_prefix_len: int = 1,
+    ) -> ConstraintTokenInput:
+        """
+        Tau-leaping update restricted to the 'Frontier' of each constraint block.
+
+        Theory:
+        Unlike standard MDM where all MASKs are candidates, here only the first MASK
+        in each block (the Frontier) is active. This reduces the 'active surface area'
+        of the diffusion process by a factor of roughly 1/block_size.
+
+        To preserve the global noise schedule (i.e., ensure the sequence finishes
+        unmasking within the allotted T steps), the unmasking rate for these
+        active frontier tokens must be scaled up by 'block_size'.
+        """
+        x = batch['c_val']
+        masks = (x == self.mask_index)
+
+        # -------------------------------------------------------------
+        # 1. Frontier Mask
+        # -------------------------------------------------------------
+        B, L = x.shape
+
+        # Determine number of full blocks
+        num_blocks = (L - token_prefix_len) // block_size
+        end_pos = token_prefix_len + num_blocks * block_size
+
+        # Extract blocks: [B, N, 4]
+        # x_body: [B, N*4]
+        x_body = x[:, token_prefix_len : end_pos]
+        x_blocks = x_body.reshape(B, num_blocks, block_size)
+
+        mask_blocks = (x_blocks == self.mask_index)
+
+        # Shift mask to find frontier (False -> True transition)
+        # [False, False, True, True] -> Frontier is the first True
+        # Pad left with False (assuming prefix/previous tokens are visible/handled)
+        padded_mask = torch.cat(
+            [torch.zeros_like(mask_blocks[:, :, :1]), mask_blocks[:, :, :-1]],
+            dim=2
+        )
+        is_frontier_block = mask_blocks & (~padded_mask) # [B, N, 4]
+
+        # Flatten back to [B, L]
+        # Initialize with False (Prefix and remainder are handled as non-frontier)
+        frontier_mask = torch.zeros_like(masks, dtype=torch.bool)
+        frontier_mask[:, token_prefix_len : end_pos] = is_frontier_block.reshape(B, -1)
+
+        # -------------------------------------------------------------
+        # 2. Rate Calculation & Poisson Sampling
+        # -------------------------------------------------------------
+
+        # Theoretical Scaling Factor:
+        # Since only 1/L tokens are active, each must work L times harder.
+        scale_factor = float(block_size)
+
+        # unmask_rate: [B, L, V]
+        # delta_sigma: [B, 1] -> [B, 1, 1]
+        # p_x0: [B, L, V]
+        base_rate = p_x0 * delta_sigma.unsqueeze(-1)
+
+        # Apply Scaling & Frontier Restriction
+        # Rate is zero for non-frontier tokens (Deep masks)
+        unmask_rate = base_rate * scale_factor * frontier_mask.unsqueeze(-1)
+
+        # Poisson Sampling
+        # Sample number of events for each token/class
+        raw_counts = torch.poisson(unmask_rate).long() # [B, L, V]
+
+        # Prevent invalid transitions (Mask -> Pad or Mask -> Mask)
+        raw_counts[..., self.pad_index] = 0
+        raw_counts[..., self.mask_index] = 0
+
+        # Sum events per position (total events for that token slot)
+        counts = raw_counts.sum(dim=-1) # [B, L]
+
+        # -------------------------------------------------------------
+        # 3. Update State
+        # -------------------------------------------------------------
+        # Determine the most likely token to unmask to
+        new_token_indices = p_x0.argmax(dim=-1)
+
+        # Conflict resolution: Accept only if exactly one event occurred
+        # (Standard Tau-leaping heuristic to avoid high-variance updates)
+        one_event = (counts == 1)
+
+        # Update condition: Must be Frontier AND have exactly one event
+        # (Checking frontier_mask again is redundant but safe)
+        update_locs = one_event & frontier_mask
+
+        x_next = x.clone()
+        x_next[update_locs] = new_token_indices[update_locs]
+
+        # Re-apply fixed tokens constraints
         if fixed_tokens is not None:
             x_next = torch.where(fixed_tokens, x, x_next)
 
@@ -502,9 +609,17 @@ class MaskProbPath:
 
         for i in tqdm(range(num_steps), desc="Sampling"):
             t = timesteps[i] * torch.ones(b, 1, device=device)
+            t_next = timesteps[i + 1] * torch.ones(b, 1, device=device)
 
             # predict p(x0|xt)
-            sigma_t, rate_t = self.noise(t)
+            sigma_t, _ = self.noise(t)
+            sigma_t_next, _ = self.noise(t_next)
+            # delta_unmask_prob: the expected change in unmask probability
+            # unmask_prob = 1 - exp(-sigma) ≈ (1-eps)*t for LogLinear noise
+            # This gives uniform rate (~0.02 per step for 50 steps)
+            unmask_prob_t = 1 - torch.exp(-sigma_t)
+            unmask_prob_t_next = 1 - torch.exp(-sigma_t_next)
+            delta_unmask_prob = unmask_prob_t - unmask_prob_t_next
             p_x0, _ = self._compute_model_outputs(batch, sigma_t)
 
             # update to x_{t-1} (NOTE: batch['c_val'] must be a partially masked for input in order to see the mask token positions)
@@ -512,10 +627,15 @@ class MaskProbPath:
                 batch = self._tau_leaping_update(
                     batch,
                     p_x0,
-                    rate_t,
-                    1.0/num_steps,
+                    delta_unmask_prob,
                     fixed_tokens=fixed_tokens,
                     N_tokenwise_unmasking=N_tokenwise_unmasking)
+            elif self.method.startswith('frontier_tau_leaping'):
+                batch = self._frontier_tau_leaping_update(
+                    batch,
+                    p_x0,
+                    delta_unmask_prob,
+                    fixed_tokens=fixed_tokens)
             elif self.method.startswith('topk_static'):
                 k = self._schedule_k(total_tokens, num_steps, self.loop_step_on, self.loop_steps, i)
                 batch = self._topk_static_update(
