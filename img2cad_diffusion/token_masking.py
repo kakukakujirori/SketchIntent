@@ -80,7 +80,8 @@ class TokenMasking:
     ) -> tuple[torch.Tensor, torch.Tensor]:
         assert len(tokens.shape) == 2
 
-        mask_prob = mask_prob.to(tokens.device) # [B]
+        # device統一
+        mask_prob = mask_prob.to(tokens.device)
 
         # reshape
         _, token_num = tokens.shape
@@ -93,46 +94,44 @@ class TokenMasking:
         b, c_num, _ = token_mid_block.shape
 
         # ------------------------------------------------------------------
-        # "Shifted Uniform" Strategy
-        # 目標: 平均が 4p となり、かつ分布が可能な限り平坦(Uniform)になるようにマスク個数を決める
+        # Linear Shifted Uniform Strategy
+        # 幅5.0の一様分布を、pに応じて [-4, 1] から [4, 9] までスライドさせる手法
         # ------------------------------------------------------------------
 
-        # 1. 各ブロックに一様乱数を生成 [B, c_num]
+        # 1. Uniform Noise [0, 1)
         u = torch.rand((b, c_num), device=tokens.device)
 
-        # 2. mask_prob を [B, c_num] に拡張
+        # 2. Mask Prob expansion
         p = mask_prob.reshape(-1, 1).expand(b, c_num)
 
-        # 3. 連続空間でのマスク個数を計算
-        # 幅5.0の一様分布を作成し、その中心を「目標個数(block_len * p)」に合わせる
-        # block_len=4 の場合、理想的なUniform分布の中心は 2.0
-        # したがって、(4p - 2.0) だけシフトさせるのが基本だが、
-        # floor(U[0,5]) は {0,1,2,3,4} を均等に出すため、中心は 2.5 ではなく 2.0 相当の挙動になる。
-        # ここではシンプルに「期待値 4p を狙う」式にする。
+        # 3. Continuous Count Calculation
+        # Width = 5.0 (to cover 0,1,2,3,4 uniformly)
+        # Shift = 8p - 4
+        #   p=0   -> Range [-4, 1) -> floor -> {-4..0} -> clamp -> {0} (All 0)
+        #   p=0.5 -> Range [0, 5)  -> floor -> {0..4}  -> clamp -> {0..4} (Uniform)
+        #   p=1   -> Range [4, 9)  -> floor -> {4..8}  -> clamp -> {4} (All 4)
 
-        # continuous_count ~ Uniform[4p - 2.5, 4p + 2.5]
-        # これにより、p=0.5 のとき U[-0.5, 4.5] -> floor -> {-1, 0, 1, 2, 3, 4} -> clamp -> {0, 1, 2, 3, 4}
         width = float(block_len) + 1.0  # 5.0
-        center = float(block_len) * p   # 4p
+        shift = (2.0 * width - 2.0) * p - (width - 1.0) # 8p - 4
 
-        # U[0, 1] * 5.0 -> U[0, 5] (平均2.5)
-        # これを center (平均4p) に移動させるには: + (center - 2.5)
-        continuous_count = u * width + (center - width / 2.0)
+        continuous_count = u * width + shift
 
-        # 4. 整数化とクリッピング
-        # floorを取ることで、確率質量を整数ビンに落とす
+        # 4. Discretization
         num_masked = torch.floor(continuous_count).clamp(0, block_len)
 
         # ------------------------------------------------------------------
 
-        # マスク生成ロジック (右詰め)
-        # num_masked=1 -> 右端1つ(idx=3)マスク -> indices >= 3
+        # Generate Mask (Right-aligned)
         mask_start_idx = (block_len - num_masked).reshape(b, c_num, 1)
+
         indices = torch.arange(block_len, device=tokens.device).expand_as(token_mid_block)
         token_mid_block_masked = torch.where(mask_start_idx <= indices, self.mask_id, token_mid_block)
 
         # flatten
         tokens_masked = tokens.clone()
         tokens_masked[:, token_prefix_len : token_prefix_len + block_num * block_len] = token_mid_block_masked.reshape(b, -1)
+
+        # Note: 入力GTにmask_idが含まれない前提
         mask = tokens_masked == self.mask_id
+
         return tokens_masked, mask

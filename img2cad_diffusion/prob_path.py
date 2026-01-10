@@ -62,32 +62,19 @@ class MaskProbPath:
         """
         self.model = model
         # Sampling configuration
-        sampling_config = getattr(config, 'sampling', None)
-
-        if sampling_config is not None:
-            self.steps = getattr(sampling_config, 'steps', 64)
-            self.method = getattr(sampling_config, 'method', 'tau_leaping') # 'topk_static', 'tau_leaping'
-            self.noise_removal = getattr(sampling_config, 'noise_removal', True)
-            self.sample_batch_size = getattr(sampling_config, 'sample_batch_size', 16) # Not strictly used if batch is provided
-            # PRISM specific params
-            self.num_initial_masks = getattr(sampling_config, 'num_initial_masks', 0)
-            self.loop_step_on = getattr(sampling_config, 'loop_step_on', 1000)
-            self.loop_steps = getattr(sampling_config, 'loop_steps', 0)
-            self.num_remask_loop = getattr(sampling_config, 'num_remask_loop', 0)
-            self.nucleus_p = getattr(sampling_config, 'nucleus_p', 1.0)
-            self.dfm = getattr(sampling_config, 'dfm', False)
-        else:
-            # Defaults if 'sampling' section is missing
-            self.steps = 64
-            self.method = 'tau_leaping' # 'topk_static' or 'tau_leaping'
-            self.noise_removal = True
-            self.sample_batch_size = 16
-            self.num_initial_masks = 0
-            self.loop_step_on = 1000
-            self.loop_steps = 0
-            self.num_remask_loop = 0
-            self.nucleus_p = 1.0
-            self.dfm = False
+        # NOTE: config is already SamplingConfig (passed from constraint_models.py as config.sampling)
+        # Use it directly, with getattr for robustness
+        self.steps = getattr(config, 'steps', 64)
+        self.method = getattr(config, 'method', 'tau_leaping')
+        self.noise_removal = getattr(config, 'noise_removal', True)
+        self.sample_batch_size = getattr(config, 'sample_batch_size', 16)
+        # PRISM specific params
+        self.num_initial_masks = getattr(config, 'num_initial_masks', 0)
+        self.loop_step_on = getattr(config, 'loop_step_on', 1000)
+        self.loop_steps = getattr(config, 'loop_steps', 0)
+        self.num_remask_loop = getattr(config, 'num_remask_loop', 0)
+        self.nucleus_p = getattr(config, 'nucleus_p', 1.0)
+        self.dfm = getattr(config, 'dfm', False)
 
         self.pad_index = ConstraintToken.Pad  # NOTE: Even if use_stop_padding is True, we use Pad for padding (since we set logits[:, :, self.pad_index] = self.neg_infinity)
         self.mask_index = ConstraintToken.Mask
@@ -662,14 +649,66 @@ class MaskProbPath:
 
         # Final cleanup / noise removal step if enabled
         if self.noise_removal:
-            # Predict one last time with t ~ 0
-            t = timesteps[-1] * torch.ones(b, 1, device=device)
-            sigma_t, _ = self.noise(t)
-            p_x0, _ = self._compute_model_outputs(batch, sigma_t)
-            x = p_x0.argmax(dim=-1)
-            if fixed_tokens is not None:
-                x = torch.where(fixed_tokens, batch['c_val'], x) # Restore fixed tokens just in case
-            batch['c_val'] = x
-            intermediates.append(batch['c_val'].clone())
+            if self.method.startswith('frontier_tau_leaping'):
+                # Block structure for frontier-based methods
+                token_prefix_len = len(start_tokens) if start_tokens is not None else 0
+                block_size = CONSTRAINT_TOKEN_LEN
+                num_blocks = (total_tokens - token_prefix_len) // block_size
+                end_pos = token_prefix_len + num_blocks * block_size
+
+                # Autoregressive noise removal: fill blocks left-to-right
+                # Iterate CONSTRAINT_TOKEN_LEN times to fill all remaining MASKs
+                t = timesteps[-1] * torch.ones(b, 1, device=device)
+                sigma_t, _ = self.noise(t)
+
+                for _ in range(CONSTRAINT_TOKEN_LEN):
+                    x = batch['c_val']
+
+                    # Find frontier (first MASK in each block)
+                    x_body = x[:, token_prefix_len : end_pos]
+                    x_blocks = x_body.reshape(b, num_blocks, block_size)
+                    mask_blocks = (x_blocks == self.mask_index)
+
+                    # Frontier = first MASK in each block
+                    shifted = torch.zeros_like(mask_blocks)
+                    shifted[..., 1:] = mask_blocks[..., :-1]
+                    frontier_blocks = mask_blocks & (~shifted)  # [B, N, block_size]
+
+                    # Flatten frontier mask to [B, L]
+                    frontier_mask = torch.zeros_like(x, dtype=torch.bool)
+                    frontier_mask[:, token_prefix_len : end_pos] = frontier_blocks.reshape(b, -1)
+
+                    # Skip if no more MASKs
+                    if not frontier_mask.any():
+                        break
+
+                    # Get model predictions
+                    p_x0, _ = self._compute_model_outputs(batch, sigma_t)
+                    new_tokens = p_x0.argmax(dim=-1)
+
+                    # Update only frontier positions
+                    x_next = x.clone()
+                    x_next[frontier_mask] = new_tokens[frontier_mask]
+
+                    if fixed_tokens is not None:
+                        x_next = torch.where(fixed_tokens, x, x_next)
+                    batch['c_val'] = x_next
+
+                intermediates.append(batch['c_val'].clone())
+            else:
+                # Standard noise removal: fill all MASKs at once
+                t = timesteps[-1] * torch.ones(b, 1, device=device)
+                sigma_t, _ = self.noise(t)
+                p_x0, _ = self._compute_model_outputs(batch, sigma_t)
+                new_tokens = p_x0.argmax(dim=-1)
+
+                # Only replace remaining MASK positions, preserve already-unmasked tokens
+                still_masked = (batch['c_val'] == self.mask_index)
+                x = torch.where(still_masked, new_tokens, batch['c_val'])
+
+                if fixed_tokens is not None:
+                    x = torch.where(fixed_tokens, batch['c_val'], x)
+                batch['c_val'] = x
+                intermediates.append(batch['c_val'].clone())
 
         return batch['c_val'], intermediates

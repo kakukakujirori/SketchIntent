@@ -336,7 +336,7 @@ class ConstraintMDDModule(L.LightningModule):
         # >>> PRISM >>>
         self.noise = LogLinearNoise()
         self.sampling_eps = 0.001
-        self.inference_sampling_steps = 50
+        self.inference_sampling_steps = config.sampling.steps
 
         self.ProbPath = MaskProbPath(self, config.sampling, self.noise)
         # <<< PRISM <<<
@@ -461,7 +461,7 @@ class ConstraintMDDModule(L.LightningModule):
             output_logits[mask_for_loss],
             target_reordered[mask_for_loss],
         ) * reweighting[mask_for_loss]
-        loss = loss.sum() / (target_reordered.shape[0] * target_reordered.shape[1])
+        loss = loss.sum() / mask_for_loss.sum().clamp(min=1)
 
         # Pred
         with torch.no_grad():
@@ -509,7 +509,7 @@ class ConstraintMDDModule(L.LightningModule):
         # forward() updates internal state AND returns per-batch value
         kappa_val = kappa(preds_sorted[valid_token_mask], target_sorted[valid_token_mask])
         accuracy_val = accuracy(preds_sorted[valid_token_mask], target_sorted[valid_token_mask])
-        set_metrics_val = set_metric(preds, target)  # Returns {"iou": ..., "precision": ..., "recall": ...}
+        set_metrics_val = set_metric(preds_sorted, target_sorted)  # Returns {"iou": ..., "precision": ..., "recall": ...}
 
         metrics = {
             "kappa": kappa_val,
@@ -535,10 +535,13 @@ class ConstraintMDDModule(L.LightningModule):
             self.hparams.model.token_masking_probs,
             self.hparams.model.gt_reordering_strategies):
 
-            loss, preds, target_reordered, mask = self._compute_loss(batch, masking_strategy, masking_prob, reordering_strategy)
-            step_metrics, _, _ = self._compute_metrics(preds, target_reordered, mask,
-                                                        ignore_pred_tokens_after_stop=(reordering_strategy != "hungarian"),
-                                                        dataloader_idx=dataloader_idx)
+            loss, preds, target_reordered, mask = self._compute_loss(
+                batch, masking_strategy, masking_prob, reordering_strategy)
+
+            step_metrics, _, _ = self._compute_metrics(
+                preds, target_reordered, mask,
+                ignore_pred_tokens_after_stop=("hungarian" not in reordering_strategy),
+                dataloader_idx=dataloader_idx)
 
             loss_list.append(loss)
             for key, value in step_metrics.items():
@@ -629,7 +632,10 @@ class ConstraintMDDModule(L.LightningModule):
             target = batch['c_val']
 
             # Compute metrics
-            ignore_pred_tokens_after_stop = "hungarian" not in self.hparams.model.token_masking_strategies
+            ignore_pred_tokens_after_stop = all(
+                "hungarian" not in masking_strategy  # subword search
+                for masking_strategy in self.hparams.model.token_masking_strategies
+            )
             metrics, samples_sorted, target_sorted = self._compute_metrics(
                 samples, target, mask=None,
                 ignore_pred_tokens_after_stop=ignore_pred_tokens_after_stop,
@@ -658,7 +664,16 @@ class ConstraintMDDModule(L.LightningModule):
                         print(f"\n  Denoising progression ({len(intermediates)} steps):")
                         steps_to_show = list(range(0, len(intermediates), max(1, len(intermediates) // 5)))
                         for step_idx in steps_to_show:
-                            step_tokens = intermediates[step_idx][i].cpu().numpy()
+                            # Apply canonical sorting for clearer display (but keep MASK tokens visible)
+                            ignore_pred_tokens_after_stop = all(
+                                "hungarian" not in reordering_strategy  # subword search
+                                for reordering_strategy in self.hparams.model.gt_reordering_strategies
+                            )
+                            step_sorted, _ = self.token_reordering(
+                                intermediates[step_idx], None, None,
+                                "canonical_with_tail_strip" if ignore_pred_tokens_after_stop else "canonical_full",
+                            )
+                            step_tokens = step_sorted[i].cpu().numpy()
                             formatted = self._format_constraint_sequence(step_tokens, max_show=None)
                             print(f"    Step {step_idx:3d}: {formatted}")
 
@@ -715,13 +730,16 @@ class ConstraintMDDModule(L.LightningModule):
                 batch=batch,
                 num_steps=self.inference_sampling_steps,
                 start_tokens=start_tokens,
-                N_tokenwise_unmasking=CONSTRAINT_TOKEN_LEN,
+                N_tokenwise_unmasking=CONSTRAINT_TOKEN_LEN if f"{CONSTRAINT_TOKEN_LEN}-tokenwise" in self.hparams.model.token_masking_strategies else 1,
             )
 
             target = batch['c_val']
 
             # Compute metrics
-            ignore_pred_tokens_after_stop = "hungarian" not in self.hparams.model.token_masking_strategies
+            ignore_pred_tokens_after_stop = all(
+                "hungarian" not in masking_strategy  # subword search
+                for masking_strategy in self.hparams.model.token_masking_strategies
+            )
             metrics, samples_sorted, target_sorted = self._compute_metrics(
                 samples, target, mask=None,
                 ignore_pred_tokens_after_stop=ignore_pred_tokens_after_stop,
@@ -750,7 +768,16 @@ class ConstraintMDDModule(L.LightningModule):
                         print(f"\n  Denoising progression ({len(intermediates)} steps):")
                         steps_to_show = list(range(0, len(intermediates), max(1, len(intermediates) // 5)))
                         for step_idx in steps_to_show:
-                            step_tokens = intermediates[step_idx][i].cpu().numpy()
+                            # Apply canonical sorting for clearer display (but keep MASK tokens visible)
+                            ignore_pred_tokens_after_stop = all(
+                                "hungarian" not in reordering_strategy  # subword search
+                                for reordering_strategy in self.hparams.model.gt_reordering_strategies
+                            )
+                            step_sorted, _ = self.token_reordering(
+                                intermediates[step_idx], None, None,
+                                "canonical_with_tail_strip" if ignore_pred_tokens_after_stop else "canonical_full",
+                            )
+                            step_tokens = step_sorted[i].cpu().numpy()
                             formatted = self._format_constraint_sequence(step_tokens, max_show=None)
                             print(f"    Step {step_idx:3d}: {formatted}")
 

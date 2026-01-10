@@ -9,6 +9,8 @@ from img2cad_diffusion.tokens import ConstraintToken
 
 class TokenReordering:
     def __init__(self, token_num_per_block: int = 1, token_prefix_len: int = 0):
+        self.pad_token = ConstraintToken.Pad
+        self.stop_token = ConstraintToken.Stop
         self.block_size = token_num_per_block
         self.prefix_len = token_prefix_len
 
@@ -23,9 +25,9 @@ class TokenReordering:
         if strategy == 'none':
             return query_tokens, ref_mask
         elif strategy == 'canonical_with_tail_strip':
-            return self.canonical_sorting(query_tokens.detach(), ignore_tokens_after_first_stop=True), ref_mask
+            return self.canonical_sorting(query_tokens.detach(), replace_tokens_after_first_stop_by_pad=True), ref_mask
         elif strategy == 'canonical_full':
-            return self.canonical_sorting(query_tokens.detach(), ignore_tokens_after_first_stop=False), ref_mask
+            return self.canonical_sorting(query_tokens.detach(), replace_tokens_after_first_stop_by_pad=False), ref_mask
         elif strategy == 'hungarian':
             if not isinstance(ref_logits, torch.Tensor) or not isinstance(ref_mask, torch.Tensor):
                 raise ValueError("'hungarian' strategy requires ref_logits and ref_mask.")
@@ -41,17 +43,20 @@ class TokenReordering:
     # Canonical Sorting
     ################################################################
 
-    @staticmethod
-    def get_first_stop_idx(tokens: torch.Tensor):
+    def get_first_stop_idx(self, tokens: torch.Tensor):
         assert len(tokens.shape) == 2, "Tokens shape must be [B, L]."
-        is_stop_padded = F.pad(tokens == ConstraintToken.Stop, (0, 1), value=True)
+        is_stop_padded = F.pad(tokens == self.stop_token, (0, 1), value=True)
         first_stop_pos = is_stop_padded.long().argmax(dim=1).reshape(-1, 1)
         return first_stop_pos
 
-    def canonical_sorting(self, tokens: torch.Tensor, ignore_tokens_after_first_stop: bool) -> torch.Tensor:
+    def canonical_sorting(
+        self,
+        tokens: torch.Tensor,
+        replace_tokens_after_first_stop_by_pad: bool,
+    ) -> torch.Tensor:
         """
         tokens are block-wise sorted in the alpha-numeric order.
-            - If ignore_tokens_after_stop=True, all the tokens after the first STOP are appended at the tail in the same order.
+            - If replace_tokens_after_first_stop_by_pad=True, all the tokens after the first STOP are replaced by PAD.
             - If False, only the blocks containing STOP or PAD are appended at the tail in the same order.
         """
         if tokens.dtype != torch.long:
@@ -68,20 +73,28 @@ class TokenReordering:
         blocks_to_sort_packed = (blocks_to_sort * pack_multiplier).sum(dim=2)
 
         # STOP + Invalid tokens want to come last
-        if ignore_tokens_after_first_stop:
+        if replace_tokens_after_first_stop_by_pad:
             # Fill tokens after the first stop token by torch.long.max
             first_stop_pos = self.get_first_stop_idx(tokens_to_sort)
             invalid_tokens = (first_stop_pos <= torch.arange(tokens_to_sort.shape[1], device=tokens.device).reshape(1, -1))
         else:
-            invalid_tokens = (tokens_to_sort == ConstraintToken.Stop) | (tokens_to_sort == ConstraintToken.Pad)
+            invalid_tokens = (tokens_to_sort == self.stop_token) | (tokens_to_sort == self.pad_token)
 
         # lexicographic sort
         invalid_blocks = invalid_tokens.reshape(B, -1, self.block_size).any(dim=2)
         blocks_to_sort_packed[invalid_blocks] = torch.iinfo(blocks_to_sort_packed.dtype).max
         sort_indices = blocks_to_sort_packed.sort(dim=1, stable=True).indices
+        sorted_blocks = blocks_to_sort.gather(dim=1, index=sort_indices.unsqueeze(-1).expand_as(blocks_to_sort))
 
         ret = tokens.detach().clone()
-        ret[:, self.prefix_len:end_idx] = blocks_to_sort.gather(dim=1, index=sort_indices.unsqueeze(-1).expand_as(blocks_to_sort)).reshape(B, -1)
+        ret[:, self.prefix_len:end_idx] = sorted_blocks.reshape(B, -1)
+
+        # Replace tokens after first STOP with PAD
+        if replace_tokens_after_first_stop_by_pad:
+            first_stop_pos = self.get_first_stop_idx(ret)
+            after_stop_mask = torch.arange(ret.shape[1], device=ret.device).unsqueeze(0) > first_stop_pos
+            ret[after_stop_mask] = self.pad_token
+
         return ret
 
     ################################################################

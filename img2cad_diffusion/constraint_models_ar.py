@@ -14,6 +14,7 @@ from .constraint_models import PrimitiveModel, ConstraintModelTrainingConfig
 from .iou import ConstraintIoU
 from .tokens import ConstraintToken
 from .tokenization import CONSTRAINT_TOKEN_LEN
+from .token_reordering import TokenReordering
 
 
 class ConstraintARModel(torch.nn.Module):
@@ -110,6 +111,9 @@ class ConstraintARModule(L.LightningModule):
         self.set_metrics = torch.nn.ModuleList(
             [ConstraintIoU(token_num_per_block=CONSTRAINT_TOKEN_LEN, token_prefix_len=0) for _ in range(2)]
         )
+        self.token_reordering = TokenReordering(
+            token_num_per_block=CONSTRAINT_TOKEN_LEN,
+            token_prefix_len=0)
 
     @staticmethod
     def _format_constraint_sequence(tokens, max_show: int | None = None) -> list[str]:
@@ -206,7 +210,7 @@ class ConstraintARModule(L.LightningModule):
         preds: torch.Tensor,
         target: torch.Tensor,
         dataloader_idx: int = 0,
-    ) -> dict[str, torch.Tensor]:
+    ) -> tuple[dict[str, torch.Tensor], torch.Tensor, torch.Tensor]:
         """Compute metrics for the given dataloader.
 
         Args:
@@ -215,7 +219,10 @@ class ConstraintARModule(L.LightningModule):
             dataloader_idx: 0 for normal, 1 for FC
 
         Returns:
-            Dict with 'kappa', 'accuracy', 'iou', 'precision', 'recall'
+            Tuple of:
+                - Dict with 'kappa', 'accuracy', 'iou', 'precision', 'recall'
+                - preds_sorted: Canonically sorted predictions
+                - target_sorted: Canonically sorted targets
         """
         kappa = self.kappa_metric[dataloader_idx]
         accuracy = self.accuracy_metric[dataloader_idx]
@@ -227,7 +234,9 @@ class ConstraintARModule(L.LightningModule):
         accuracy_val = accuracy(preds[relevant_idxs], target[relevant_idxs])
 
         # IoU on full sequences (ConstraintIoU uses token_prefix_len=0, no START expected)
-        set_metrics_val = set_metric(preds, target)
+        preds_sorted, _ = self.token_reordering(preds, None, None, "canonical_with_tail_strip")
+        target_sorted, _ = self.token_reordering(target, None, None, "canonical_with_tail_strip")
+        set_metrics_val = set_metric(preds_sorted, target_sorted)
 
         metrics = {
             "kappa": kappa_val,
@@ -235,7 +244,7 @@ class ConstraintARModule(L.LightningModule):
             **set_metrics_val,  # iou, precision, recall
         }
 
-        return metrics
+        return metrics, preds_sorted, target_sorted
 
     def generate_sample(
         self,
@@ -279,7 +288,7 @@ class ConstraintARModule(L.LightningModule):
 
     def training_step(self, batch: ConstraintTokenInput, batch_idx: int):
         loss, preds, target = self._compute_loss(batch)
-        metrics = self._compute_metrics(preds, target, dataloader_idx=0)
+        metrics, preds_sorted, target_sorted = self._compute_metrics(preds, target, dataloader_idx=0)
 
         self.log('train/loss', loss)
         for metric_key, metric_value in metrics.items():
@@ -289,7 +298,7 @@ class ConstraintARModule(L.LightningModule):
 
     def validation_step(self, batch: ConstraintTokenInput, batch_idx: int, dataloader_idx: int = 0):
         loss, preds, target = self._compute_loss(batch)
-        metrics = self._compute_metrics(preds, target, dataloader_idx=dataloader_idx)
+        metrics, preds_sorted, target_sorted = self._compute_metrics(preds, target, dataloader_idx=dataloader_idx)
 
         suffix = '_fc' if dataloader_idx == 1 else ''
         self.log(f'validation/loss{suffix}', loss, add_dataloader_idx=False, sync_dist=True)
@@ -328,7 +337,7 @@ class ConstraintARModule(L.LightningModule):
             generated = self.generate_sample(batch, max_len, dtype=target.dtype)
 
             # Compute metrics for validation (skip START token at index 0)
-            metrics = self._compute_metrics(generated[:, 1:], target[:, 1:], dataloader_idx=loader_idx)
+            metrics, generated_sorted, target_sorted = self._compute_metrics(generated[:, 1:], target[:, 1:], dataloader_idx=loader_idx)
 
             suffix = '_fc' if loader_idx == 1 else ''
             for metric_name, metric_value in metrics.items():
@@ -342,14 +351,14 @@ class ConstraintARModule(L.LightningModule):
 
                 for i in range(min(5, generated.size(0))):
                     print(f"\n[Sample {i}]:")
-                    print(f"  GT  : {self._format_constraint_sequence(target[i].cpu().numpy())}")
-                    print(f"  Gen : {self._format_constraint_sequence(generated[i].cpu().numpy())}")
+                    print(f"  GT  : {self._format_constraint_sequence(target_sorted[i].cpu().numpy())}")
+                    print(f"  Gen : {self._format_constraint_sequence(generated_sorted[i].cpu().numpy())}")
 
                 print("="*80 + "\n")
 
     def test_step(self, batch: ConstraintTokenInput, batch_idx: int, dataloader_idx: int = 0):
         loss, preds, target = self._compute_loss(batch)
-        metrics = self._compute_metrics(preds, target, dataloader_idx=dataloader_idx)
+        metrics, preds_sorted, target_sorted = self._compute_metrics(preds, target, dataloader_idx=dataloader_idx)
 
         suffix = '_fc' if dataloader_idx == 1 else ''
         self.log(f'test/loss{suffix}', loss, add_dataloader_idx=False, sync_dist=True)
@@ -385,7 +394,7 @@ class ConstraintARModule(L.LightningModule):
             generated = self.generate_sample(batch, max_len, dtype=target.dtype)
 
             # Compute metrics (skip START token at index 0)
-            metrics = self._compute_metrics(generated[:, 1:], target[:, 1:], dataloader_idx=loader_idx)
+            metrics, generated_sorted, target_sorted = self._compute_metrics(generated[:, 1:], target[:, 1:], dataloader_idx=loader_idx)
 
             # Use different names for each loader since on_test_epoch_end is called once
             suffix = '' if loader_idx == 0 else '_fc'
@@ -400,8 +409,8 @@ class ConstraintARModule(L.LightningModule):
 
                 for i in range(min(5, generated.size(0))):
                     print(f"\n[Sample {i}]:")
-                    print(f"  GT  : {self._format_constraint_sequence(target[i].cpu().numpy())}")
-                    print(f"  Gen : {self._format_constraint_sequence(generated[i].cpu().numpy())}")
+                    print(f"  GT  : {self._format_constraint_sequence(target_sorted[i].cpu().numpy())}")
+                    print(f"  Gen : {self._format_constraint_sequence(generated_sorted[i].cpu().numpy())}")
 
                 print("="*80 + "\n")
 
