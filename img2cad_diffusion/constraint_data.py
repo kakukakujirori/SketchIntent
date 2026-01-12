@@ -12,7 +12,7 @@ import numpy as np
 import lightning as L
 import torch
 import torch.utils.data
-from typing import TypedDict
+from typing import TypedDict, Required, NotRequired
 from scipy.stats import truncnorm
 
 import sketchgraphs.data as datalib
@@ -38,6 +38,8 @@ class ConstraintTokenInput(TypedDict):
     c_val: torch.Tensor
     # c_coord: torch.Tensor
     # c_pos: torch.Tensor
+    c_cnt: NotRequired[torch.Tensor]
+    data_index: NotRequired[torch.Tensor]
 
 
 @dataclasses.dataclass
@@ -182,7 +184,7 @@ class ConstraintDataset(torch.utils.data.Dataset):
         else:
             raise KeyError("Neither 'sequences' or 'perturbations' found in the key")
 
-    def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
+    def __getitem__(self, index: int) -> ConstraintTokenInput:
         seq = self.sequences[index]
         if self.is_purturbed:
             if len(seq) == 0:
@@ -211,15 +213,16 @@ class ConstraintDataset(torch.utils.data.Dataset):
             constraint_order=self.constraint_order,
         )
 
-        return {
-            'val': torch.from_numpy(result.prim_tokens['val']),
-            'coord': torch.from_numpy(result.prim_tokens['coord']),
-            'pos': torch.from_numpy(result.prim_tokens['pos']),
-            'c_val': torch.from_numpy(result.constr_tokens['val']),
-            # 'c_coord': torch.from_numpy(result.constr_tokens['coord']),
-            # 'c_pos': torch.from_numpy(result.constr_tokens['pos']),
-            # 'data_index': torch.tensor([index]),                         # NOTE: Uncomment during debug
-        }
+        return ConstraintTokenInput(
+            val=torch.from_numpy(result.prim_tokens['val']),
+            coord=torch.from_numpy(result.prim_tokens['coord']),
+            pos=torch.from_numpy(result.prim_tokens['pos']),
+            c_val=torch.from_numpy(result.constr_tokens['val']),
+            # c_coord=torch.from_numpy(result.constr_tokens['coord']),
+            # c_pos=torch.from_numpy(result.constr_tokens['pos']),
+            c_cnt=torch.tensor(result.constr_tokens['cnt']),
+            # data_index=torch.tensor([index]),                         # NOTE: Uncomment during debug
+        )
 
     def __len__(self) -> int:
         if self.is_purturbed:

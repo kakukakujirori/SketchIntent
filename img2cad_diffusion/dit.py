@@ -481,11 +481,7 @@ class DDiTCrossBlock(nn.Module):
     k, v = kv[..., 0, :], kv[..., 1, :]
 
     # Standard attention (no flash for cross-attention with variable lengths to keep simple)
-    scale = self.head_dim ** -0.5
-    attn_weights = torch.matmul(q, k.transpose(-2, -1)) * scale
-    attn_weights = F.softmax(attn_weights, dim=-1)
-    attn_weights = F.dropout(attn_weights, p=self.dropout, training=self.training)
-    attn_out = torch.matmul(attn_weights, v)
+    attn_out = F.scaled_dot_product_attention(q, k, v, dropout_p=self.dropout if self.training else 0.)
     attn_out = rearrange(attn_out, 'b h s d -> b s (h d)')
 
     x = bias_dropout_scale_fn(self.cross_attn_out(attn_out), None, gate_ca, x_skip, self.dropout)

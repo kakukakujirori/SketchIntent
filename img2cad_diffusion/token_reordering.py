@@ -8,11 +8,11 @@ from img2cad_diffusion.tokens import ConstraintToken
 
 
 class TokenReordering:
-    def __init__(self, token_num_per_block: int = 1, token_prefix_len: int = 0):
+    def __init__(self, token_num_per_block: int = 1, prefix_len: int = 0):
         self.pad_token = ConstraintToken.Pad
         self.stop_token = ConstraintToken.Stop
         self.block_size = token_num_per_block
-        self.prefix_len = token_prefix_len
+        self.prefix_len = prefix_len
 
     @torch.no_grad()  # NOTE: query_tokens must not be model prediction results during training!!!
     def __call__(
@@ -21,21 +21,24 @@ class TokenReordering:
         ref_logits: torch.Tensor | None,
         ref_mask: torch.Tensor | None,
         strategy: str,
+        prefix_len: int | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        if prefix_len is None:
+            prefix_len = self.prefix_len
         if strategy == 'none':
             return query_tokens, ref_mask
         elif strategy == 'canonical_with_tail_strip':
-            return self.canonical_sorting(query_tokens.detach(), replace_tokens_after_first_stop_by_pad=True), ref_mask
+            return self.canonical_sorting(query_tokens.detach(), replace_tokens_after_first_stop_by_pad=True, prefix_len=prefix_len), ref_mask
         elif strategy == 'canonical_full':
-            return self.canonical_sorting(query_tokens.detach(), replace_tokens_after_first_stop_by_pad=False), ref_mask
+            return self.canonical_sorting(query_tokens.detach(), replace_tokens_after_first_stop_by_pad=False, prefix_len=prefix_len), ref_mask
         elif strategy == 'hungarian':
             if not isinstance(ref_logits, torch.Tensor) or not isinstance(ref_mask, torch.Tensor):
                 raise ValueError("'hungarian' strategy requires ref_logits and ref_mask.")
-            return self.hungarian_match(query_tokens.detach(), ref_logits.detach(), ref_mask.detach()), ref_mask
+            return self.hungarian_match(query_tokens.detach(), ref_logits.detach(), ref_mask.detach(), prefix_len=prefix_len), ref_mask
         elif strategy == 'hungarian_frontier':
             if not isinstance(ref_logits, torch.Tensor) or not isinstance(ref_mask, torch.Tensor):
                 raise ValueError("'hungarian_frontier' strategy requires ref_logits and ref_mask.")
-            return self.hungarian_frontier_match(query_tokens.detach(), ref_logits.detach(), ref_mask.detach())
+            return self.hungarian_frontier_match(query_tokens.detach(), ref_logits.detach(), ref_mask.detach(), prefix_len=prefix_len)
         else:
             raise ValueError(f"Unknown strategy: {strategy}")
 
@@ -53,18 +56,21 @@ class TokenReordering:
         self,
         tokens: torch.Tensor,
         replace_tokens_after_first_stop_by_pad: bool,
+        prefix_len: int | None = None,
     ) -> torch.Tensor:
         """
         tokens are block-wise sorted in the alpha-numeric order.
             - If replace_tokens_after_first_stop_by_pad=True, all the tokens after the first STOP are replaced by PAD.
             - If False, only the blocks containing STOP or PAD are appended at the tail in the same order.
         """
+        if prefix_len is None:
+            prefix_len = self.prefix_len
         if tokens.dtype != torch.long:
             raise ValueError(f"tokens.dtype must be long, but got {tokens.dtype}")
 
         B, L = tokens.shape
-        end_idx = self.prefix_len + ((L - self.prefix_len) // self.block_size) * self.block_size
-        tokens_to_sort = tokens[:, self.prefix_len:end_idx]
+        end_idx = prefix_len + ((L - prefix_len) // self.block_size) * self.block_size
+        tokens_to_sort = tokens[:, prefix_len:end_idx]
 
         # Prepare keys for lexicographic sort
         vocab_size = int(tokens.max().item()) + 1
@@ -87,7 +93,7 @@ class TokenReordering:
         sorted_blocks = blocks_to_sort.gather(dim=1, index=sort_indices.unsqueeze(-1).expand_as(blocks_to_sort))
 
         ret = tokens.detach().clone()
-        ret[:, self.prefix_len:end_idx] = sorted_blocks.reshape(B, -1)
+        ret[:, prefix_len:end_idx] = sorted_blocks.reshape(B, -1)
 
         # Replace tokens after first STOP with PAD
         if replace_tokens_after_first_stop_by_pad:
@@ -101,12 +107,14 @@ class TokenReordering:
     # Hungarian Matching
     ################################################################
 
-    def cut_and_reshape_to_blocks(self, tokens: torch.Tensor) -> torch.Tensor:
+    def cut_and_reshape_to_blocks(self, tokens: torch.Tensor, prefix_len: int | None = None) -> torch.Tensor:
         """Reshape [B, L, ...] to [B, N_blocks, block_size, ...].
         """
+        if prefix_len is None:
+            prefix_len = self.prefix_len
         B, L = tokens.shape[:2]
-        end_idx = self.prefix_len + ((L - self.prefix_len) // self.block_size) * self.block_size
-        return rearrange(tokens[:, self.prefix_len : end_idx], "b (n c) ... -> b n c ...", c=self.block_size)
+        end_idx = prefix_len + ((L - prefix_len) // self.block_size) * self.block_size
+        return rearrange(tokens[:, prefix_len : end_idx], "b (n c) ... -> b n c ...", c=self.block_size)
 
     def _compute_cost_matrix(
         self,
@@ -198,11 +206,14 @@ class TokenReordering:
         query_tokens: torch.Tensor,
         ref_logits: torch.Tensor,
         ref_mask: torch.Tensor,
+        prefix_len: int | None = None,
     ) -> torch.Tensor:
+        if prefix_len is None:
+            prefix_len = self.prefix_len
         # Reshape to blocks (skip START token)
-        query_blocks = self.cut_and_reshape_to_blocks(query_tokens)  # [B, N, block_size]
-        ref_logits_blocks = self.cut_and_reshape_to_blocks(ref_logits)   # [B, N, block_size, V]
-        mask_blocks = self.cut_and_reshape_to_blocks(ref_mask)  # [B, N, block_size]
+        query_blocks = self.cut_and_reshape_to_blocks(query_tokens, prefix_len)  # [B, N, block_size]
+        ref_logits_blocks = self.cut_and_reshape_to_blocks(ref_logits, prefix_len)   # [B, N, block_size, V]
+        mask_blocks = self.cut_and_reshape_to_blocks(ref_mask, prefix_len)  # [B, N, block_size]
         B, N, _, V = ref_logits_blocks.shape
 
         # Compute cost matrix
@@ -222,9 +233,9 @@ class TokenReordering:
         mask_flat = mask_blocks.reshape(B, -1)
 
         # Reconstruct full sequence
-        end_pos = self.prefix_len + N * self.block_size
+        end_pos = prefix_len + N * self.block_size
         full_matched_query = query_tokens.clone()
-        full_matched_query[:, self.prefix_len : end_pos] = matched_query_flat
+        full_matched_query[:, prefix_len : end_pos] = matched_query_flat
 
         return full_matched_query
 
@@ -331,6 +342,7 @@ class TokenReordering:
         query_tokens: torch.Tensor,
         ref_logits: torch.Tensor,
         ref_mask: torch.Tensor,
+        prefix_len: int | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Reorders query_tokens to match ref_logits based on:
@@ -341,10 +353,12 @@ class TokenReordering:
             reordered_tokens: [B, L]
             mask_for_loss: [B, L] (True only at Frontier positions)
         """
+        if prefix_len is None:
+            prefix_len = self.prefix_len
         # 1. Reshape to blocks
-        query_blocks = self.cut_and_reshape_to_blocks(query_tokens)        # [B, N, 4]
-        ref_logits_blocks = self.cut_and_reshape_to_blocks(ref_logits)     # [B, N, 4, V]
-        mask_blocks = self.cut_and_reshape_to_blocks(ref_mask)             # [B, N, 4]
+        query_blocks = self.cut_and_reshape_to_blocks(query_tokens, prefix_len)        # [B, N, 4]
+        ref_logits_blocks = self.cut_and_reshape_to_blocks(ref_logits, prefix_len)     # [B, N, 4, V]
+        mask_blocks = self.cut_and_reshape_to_blocks(ref_mask, prefix_len)             # [B, N, 4]
         B, N, block_size, _ = ref_logits_blocks.shape
 
         # 2. Compute Cost Matrix (Vectorized)
@@ -368,15 +382,15 @@ class TokenReordering:
         matched_query_flat = matched_query.reshape(B, -1)
         frontier_mask_flat = frontier_mask_blocks.reshape(B, -1)
 
-        end_pos = self.prefix_len + N * block_size
+        end_pos = prefix_len + N * block_size
 
         # Construct full tokens
         full_matched_query = query_tokens.clone()
-        full_matched_query[:, self.prefix_len : end_pos] = matched_query_flat
+        full_matched_query[:, prefix_len : end_pos] = matched_query_flat
 
         # Construct full mask
         # Default to False (ignore loss) for prefix/padding
         full_frontier_mask = torch.zeros_like(ref_mask, dtype=torch.bool)
-        full_frontier_mask[:, self.prefix_len : end_pos] = frontier_mask_flat
+        full_frontier_mask[:, prefix_len : end_pos] = frontier_mask_flat
 
         return full_matched_query, full_frontier_mask

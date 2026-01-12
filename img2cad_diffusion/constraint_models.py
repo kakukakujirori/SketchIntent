@@ -317,7 +317,7 @@ class ConstraintMDDModule(L.LightningModule):
         self.token_masking = TokenMasking(mask_id=ConstraintToken.Mask)
         self.token_reordering = TokenReordering(
             token_num_per_block=CONSTRAINT_TOKEN_LEN,
-            token_prefix_len=1)
+            prefix_len=1)
 
         self.criterion = torch.nn.CrossEntropyLoss(ignore_index=ConstraintToken.Pad, reduction='none')
 
@@ -330,7 +330,7 @@ class ConstraintMDDModule(L.LightningModule):
         self.kappa_metric = torch.nn.ModuleList([CohenKappa(num_pointer_targets) for _ in range(2)])
         self.accuracy_metric = torch.nn.ModuleList([torchmetrics.Accuracy(task='multiclass', num_classes=num_pointer_targets) for _ in range(2)])
         self.set_metrics = torch.nn.ModuleList(
-            [ConstraintIoU(token_num_per_block=CONSTRAINT_TOKEN_LEN, token_prefix_len=1) for _ in range(2)]
+            [ConstraintIoU(token_num_per_block=CONSTRAINT_TOKEN_LEN, prefix_len=1) for _ in range(2)]
         )
 
         # >>> PRISM >>>
@@ -434,7 +434,7 @@ class ConstraintMDDModule(L.LightningModule):
         c_val_masked, mask = self.token_masking(
             tokens=batch["c_val"],
             mask_prob=move_chance,
-            token_prefix_len=1,
+            prefix_len=1,
             strategy=masking_strategy)
 
         # Create masked batch (primitives unchanged, constraints masked)

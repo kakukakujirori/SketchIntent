@@ -332,7 +332,7 @@ class MaskProbPath:
         delta_sigma: torch.Tensor,
         fixed_tokens: torch.Tensor | None,
         block_size: int = CONSTRAINT_TOKEN_LEN,
-        token_prefix_len: int = 1,
+        prefix_len: int = 1,
     ) -> ConstraintTokenInput:
         """
         Tau-leaping update restricted to the 'Frontier' of each constraint block.
@@ -355,12 +355,12 @@ class MaskProbPath:
         B, L = x.shape
 
         # Determine number of full blocks
-        num_blocks = (L - token_prefix_len) // block_size
-        end_pos = token_prefix_len + num_blocks * block_size
+        num_blocks = (L - prefix_len) // block_size
+        end_pos = prefix_len + num_blocks * block_size
 
         # Extract blocks: [B, N, 4]
         # x_body: [B, N*4]
-        x_body = x[:, token_prefix_len : end_pos]
+        x_body = x[:, prefix_len : end_pos]
         x_blocks = x_body.reshape(B, num_blocks, block_size)
 
         mask_blocks = (x_blocks == self.mask_index)
@@ -377,7 +377,7 @@ class MaskProbPath:
         # Flatten back to [B, L]
         # Initialize with False (Prefix and remainder are handled as non-frontier)
         frontier_mask = torch.zeros_like(masks, dtype=torch.bool)
-        frontier_mask[:, token_prefix_len : end_pos] = is_frontier_block.reshape(B, -1)
+        frontier_mask[:, prefix_len : end_pos] = is_frontier_block.reshape(B, -1)
 
         # -------------------------------------------------------------
         # 2. Rate Calculation & Poisson Sampling
@@ -651,10 +651,10 @@ class MaskProbPath:
         if self.noise_removal:
             if self.method.startswith('frontier_tau_leaping'):
                 # Block structure for frontier-based methods
-                token_prefix_len = len(start_tokens) if start_tokens is not None else 0
+                prefix_len = len(start_tokens) if start_tokens is not None else 0
                 block_size = CONSTRAINT_TOKEN_LEN
-                num_blocks = (total_tokens - token_prefix_len) // block_size
-                end_pos = token_prefix_len + num_blocks * block_size
+                num_blocks = (total_tokens - prefix_len) // block_size
+                end_pos = prefix_len + num_blocks * block_size
 
                 # Autoregressive noise removal: fill blocks left-to-right
                 # Iterate CONSTRAINT_TOKEN_LEN times to fill all remaining MASKs
@@ -665,7 +665,7 @@ class MaskProbPath:
                     x = batch['c_val']
 
                     # Find frontier (first MASK in each block)
-                    x_body = x[:, token_prefix_len : end_pos]
+                    x_body = x[:, prefix_len : end_pos]
                     x_blocks = x_body.reshape(b, num_blocks, block_size)
                     mask_blocks = (x_blocks == self.mask_index)
 
@@ -676,7 +676,7 @@ class MaskProbPath:
 
                     # Flatten frontier mask to [B, L]
                     frontier_mask = torch.zeros_like(x, dtype=torch.bool)
-                    frontier_mask[:, token_prefix_len : end_pos] = frontier_blocks.reshape(b, -1)
+                    frontier_mask[:, prefix_len : end_pos] = frontier_blocks.reshape(b, -1)
 
                     # Skip if no more MASKs
                     if not frontier_mask.any():

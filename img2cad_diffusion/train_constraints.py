@@ -8,7 +8,7 @@ import lightning.pytorch as pl
 from lightning.pytorch.loggers import TensorBoardLogger
 from lightning.pytorch.strategies import DDPStrategy
 
-from img2cad_diffusion import constraint_models, constraint_data
+from img2cad_diffusion import constraint_data, constraint_models, constraint_models_with_cnt
 
 
 log = logging.getLogger(__name__)
@@ -105,6 +105,8 @@ def main(config: constraint_models.ConstraintModelTrainingConfig):
         model = constraint_models_ar.ConstraintARModule(config)
     elif config.model.net.model_type == "mdd":
         model = constraint_models.ConstraintMDDModule(config)
+    elif config.model.net.model_type == "mdd_with_cnt":
+        model = constraint_models_with_cnt.ConstraintMDDWithCntModule(config)
     else:
         raise ValueError(f"Unknown model_type: {config.model.net.model_type}. Expected 'ar' or 'mdd'.")
 

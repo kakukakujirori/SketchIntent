@@ -5,7 +5,7 @@ model:
   token_masking_probs: ["antithetic"]
   gt_reordering_strategies: ["hungarian_frontier"]
   net:
-    model_type: mdd  # "ar" or "mdd"
+    model_type: mdd_with_cnt  # "ar" or "mdd"
     num_heads: 8
     num_layers: 12
     hidden_size: 384
@@ -40,7 +40,7 @@ mixed_precision: True
 num_gpus: 2
 training_seed: 42  # Seed for training randomness (model init, dropout, etc.)
 
-max_epochs: 30
+max_epochs: 100 #30
 
 # test_only: true
 # checkpoint_path: outputs/2025-12-28/23-38-22/lightning_logs/version_0/checkpoints/epoch_29.ckpt

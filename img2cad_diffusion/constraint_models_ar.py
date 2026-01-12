@@ -109,11 +109,11 @@ class ConstraintARModule(L.LightningModule):
         self.kappa_metric = torch.nn.ModuleList([CohenKappa(num_pointer_targets) for _ in range(2)])
         self.accuracy_metric = torch.nn.ModuleList([torchmetrics.Accuracy(task='multiclass', num_classes=num_pointer_targets) for _ in range(2)])
         self.set_metrics = torch.nn.ModuleList(
-            [ConstraintIoU(token_num_per_block=CONSTRAINT_TOKEN_LEN, token_prefix_len=0) for _ in range(2)]
+            [ConstraintIoU(token_num_per_block=CONSTRAINT_TOKEN_LEN, prefix_len=0) for _ in range(2)]
         )
         self.token_reordering = TokenReordering(
             token_num_per_block=CONSTRAINT_TOKEN_LEN,
-            token_prefix_len=0)
+            prefix_len=0)
 
     @staticmethod
     def _format_constraint_sequence(tokens, max_show: int | None = None) -> list[str]:
@@ -233,7 +233,7 @@ class ConstraintARModule(L.LightningModule):
         kappa_val = kappa(preds[relevant_idxs], target[relevant_idxs])
         accuracy_val = accuracy(preds[relevant_idxs], target[relevant_idxs])
 
-        # IoU on full sequences (ConstraintIoU uses token_prefix_len=0, no START expected)
+        # IoU on full sequences (ConstraintIoU uses prefix_len=0, no START expected)
         preds_sorted, _ = self.token_reordering(preds, None, None, "canonical_with_tail_strip")
         target_sorted, _ = self.token_reordering(target, None, None, "canonical_with_tail_strip")
         set_metrics_val = set_metric(preds_sorted, target_sorted)

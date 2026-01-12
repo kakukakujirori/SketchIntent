@@ -12,25 +12,30 @@ class TokenMasking:
         self,
         tokens: torch.Tensor,
         mask_prob: float | torch.Tensor,
-        token_prefix_len: int = 0,
+        mask_start_pos: int = 1,
+        prefix_len: int = 1,
         strategy: str = "tokenwise",
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # sanity check
         if len(tokens.shape) != 2:
             raise ValueError(f"tokens shape must be [B, L], but got {tokens.shape}")
+        if mask_start_pos < 0:
+            raise ValueError(f"mask_start_pos must be non-negative, but got {mask_start_pos}")
+        if prefix_len < 0:
+            raise ValueError(f"prefix_len must be non-negative, but got {prefix_len}")
 
         if not isinstance(mask_prob, torch.Tensor):
             mask_prob = torch.tensor([mask_prob])
 
         # factory
         if strategy == "tokenwise":
-            return self.tokenwise_masking(tokens, mask_prob, token_prefix_len)
+            return self.tokenwise_masking(tokens, mask_prob, mask_start_pos, prefix_len)
         elif re.fullmatch(r"^\d+-tokenwise-all$", strategy):  # e.g., 4-tokenwise-all
             block_len = int(strategy.split("-")[0])
-            return self.blockwise_masking_all(tokens, mask_prob, block_len, token_prefix_len)
+            return self.blockwise_masking_all(tokens, mask_prob, mask_start_pos, block_len, prefix_len)
         elif re.fullmatch(r"^\d+-tokenwise-causal$", strategy):  # e.g., 4-tokenwise-causal
             block_len = int(strategy.split("-")[0])
-            return self.blockwise_masking_causal(tokens, mask_prob, block_len, token_prefix_len)
+            return self.blockwise_masking_causal(tokens, mask_prob, mask_start_pos, block_len, prefix_len)
         else:
             raise ValueError(f"Unknown masking strategy: {strategy}")
 
@@ -38,11 +43,14 @@ class TokenMasking:
         self,
         tokens: torch.Tensor,
         mask_prob: torch.Tensor,
-        token_prefix_len: int,
+        mask_start_pos: int,
+        prefix_len: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         assert len(tokens.shape) == 2
+        assert mask_start_pos >= 0
+        assert prefix_len >= 0
         mask = torch.rand_like(tokens, dtype=torch.float32) < mask_prob.reshape(-1, 1)
-        mask[:, :token_prefix_len] = False
+        mask[:, :mask_start_pos] = False
         tokens_masked = torch.where(mask, self.mask_id, tokens)
         return tokens_masked, mask
 
@@ -50,15 +58,19 @@ class TokenMasking:
         self,
         tokens: torch.Tensor,
         mask_prob: torch.Tensor,
+        mask_start_pos: int,
         block_len: int,
-        token_prefix_len: int,
+        prefix_len: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         assert len(tokens.shape) == 2
+        assert mask_start_pos >= 0
+        assert block_len > 0
+        assert prefix_len >= 0
         # reshape
         _, token_num = tokens.shape
-        block_num = (token_num - token_prefix_len) // block_len
+        block_num = (token_num - prefix_len) // block_len
         token_mid_block = rearrange(
-            tokens[:, token_prefix_len : token_prefix_len + block_num * block_len],
+            tokens[:, prefix_len : prefix_len + block_num * block_len],
             "b (c_num c_tokens) -> b c_num c_tokens",
             c_tokens=block_len)
         # masking
@@ -67,7 +79,17 @@ class TokenMasking:
         token_mid_block_masked = torch.where(mask, self.mask_id, token_mid_block)
         # flatten
         tokens_masked = tokens.clone()
-        tokens_masked[:, token_prefix_len : token_prefix_len + block_num * block_len] = token_mid_block_masked.reshape(b, -1)
+        tokens_masked[:, prefix_len : prefix_len + block_num * block_len] = token_mid_block_masked.reshape(b, -1)
+
+        # care about prefix masking
+        if mask_start_pos < prefix_len:
+            # prefix masking
+            prefix_mask = torch.rand((b, prefix_len - mask_start_pos), device=tokens.device) < mask_prob.reshape(-1, 1)
+            tokens_masked[:, mask_start_pos:prefix_len] = torch.where(prefix_mask, self.mask_id, tokens[:, mask_start_pos:prefix_len])
+        else:
+            # unmask before mask_start_pos
+            tokens_masked[:, :mask_start_pos] = tokens[:, :mask_start_pos]
+
         mask = tokens_masked == self.mask_id
         return tokens_masked, mask
 
@@ -75,19 +97,23 @@ class TokenMasking:
         self,
         tokens: torch.Tensor,
         mask_prob: torch.Tensor,
+        mask_start_pos: int,
         block_len: int,
-        token_prefix_len: int,
+        prefix_len: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         assert len(tokens.shape) == 2
+        assert mask_start_pos >= 0
+        assert block_len > 0
+        assert prefix_len >= 0
 
-        # device統一
+        # ensure that tensors are on the same device
         mask_prob = mask_prob.to(tokens.device)
 
         # reshape
         _, token_num = tokens.shape
-        block_num = (token_num - token_prefix_len) // block_len
+        block_num = (token_num - prefix_len) // block_len
         token_mid_block = rearrange(
-            tokens[:, token_prefix_len : token_prefix_len + block_num * block_len],
+            tokens[:, prefix_len : prefix_len + block_num * block_len],
             "b (c_num c_tokens) -> b c_num c_tokens",
             c_tokens=block_len)
 
@@ -129,9 +155,17 @@ class TokenMasking:
 
         # flatten
         tokens_masked = tokens.clone()
-        tokens_masked[:, token_prefix_len : token_prefix_len + block_num * block_len] = token_mid_block_masked.reshape(b, -1)
+        tokens_masked[:, prefix_len : prefix_len + block_num * block_len] = token_mid_block_masked.reshape(b, -1)
 
-        # Note: 入力GTにmask_idが含まれない前提
+        # care about prefix masking
+        if mask_start_pos < prefix_len:
+            # prefix masking
+            prefix_mask = torch.rand((b, prefix_len - mask_start_pos), device=tokens.device) < mask_prob.reshape(-1, 1)
+            tokens_masked[:, mask_start_pos:prefix_len] = torch.where(prefix_mask, self.mask_id, tokens[:, mask_start_pos:prefix_len])
+        else:
+            # unmask before mask_start_pos
+            tokens_masked[:, :mask_start_pos] = tokens[:, :mask_start_pos]
+
         mask = tokens_masked == self.mask_id
 
         return tokens_masked, mask

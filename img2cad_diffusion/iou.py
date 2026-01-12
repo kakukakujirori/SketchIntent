@@ -20,10 +20,10 @@ class ConstraintIoU(torchmetrics.Metric):
     - Number of samples (for averaging precision/recall per sample)
     """
 
-    def __init__(self, token_num_per_block: int | None, token_prefix_len: int, **kwargs):
+    def __init__(self, token_num_per_block: int | None, prefix_len: int, **kwargs):
         super().__init__(**kwargs)
         self.block_size = token_num_per_block
-        self.prefix_len = token_prefix_len
+        self.prefix_len = prefix_len
         self.add_state("total_intersection", default=torch.tensor(0.0), dist_reduce_fx="sum")
         self.add_state("total_pred", default=torch.tensor(0.0), dist_reduce_fx="sum")
         self.add_state("total_target", default=torch.tensor(0.0), dist_reduce_fx="sum")

@@ -348,7 +348,7 @@ def tokenize_constraints(
 
     val_tokens = [ConstraintToken.Start]
     coord_tokens = [ConstraintParamToken.Type]  # Start token
-    pos_idx = len(SpecialToken)
+    pos_idx = pos_idx_start = len(SpecialToken)
     pos_tokens = [pos_idx]
 
     for constraint_type, sorted_refs, _ in parsed_constraints:
@@ -399,11 +399,16 @@ def tokenize_constraints(
     # Determine tail padding token
     tail_pad_value = ConstraintToken.Stop if use_stop_padding else ConstraintToken.Pad
 
-    return {
+    ret =  {
         'val': _pad_or_truncate(np.array(val_tokens, dtype=np.int64), max_length, tail_pad_value),
         'coord': _pad_or_truncate(np.array(coord_tokens, dtype=np.int64), max_length, pad_value=ConstraintParamToken.Pad),
         'pos': _pad_or_truncate(np.array(pos_tokens, dtype=np.int64), max_length, pad_value=0),
     }
+
+    # count constraints
+    ret['cnt'] = ret['pos'].max() - pos_idx_start - 1
+
+    return ret
 
 
 # =============================================================================
