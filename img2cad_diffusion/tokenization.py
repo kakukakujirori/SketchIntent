@@ -312,7 +312,7 @@ def tokenize_constraints(
                 continue
 
         # Sort refs within this constraint by token position
-        # Midpoint: ensure midpoint (point/subnode) is always first for consistency
+        # Midpoint: ensure midpoint (center point) is always first for consistency
         if constraint_type == 'Midpoint':
             if len(refs) == 2:
                 # 2-ref: swap if first ref is a curve (Line/Arc/Circle), not a point/subnode
@@ -323,8 +323,68 @@ def tokenize_constraints(
                 else:
                     sorted_refs = refs
             else:
-                # 3+ refs: first is midpoint (keep), sort rest by token position
-                sorted_refs = [refs[0]] + sorted(refs[1:], key=lambda r: get_token_pos(r[0], r[1]))
+                # 3+ refs: determine midpoint geometrically
+                # For Midpoint(mid, p1, p2), mid.coords = (p1.coords + p2.coords) / 2
+                # We test all permutations and find the best one
+                def get_point_coords(entity_idx: int, subnode_name: str | None):
+                    """Get (x, y) coordinates for a reference."""
+                    ent = sketch.entities.get(str(entity_idx))
+                    if ent is None:
+                        return None
+                    if isinstance(ent, Point):
+                        return (ent.x, ent.y)
+                    elif isinstance(ent, Line):
+                        if subnode_name == 'start':
+                            sp = ent.start_point
+                            return (sp[0], sp[1])
+                        elif subnode_name == 'end':
+                            ep = ent.end_point
+                            return (ep[0], ep[1])
+                        else:
+                            # Edge reference - use midpoint of line
+                            sp = ent.start_point
+                            ep = ent.end_point
+                            return ((sp[0] + ep[0]) / 2, (sp[1] + ep[1]) / 2)
+                    elif isinstance(ent, (Circle, Arc)):
+                        if subnode_name in ('start', 'end'):
+                            # For arc start/end, would need more complex calc
+                            return (ent.xCenter, ent.yCenter)
+                        return (ent.xCenter, ent.yCenter)
+                    return None
+
+                # Find which ref is the geometric midpoint
+                best_mid_idx = 0
+                best_err = float('inf')
+
+                for mid_idx in range(len(refs)):
+                    mid_entity_idx, mid_subnode = refs[mid_idx]
+                    mid_coords = get_point_coords(mid_entity_idx, mid_subnode)
+                    if mid_coords is None:
+                        continue
+
+                    # Get other refs
+                    other_refs = [refs[i] for i in range(len(refs)) if i != mid_idx]
+                    if len(other_refs) < 2:
+                        continue
+
+                    # Check if mid is midpoint of first two others
+                    p1_coords = get_point_coords(other_refs[0][0], other_refs[0][1])
+                    p2_coords = get_point_coords(other_refs[1][0], other_refs[1][1])
+                    if p1_coords is None or p2_coords is None:
+                        continue
+
+                    calc_mid_x = (p1_coords[0] + p2_coords[0]) / 2
+                    calc_mid_y = (p1_coords[1] + p2_coords[1]) / 2
+                    err = ((mid_coords[0] - calc_mid_x)**2 + (mid_coords[1] - calc_mid_y)**2)**0.5
+
+                    if err < best_err:
+                        best_err = err
+                        best_mid_idx = mid_idx
+
+                # Reorder: midpoint first, then others sorted by token position
+                mid_ref = refs[best_mid_idx]
+                other_refs = [refs[i] for i in range(len(refs)) if i != best_mid_idx]
+                sorted_refs = [mid_ref] + sorted(other_refs, key=lambda r: get_token_pos(r[0], r[1]))
         else:
             sorted_refs = sorted(refs, key=lambda r: get_token_pos(r[0], r[1]))
 

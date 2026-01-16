@@ -968,7 +968,7 @@ def _add_constraint(
 def convert_sketch_to_freecad(
     sketch: Sketch,
     doc_name: str = "SketchDoc",
-) -> tuple[FreeCAD.Document, "Sketcher.SketchObject", list[str], dict[int, str]]:
+) -> tuple[FreeCAD.Document, "Sketcher.SketchObject", list[str], dict[int, int], dict[int, str]]:
     """Convert a SketchGraphs Sketch object directly to FreeCAD sketch.
 
     Parameters
@@ -980,9 +980,10 @@ def convert_sketch_to_freecad(
 
     Returns
     -------
-    tuple[FreeCAD.Document, Sketcher.SketchObject, list[str], dict[int, str]]
-        The FreeCAD document and sketch object, history commands, and constraint mapping.
-        Mapping is {freecad_constraint_index: original_constraint_id}.
+    tuple[FreeCAD.Document, Sketcher.SketchObject, list[str], dict[int, int], dict[int, str]]
+        The FreeCAD document, sketch object, history commands, entity_to_geoid mapping,
+        and constraint_mapping. entity_to_geoid is {entity_id: freecad_geo_id}.
+        constraint_mapping is {freecad_constraint_index: original_constraint_id}.
     """
     doc = FreeCAD.newDocument(doc_name)
     body = doc.addObject('PartDesign::Body', 'Body')
@@ -1060,7 +1061,7 @@ def convert_sketch_to_freecad(
     doc.recompute()
     history_commands.append("doc.recompute()")
 
-    return doc, fc_sketch, history_commands, constraint_mapping
+    return doc, fc_sketch, history_commands, entity_to_geoid, constraint_mapping
 
 
 def draw_svg(
@@ -1262,7 +1263,7 @@ if __name__ == '__main__':
         plt.close(fig)
 
         try:
-            doc, fc_sketch, history_commands, mapping = convert_sketch_to_freecad(sketch)
+            doc, fc_sketch, history_commands, entity_to_geoid, mapping = convert_sketch_to_freecad(sketch)
 
             # dump paths
             output_py_path=f"{output_dir}/{i}.py"

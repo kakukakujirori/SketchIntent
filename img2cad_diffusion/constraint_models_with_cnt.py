@@ -453,6 +453,11 @@ class ConstraintMDDWithCntModule(L.LightningModule):
     ]:
         """
         Model expects the following input format: [Start, [Count], Coincident, Ref1, Ref2, IPad, ...]
+
+        2-Pass Training:
+        - Pass 1: Fill inactive blocks with GT-masked
+        - Pass 2: Fill inactive blocks with Pass 1's detached predictions (with same mask pattern)
+        This addresses train/inference domain gap where inactive blocks accumulate coherent predictions.
         """
         # Prepare input for model
         target = batch["c_val"]
@@ -460,11 +465,6 @@ class ConstraintMDDWithCntModule(L.LightningModule):
         target_with_offset_cnt = torch.cat([
             batch["c_val"][:, 0:1], self.num_fixed_tokens + target_cnt.reshape(-1, 1), batch['c_val'][:, 1:]
         ], dim=1)
-
-        # Mask tokens
-        c_val_masked_batch = []
-        mask_batch = []
-        sigma_batch = []
 
         # Sample t
         batch_size = target.shape[0]
@@ -499,44 +499,83 @@ class ConstraintMDDWithCntModule(L.LightningModule):
         # ---------------------------------------------------------------------
         B, L_total = c_val_with_offset_cnt_masked.shape
         block_num = (L_total - 2) // CONSTRAINT_TOKEN_LEN
-        c_val_masked_blocks = c_val_with_offset_cnt_masked[:, 2 : 2 + block_num * CONSTRAINT_TOKEN_LEN].reshape(B, block_num, CONSTRAINT_TOKEN_LEN)
 
         c_val_active_block_num = batch["c_cnt"].reshape(B, 1)  # [B, 1]
         # assert (c_val_active_block_num > 0).all(), "No active blocks found."  # FIXME
 
+        block_indices = torch.arange(block_num, device=target.device).unsqueeze(0)  # [1, N]
+        inactive_mask = (block_indices >= c_val_active_block_num) * (c_val_active_block_num > 0).expand(-1, block_num)  # [B, N]
+
+        # ---------------------------------------------------------------------
+        # PASS 1: Fill inactive with GT-masked
+        # ---------------------------------------------------------------------
+        c_val_masked_blocks_p1 = c_val_with_offset_cnt_masked[:, 2 : 2 + block_num * CONSTRAINT_TOKEN_LEN].reshape(B, block_num, CONSTRAINT_TOKEN_LEN)
+
         # Randomly sample from Active slots to fill Inactive slots
-        rand_indices = (torch.rand(B, block_num, device=c_val_masked_blocks.device) * c_val_active_block_num).long()
+        rand_indices = (torch.rand(B, block_num, device=target.device) * c_val_active_block_num).long()
         gather_indices = rand_indices.unsqueeze(-1).expand(-1, -1, CONSTRAINT_TOKEN_LEN)
-        sampled_active_blocks = torch.gather(c_val_masked_blocks, 1, gather_indices)
+        sampled_active_blocks = torch.gather(c_val_masked_blocks_p1, 1, gather_indices)
 
         # Apply to Inactive slots only
-        block_indices = torch.arange(block_num, device=c_val_masked_blocks.device).unsqueeze(0) # [1, N]
-        inactive_mask = (block_indices >= c_val_active_block_num) * (c_val_active_block_num > 0).expand(-1, block_num) # [B, N]
-        c_val_masked_blocks[inactive_mask] = sampled_active_blocks[inactive_mask]
+        c_val_masked_blocks_p1 = c_val_masked_blocks_p1.clone()
+        c_val_masked_blocks_p1[inactive_mask] = sampled_active_blocks[inactive_mask]
 
-        # Write back
-        c_val_with_offset_cnt_masked[:, 2 : 2 + block_num * CONSTRAINT_TOKEN_LEN] = c_val_masked_blocks.reshape(B, -1)
+        # Write back for Pass 1
+        c_val_with_offset_cnt_masked_p1 = c_val_with_offset_cnt_masked.clone()
+        c_val_with_offset_cnt_masked_p1[:, 2 : 2 + block_num * CONSTRAINT_TOKEN_LEN] = c_val_masked_blocks_p1.reshape(B, -1)
 
-        # Batch creation
-        batch_masked = ConstraintTokenInput(
+        # Batch creation for Pass 1
+        batch_masked_p1 = ConstraintTokenInput(
             val=batch['val'], coord=batch['coord'], pos=batch['pos'],
-            c_val=c_val_with_offset_cnt_masked,
+            c_val=c_val_with_offset_cnt_masked_p1,
         )
 
-        # Model Forward
-        # logits_ptr: [B, L_ptr, V], logits_cnt: [B, MaxCnt+1]
-        # NOTE: logit_ptr DOESN'T CONTAIN THE COUNT TOKEN
-        output_logits_ptr, output_logits_cnt = self.model.forward(batch_masked, sigma)
+        # Model Forward (Pass 1)
+        output_logits_ptr_p1, output_logits_cnt_p1 = self.model.forward(batch_masked_p1, sigma)
 
-        # ---------------------------------------------------------------------
         # Postprocess: Forbid invalid tokens globally
-        # ---------------------------------------------------------------------
-        invalid_tokens = [ConstraintToken.Pad, ConstraintToken.Mask, ConstraintToken.Start, ConstraintToken.Stop]
-        output_logits_ptr[:, :, invalid_tokens] = float('-inf')
-        del invalid_tokens
+        invalid_token_ids = [ConstraintToken.Pad, ConstraintToken.Mask, ConstraintToken.Start, ConstraintToken.Stop]
+        output_logits_ptr_p1[:, :, invalid_token_ids] = float('-inf')
 
         # ---------------------------------------------------------------------
-        # Loss Calculation
+        # PASS 2: Fill inactive with Pass 1's detached predictions
+        # ---------------------------------------------------------------------
+        with torch.no_grad():
+            # Get Pass 1 predictions (sample from distribution to match inference behavior)
+            # NOTE: We only need constraint predictions, not COUNT (inactive_mask only covers constraint blocks)
+            preds_ptr_p1 = torch.distributions.Categorical(logits=output_logits_ptr_p1).sample()  # [B, L_ptr]
+
+            # Re-apply mask pattern to constraint blocks only
+            mask_constraint_blocks = mask_with_cnt[:, 2 : 2 + block_num * CONSTRAINT_TOKEN_LEN]
+            preds_constraint_blocks_p1_masked = torch.where(
+                mask_constraint_blocks,
+                ConstraintToken.Mask,
+                preds_ptr_p1[:, 1 : 1 + block_num * CONSTRAINT_TOKEN_LEN]
+            )
+
+        # Extract blocks and fill inactive with Pass 1's predictions
+        c_val_masked_blocks_p2 = c_val_with_offset_cnt_masked[:, 2 : 2 + block_num * CONSTRAINT_TOKEN_LEN].reshape(B, block_num, CONSTRAINT_TOKEN_LEN)
+        preds_blocks_p1 = preds_constraint_blocks_p1_masked.reshape(B, block_num, CONSTRAINT_TOKEN_LEN)
+
+        c_val_masked_blocks_p2 = c_val_masked_blocks_p2.clone()
+        c_val_masked_blocks_p2[inactive_mask] = preds_blocks_p1[inactive_mask]
+
+        # Write back for Pass 2
+        c_val_with_offset_cnt_masked_p2 = c_val_with_offset_cnt_masked.clone()
+        c_val_with_offset_cnt_masked_p2[:, 2 : 2 + block_num * CONSTRAINT_TOKEN_LEN] = c_val_masked_blocks_p2.reshape(B, -1)
+
+        # Batch creation for Pass 2
+        batch_masked_p2 = ConstraintTokenInput(
+            val=batch['val'], coord=batch['coord'], pos=batch['pos'],
+            c_val=c_val_with_offset_cnt_masked_p2,
+        )
+
+        # Model Forward (Pass 2)
+        output_logits_ptr_p2, output_logits_cnt_p2 = self.model.forward(batch_masked_p2, sigma)
+        output_logits_ptr_p2[:, :, invalid_token_ids] = float('-inf')
+
+        # ---------------------------------------------------------------------
+        # Loss Calculation (Combined from both passes)
         # ---------------------------------------------------------------------
 
         # NOTE: output_logits_ptr and target don't contain the COUNT token, so 1+ rather than 2+
@@ -544,60 +583,67 @@ class ConstraintMDDWithCntModule(L.LightningModule):
         invalid_tokens = (1 + target_cnt * CONSTRAINT_TOKEN_LEN).reshape(B, 1) <= torch.arange(L, device=target.device).reshape(1, L)
 
         # Prepare PAD one-hot vector
-        pad_onehot = torch.full_like(output_logits_ptr[0:1, 0:1, :], float('-inf'))
+        pad_onehot = torch.full_like(output_logits_ptr_p1[0:1, 0:1, :], float('-inf'))
         pad_onehot[:, :, ConstraintToken.Stop] = 0.0
 
-        # Overwrite inativate constraint blocks
-        output_logits_ptr_forced = torch.where(
-            invalid_tokens.unsqueeze(-1),
-            pad_onehot,
-            output_logits_ptr,
-        )
-        target_forced = torch.where(
-            invalid_tokens,
-            ConstraintToken.Stop,
-            target
-        )
+        # Overwrite inactive constraint blocks (for both passes)
+        output_logits_ptr_forced_p1 = torch.where(invalid_tokens.unsqueeze(-1), pad_onehot, output_logits_ptr_p1)
+        output_logits_ptr_forced_p2 = torch.where(invalid_tokens.unsqueeze(-1), pad_onehot, output_logits_ptr_p2)
+        target_forced = torch.where(invalid_tokens, ConstraintToken.Stop, target)
 
-        # Matching
+        # Matching (same for both passes since GT target is the same)
         mask_ptr = torch.cat([mask_with_cnt[:, 0:1], mask_with_cnt[:, 2:]], dim=1)
         target_reordered, mask_for_loss_ptr = self.token_reordering(
             target_forced,
-            output_logits_ptr_forced,
+            output_logits_ptr_forced_p1,  # Use Pass 1 logits for matching (output_logits_ptr_forced_p2 should also be used)
             mask_ptr,
             gt_reordering_strategy,
             prefix_len=1,  # NOTE: target doesn't contain COUNT token, only START as prefix
         )
 
-        # Loss
+        # Loss reweighting
         if gt_reordering_strategy == "hungarian_frontier":
-            reweighting_ptr = torch.ones_like(t).unsqueeze(-1).expand(-1, target.size(1))  # TODO: NEED THEORETICAL JUSTIFICATION
+            reweighting_ptr = torch.ones_like(t).unsqueeze(-1).expand(-1, target.size(1))
             reweighting_cnt = torch.ones_like(t)
         else:
-            reweighting_ptr = 1 / t.unsqueeze(-1).expand(-1, target.size(1))  # NOTE: the reweighting term = 1/t for LogLinearNoise
+            reweighting_ptr = 1 / t.unsqueeze(-1).expand(-1, target.size(1))
             reweighting_cnt = 1 / t
 
-        # Loss 1: pointer loss
-        loss_ptr = self.criterion(
-            output_logits_ptr_forced[mask_for_loss_ptr],
+        # Pointer loss (average of both passes)
+        loss_ptr_p1 = self.criterion(
+            output_logits_ptr_forced_p1[mask_for_loss_ptr],
             target_reordered[mask_for_loss_ptr],
         ) * reweighting_ptr[mask_for_loss_ptr]
-        loss_ptr = loss_ptr.sum() / mask_for_loss_ptr.sum().clamp(min=1)
+        loss_ptr_p1 = loss_ptr_p1.sum() / mask_for_loss_ptr.sum().clamp(min=1)
 
-        # Loss 2: count loss
+        loss_ptr_p2 = self.criterion(
+            output_logits_ptr_forced_p2[mask_for_loss_ptr],
+            target_reordered[mask_for_loss_ptr],
+        ) * reweighting_ptr[mask_for_loss_ptr]
+        loss_ptr_p2 = loss_ptr_p2.sum() / mask_for_loss_ptr.sum().clamp(min=1)
+
+        loss_ptr = (loss_ptr_p1 + loss_ptr_p2) / 2
+
+        # Count loss (average of both passes)
         mask_for_loss_cnt = c_val_with_offset_cnt_masked[:, 1] == ConstraintToken.Mask
-        loss_cnt = self.criterion(
-            output_logits_cnt[mask_for_loss_cnt],
+        loss_cnt_p1 = self.criterion(
+            output_logits_cnt_p1[mask_for_loss_cnt],
             target_cnt[mask_for_loss_cnt],
         ) * reweighting_cnt[mask_for_loss_cnt]
-        loss_cnt = loss_cnt.sum() / mask_for_loss_cnt.sum().clamp(min=1)
+        loss_cnt_p1 = loss_cnt_p1.sum() / mask_for_loss_cnt.sum().clamp(min=1)
 
-        loss = loss_ptr + loss_cnt
+        loss_cnt_p2 = self.criterion(
+            output_logits_cnt_p2[mask_for_loss_cnt],
+            target_cnt[mask_for_loss_cnt],
+        ) * reweighting_cnt[mask_for_loss_cnt]
+        loss_cnt_p2 = loss_cnt_p2.sum() / mask_for_loss_cnt.sum().clamp(min=1)
 
-        # Pred
+        loss_cnt = (loss_cnt_p1 + loss_cnt_p2) / 2
+
+        # Pred (use Pass 2 predictions as they are more representative of inference)
         with torch.no_grad():
-            preds_ptr = torch.distributions.Categorical(logits=output_logits_ptr).sample()
-            preds_cnt = torch.distributions.Categorical(logits=output_logits_cnt).sample()
+            preds_ptr = torch.distributions.Categorical(logits=output_logits_ptr_p2).sample()
+            preds_cnt = torch.distributions.Categorical(logits=output_logits_cnt_p2).sample()
 
             B, L = preds_ptr.shape
             invalid_tokens = (1 + preds_cnt * CONSTRAINT_TOKEN_LEN).reshape(B, 1) <= torch.arange(L, device=target.device).reshape(1, L)
