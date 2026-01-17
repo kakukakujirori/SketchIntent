@@ -164,7 +164,16 @@ def load_and_extract_from_file(file_path: str):
 # ==========================================
 
 
-def visualize_sketch_for_vlm(data, save_path="vlm_input.png"):
+def visualize_sketch_for_vlm(data, save_path: str = "vlm_input.png", title: str | None = None, title_fontsize: int = 24):
+    """
+    Visualize sketch with primitives and constraints.
+
+    Args:
+        data: Sketch data dictionary with primitives and constraints
+        save_path: Path to save the output image
+        title: Optional label (e.g., "Sketch A") to display in top-left corner
+        title_fontsize: Font size for the title label
+    """
     if not data: return
 
     fig, ax = plt.subplots(figsize=(8, 8))
@@ -385,29 +394,44 @@ def visualize_sketch_for_vlm(data, save_path="vlm_input.png"):
         ax.text(mx, my, label, color='red', fontsize=11, weight='bold', ha='center', va='center', zorder=30,
                 bbox=dict(facecolor='white', edgecolor='red', boxstyle='square,pad=0.1', alpha=1.0))
 
+
+    # Counter for symmetry markers to vary symbols
+    symmetry_marker_counter = 0
+    # Use standard matplotlib markers: circle, x, square, diamond, triangle_up, triangle_down
+    SYMMETRY_MARKERS = ['o', 's', 'D', '^', 'v']
+
     def draw_symmetry_axis(targets):
+        nonlocal symmetry_marker_counter
         AXIS_COLOR = '#800080'
-        axis_id = targets[2]["id"]
+
+        # Get symmetry axis/point
+        axis_target = targets[2]
+        axis_id = axis_target["id"]
         prim = prim_map.get(axis_id)
         if not prim: return
-        p1, p2 = None, None
-        if prim["type"] == "Line":
-            p1, p2 = prim["start"], prim["end"]
-        elif prim["type"] == "Point":
-            cx, cy = prim["coords"]
-            ax.plot([view_min_x, view_max_x], [cy, cy], color=AXIS_COLOR, linestyle='-.', lw=1.0, zorder=0, alpha=0.6)
-            ax.plot([cx, cx], [view_min_y, view_max_y], color=AXIS_COLOR, linestyle='-.', lw=1.0, zorder=0, alpha=0.6)
-            return
-        if p1 and p2:
-            dx, dy = p2[0]-p1[0], p2[1]-p1[1]
-            if abs(dx) < 1e-6:
-                ax.plot([p1[0], p1[0]], [view_min_y, view_max_y], color=AXIS_COLOR, linestyle='-.', lw=1.0, zorder=0, alpha=0.6)
-            elif abs(dy) < 1e-6:
-                ax.plot([view_min_x, view_max_x], [p1[1], p1[1]], color=AXIS_COLOR, linestyle='-.', lw=1.0, zorder=0, alpha=0.6)
-            else:
-                scale = 100
-                ax.plot([p1[0]-dx*scale, p2[0]+dx*scale], [p1[1]-dy*scale, p2[1]+dy*scale],
-                        color=AXIS_COLOR, linestyle='-.', lw=1.0, zorder=0, alpha=0.6)
+
+        # Get the two symmetric points
+        t1, t2 = targets[0], targets[1]
+        p1 = get_pos_coord(t1)
+        p2 = get_pos_coord(t2)
+
+        # Draw line between points
+        ax.plot([p1[0], p2[0]], [p1[1], p2[1]], color=AXIS_COLOR, linestyle='-', lw=1.0, zorder=5, alpha=0.8)
+
+        # Draw markers at 1/4 and 3/4 positions
+        marker = SYMMETRY_MARKERS[symmetry_marker_counter % len(SYMMETRY_MARKERS)]
+        symmetry_marker_counter += 1
+
+        # Calculate positions
+        dx, dy = p2[0] - p1[0], p2[1] - p1[1]
+        m1 = (p1[0] + dx*0.25, p1[1] + dy*0.25)
+        m2 = (p1[0] + dx*0.75, p1[1] + dy*0.75)
+
+        # Draw markers with white background for visibility
+        for mx, my in [m1, m2]:
+            ax.scatter([mx], [my], marker=marker, color=AXIS_COLOR, s=60, zorder=6,
+                        edgecolors=AXIS_COLOR, facecolors='white', linewidth=1.5)
+        return
 
     # --- Constraints Loop ---
     text_props = dict(ha='center', va='center', weight='bold', zorder=30)
@@ -591,6 +615,23 @@ def visualize_sketch_for_vlm(data, save_path="vlm_input.png"):
     ax.set_xlim(view_min_x, view_max_x)
     ax.set_ylim(view_min_y, view_max_y)
     ax.axis('off')
+
+    # Add label in top-left corner if provided
+    if title:
+        ax.text(
+            0.02,  # 2% from left edge in axes coordinates
+            0.98,  # 98% from bottom (2% from top) in axes coordinates
+            title,
+            fontsize=title_fontsize,
+            fontweight='bold',
+            color='blue',
+            ha='left',
+            va='top',
+            transform=ax.transAxes,
+            bbox=dict(facecolor='white', edgecolor='blue', boxstyle='round,pad=0.4', linewidth=2, alpha=1.0),
+            zorder=1000
+        )
+
     plt.savefig(save_path, bbox_inches='tight', dpi=100)
     plt.close()
 
@@ -599,7 +640,7 @@ if __name__ == "__main__":
     input_files = sorted(
         glob.glob("/home/ryotaro/github/vitruvion/scripts/prediction_fc_search/history_gt_ar_refined_*.py"),
         key=lambda x: int(x.split("_")[-1].split(".")[0]))
-    INPUT_SCRIPT_PATH = input_files[29]
+    INPUT_SCRIPT_PATH = input_files[0]
     OUTPUT_IMAGE_PATH = "vlm_judge_input.png"
 
     assert os.path.isfile(INPUT_SCRIPT_PATH)

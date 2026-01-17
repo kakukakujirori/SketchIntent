@@ -530,7 +530,7 @@ Note: We omit the inference of the parameter values for dimensional constraints 
 
 2. Dimensional Constraints (Use only if geometry implies specific dimensions):
 - Distance(Entity1, Subnode1, Entity2, Subnode2, Value)
-    * Fixes distance between two points.
+    * Fixes distance between two points or a point to a curve.
 - Diameter(Entity1, Value)
     * Fixes diameter of Circle or Arc.
 - Radius(Entity1, Value)
