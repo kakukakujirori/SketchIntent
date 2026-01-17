@@ -126,9 +126,9 @@ def parse_freecad_script(filepath):
         # --- Constraints ---
         elif line.startswith('fc_sketch.addConstraint('):
             # Example: fc_sketch.addConstraint(Sketcher.Constraint('Tangent', 3, 2, 6, 2))
-            inner = re.search(r"Constraint\((.*)\)", line)
+            inner = re.search(r"Sketcher\.Constraint\((.*)\)", line)
             if inner:
-                args_str = inner.group(1)
+                args_str = inner.group(1).rstrip(')')
                 # Naive CSV split (assuming no commas in strings)
                 raw_args = [a.strip().strip("'").strip('"') for a in args_str.split(',')]
                 if not raw_args: continue
@@ -257,23 +257,210 @@ def export_to_freecad_script(primitives: list, constraints_json: dict, output_pa
     print(f"Exported to {output_path}")
 
 
-def prepare_prompts(primitives_list: list, image_path_list: str | list[str]):
-    # load images
+def format_constraint_to_json(ctype: str, args: list) -> dict:
+    """Convert raw FreeCAD constraint arguments to structured JSON format.
+
+    Based on FreeCAD constraint API signatures from convert_sketch_to_freecad.py.
+
+    Args:
+        ctype: Constraint type name (e.g., 'Coincident', 'Horizontal', 'Tangent')
+        args: List of constraint arguments from parse_freecad_script
+
+    Returns:
+        dict with keys: type, entity1, subnode1, entity2, subnode2, entity3, subnode3
+    """
+    c_out = {
+        "type": ctype,
+        "entity1": None, "subnode1": None,
+        "entity2": None, "subnode2": None,
+        "entity3": None, "subnode3": None
+    }
+
+    def get_arg(idx):
+        return args[idx] if idx < len(args) else None
+
+    # Helper to check if arg is numeric (not a value like distance)
+    def is_int_arg(val):
+        return isinstance(val, int)
+
+    if ctype == "Coincident":
+        # Coincident(e1, s1, e2, s2) - 4 args
+        if len(args) >= 4:
+            c_out["entity1"] = get_arg(0)
+            c_out["subnode1"] = get_arg(1)
+            c_out["entity2"] = get_arg(2)
+            c_out["subnode2"] = get_arg(3)
+
+    elif ctype == "PointOnObject":
+        # PointOnObject(e1, s1, e2) - 3 args
+        c_out["entity1"] = get_arg(0)
+        c_out["subnode1"] = get_arg(1)
+        c_out["entity2"] = get_arg(2)
+
+    elif ctype in ["Horizontal", "Vertical"]:
+        # Horizontal(e1) - 1 arg for line
+        # Horizontal(e1, s1, e2, s2) - 4 args for two points
+        if len(args) == 1:
+            c_out["entity1"] = get_arg(0)
+        elif len(args) >= 4:
+            c_out["entity1"] = get_arg(0)
+            c_out["subnode1"] = get_arg(1)
+            c_out["entity2"] = get_arg(2)
+            c_out["subnode2"] = get_arg(3)
+
+    elif ctype in ["Parallel", "Perpendicular", "Equal"]:
+        # Parallel(e1, e2) - 2 args
+        c_out["entity1"] = get_arg(0)
+        c_out["entity2"] = get_arg(1)
+
+    elif ctype == "Tangent":
+        # Tangent(e1, e2) - 2 args (edge-edge)
+        # Tangent(e1, s1, e2, s2) - 4 args (point-point)
+        if len(args) == 2:
+            c_out["entity1"] = get_arg(0)
+            c_out["entity2"] = get_arg(1)
+        elif len(args) >= 4:
+            c_out["entity1"] = get_arg(0)
+            c_out["subnode1"] = get_arg(1)
+            c_out["entity2"] = get_arg(2)
+            c_out["subnode2"] = get_arg(3)
+
+    elif ctype == "TangentViaPoint":
+        # TangentViaPoint(e1, e2, e3, s3) - 4 args
+        c_out["entity1"] = get_arg(0)
+        c_out["entity2"] = get_arg(1)
+        c_out["entity3"] = get_arg(2)
+        c_out["subnode3"] = get_arg(3)
+
+    elif ctype == "Symmetric":
+        # Symmetric(e1, s1, e2, s2, e3, s3) - 6 args
+        c_out["entity1"] = get_arg(0)
+        c_out["subnode1"] = get_arg(1)
+        c_out["entity2"] = get_arg(2)
+        c_out["subnode2"] = get_arg(3)
+        c_out["entity3"] = get_arg(4)
+        c_out["subnode3"] = get_arg(5)
+
+    elif ctype == "Distance":
+        # Distance(e1, value) - 2 args (line length)
+        # Distance(e1, s1, e2, s2, value) - 5 args (point-point or point-edge)
+        if len(args) == 2:
+            c_out["entity1"] = get_arg(0)
+            # args[1] is the value, skip
+        elif len(args) >= 5:
+            c_out["entity1"] = get_arg(0)
+            c_out["subnode1"] = get_arg(1)
+            c_out["entity2"] = get_arg(2)
+            c_out["subnode2"] = get_arg(3)
+            # args[4] is the value, skip
+
+    elif ctype in ["Diameter", "Radius"]:
+        # Diameter(e1, value) - 2 args
+        # Radius(e1, value) - 2 args
+        c_out["entity1"] = get_arg(0)
+        # args[1] is the value, skip
+
+    elif ctype == "Angle":
+        # Angle(e1, value) - 2 args (single line angle)
+        # Angle(e1, e2, value) - 3 args (two lines)
+        # Angle(e1, s1, e2, s2, value) - 5 args (two points)
+        if len(args) == 2:
+            c_out["entity1"] = get_arg(0)
+        elif len(args) == 3:
+            c_out["entity1"] = get_arg(0)
+            c_out["entity2"] = get_arg(1)
+        elif len(args) >= 5:
+            c_out["entity1"] = get_arg(0)
+            c_out["subnode1"] = get_arg(1)
+            c_out["entity2"] = get_arg(2)
+            c_out["subnode2"] = get_arg(3)
+
+    else:
+        raise NotImplementedError(f"Unknown constraint type: {ctype}")
+
+    return c_out
+
+
+def prepare_prompts(primitives_list: list, image_path_list: str | list[str], example_files: list[str] = []):
+    # 1. Collect all images (Target images + Example images are handled differently in prompt construction)
+    # Actually, based on the plan, we want to present Example Images first, then Target Image.
+    # But image_path_list argument in this function signature was originally for the target.
+
+    # Let's normalize the target image list
     if isinstance(image_path_list, str):
-        image_path_list = [image_path_list]
+        target_image_path_list = [image_path_list]
+    else:
+        target_image_path_list = image_path_list
 
-    encoded_image_list = []
-    for image_path in image_path_list:
-        assert image_path.endswith(".svg"), f"{image_path=}"
-        png_bytes = cairosvg.svg2png(url=image_path, scale=1.0)
+    # 2. Prepare Example Content
+    all_encoded_images = []
+    example_text_block = ""
+
+    # Process examples
+    for i, ex_file in enumerate(example_files):
+        # Parse example
+        ex_primitives, ex_constraints_gt = parse_freecad_script(ex_file)
+
+        # Determine example image path
+        # Assuming .py -> .svg convention
+        # Check if the file name follows the pattern "history_gt_ar_refined_*.py" -> "gt_sketch_*.svg"
+        if "history_gt_ar_refined_" in ex_file:
+            ex_svg_path = ex_file.replace("history_gt_ar_refined_", "gt_sketch_").replace(".py", ".svg")
+        else:
+            # Fallback or strict assumption? Let's assume strict or simple replace if needed.
+            # If naming is different, might need adjustment. For now assume same pattern as main.
+            ex_svg_path = ex_file.replace(".py", ".svg")
+
+        if not os.path.exists(ex_svg_path):
+            print(f"Warning: Example image not found: {ex_svg_path}")
+            continue
+
+        # Encode example image
+        png_bytes = cairosvg.svg2png(url=ex_svg_path, scale=1.0)
         encoded_data = base64.b64encode(png_bytes).decode("utf-8")
-        encoded_image_list.append(encoded_data)
+        all_encoded_images.append(encoded_data)
 
-    # プリミティブ情報をテキスト化
-    primitives_text = json.dumps(primitives_list, indent=2)
+        # Format primitives
+        ex_prim_text = json.dumps(ex_primitives, indent=2)
 
-    # プロンプト作成
-    system_prompt_text = """
+        # Format constraints to match the prompt schema
+        formatted_constraints = [format_constraint_to_json(c["type"], c["args"]) for c in ex_constraints_gt]
+
+        # Format constraints
+        ex_cons_text = json.dumps({"constraints": formatted_constraints}, indent=2)
+
+        # Append to example text block
+        # Image index is i+1 (1-based)
+        example_text_block += f"""
+[Example {i+1}]
+Reference Image: The {i+1}-th image provided.
+
+[Primitives]
+```
+{ex_prim_text}
+```
+[Constraints]
+```
+{ex_cons_text}
+```
+"""
+
+    # 3. Process Target Image(s)
+    # We append target images AFTER example images
+    for target_image_path in target_image_path_list:
+        assert target_image_path.endswith(".svg"), f"{target_image_path=}"
+        png_bytes = cairosvg.svg2png(url=target_image_path, scale=1.0)
+        encoded_data = base64.b64encode(png_bytes).decode("utf-8")
+        all_encoded_images.append(encoded_data)
+
+    # Target image index starts after examples
+    target_image_index = len(example_files) + 1 # 1-based index for the *first* target image (assuming 1 target usually)
+
+    # 4. Primitives info for Target
+    target_primitives_text = json.dumps(primitives_list, indent=2)
+
+    # 5. Provide System Prompt
+    base_system_prompt_text = """
 You are an expert CAD engineer.
 Analyze the provided 2D sketch image and the list of geometric primitives.
 
@@ -387,50 +574,58 @@ Field descriptions:
 Example output for two constraints:
 ```
 {
-    "constraints":[
-        {
-            "type":"Coincident",
-            "entity1":0,
-            "subnode1":2,
-            "entity2":1,
-            "subnode2":1,
-            "entity3":null,
-            "subnode3":null
-        },
-        {
-            "type":"Horizontal",
-            "entity1":0,
-            "subnode1":null,
-            "entity2":null,
-            "subnode2":null,
-            "entity3":null,
-            "subnode3":null
-        }
-    ]
+  "constraints":[
+    {
+      "type":"Coincident",
+      "entity1":0,
+      "subnode1":2,
+      "entity2":1,
+      "subnode2":1,
+      "entity3":null,
+      "subnode3":null
+    },
+    {
+      "type":"Horizontal",
+      "entity1":0,
+      "subnode1":null,
+      "entity2":null,
+      "subnode2":null,
+      "entity3":null,
+      "subnode3":null
+    }
+  ]
 }
 ```
 Your response must start with '{' and end with '}'. No other text is allowed.
 """
 
+    if example_text_block:
+        system_prompt_text = base_system_prompt_text + "\n[Few-Shot Examples]\n" + example_text_block
+    else:
+        system_prompt_text = base_system_prompt_text
+
+    # 6. Construct User Message Content
     user_messages = []
-    for encoded_data in encoded_image_list:
+
+    # Add all images (Examples + Target)
+    for encoded_data in all_encoded_images:
         encoded_text = f"data:image/png;base64,{encoded_data}"
         user_messages.append({"type": "image_url", "image_url": {"url": encoded_text}})
 
-    # 4. Add the final text prompt at the end of the list
+    # Add final text prompt
     user_prompt_text = f"""
 Predict all the natural constraints to make the primitives fully constrained, i.e. to make the Degree of Freedom 2.
+Use the **last** provided 2D sketch image (the {target_image_index}-th image) as the reference.
 
 [Primitives Information]
 ```
-{primitives_text}
+{target_primitives_text}
 ```
 """
     user_messages.append({"type": "text", "text": user_prompt_text})
 
     messages = [
         {"role": "system", "content": system_prompt_text},
-        # The user's content is the list containing both images and text
         {"role": "user", "content": user_messages}
     ]
 
@@ -454,65 +649,68 @@ def extract_json_from_thinking_output(text: str) -> str:
 if __name__ == '__main__':
     import sys
 
-    # load data
+    #load data
     target_file_list = sorted(glob.glob("/home/ryotaro/github/vitruvion/scripts/prediction_fc_search/history_gt_ar_refined_*.py"))
 
-    idx = 3
-    target_file = target_file_list[idx]
+    # Example files (first 3)
+    example_files = target_file_list[0:3]
 
-    sample_primitives, constraints_gt = parse_freecad_script(target_file)
-    sample_svg_path = target_file.replace("history_gt_ar_refined_", "gt_sketch_").replace(".py", ".svg")
-    number = int(target_file.split("_")[-1].replace(".py", ""))
+    for target_file in target_file_list[3:]:
 
-    print(f"=== Processing sample {number} ===")
-    print(f"File: {target_file}")
-    print(f"Primitives: {len(sample_primitives)} items")
-    print("=" * 50)
+        sample_primitives, constraints_gt = parse_freecad_script(target_file)
+        sample_svg_path = target_file.replace("history_gt_ar_refined_", "gt_sketch_").replace(".py", ".svg")
+        number = int(target_file.split("_")[-1].replace(".py", ""))
 
-    # ストリーミングモードで実行
-    messages = prepare_prompts(sample_primitives, sample_svg_path)
-    llm.reset()
+        print(f"=== Processing sample {number} ===")
+        print(f"File: {target_file}")
+        print(f"Primitives: {len(sample_primitives)} items")
+        print(f"Example files: {len(example_files)} items")
+        print("=" * 50)
 
-    output_text = ""
-    token_count = 0
+        # ストリーミングモードで実行
+        messages = prepare_prompts(sample_primitives, sample_svg_path, example_files=example_files)
+        llm.reset()
 
-    try:
-        print("\n--- Streaming Output (Thinking + Response) ---\n")
-        for chunk in llm.create_chat_completion(
-            messages=messages,
-            stream=True,
-            max_tokens=32768,
-        ):
-            delta = chunk["choices"][0].get("delta", {})
-            content = delta.get("content", "")
-            if content:
-                output_text += content
-                token_count += 1
-                # リアルタイム出力
-                sys.stdout.write(content)
-                sys.stdout.flush()
-
-    except RuntimeError as e:
-        print(f"\n\n=== RuntimeError after {token_count} tokens ===")
-        print(f"Error: {e}")
-        print("\n--- Output so far ---")
-        print(output_text[-2000:] if len(output_text) > 2000 else output_text)  # 最後の2000文字
-
-        # 途中結果を保存
-        with open(f"thinking_output_{number}.txt", "w") as f:
-            f.write(output_text)
-        print(f"\nFull output saved to: thinking_output_{number}.txt")
-
-    else:
-        print("\n\n=== Generation Complete ===")
-        print(f"Total tokens: {token_count}")
-
-        # 結果を抽出
-        json_text = extract_json_from_thinking_output(output_text)
-        print(f"\nExtracted JSON:\n{json_text}")
+        output_text = ""
+        token_count = 0
 
         try:
-            constraints_json = json.loads(json_text)
-            export_to_freecad_script(sample_primitives, constraints_json, f"qwen3_8b_output_{number}.py")
-        except json.JSONDecodeError as e:
-            print(f"Failed to parse JSON: {e}")
+            print("\n--- Streaming Output (Thinking + Response) ---\n")
+            for chunk in llm.create_chat_completion(
+                messages=messages,
+                stream=True,
+                max_tokens=32768,
+            ):
+                delta = chunk["choices"][0].get("delta", {})
+                content = delta.get("content", "")
+                if content:
+                    output_text += content
+                    token_count += 1
+                    # リアルタイム出力
+                    sys.stdout.write(content)
+                    sys.stdout.flush()
+
+        except RuntimeError as e:
+            print(f"\n\n=== RuntimeError after {token_count} tokens ===")
+            print(f"Error: {e}")
+            print("\n--- Output so far ---")
+            print(output_text[-2000:] if len(output_text) > 2000 else output_text)  # 最後の2000文字
+
+            # 途中結果を保存
+            with open(f"thinking_output_{number}.txt", "w") as f:
+                f.write(output_text)
+            print(f"\nFull output saved to: thinking_output_{number}.txt")
+
+        else:
+            print("\n\n=== Generation Complete ===")
+            print(f"Total tokens: {token_count}")
+
+            # 結果を抽出
+            json_text = extract_json_from_thinking_output(output_text)
+            print(f"\nExtracted JSON:\n{json_text}")
+
+            try:
+                constraints_json = json.loads(json_text)
+                export_to_freecad_script(sample_primitives, constraints_json, f"qwen3_8b_output_{number}.py")
+            except json.JSONDecodeError as e:
+                print(f"Failed to parse JSON: {e}")

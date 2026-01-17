@@ -213,7 +213,7 @@ def evaluate_and_save(
         f.write("\n".join(gt_refined_history))
 
     # Save solver history
-    solver_path = output_dir / f"history_with_solver_{idx}.py"
+    solver_path = output_dir / f"history_pred_with_solver_{idx}.py"
     with open(solver_path, "w") as f:
         f.write("\n".join(solver_history_final))
 
