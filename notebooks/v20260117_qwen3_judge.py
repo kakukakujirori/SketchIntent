@@ -504,7 +504,8 @@ def prepare_judge_prompt(
     sketch_b_image_path: str,
     primitives: list,
     sketch_a_constraints: list,
-    sketch_b_constraints: list
+    sketch_b_constraints: list,
+    allow_tie: bool = False
 ) -> list:
     """
     Prepare messages for Qwen3 to judge which sketch has better constraints.
@@ -539,7 +540,7 @@ The primitives are implicitly indexed starting from 0 based on their order.
 
 [Constraint Format]
 Each constraint follows this structure:
-{
+{{
   "type": "ConstraintTypeName",
   "entity1": <int or null>,
   "subnode1": <int or null>,
@@ -548,7 +549,7 @@ Each constraint follows this structure:
   "entity3": <int or null>,
   "subnode3": <int or null>,
   "value": <float or null>
-}
+}}
 
 - entityN: The 0-based index of the primitive
 - subnodeN: Which part of the primitive is referenced:
@@ -611,16 +612,24 @@ Each constraint follows this structure:
 6. **Best Practices**: Do the constraints follow CAD best practices (e.g., avoid excessive dimension constraints)?
 
 [Note]
-- Do to the type and order of applying constraints, the absolute sketch sizes are different between the two sketches. This difference should not affect the evaluation, i.e., we don't care whether one edge length is 999.0 mm or 1000.0 mm.
-- In some cases, constraints on the sketch are overlapped and a bit hard to recognize. Since this is an issue on the sketch drawing, don't rely too much on the sketch visual cues, and mainly focus on the constraint definition commands for evaluation.
+- Due to the type and order of applying constraints, the absolute sketch sizes are different between the two sketches. This difference should not affect the evaluation (e.g., we don't care whether one edge length is 999.0 mm or 1000.0 mm).
+- In some cases, constraints on the sketch are overlapped and a bit hard to recognize. Since this is an issue not on the constraints but on the sketch drawing, don't rely too much on the sketch visual cues, and mainly focus on the constraint definition commands for evaluation.
+- The order of defining constraints is at random. Don't take it into account when evaluating the constraints.
 
 [Response Format]
 You MUST respond with ONLY a valid JSON object. No other text is allowed.
-{
-  "choice": "A" or "B",
+{{
+  "choice": {choice_options},
   "reasoning": "Brief explanation of why you chose this sketch."
-}
-Your response must start with '{' and end with '}'. No other text is allowed."""
+}}
+{tie_instruction}
+Your response must start with '{{' and end with '}}'. No other text is allowed.""".format(
+        choice_options='"A", "B", or "tie"' if allow_tie else '"A" or "B"',
+        tie_instruction="If both constraint sets are equally good and it's difficult to decide, choose \"tie\"." if allow_tie else ""
+    )
+
+    # Build the choice instruction text based on allow_tie
+    choice_instruction = '"A", "B", or "tie"' if allow_tie else '"A" or "B"'
 
     user_content = [
         {"type": "text", "text": "I will show you three images and two sets of constraints.\n\n**Image 1**: The base primitives (geometry only, no constraints)\n**Image 2**: Sketch A (primitives + Constraint Set A)\n**Image 3**: Sketch B (primitives + Constraint Set B)\n\nPlease analyze which constraint set (A or B) is more natural and editable."},
@@ -644,7 +653,7 @@ Your response must start with '{' and end with '}'. No other text is allowed."""
 ```
 
 Based on the images and constraint definitions, which sketch (A or B) has more natural, editable CAD constraints?
-Respond with a JSON object containing "choice" (either "A" or "B") and "reasoning"."""}
+Respond with a JSON object containing "choice" (either {choice_instruction}) and "reasoning"."""}
     ]
 
     messages = [
@@ -679,6 +688,7 @@ def main():
     parser = argparse.ArgumentParser(description="Qwen3 VLM Constraint Judge")
     parser.add_argument("--num_samples", type=int, default=None, help="Number of samples to process (default: all)")
     parser.add_argument("--output_dir", type=str, default="qwen_judge_images", help="Directory for generated images")
+    parser.add_argument("--allow-tie", action="store_true", help="Allow 'tie' as a choice when judgment is difficult")
     args = parser.parse_args()
 
     # Find all sample indices
@@ -712,6 +722,7 @@ def main():
     results = []
     gt_wins = 0
     pred_wins = 0
+    tie_wins = 0
 
     # Results path
     results_path = os.path.join(args.output_dir, "judge_results.jsonl")
@@ -735,6 +746,8 @@ def main():
                             gt_wins += 1
                         elif data.get("winner") == "Pred":
                             pred_wins += 1
+                        elif data.get("winner") == "Tie":
+                            tie_wins += 1
                 except json.JSONDecodeError:
                     continue
 
@@ -790,7 +803,8 @@ def main():
         # Prepare prompt
         messages = prepare_judge_prompt(
             prim_img, sketch_a_img, sketch_b_img,
-            primitives, sketch_a_constraints, sketch_b_constraints
+            primitives, sketch_a_constraints, sketch_b_constraints,
+            allow_tie=getattr(args, 'allow_tie', False)
         )
 
         # Call Qwen3 with streaming
@@ -831,6 +845,8 @@ def main():
                 winner = sketch_a_label
             elif choice == "B":
                 winner = sketch_b_label
+            elif choice.lower() == "tie":
+                winner = "Tie"
             else:
                 winner = "Unknown"
 
@@ -838,6 +854,8 @@ def main():
                 gt_wins += 1
             elif winner == "Pred":
                 pred_wins += 1
+            elif winner == "Tie":
+                tie_wins += 1
 
             result_entry = {
                 "sample_idx": idx,
@@ -877,6 +895,7 @@ def main():
     print(f"Total samples: {len(results)}")
     print(f"GT wins: {gt_wins} ({100*gt_wins/len(results):.1f}%)" if results else "GT wins: 0")
     print(f"Pred wins: {pred_wins} ({100*pred_wins/len(results):.1f}%)" if results else "Pred wins: 0")
+    print(f"Ties: {tie_wins} ({100*tie_wins/len(results):.1f}%)" if results else "Ties: 0")
 
     # Save summary
     summary_path = os.path.join(args.output_dir, "judge_summary.json")
@@ -885,7 +904,8 @@ def main():
             "summary": {
                 "total": len(results),
                 "gt_wins": gt_wins,
-                "pred_wins": pred_wins
+                "pred_wins": pred_wins,
+                "ties": tie_wins
             }
         }, f, indent=2)
     print(f"\nResults saved to: {results_path}")
