@@ -221,7 +221,7 @@ class ConstraintDataset(torch.utils.data.Dataset):
             # c_coord=torch.from_numpy(result.constr_tokens['coord']),
             # c_pos=torch.from_numpy(result.constr_tokens['pos']),
             c_cnt=torch.tensor(result.constr_tokens['cnt']),
-            # data_index=torch.tensor([index]),                         # NOTE: Uncomment during debug
+            data_index=torch.tensor([index]),
         )
 
     def __len__(self) -> int:

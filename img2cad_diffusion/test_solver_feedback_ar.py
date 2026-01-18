@@ -149,6 +149,7 @@ def cleanup_constraints(
 
     for iter_idx in range(max_cleanup_iters):
         # Retry loop for non-deterministic FreeCAD solver behavior
+        status = None
         for retry in range(max_conflict_retries):
             try:
                 doc, fc_sketch, history_commands, mapping = tokens_to_freecad_sketch(
@@ -162,6 +163,10 @@ def cleanup_constraints(
             if not status.MappedConflictingIndices:
                 break
             # Conflicting found - retry with fresh FreeCAD document
+
+        if status is None:
+            # Conversion failed, return current state
+            break
 
         final_status = status
 

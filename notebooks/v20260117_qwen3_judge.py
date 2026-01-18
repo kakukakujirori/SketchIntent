@@ -614,7 +614,7 @@ Each constraint follows this structure:
 [Note]
 - Due to the type and order of applying constraints, the absolute sketch sizes are different between the two sketches. This difference should not affect the evaluation (e.g., we don't care whether one edge length is 999.0 mm or 1000.0 mm).
 - In some cases, constraints on the sketch are overlapped and a bit hard to recognize. Since this is an issue not on the constraints but on the sketch drawing, don't rely too much on the sketch visual cues, and mainly focus on the constraint definition commands for evaluation.
-- The order of defining constraints is at random. Don't take it into account when evaluating the constraints.
+- Don't take the order of constraints into account when evaluating the constraints.
 
 [Response Format]
 You MUST respond with ONLY a valid JSON object. No other text is allowed.
@@ -653,7 +653,8 @@ Your response must start with '{{' and end with '}}'. No other text is allowed."
 ```
 
 Based on the images and constraint definitions, which sketch (A or B) has more natural, editable CAD constraints?
-Respond with a JSON object containing "choice" (either {choice_instruction}) and "reasoning"."""}
+Respond with a JSON object containing "choice" (either {choice_instruction}) and "reasoning".
+You don't need to take the order of constraints into account when evaluating the constraints. It doesn't matter if dimension constraints come first."""}
     ]
 
     messages = [

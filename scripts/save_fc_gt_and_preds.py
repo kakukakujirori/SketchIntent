@@ -23,17 +23,20 @@ matplotlib.use('Agg')  # Non-interactive backend
 import matplotlib.pyplot as plt
 
 import sketchgraphs.data as datalib
+from sketchgraphs.data import Arc, Circle, Line, Point, flat_array
+from sketchgraphs.data._constraint import Constraint, LocalReferenceParameter
 
+from img2cad_diffusion import sketch_utils
 from img2cad_diffusion.constraint_data import ConstraintDataModule
 from img2cad_diffusion.constraint_models_ar import ConstraintARModule
 from img2cad_diffusion.solver_feedback import (
     get_solver_status,
-    tokens_to_freecad_sketch,
     validate_constraint_geometry_impact,
     HAS_FREECAD,
 )
-from img2cad_diffusion.detokenization import reconstruct_sketch
-from img2cad_diffusion.tokenization import CONSTRAINT_TOKEN_LEN
+from img2cad_diffusion.convert_sketch_to_freecad import convert_sketch_to_freecad
+from img2cad_diffusion.detokenization import reconstruct_constraints, build_gather_idx_mapping
+from img2cad_diffusion.tokenization import CONSTRAINT_TOKEN_LEN, tokenize_primitives
 
 
 if not HAS_FREECAD:
@@ -42,12 +45,98 @@ if not HAS_FREECAD:
 import FreeCAD
 
 
+def build_sketch_with_original_entities(
+    original_sketch: datalib.Sketch,
+    cons_tokens: np.ndarray,
+    num_bins: int,
+    token_len_per_constraint: int,
+) -> datalib.Sketch:
+    """Build sketch using original entity coords + reconstructed constraints.
+
+    Strategy: First tokenize the original sketch to get primitive tokens (preserving
+    entity structure), then use reconstruct_sketch with those tokens and constraint
+    tokens to build a sketch with correct constraint refs (entity IDs "1", "2", "3").
+    Finally, replace entity coordinates with original (non-quantized) values.
+    """
+    from img2cad_diffusion.detokenization import reconstruct_sketch
+
+    # Step 1: Extract non-quantized coordinates
+    original_entities = list(original_sketch.entities.values())
+
+    # Step 2: Tokenize original sketch to get primitive tokens (same structure as batch)
+    prim_token_dict, _ = tokenize_primitives(original_sketch, num_bins, max_length=None)
+    prim_tokens = prim_token_dict['val']
+
+    # Step 3: Use standard reconstruct_sketch to build sketch with correct constraint refs
+    # This creates entities with IDs "1", "2", "3" and constraints matching the tokens
+    sketch = reconstruct_sketch(prim_tokens, cons_tokens, num_bins, token_len_per_constraint)
+
+    # Step 4: Replace entity coordinates with original (non-quantized) values
+    # Entity order should match since we used the same tokenization
+    reconstructed_entities = list(sketch.entities.values())
+    for recon_ent, orig_ent in zip(reconstructed_entities, original_entities):
+        if recon_ent is None or orig_ent is None:
+            continue
+        if type(recon_ent) != type(orig_ent):
+            continue  # Type mismatch - skip
+
+        # Copy coordinates from original entity
+        if isinstance(orig_ent, Line):
+            recon_ent.dirX = orig_ent.dirX
+            recon_ent.dirY = orig_ent.dirY
+            recon_ent.pntX = orig_ent.pntX
+            recon_ent.pntY = orig_ent.pntY
+            recon_ent.startParam = orig_ent.startParam
+            recon_ent.endParam = orig_ent.endParam
+        elif isinstance(orig_ent, Circle):
+            recon_ent.xCenter = orig_ent.xCenter
+            recon_ent.yCenter = orig_ent.yCenter
+            recon_ent.radius = orig_ent.radius
+        elif isinstance(orig_ent, Arc):
+            recon_ent.xCenter = orig_ent.xCenter
+            recon_ent.yCenter = orig_ent.yCenter
+            recon_ent.xDir = orig_ent.xDir
+            recon_ent.yDir = orig_ent.yDir
+            recon_ent.radius = orig_ent.radius
+            recon_ent.startParam = orig_ent.startParam
+            recon_ent.endParam = orig_ent.endParam
+            recon_ent.clockwise = orig_ent.clockwise
+        elif isinstance(orig_ent, Point):
+            recon_ent.x = orig_ent.x
+            recon_ent.y = orig_ent.y
+        else:
+            raise ValueError(f"Unsupported entity type: {type(orig_ent)}")
+
+    return sketch
+
+
+def sketch_to_freecad(
+    original_sketch: datalib.Sketch,
+    cons_tokens: np.ndarray | torch.Tensor,
+    num_bins: int,
+    token_len_per_constraint: int,
+):
+    """Convert original sequence + constraint tokens to FreeCAD sketch.
+
+    Uses original (non-quantized) primitive coordinates for accurate dimensions.
+    """
+    if isinstance(cons_tokens, torch.Tensor):
+        cons_tokens = cons_tokens.cpu().numpy()
+
+    sketch = build_sketch_with_original_entities(
+        original_sketch, cons_tokens, num_bins, token_len_per_constraint
+    )
+    doc, fc_sketch, history_commands, entity_to_geoid, mapping = convert_sketch_to_freecad(sketch)
+    return doc, fc_sketch, history_commands, mapping
+
+
 def evaluate_and_save(
     model: ConstraintARModule,
     datamodule: ConstraintDataModule,
     idx: int,
     config,
     output_dir: Path,
+    original_sketch: datalib.Sketch,
     geo_threshold_mm: float = 50.0,
     seed: int = 42,
 ) -> dict:
@@ -85,8 +174,8 @@ def evaluate_and_save(
     # Evaluate GT
     gt_tokens = batch['c_val'][0]
     try:
-        doc, fc_sketch, gt_history, mapping = tokens_to_freecad_sketch(
-            batch['val'][0], gt_tokens, num_bins, CONSTRAINT_TOKEN_LEN)
+        doc, fc_sketch, gt_history, mapping = sketch_to_freecad(
+            original_sketch, gt_tokens, num_bins, CONSTRAINT_TOKEN_LEN)
         gt_status = get_solver_status(fc_sketch, mapping)
         FreeCAD.closeDocument(doc.Name)
     except FreeCADConversionError:
@@ -130,8 +219,8 @@ def evaluate_and_save(
 
     # Run GT geometry validation
     try:
-        sketch = reconstruct_sketch(
-            batch['val'][0].cpu().numpy(), gt_refined_tokens.cpu().numpy(),
+        sketch = build_sketch_with_original_entities(
+            original_sketch, gt_refined_tokens.cpu().numpy(),
             num_bins, CONSTRAINT_TOKEN_LEN)
         geo_results, fc_sketch, _, _ = validate_constraint_geometry_impact(
             sketch, threshold_mm=geo_threshold_mm, verbose=False)
@@ -157,8 +246,8 @@ def evaluate_and_save(
 
     # Evaluate solver result
     try:
-        doc, fc_sketch, solver_history_final, mapping = tokens_to_freecad_sketch(
-            batch['val'][0], solver_sample[0], num_bins, CONSTRAINT_TOKEN_LEN)
+        doc, fc_sketch, solver_history_final, mapping = sketch_to_freecad(
+            original_sketch, solver_sample[0], num_bins, CONSTRAINT_TOKEN_LEN)
         solver_status = get_solver_status(fc_sketch, mapping)
         FreeCAD.closeDocument(doc.Name)
     except FreeCADConversionError:
@@ -185,8 +274,8 @@ def evaluate_and_save(
 
     # Run solver geometry validation
     try:
-        sketch = reconstruct_sketch(
-            batch['val'][0].cpu().numpy(), solver_sample[0].cpu().numpy(),
+        sketch = build_sketch_with_original_entities(
+            original_sketch, solver_sample[0].cpu().numpy(),
             num_bins, CONSTRAINT_TOKEN_LEN)
         geo_results, fc_sketch, _, _ = validate_constraint_geometry_impact(
             sketch, threshold_mm=geo_threshold_mm, verbose=False)
@@ -275,6 +364,10 @@ def main():
     datamodule = ConstraintDataModule(config.data)
     datamodule.setup("test")
 
+    # Load original sequences for non-quantized dimension calculation
+    seq_data = flat_array.load_dictionary_flat(config.data.sequence_path)
+    sequences = seq_data['sequences']
+
     # Use test dataloader - may be a single loader or a list [normal, fc]
     test_loaders = datamodule.test_dataloader()
     if isinstance(test_loaders, list):
@@ -297,8 +390,15 @@ def main():
 
     saved_count = 0
     for idx in range(n_samples):
+        # Get original sequence via data_index
+        data_item = fc_dataset[idx]
+        data_index = data_item['data_index'].item()
+        original_seq = sequences[data_index]
+        original_sketch = datalib.sketch_from_sequence(original_seq)
+        sketch_utils.normalize_sketch(original_sketch)
+
         result = evaluate_and_save(
-            model, datamodule, idx, config, output_dir,
+            model, datamodule, idx, config, output_dir, original_sketch,
             geo_threshold_mm=args.geo_threshold, seed=args.seed)
 
         status = "SAVED" if result['saved'] else "SKIP"
