@@ -614,7 +614,7 @@ Each constraint follows this structure:
 [Note]
 - Due to the type and order of applying constraints, the absolute sketch sizes are different between the two sketches. This difference should not affect the evaluation (e.g., we don't care whether one edge length is 999.0 mm or 1000.0 mm).
 - In some cases, constraints on the sketch are overlapped and a bit hard to recognize. Since this is an issue not on the constraints but on the sketch drawing, don't rely too much on the sketch visual cues, and mainly focus on the constraint definition commands for evaluation.
-- Don't take the order of constraints into account when evaluating the constraints.
+- Disregard the constraint order for evaluation. They are randomized on purpose.
 
 [Response Format]
 You MUST respond with ONLY a valid JSON object. No other text is allowed.
@@ -654,7 +654,7 @@ Your response must start with '{{' and end with '}}'. No other text is allowed."
 
 Based on the images and constraint definitions, which sketch (A or B) has more natural, editable CAD constraints?
 Respond with a JSON object containing "choice" (either {choice_instruction}) and "reasoning".
-You don't need to take the order of constraints into account when evaluating the constraints. It doesn't matter if dimension constraints come first."""}
+Don't take the constraint order into account when evaluating the constraints. It doesn't matter whether dimension constraints come earlier or later."""}
     ]
 
     messages = [
@@ -770,8 +770,8 @@ def main():
             print(f"Skipping sample {idx}: files not found")
             continue
 
-        # Random A/B assignment for bias avoidance
-        is_gt_first = random.choice([True, False])
+        # Deterministic A/B assignment based on sample index parity for unbiased evaluation
+        is_gt_first = (idx % 2 == 0)
 
         # Generate images with A/B labels
         prim_img, sketch_a_img, sketch_b_img, gt_data, pred_data = generate_images_for_comparison(
@@ -798,6 +798,10 @@ def main():
         else:
             sketch_a_constraints, sketch_a_label = pred_constraints, "Pred"
             sketch_b_constraints, sketch_b_label = gt_constraints, "GT"
+
+        # Shuffle constraints to prevent order-based bias (e.g., "dimensions at the end is good")
+        random.shuffle(sketch_a_constraints)
+        random.shuffle(sketch_b_constraints)
 
         print(f"  A = {sketch_a_label}, B = {sketch_b_label}")
 

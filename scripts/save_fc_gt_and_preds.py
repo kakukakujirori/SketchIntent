@@ -48,7 +48,6 @@ import FreeCAD
 def build_sketch_with_original_entities(
     original_sketch: datalib.Sketch,
     cons_tokens: np.ndarray,
-    num_bins: int,
     token_len_per_constraint: int,
 ) -> datalib.Sketch:
     """Build sketch using original entity coords + reconstructed constraints.
@@ -57,19 +56,28 @@ def build_sketch_with_original_entities(
     entity structure), then use reconstruct_sketch with those tokens and constraint
     tokens to build a sketch with correct constraint refs (entity IDs "1", "2", "3").
     Finally, replace entity coordinates with original (non-quantized) values.
+
+    Note: We use a high-resolution quantization (NUM_BINS_FINE=8192) internally to
+    minimize intermediate quantization error. The actual coordinates are overwritten
+    with original values afterwards, so this only affects the intermediate representation.
     """
     from img2cad_diffusion.detokenization import reconstruct_sketch
+
+    # Use high-resolution bins for internal tokenization to minimize quantization error
+    # Gather indices depend on token positions (entity structure), not on num_bins value,
+    # so this is safe to use a different value than the training num_bins.
+    NUM_BINS_FINE = 8192
 
     # Step 1: Extract non-quantized coordinates
     original_entities = list(original_sketch.entities.values())
 
     # Step 2: Tokenize original sketch to get primitive tokens (same structure as batch)
-    prim_token_dict, _ = tokenize_primitives(original_sketch, num_bins, max_length=None)
+    prim_token_dict, _ = tokenize_primitives(original_sketch, NUM_BINS_FINE, max_length=None)
     prim_tokens = prim_token_dict['val']
 
     # Step 3: Use standard reconstruct_sketch to build sketch with correct constraint refs
     # This creates entities with IDs "1", "2", "3" and constraints matching the tokens
-    sketch = reconstruct_sketch(prim_tokens, cons_tokens, num_bins, token_len_per_constraint)
+    sketch = reconstruct_sketch(prim_tokens, cons_tokens, NUM_BINS_FINE, token_len_per_constraint)
 
     # Step 4: Replace entity coordinates with original (non-quantized) values
     # Entity order should match since we used the same tokenization
@@ -113,7 +121,6 @@ def build_sketch_with_original_entities(
 def sketch_to_freecad(
     original_sketch: datalib.Sketch,
     cons_tokens: np.ndarray | torch.Tensor,
-    num_bins: int,
     token_len_per_constraint: int,
 ):
     """Convert original sequence + constraint tokens to FreeCAD sketch.
@@ -124,7 +131,7 @@ def sketch_to_freecad(
         cons_tokens = cons_tokens.cpu().numpy()
 
     sketch = build_sketch_with_original_entities(
-        original_sketch, cons_tokens, num_bins, token_len_per_constraint
+        original_sketch, cons_tokens, token_len_per_constraint
     )
     doc, fc_sketch, history_commands, entity_to_geoid, mapping = convert_sketch_to_freecad(sketch)
     return doc, fc_sketch, history_commands, mapping
@@ -175,7 +182,7 @@ def evaluate_and_save(
     gt_tokens = batch['c_val'][0]
     try:
         doc, fc_sketch, gt_history, mapping = sketch_to_freecad(
-            original_sketch, gt_tokens, num_bins, CONSTRAINT_TOKEN_LEN)
+            original_sketch, gt_tokens, CONSTRAINT_TOKEN_LEN)
         gt_status = get_solver_status(fc_sketch, mapping)
         FreeCAD.closeDocument(doc.Name)
     except FreeCADConversionError:
@@ -189,15 +196,24 @@ def evaluate_and_save(
         len(gt_status.MappedRedundantIndices)
     )
     if problem_count > 0:
-        gt_refined_tokens, gt_refined_status, gt_refined_history = cleanup_constraints(
+        # Get cleaned tokens from cleanup_constraints (uses quantized primitives internally)
+        gt_refined_tokens, _, _ = cleanup_constraints(
             batch['val'][0], gt_tokens, num_bins, max_len)
-        if gt_refined_status is None:
+        if gt_refined_tokens is None:
             result['error'] = 'GT cleanup failed'
             return result
     else:
         gt_refined_tokens = gt_tokens
-        gt_refined_status = gt_status
-        gt_refined_history = gt_history
+
+    # Regenerate history with original_sketch for non-quantized primitive coordinates
+    try:
+        doc, fc_sketch, gt_refined_history, mapping = sketch_to_freecad(
+            original_sketch, gt_refined_tokens, CONSTRAINT_TOKEN_LEN)
+        gt_refined_status = get_solver_status(fc_sketch, mapping)
+        FreeCAD.closeDocument(doc.Name)
+    except FreeCADConversionError:
+        result['error'] = 'GT refined conversion failed'
+        return result
 
     # Check GT refined criteria
     gt_ok = (
@@ -221,7 +237,7 @@ def evaluate_and_save(
     try:
         sketch = build_sketch_with_original_entities(
             original_sketch, gt_refined_tokens.cpu().numpy(),
-            num_bins, CONSTRAINT_TOKEN_LEN)
+            CONSTRAINT_TOKEN_LEN)
         geo_results, fc_sketch, _, _ = validate_constraint_geometry_impact(
             sketch, threshold_mm=geo_threshold_mm, verbose=False)
         FreeCAD.closeDocument(fc_sketch.Document.Name)
@@ -247,7 +263,7 @@ def evaluate_and_save(
     # Evaluate solver result
     try:
         doc, fc_sketch, solver_history_final, mapping = sketch_to_freecad(
-            original_sketch, solver_sample[0], num_bins, CONSTRAINT_TOKEN_LEN)
+            original_sketch, solver_sample[0], CONSTRAINT_TOKEN_LEN)
         solver_status = get_solver_status(fc_sketch, mapping)
         FreeCAD.closeDocument(doc.Name)
     except FreeCADConversionError:
@@ -276,7 +292,7 @@ def evaluate_and_save(
     try:
         sketch = build_sketch_with_original_entities(
             original_sketch, solver_sample[0].cpu().numpy(),
-            num_bins, CONSTRAINT_TOKEN_LEN)
+            CONSTRAINT_TOKEN_LEN)
         geo_results, fc_sketch, _, _ = validate_constraint_geometry_impact(
             sketch, threshold_mm=geo_threshold_mm, verbose=False)
         FreeCAD.closeDocument(fc_sketch.Document.Name)
