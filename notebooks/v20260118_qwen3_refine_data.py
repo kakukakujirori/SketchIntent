@@ -34,13 +34,13 @@ from img2cad_diffusion.convert_sketch_to_freecad import convert_sketch_to_freeca
 
 
 # --- Model Configuration ---
-# Define the path to the main model file
-MODEL_PATH = "/home/ryotaro/github/llama.cpp/models/Qwen3VL-235B-A22B-Thinking-Q4_K_M-split-00001-of-00003.gguf"
-# Define the path to the multi-modal projector file
-MMPROJ_PATH = "/home/ryotaro/github/llama.cpp/models/mmproj-Qwen3VL-235B-A22B-Thinking-F16.gguf"
+# # Define the path to the main model file
+# MODEL_PATH = "/home/ryotaro/github/llama.cpp/models/Qwen3VL-235B-A22B-Thinking-Q4_K_M-split-00001-of-00003.gguf"
+# # Define the path to the multi-modal projector file
+# MMPROJ_PATH = "/home/ryotaro/github/llama.cpp/models/mmproj-Qwen3VL-235B-A22B-Thinking-F16.gguf"
 
-# MODEL_PATH = "/home/ryotaro/github/llama.cpp/models/Qwen3VL-30B-A3B-Thinking-Q8_0.gguf"
-# MMPROJ_PATH = "/home/ryotaro/github/llama.cpp/models/mmproj-Qwen3VL-30B-A3B-Thinking-F16.gguf"
+MODEL_PATH = "/home/ryotaro/github/llama.cpp/models/Qwen3VL-30B-A3B-Thinking-Q8_0.gguf"
+MMPROJ_PATH = "/home/ryotaro/github/llama.cpp/models/mmproj-Qwen3VL-30B-A3B-Thinking-F16.gguf"
 
 
 
@@ -358,8 +358,7 @@ def export_to_freecad_script(primitives: list, constraints: list, output_path: s
             sx, sy = prim["start"]
             mx, my = prim["mid"]
             ex, ey = prim["end"]
-            lines.append(f"fc_sketch.addGeometry(Part.ArcOfCircle(Part.Circle(Vector({sx}, {sy}, 0), Vector({mx}, {my}, 0), Vector({ex}, {ey}, 0)), ), {is_const})")
-            # Note: ArcOfCircle construction may need adjustment based on actual FreeCAD API
+            lines.append(f"fc_sketch.addGeometry(Part.ArcOfCircle(Vector({sx}, {sy}, 0), Vector({mx}, {my}, 0), Vector({ex}, {ey}, 0)), {is_const})")
 
     lines.append("")
     lines.append("# --- Add Constraints ---")
@@ -374,12 +373,34 @@ def export_to_freecad_script(primitives: list, constraints: list, output_path: s
         s3 = c.get("subnode3")
 
         # Build constraint arguments based on type
-        if ctype in ["Coincident", "Tangent"]:
+        if ctype == "Coincident":
             # 4-arg: entity1, subnode1, entity2, subnode2
             if s1 is not None and s2 is not None:
-                lines.append(f"fc_sketch.addConstraint(Sketcher.Constraint('{ctype}', {e1}, {s1}, {e2}, {s2}))")
+                lines.append(f"fc_sketch.addConstraint(Sketcher.Constraint('Coincident', {e1}, {s1}, {e2}, {s2}))")
             else:
-                lines.append(f"# Skipped {ctype}: missing subnode info")
+                lines.append(f"# Skipped Coincident: missing subnode info")
+        elif ctype == "Tangent":
+            # Can be 4-arg (point-to-point) or 2-arg (edge-to-edge)
+            if s1 is not None and s2 is not None:
+                lines.append(f"fc_sketch.addConstraint(Sketcher.Constraint('Tangent', {e1}, {s1}, {e2}, {s2}))")
+            elif e1 is not None and e2 is not None:
+                # Edge-to-edge tangent (no subnode required)
+                lines.append(f"fc_sketch.addConstraint(Sketcher.Constraint('Tangent', {e1}, {e2}))")
+            else:
+                lines.append(f"# Skipped Tangent: missing required args")
+        elif ctype == "TangentViaPoint":
+            # TangentViaPoint(e1, e2, ePoint, sPoint) - 4 args
+            # entity3 and subnode3 hold the point reference
+            if all(v is not None for v in [e1, e2, e3, s3]):
+                lines.append(f"fc_sketch.addConstraint(Sketcher.Constraint('TangentViaPoint', {e1}, {e2}, {e3}, {s3}))")
+            else:
+                lines.append(f"# Skipped TangentViaPoint: missing args")
+        elif ctype == "Concentric":
+            # Concentric means center points coincide: Coincident(e1, 3, e2, 3)
+            if e1 is not None and e2 is not None:
+                lines.append(f"fc_sketch.addConstraint(Sketcher.Constraint('Coincident', {e1}, 3, {e2}, 3))  # Concentric")
+            else:
+                lines.append(f"# Skipped Concentric: missing args")
         elif ctype in ["Horizontal", "Vertical"]:
             # Can be 1-arg (line) or 4-arg (two points)
             if e2 is not None and s1 is not None and s2 is not None:
@@ -535,6 +556,11 @@ def format_constraint_to_json(ctype: str, args: list) -> dict:
         c_out["entity3"] = get_arg(2)
         c_out["subnode3"] = get_arg(3)
 
+    elif ctype == "Concentric":
+        # Concentric(e1, e2) - 2 args (centers coincide)
+        c_out["entity1"] = get_arg(0)
+        c_out["entity2"] = get_arg(1)
+
     elif ctype == "Symmetric":
         # Symmetric(e1, s1, e2, s2, e3, s3) - 6 args
         c_out["entity1"] = get_arg(0)
@@ -549,19 +575,19 @@ def format_constraint_to_json(ctype: str, args: list) -> dict:
         # Distance(e1, s1, e2, s2, value) - 5 args (point-point or point-edge)
         if len(args) == 2:
             c_out["entity1"] = get_arg(0)
-            # args[1] is the value, skip
+            c_out["value"] = get_arg(1)  # Preserve the value
         elif len(args) >= 5:
             c_out["entity1"] = get_arg(0)
             c_out["subnode1"] = get_arg(1)
             c_out["entity2"] = get_arg(2)
             c_out["subnode2"] = get_arg(3)
-            # args[4] is the value, skip
+            c_out["value"] = get_arg(4)  # Preserve the value
 
     elif ctype in ["Diameter", "Radius"]:
         # Diameter(e1, value) - 2 args
         # Radius(e1, value) - 2 args
         c_out["entity1"] = get_arg(0)
-        # args[1] is the value, skip
+        c_out["value"] = get_arg(1)  # Preserve the value
 
     elif ctype == "Angle":
         # Angle(e1, value) - 2 args (single line angle)
@@ -569,14 +595,17 @@ def format_constraint_to_json(ctype: str, args: list) -> dict:
         # Angle(e1, s1, e2, s2, value) - 5 args (two points)
         if len(args) == 2:
             c_out["entity1"] = get_arg(0)
+            c_out["value"] = get_arg(1)  # Preserve the value
         elif len(args) == 3:
             c_out["entity1"] = get_arg(0)
             c_out["entity2"] = get_arg(1)
+            c_out["value"] = get_arg(2)  # Preserve the value
         elif len(args) >= 5:
             c_out["entity1"] = get_arg(0)
             c_out["subnode1"] = get_arg(1)
             c_out["entity2"] = get_arg(2)
             c_out["subnode2"] = get_arg(3)
+            c_out["value"] = get_arg(4)  # Preserve the value
 
     else:
         raise NotImplementedError(f"Unknown constraint type: {ctype}")
@@ -802,6 +831,7 @@ class VerificationResult:
     redundant_count: int = 0
     solver_converged: bool = True  # True if solver found a solution
     prefix_matched: bool = True  # True if Qwen3 output contains input constraints as prefix
+    dof_decreased: bool = True  # True if Qwen3 DoF <= GT DoF (improved or same)
     geo_max_deviation: float = -1.0
     geo_passed: bool = False
     error: str | None = None
@@ -815,6 +845,7 @@ class VerificationResult:
             self.redundant_count == 0 and
             self.solver_converged and
             self.prefix_matched and
+            self.dof_decreased and
             self.geo_passed
         )
 
@@ -835,6 +866,8 @@ class VerificationResult:
             issues.append(f"geo_fail(dev={self.geo_max_deviation:.1f}mm)")
         if not self.prefix_matched:
             issues.append("prefix_mismatch")
+        if not self.dof_decreased:
+            issues.append("dof_increased")
         issue_str = ", ".join(issues) if issues else "OK"
         return f"DoF={self.dof}, {issue_str}"
 
@@ -857,14 +890,14 @@ def extract_geometry_coords(fc_sketch: "Sketcher.SketchObject") -> dict[int, lis
             points.append((sp.x, sp.y))
             points.append((ep.x, ep.y))
         elif geo_type in ('Circle', 'ArcOfCircle'):
-            c = geo.Center
-            points.append((c.x, c.y))
             if hasattr(geo, 'StartPoint'):
                 sp = geo.StartPoint
                 points.append((sp.x, sp.y))
             if hasattr(geo, 'EndPoint'):
                 ep = geo.EndPoint
                 points.append((ep.x, ep.y))
+            c = geo.Center
+            points.append((c.x, c.y))
 
         coords[geo_id] = points
 
@@ -941,10 +974,24 @@ def add_constraints_to_sketch(
                 # GT format: use args directly based on constraint type
                 args = c.get("args", [])
 
-                if ctype in ["Coincident", "Tangent"]:
+                if ctype == "Coincident":
                     # args: [e1, s1, e2, s2]
                     if len(args) >= 4:
-                        fc_sketch.addConstraint(Sketcher.Constraint(ctype, args[0], args[1], args[2], args[3]))
+                        fc_sketch.addConstraint(Sketcher.Constraint('Coincident', args[0], args[1], args[2], args[3]))
+                elif ctype == "Tangent":
+                    # args: [e1, e2] or [e1, s1, e2, s2]
+                    if len(args) == 2:
+                        fc_sketch.addConstraint(Sketcher.Constraint('Tangent', args[0], args[1]))
+                    elif len(args) >= 4:
+                        fc_sketch.addConstraint(Sketcher.Constraint('Tangent', args[0], args[1], args[2], args[3]))
+                elif ctype == "TangentViaPoint":
+                    # args: [e1, e2, e3, s3]
+                    if len(args) >= 4:
+                        fc_sketch.addConstraint(Sketcher.Constraint('TangentViaPoint', args[0], args[1], args[2], args[3]))
+                elif ctype == "Concentric":
+                    # args: [e1, e2] -> Coincident(e1, 3, e2, 3)
+                    if len(args) >= 2:
+                        fc_sketch.addConstraint(Sketcher.Constraint('Coincident', args[0], 3, args[1], 3))
                 elif ctype in ["Horizontal", "Vertical"]:
                     # args: [e1] or [e1, s1, e2, s2]
                     if len(args) == 1:
@@ -988,9 +1035,23 @@ def add_constraints_to_sketch(
                 e3 = c.get("entity3")
                 s3 = c.get("subnode3")
 
-                if ctype in ["Coincident", "Tangent"]:
+                if ctype == "Coincident":
                     if e1 is not None and s1 is not None and e2 is not None and s2 is not None:
-                        fc_sketch.addConstraint(Sketcher.Constraint(ctype, e1, s1, e2, s2))
+                        fc_sketch.addConstraint(Sketcher.Constraint('Coincident', e1, s1, e2, s2))
+                elif ctype == "Tangent":
+                    # Can be 4-arg (point-to-point) or 2-arg (edge-to-edge)
+                    if s1 is not None and s2 is not None:
+                        fc_sketch.addConstraint(Sketcher.Constraint('Tangent', e1, s1, e2, s2))
+                    elif e1 is not None and e2 is not None:
+                        fc_sketch.addConstraint(Sketcher.Constraint('Tangent', e1, e2))
+                elif ctype == "TangentViaPoint":
+                    # TangentViaPoint(e1, e2, e3, s3)
+                    if all(v is not None for v in [e1, e2, e3, s3]):
+                        fc_sketch.addConstraint(Sketcher.Constraint('TangentViaPoint', e1, e2, e3, s3))
+                elif ctype == "Concentric":
+                    # Concentric means center points coincide
+                    if e1 is not None and e2 is not None:
+                        fc_sketch.addConstraint(Sketcher.Constraint('Coincident', e1, 3, e2, 3))
                 elif ctype in ["Horizontal", "Vertical"]:
                     if e2 is not None and s1 is not None and s2 is not None:
                         fc_sketch.addConstraint(Sketcher.Constraint(ctype, e1, s1, e2, s2))
@@ -1197,6 +1258,7 @@ def cleanup_constraints_from_lists(
     primitives: list,
     constraints: list,
     max_cleanup_iters: int = 10,
+    prefix_size: int = 0,
 ) -> tuple[list, VerificationResult | None]:
     """
     Remove malformed/conflicting/redundant constraints iteratively.
@@ -1208,6 +1270,7 @@ def cleanup_constraints_from_lists(
         primitives: List of primitive dicts
         constraints: List of constraint dicts
         max_cleanup_iters: Maximum cleanup iterations
+        prefix_size: Number of constraints at the start that should NOT be removed (GT prefix)
 
     Returns:
         Tuple of (cleaned_constraints, final_verification_result)
@@ -1252,14 +1315,18 @@ def cleanup_constraints_from_lists(
             for fc_idx in malformed_fc + conflicting_fc:
                 orig_idx = fc_to_orig.get(fc_idx - 1)  # Convert 1-based to 0-based
                 if orig_idx is not None:
-                    problem_orig_indices.add(orig_idx)
+                    # Only consider removing if not in prefix
+                    if orig_idx >= prefix_size:
+                        problem_orig_indices.add(orig_idx)
 
             # For redundant, remove only the last one (highest index)
             redundant_orig_indices = set()
             for fc_idx in redundant_fc:
                 orig_idx = fc_to_orig.get(fc_idx - 1)
                 if orig_idx is not None:
-                    redundant_orig_indices.add(orig_idx)
+                    # Only consider removing if not in prefix
+                    if orig_idx >= prefix_size:
+                        redundant_orig_indices.add(orig_idx)
 
             # Build final result
             final_result = VerificationResult(
@@ -1558,10 +1625,11 @@ if __name__ == '__main__':
 
                 # === Qwen3 Output Cleanup ===
                 print("\n--- Qwen3 Output Cleanup ---")
+                # Protect GT prefix constraints from being removed during cleanup
                 qwen3_cleaned, qwen3_cleanup_result = cleanup_constraints_from_lists(
-                    sample_primitives, constraints_json
+                    sample_primitives, constraints_json, prefix_size=len(gt_cleaned)
                 )
-                print(f"  Cleanup: {len(constraints_json)} -> {len(qwen3_cleaned)} constraints")
+                print(f"  Cleanup: {len(constraints_json)} -> {len(qwen3_cleaned)} constraints (prefix_size={len(gt_cleaned)})")
 
                 # Check prefix matching (Qwen3 output should start with cleaned GT constraints)
                 prefix_ok = constraints_prefix_matched(gt_cleaned, constraints_json)
@@ -1575,6 +1643,12 @@ if __name__ == '__main__':
                 print("\n--- Qwen3 Verification ---")
                 qwen3_verification = verify_constraints(sample_primitives, qwen3_cleaned, args.geo_threshold)
                 qwen3_verification.prefix_matched = prefix_ok  # Set prefix check result
+
+                # Check if Qwen3 made DoF worse (more DoF = less constrained = worse)
+                if qwen3_verification.dof > gt_verification.dof:
+                    qwen3_verification.dof_decreased = False
+                    print(f"  ⚠ DOF INCREASED: Qwen3 DoF ({qwen3_verification.dof}) > GT DoF ({gt_verification.dof})")
+
                 qwen3_summary = qwen3_verification.summary()
                 print(f"  Result: {qwen3_summary}")
                 if qwen3_verification.geo_max_deviation >= 0:
@@ -1618,4 +1692,3 @@ if __name__ == '__main__':
             if os.path.exists(output_cmd_path):
                 os.remove(output_cmd_path)
                 print(f"  Deleted {output_cmd_path} (Qwen3 generation failed)")
-

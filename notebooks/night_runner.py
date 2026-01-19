@@ -25,6 +25,7 @@ OUTPUT_DIR = "qwen3_refined_data"
 SCRIPT_PATH = "v20260118_qwen3_refine_data.py"
 REQUIRED_GPUS = 4
 MEMORY_THRESHOLD_MB = 10000  # このMB以下なら未使用とみなす（Xorgのみ≒5MB）
+START_HOUR = 1   # 開始時刻 (1時) - cronがこの時刻に起動
 END_HOUR = 11    # 終了時刻 (11時) - この時刻を過ぎたら停止
 CHECK_INTERVAL_SEC = 60  # 時間チェック間隔
 CONDA_ENV = "freecad"  # アクティベートするconda/mamba環境
@@ -101,11 +102,23 @@ def get_next_index() -> int:
     return max(completed_indices) + 1
 
 
-def is_before_end_time() -> bool:
-    """現在時刻が終了時刻より前かチェック"""
+def is_within_time_window() -> bool:
+    """現在時刻が実行可能な時間帯内かチェック
+
+    例: START_HOUR=1, END_HOUR=11 の場合
+    - 1:00 〜 10:59: True (実行可能)
+    - 11:00 〜 0:59: False (実行不可)
+    """
     now = datetime.now().time()
+    start = time(START_HOUR, 0)
     end = time(END_HOUR, 0)
-    return now < end
+
+    if start <= end:
+        # 通常の範囲 (例: 1:00〜11:00)
+        return start <= now < end
+    else:
+        # 深夜をまたぐ範囲 (例: 22:00〜6:00)
+        return now >= start or now < end
 
 
 def run_training(start_idx: int) -> subprocess.Popen:
@@ -169,8 +182,8 @@ def main():
     # 監視ループ
     while process.poll() is None:
         # 時間帯チェック
-        if not is_before_end_time():
-            log(f"Reached end time ({END_HOUR}:00). Stopping...")
+        if not is_within_time_window():
+            log(f"Outside time window ({START_HOUR}:00 - {END_HOUR}:00). Stopping...")
             process.terminate()
             try:
                 process.wait(timeout=120)
