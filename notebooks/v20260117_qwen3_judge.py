@@ -498,6 +498,72 @@ def generate_images_for_comparison(
 # Qwen3 Judge Functions
 # ==========================================
 
+def run_single_inference(
+    llm,
+    prim_img: str,
+    sketch_a_img: str,
+    sketch_b_img: str,
+    primitives: list,
+    sketch_a_constraints: list,
+    sketch_b_constraints: list,
+    allow_tie: bool = False
+) -> tuple:
+    """
+    Run a single inference pass and return the choice and reasoning.
+
+    Returns:
+        Tuple of (choice, reasoning, error) where error is None on success.
+    """
+    # Shuffle constraints to prevent order-based bias
+    import copy
+    a_constraints = copy.deepcopy(sketch_a_constraints)
+    b_constraints = copy.deepcopy(sketch_b_constraints)
+    random.shuffle(a_constraints)
+    random.shuffle(b_constraints)
+
+    # Prepare prompt
+    messages = prepare_judge_prompt(
+        prim_img, sketch_a_img, sketch_b_img,
+        primitives, a_constraints, b_constraints,
+        allow_tie=allow_tie
+    )
+
+    # Call Qwen3 with streaming
+    llm.reset()
+    output_text = ""
+    token_count = 0
+
+    try:
+        for chunk in llm.create_chat_completion(
+            messages=messages,
+            stream=True,
+            max_tokens=32768,
+            temperature=0.8,
+        ):
+            delta = chunk["choices"][0].get("delta", {})
+            content = delta.get("content", "")
+            if content:
+                output_text += content
+                token_count += 1
+                sys.stdout.write(content)
+                sys.stdout.flush()
+
+        print()  # Newline after streaming
+        print(f"  Total tokens: {token_count}")
+
+        # Extract JSON
+        json_text = extract_json_from_thinking_output(output_text)
+        result = json.loads(json_text)
+
+        choice = result.get("choice", "")
+        reasoning = result.get("reasoning", "")
+
+        return choice, reasoning, None
+
+    except Exception as e:
+        return None, None, str(e)
+
+
 def prepare_judge_prompt(
     primitives_image_path: str,
     sketch_a_image_path: str,
@@ -743,11 +809,13 @@ def main():
                     if idx is not None:
                         # Add to results list for summary calculation
                         results.append(data)
-                        if data.get("winner") == "GT":
+                        # Support both old format (winner) and new format (final_winner)
+                        winner = data.get("final_winner") or data.get("winner")
+                        if winner == "GT":
                             gt_wins += 1
-                        elif data.get("winner") == "Pred":
+                        elif winner == "Pred":
                             pred_wins += 1
-                        elif data.get("winner") == "Tie":
+                        elif winner == "Tie":
                             tie_wins += 1
                 except json.JSONDecodeError:
                     continue
@@ -770,17 +838,20 @@ def main():
             print(f"Skipping sample {idx}: files not found")
             continue
 
-        # Deterministic A/B assignment based on sample index parity for unbiased evaluation
-        is_gt_first = (idx % 2 == 0)
-
-        # Generate images with A/B labels
-        prim_img, sketch_a_img, sketch_b_img, gt_data, pred_data = generate_images_for_comparison(
-            gt_file, pred_file, args.output_dir, idx, is_gt_first=is_gt_first
+        # Generate images for both orderings
+        # Pass 1: GT=A, Pred=B
+        prim_img, sketch_a_img_gt_first, sketch_b_img_gt_first, gt_data, pred_data = generate_images_for_comparison(
+            gt_file, pred_file, args.output_dir, idx, is_gt_first=True
         )
 
         if prim_img is None:
             print(f"Skipping sample {idx}: image generation failed")
             continue
+
+        # Pass 2: GT=B, Pred=A (swap A and B images)
+        _, sketch_a_img_pred_first, sketch_b_img_pred_first, _, _ = generate_images_for_comparison(
+            gt_file, pred_file, args.output_dir, idx, is_gt_first=False
+        )
 
         # Extract primitives and constraints
         primitives = extract_primitives_from_script(gt_file)
@@ -791,107 +862,92 @@ def main():
         gt_constraints = [format_constraint_to_json(c["type"], c["args"]) for c in gt_constraints_raw]
         pred_constraints = [format_constraint_to_json(c["type"], c["args"]) for c in pred_constraints_raw]
 
-        # Assign constraints based on A/B order
-        if is_gt_first:
-            sketch_a_constraints, sketch_a_label = gt_constraints, "GT"
-            sketch_b_constraints, sketch_b_label = pred_constraints, "Pred"
-        else:
-            sketch_a_constraints, sketch_a_label = pred_constraints, "Pred"
-            sketch_b_constraints, sketch_b_label = gt_constraints, "GT"
-
-        # Shuffle constraints to prevent order-based bias (e.g., "dimensions at the end is good")
-        random.shuffle(sketch_a_constraints)
-        random.shuffle(sketch_b_constraints)
-
-        print(f"  A = {sketch_a_label}, B = {sketch_b_label}")
-
-        # Prepare prompt
-        messages = prepare_judge_prompt(
-            prim_img, sketch_a_img, sketch_b_img,
-            primitives, sketch_a_constraints, sketch_b_constraints,
-            allow_tie=getattr(args, 'allow_tie', False)
+        # ========== Pass 1: GT=A, Pred=B ==========
+        print(f"\n  --- Pass 1: A=GT, B=Pred ---")
+        choice1, reasoning1, error1 = run_single_inference(
+            llm, prim_img, sketch_a_img_gt_first, sketch_b_img_gt_first,
+            primitives, gt_constraints, pred_constraints,
+            allow_tie=True  # Allow tie for intermediate results
         )
 
-        # Call Qwen3 with streaming
-        llm.reset()
-        output_text = ""
-        token_count = 0
-
-        result_entry = None
-
-        try:
-            print("  Calling Qwen3 (streaming)...")
-            for chunk in llm.create_chat_completion(
-                messages=messages,
-                stream=True,
-                max_tokens=32768,
-            ):
-                delta = chunk["choices"][0].get("delta", {})
-                content = delta.get("content", "")
-                if content:
-                    output_text += content
-                    token_count += 1
-                    # Stream thinking output
-                    sys.stdout.write(content)
-                    sys.stdout.flush()
-
-            print()  # Newline after streaming
-            print(f"  Total tokens: {token_count}")
-
-            # Extract JSON
-            json_text = extract_json_from_thinking_output(output_text)
-            result = json.loads(json_text)
-
-            choice = result.get("choice", "")
-            reasoning = result.get("reasoning", "")
-
-            # Determine winner
-            if choice == "A":
-                winner = sketch_a_label
-            elif choice == "B":
-                winner = sketch_b_label
-            elif choice.lower() == "tie":
-                winner = "Tie"
+        if error1:
+            print(f"  Pass 1 Error: {error1}")
+            winner1 = "Error"
+        else:
+            # In Pass 1: A=GT, B=Pred
+            if choice1 == "A":
+                winner1 = "GT"
+            elif choice1 == "B":
+                winner1 = "Pred"
+            elif choice1 and choice1.lower() == "tie":
+                winner1 = "Tie"
             else:
-                winner = "Unknown"
+                winner1 = "Unknown"
+            print(f"  Pass 1 Choice: {choice1} -> {winner1}")
 
-            if winner == "GT":
-                gt_wins += 1
-            elif winner == "Pred":
-                pred_wins += 1
-            elif winner == "Tie":
-                tie_wins += 1
+        # ========== Pass 2: GT=B, Pred=A (swapped) ==========
+        print(f"\n  --- Pass 2: A=Pred, B=GT ---")
+        choice2, reasoning2, error2 = run_single_inference(
+            llm, prim_img, sketch_a_img_pred_first, sketch_b_img_pred_first,
+            primitives, pred_constraints, gt_constraints,
+            allow_tie=True  # Allow tie for intermediate results
+        )
 
-            result_entry = {
-                "sample_idx": idx,
-                "a_label": sketch_a_label,
-                "b_label": sketch_b_label,
-                "choice": choice,
-                "winner": winner,
-                "reasoning": reasoning
-            }
+        if error2:
+            print(f"  Pass 2 Error: {error2}")
+            winner2 = "Error"
+        else:
+            # In Pass 2: A=Pred, B=GT
+            if choice2 == "A":
+                winner2 = "Pred"
+            elif choice2 == "B":
+                winner2 = "GT"
+            elif choice2 and choice2.lower() == "tie":
+                winner2 = "Tie"
+            else:
+                winner2 = "Unknown"
+            print(f"  Pass 2 Choice: {choice2} -> {winner2}")
 
-            results.append(result_entry)
+        # ========== Combine results ==========
+        # If either pass is Tie, Error, or Unknown -> final is Tie
+        # If both passes agree (both GT or both Pred) -> use that result
+        # If passes disagree (one GT, one Pred) -> Tie
+        if winner1 in ["Tie", "Error", "Unknown"] or winner2 in ["Tie", "Error", "Unknown"]:
+            final_winner = "Tie"
+            final_reason = "One or both passes resulted in Tie/Error/Unknown"
+        elif winner1 == winner2:
+            final_winner = winner1
+            final_reason = f"Both passes agreed: {winner1}"
+        else:
+            final_winner = "Tie"
+            final_reason = f"Passes disagreed: Pass1={winner1}, Pass2={winner2}"
 
-            print(f"  Choice: {choice} ({winner})")
-            print(f"  Reasoning: {reasoning[:200]}..." if len(reasoning) > 200 else f"  Reasoning: {reasoning}")
+        print(f"\n  >>> Final Result: {final_winner} ({final_reason})")
 
-        except Exception as e:
-            print(f"  Error: {e}")
-            result_entry = {
-                "sample_idx": idx,
-                "a_label": sketch_a_label,
-                "b_label": sketch_b_label,
-                "choice": "Error",
-                "winner": "Error",
-                "reasoning": str(e)
-            }
-            results.append(result_entry)
+        if final_winner == "GT":
+            gt_wins += 1
+        elif final_winner == "Pred":
+            pred_wins += 1
+        elif final_winner == "Tie":
+            tie_wins += 1
+
+        result_entry = {
+            "sample_idx": idx,
+            "pass1_choice": choice1,
+            "pass1_winner": winner1,
+            "pass1_reasoning": reasoning1 if reasoning1 else (error1 if error1 else ""),
+            "pass2_choice": choice2,
+            "pass2_winner": winner2,
+            "pass2_reasoning": reasoning2 if reasoning2 else (error2 if error2 else ""),
+            "final_winner": final_winner,
+            "final_reason": final_reason
+        }
+
+        results.append(result_entry)
 
         # Incrementally write to JSONL
-        if result_entry:
-            with open(results_path, 'a') as f:
-                f.write(json.dumps(result_entry) + '\n')
+        with open(results_path, 'a') as f:
+            f.write(json.dumps(result_entry) + '\n')
 
     # Print summary
     print("\n" + "=" * 60)
