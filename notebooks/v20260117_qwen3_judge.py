@@ -470,28 +470,26 @@ def generate_images_for_comparison(
     if pred_data is None:
         return None, None, None, None, None
 
-    # Generate image paths
+    # Generate image paths - use gt/pred naming for clarity
     prim_only_path = os.path.join(output_dir, f"primitives_only_{sample_idx}.png")
-    sketch_a_path = os.path.join(output_dir, f"sketch_a_{sample_idx}.png")
-    sketch_b_path = os.path.join(output_dir, f"sketch_b_{sample_idx}.png")
+    sketch_gt_path = os.path.join(output_dir, f"sketch_gt_{sample_idx}.png")
+    sketch_pred_path = os.path.join(output_dir, f"sketch_pred_{sample_idx}.png")
 
     # Primitives only (use GT data but remove constraints)
     prim_only_data = create_primitives_only_data(gt_data)
     visualize_sketch_for_vlm(prim_only_data, prim_only_path, title="Primitives", title_fontsize=20)
 
-    # Assign A and B based on is_gt_first
+    # Generate GT and Pred images with appropriate A/B labels based on is_gt_first
     if is_gt_first:
-        sketch_a_data = gt_data
-        sketch_b_data = pred_data
+        # GT=A, Pred=B
+        visualize_sketch_for_vlm(gt_data, sketch_gt_path, title="Sketch A", title_fontsize=20)
+        visualize_sketch_for_vlm(pred_data, sketch_pred_path, title="Sketch B", title_fontsize=20)
+        return prim_only_path, sketch_gt_path, sketch_pred_path, gt_data, pred_data
     else:
-        sketch_a_data = pred_data
-        sketch_b_data = gt_data
-
-    # Generate Sketch A and B images with labels
-    visualize_sketch_for_vlm(sketch_a_data, sketch_a_path, title="Sketch A", title_fontsize=20)
-    visualize_sketch_for_vlm(sketch_b_data, sketch_b_path, title="Sketch B", title_fontsize=20)
-
-    return prim_only_path, sketch_a_path, sketch_b_path, gt_data, pred_data
+        # Pred=A, GT=B
+        visualize_sketch_for_vlm(pred_data, sketch_pred_path, title="Sketch A", title_fontsize=20)
+        visualize_sketch_for_vlm(gt_data, sketch_gt_path, title="Sketch B", title_fontsize=20)
+        return prim_only_path, sketch_pred_path, sketch_gt_path, gt_data, pred_data
 
 
 # ==========================================
