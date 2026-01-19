@@ -34,13 +34,13 @@ from img2cad_diffusion.convert_sketch_to_freecad import convert_sketch_to_freeca
 
 
 # --- Model Configuration ---
-# # Define the path to the main model file
-# MODEL_PATH = "/home/ryotaro/github/llama.cpp/models/Qwen3VL-235B-A22B-Thinking-Q4_K_M-split-00001-of-00003.gguf"
-# # Define the path to the multi-modal projector file
-# MMPROJ_PATH = "/home/ryotaro/github/llama.cpp/models/mmproj-Qwen3VL-235B-A22B-Thinking-F16.gguf"
+# Define the path to the main model file
+MODEL_PATH = "/home/ryotaro/github/llama.cpp/models/Qwen3VL-235B-A22B-Thinking-Q4_K_M-split-00001-of-00003.gguf"
+# Define the path to the multi-modal projector file
+MMPROJ_PATH = "/home/ryotaro/github/llama.cpp/models/mmproj-Qwen3VL-235B-A22B-Thinking-F16.gguf"
 
-MODEL_PATH = "/home/ryotaro/github/llama.cpp/models/Qwen3VL-30B-A3B-Thinking-Q8_0.gguf"
-MMPROJ_PATH = "/home/ryotaro/github/llama.cpp/models/mmproj-Qwen3VL-30B-A3B-Thinking-F16.gguf"
+# MODEL_PATH = "/home/ryotaro/github/llama.cpp/models/Qwen3VL-30B-A3B-Thinking-Q8_0.gguf"
+# MMPROJ_PATH = "/home/ryotaro/github/llama.cpp/models/mmproj-Qwen3VL-30B-A3B-Thinking-F16.gguf"
 
 
 
@@ -265,12 +265,28 @@ def compute_constraint_value(ctype: str, primitives: list, e1: int, s1: int | No
 
     if ctype == "Distance":
         if e2 is not None and s1 is not None and s2 is not None:
-            # Point-to-point or point-to-edge distance
+            # Point-to-point distance
             p1 = get_point_from_primitive(primitives, e1, s1)
             p2 = get_point_from_primitive(primitives, e2, s2)
             if p1 and p2:
                 return math.sqrt((p2[0] - p1[0])**2 + (p2[1] - p1[1])**2)
-        else:
+        elif e2 is not None and s1 is not None and s2 is None:
+            # Point-to-edge distance: compute perpendicular distance from point to line
+            p1 = get_point_from_primitive(primitives, e1, s1)
+            prim2 = primitives[e2] if e2 < len(primitives) else None
+            if p1 and prim2 and prim2["type"] == "LineSegment":
+                lx1, ly1 = prim2["start"]
+                lx2, ly2 = prim2["end"]
+                # Vector from line start to point
+                dx, dy = lx2 - lx1, ly2 - ly1
+                line_len_sq = dx**2 + dy**2
+                if line_len_sq > 1e-9:
+                    # Project point onto line and compute perpendicular dist
+                    t = ((p1[0] - lx1) * dx + (p1[1] - ly1) * dy) / line_len_sq
+                    closest_x = lx1 + t * dx
+                    closest_y = ly1 + t * dy
+                    return math.sqrt((p1[0] - closest_x)**2 + (p1[1] - closest_y)**2)
+        elif e2 is None or (s1 is None and s2 is None):
             # Line length (single entity)
             if prim1["type"] == "LineSegment":
                 sx, sy = prim1["start"]
@@ -432,8 +448,11 @@ def export_to_freecad_script(primitives: list, constraints: list, output_path: s
                 value = compute_constraint_value("Distance", primitives, e1, s1, e2, s2)
             if value is not None:
                 if e2 is not None and s1 is not None and s2 is not None:
-                    # Point-to-point or point-to-edge distance
+                    # Point-to-point distance
                     lines.append(f"fc_sketch.addConstraint(Sketcher.Constraint('Distance', {e1}, {s1}, {e2}, {s2}, {value}))")
+                elif e2 is not None and s1 is not None:
+                    # Point-to-edge distance (s2 is None or 0)
+                    lines.append(f"fc_sketch.addConstraint(Sketcher.Constraint('Distance', {e1}, {s1}, {e2}, 0, {value}))")
                 else:
                     # Line length
                     lines.append(f"fc_sketch.addConstraint(Sketcher.Constraint('Distance', {e1}, {value}))")
@@ -1071,6 +1090,9 @@ def add_constraints_to_sketch(
                     if value is not None:
                         if e2 is not None and s1 is not None and s2 is not None:
                             fc_sketch.addConstraint(Sketcher.Constraint('Distance', e1, s1, e2, s2, value))
+                        elif e2 is not None and s1 is not None:
+                            # Point-to-edge distance
+                            fc_sketch.addConstraint(Sketcher.Constraint('Distance', e1, s1, e2, 0, value))
                         elif e1 is not None:
                             fc_sketch.addConstraint(Sketcher.Constraint('Distance', e1, value))
                 elif ctype == "Angle":
@@ -1482,7 +1504,25 @@ def constraints_prefix_matched(input_constraints: list, output_constraints: list
                 for key in ["entity1", "subnode1", "entity2", "subnode2", "entity3", "subnode3"]:
                     if c.get(key) is not None:
                         args.append(c.get(key))
-            elif ctype in ["Radius", "Diameter", "Distance", "Angle"]:
+            elif ctype == "Distance":
+                # Distance can be [e1] (line length) or [e1, s1, e2, s2] (point-to-point)
+                if c.get("entity1") is not None:
+                    args.append(c.get("entity1"))
+                    if c.get("subnode1") is not None:
+                        args.append(c.get("subnode1"))
+                        if c.get("entity2") is not None:
+                            args.append(c.get("entity2"))
+                            if c.get("subnode2") is not None:
+                                args.append(c.get("subnode2"))
+                            else:
+                                args.append(0)  # Point-to-edge uses 0 for edge
+            elif ctype == "Angle":
+                # Angle can be [e1] (single line) or [e1, e2] (two lines)
+                if c.get("entity1") is not None:
+                    args.append(c.get("entity1"))
+                    if c.get("entity2") is not None:
+                        args.append(c.get("entity2"))
+            elif ctype in ["Radius", "Diameter"]:
                 # entity1 only (ignore value for prefix matching)
                 if c.get("entity1") is not None:
                     args.append(c.get("entity1"))
@@ -1518,6 +1558,13 @@ if __name__ == '__main__':
 
     for i, seq in enumerate(sequences[args.start_idx : args.end_idx]):
         i += args.start_idx
+
+        # Skip if refined file already exists (resume support)
+        output_vlm_path = f"{args.output_dir}/commands/{i:07d}_refined.py"
+        if os.path.exists(output_vlm_path):
+            print(f"=== Skipping sample {i} (refined already exists) ===")
+            continue
+
         sketch = datalib.sketch_from_sequence(seq)
 
         # original data
@@ -1539,7 +1586,7 @@ if __name__ == '__main__':
         except Exception as e:
             print(f"Error processing sequence {i}: {e}")
             with open(error_log, "a") as f:
-                f.write(f"Error processing sequence {i}: {e}")
+                f.write(f"Error processing sequence {i}: {e}\n")
             continue
 
         finally:
@@ -1671,7 +1718,7 @@ if __name__ == '__main__':
             except json.JSONDecodeError as e:
                 print(f"Failed to parse JSON: {e}")
                 with open(error_log, "a") as f:
-                    f.write(f"Failed to parse JSON for sequence {i}: {e}")
+                    f.write(f"Failed to parse JSON for sequence {i}: {e}\n")
                 # Delete original file since refined file was not generated
                 if os.path.exists(output_cmd_path):
                     os.remove(output_cmd_path)
@@ -1685,7 +1732,7 @@ if __name__ == '__main__':
 
             # 途中結果を保存
             with open(error_log, "a") as f:
-                f.write(f"Error processing sequence {i} by Qwen3: {e}")
+                f.write(f"Error processing sequence {i} by Qwen3: {e}\n")
                 f.write(output_text)
 
             # Delete original file since refined file was not generated
