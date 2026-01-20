@@ -34,13 +34,13 @@ from img2cad_diffusion.convert_sketch_to_freecad import convert_sketch_to_freeca
 
 
 # --- Model Configuration ---
-# Define the path to the main model file
-MODEL_PATH = "/home/ryotaro/github/llama.cpp/models/Qwen3VL-235B-A22B-Thinking-Q4_K_M-split-00001-of-00003.gguf"
-# Define the path to the multi-modal projector file
-MMPROJ_PATH = "/home/ryotaro/github/llama.cpp/models/mmproj-Qwen3VL-235B-A22B-Thinking-F16.gguf"
+# # Define the path to the main model file
+# MODEL_PATH = "/home/ryotaro/github/llama.cpp/models/Qwen3VL-235B-A22B-Thinking-Q4_K_M-split-00001-of-00003.gguf"
+# # Define the path to the multi-modal projector file
+# MMPROJ_PATH = "/home/ryotaro/github/llama.cpp/models/mmproj-Qwen3VL-235B-A22B-Thinking-F16.gguf"
 
-# MODEL_PATH = "/home/ryotaro/github/llama.cpp/models/Qwen3VL-30B-A3B-Thinking-Q8_0.gguf"
-# MMPROJ_PATH = "/home/ryotaro/github/llama.cpp/models/mmproj-Qwen3VL-30B-A3B-Thinking-F16.gguf"
+MODEL_PATH = "/home/ryotaro/github/llama.cpp/models/Qwen3VL-30B-A3B-Thinking-Q8_0.gguf"
+MMPROJ_PATH = "/home/ryotaro/github/llama.cpp/models/mmproj-Qwen3VL-30B-A3B-Thinking-F16.gguf"
 
 
 
@@ -1540,6 +1540,7 @@ def constraints_prefix_matched(input_constraints: list, output_constraints: list
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Save FC GT and predictions that pass all validation criteria")
     parser.add_argument('--geo_threshold', type=float, default=50.0, help="Geometry validation threshold in mm")
+    parser.add_argument('--keep_gt', action="store_true", help="Keep GT constraints")
     parser.add_argument('--output_dir', type=str, default='qwen3_refined_data', help="Output directory")
     parser.add_argument('--start_idx', type=int, default=0, help="Start index of sequences to process")
     parser.add_argument('--end_idx', type=int, default=100000000, help="End index of sequences to process")
@@ -1672,16 +1673,23 @@ if __name__ == '__main__':
 
                 # === Qwen3 Output Cleanup ===
                 print("\n--- Qwen3 Output Cleanup ---")
-                # Protect GT prefix constraints from being removed during cleanup
+
+                # Protect GT prefix constraints only if keep_gt is True
+                prefix_size = len(gt_cleaned) if args.keep_gt else 0
+
                 qwen3_cleaned, qwen3_cleanup_result = cleanup_constraints_from_lists(
-                    sample_primitives, constraints_json, prefix_size=len(gt_cleaned)
+                    sample_primitives, constraints_json, prefix_size=prefix_size
                 )
-                print(f"  Cleanup: {len(constraints_json)} -> {len(qwen3_cleaned)} constraints (prefix_size={len(gt_cleaned)})")
+                print(f"  Cleanup: {len(constraints_json)} -> {len(qwen3_cleaned)} constraints (prefix_size={prefix_size})")
 
                 # Check prefix matching (Qwen3 output should start with cleaned GT constraints)
                 prefix_ok = constraints_prefix_matched(gt_cleaned, constraints_json)
                 if not prefix_ok:
-                    print("  ⚠ PREFIX MISMATCH: Qwen3 output does not contain cleaned GT constraints as prefix")
+                    msg = "  ⚠ PREFIX MISMATCH: Qwen3 output does not contain cleaned GT constraints as prefix"
+                    if args.keep_gt:
+                        print(msg + " [STRICT MODE: FAILURE]")
+                    else:
+                        print(msg + " [IGNORED]")
 
                 # Export cleaned constraints
                 export_to_freecad_script(sample_primitives, qwen3_cleaned, output_vlm_path)
@@ -1689,7 +1697,13 @@ if __name__ == '__main__':
                 # === Qwen3 Verification ===
                 print("\n--- Qwen3 Verification ---")
                 qwen3_verification = verify_constraints(sample_primitives, qwen3_cleaned, args.geo_threshold)
-                qwen3_verification.prefix_matched = prefix_ok  # Set prefix check result
+
+                # Check strict adherence only if keep_gt is True
+                if args.keep_gt and not prefix_ok:
+                    qwen3_verification.prefix_matched = False
+                else:
+                    qwen3_verification.prefix_matched = True
+
 
                 # Check if Qwen3 made DoF worse (more DoF = less constrained = worse)
                 if qwen3_verification.dof > gt_verification.dof:
