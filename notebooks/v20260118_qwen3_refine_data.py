@@ -1543,7 +1543,7 @@ if __name__ == '__main__':
     parser.add_argument('--keep_gt', action="store_true", help="Keep GT constraints")
     parser.add_argument('--output_dir', type=str, default='qwen3_refined_data', help="Output directory")
     parser.add_argument('--start_idx', type=int, default=0, help="Start index of sequences to process")
-    parser.add_argument('--end_idx', type=int, default=100000000, help="End index of sequences to process")
+    parser.add_argument('--end_idx', type=int, default=1000, help="End index of sequences to process")
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)

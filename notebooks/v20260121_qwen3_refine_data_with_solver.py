@@ -33,6 +33,7 @@ from sketchgraphs.data import flat_array
 
 
 from img2cad_diffusion.convert_sketch_to_freecad import convert_sketch_to_freecad, draw_svg
+from v20260116_draw_constraints import visualize_sketch_for_vlm, load_and_extract_from_file
 
 
 
@@ -48,20 +49,9 @@ MMPROJ_PATH = "/home/ryotaro/github/llama.cpp/models/mmproj-Qwen3VL-30B-A3B-Thin
 
 
 # --- Initialize the Llama Model ---
-llm = Llama(
-    model_path=MODEL_PATH,
-    # Set up the chat handler for Qwen3-VL, specifying the projector path
-    chat_handler=Qwen3VLChatHandler(
-      clip_model_path=MMPROJ_PATH,
-      force_reasoning=True,
-      image_min_tokens=1024, # Note: Qwen-VL models require at minimum 1024 image tokens to function correctly on bbox grounding tasks
-      verbose=False,  # Suppress handler debug output
-    ),
-    n_gpu_layers=-1,  # Offload all layers to the GPU
-    n_ctx=65536, #32768,      # Set the context window size
-    swa_full=True,
-    verbose=False,  # Suppress debug output (e.g., system prompt printing)
-)
+# Model initialization is deferred to main execution block
+llm = None
+
 
 
 def parse_vector(vec_str):
@@ -644,13 +634,26 @@ def prepare_prompts(primitives_list: list, constraints_list: list, image_path_li
 
     encoded_images = []
     for image_path in image_path_list:
-        assert image_path.endswith(".svg"), f"{image_path=}"
-        png_bytes = cairosvg.svg2png(url=image_path, scale=1.0)
-        encoded_data = base64.b64encode(png_bytes).decode("utf-8")
+        if image_path.endswith(".svg"):
+            png_bytes = cairosvg.svg2png(url=image_path, scale=1.0)
+            encoded_data = base64.b64encode(png_bytes).decode("utf-8")
+        else:
+            with open(image_path, "rb") as img_f:
+                encoded_data = base64.b64encode(img_f.read()).decode("utf-8")
         encoded_images.append(encoded_data)
 
     primitives_text = json.dumps(primitives_list, indent=2)
-    constraints_text = json.dumps([format_constraint_to_json(c["type"], c["args"]) for c in constraints_list], indent=2)
+
+    # Format constraints text for prompt (convert to JSON format if needed)
+    constraints_json_list = []
+    for c in constraints_list:
+        if "args" not in c:
+            raise ValueError(f"prepare_prompts expects constraints with 'args' key, got: {c}")
+        constraints_json_list.append(format_constraint_to_json(c["type"], c["args"]))
+    constraints_text = json.dumps(constraints_json_list, indent=2)
+
+    # Run solver on partial constraints to get initial status
+    initial_solver_output = run_solver_tool(primitives_list, constraints_list)
 
     system_prompt_text = """
 You are an expert CAD engineer.
@@ -776,7 +779,13 @@ The tool will return a JSON object with the solver status:
   'ConflictingConstraints': [int...], # List of indices causing conflicts (0-based)
   'RedundantConstraints': [int...],   # List of indices that are redundant (0-based)
   'ConflictGroups': [[int...], ...],  # Groups of constraints causing issues (0-based)
-  'MalformedConstraints': [int...]    # Malformed constraints (0-based)
+  'MalformedConstraints': [int...],   # Malformed constraints (0-based)
+  'GeometryValidation': {             # Geometry impact check
+      'MaxDeviation_mm': float,       # Maximum deviation of primitives (mm)
+      'MaxDeviationPrimitive': int,   # 0-based index of primitive with max deviation (-1 if none)
+      'Passed': bool,                 # True if deviation < Threshold_mm. False means the geometry was moved unacceptably yoo much.
+      'Threshold_mm': float           # Threshold value used for judgement
+  }
 }
 </solver_output>
 ```
@@ -787,6 +796,7 @@ The tool will return a JSON object with the solver status:
 - RedundantConstraints: Constraints that are automatically deduced from existing constraints. You MUST remove them.
 - ConflictingConstraints: Constraints that mathematically contradict others. You MUST revise your logic to resolve them.
 - MalformedConstraints: Constraints that are syntactically incorrect, e.g., referring to non-existing primitives, or too many/few primitives are specified in a particular constraint. You MUST review the constraint command.
+- GeometryValidation: Checks if applying constraints moves the geometry too much (bad). If Passed=False, it means the constraints are distorting the sketch significantly (e.g., flipping lines, moving points far away). You should avoid such constraints.
 
 [Behavioral Guidelines]
 1. You MUST use the <solver_call> tool to verify your constraints with the solver BEFORE outputting your final answer.
@@ -861,6 +871,25 @@ In all the following examples, the input primitives and partial constraints are 
   {"type": "Coincident", "entity1": 3, "subnode1": 2, "entity2": 0, "subnode2": 1},
 ]
 ```
+# Initial Solver Status
+```
+<solver_output>
+{
+  "DoF": 8,
+  "Status": "Converged",
+  "ConflictingConstraints": [],
+  "RedundantConstraints": [],
+  "ConflictGroups": [],
+  "MalformedConstraints": [],
+  "GeometryValidation": {
+    "MaxDeviation_mm": 0.0,
+    "MaxDeviationPrimitive": -1,
+    "Passed": true,
+    "Threshold_mm": 50.0
+  }
+}
+</solver_output>
+```
 
 Example 1: Redundant Constraints
 If you submit a set where one constraint is implied by others (e.g., Vertical(0), Vertical(2), Perpendicular(1,2) implies Perpendicular(0,1)):
@@ -884,7 +913,13 @@ If you submit a set where one constraint is implied by others (e.g., Vertical(0)
   "ConflictingConstraints": [],
   "RedundantConstraints": [7],
   "ConflictGroups": [[4, 7, 5, 6]],
-  "MalformedConstraints": []
+  "MalformedConstraints": [],
+  "GeometryValidation": {
+    "MaxDeviation_mm": 0.0,
+    "MaxDeviationPrimitive": -1,
+    "Passed": true,
+    "Threshold_mm": 50.0
+  }
 }
 </solver_output>
 ```
@@ -912,7 +947,13 @@ If you submit a set with contradictions (e.g., expecting a sharp corner to be Ta
   "ConflictingConstraints": [4, 5, 6, 7],
   "RedundantConstraints": [0],
   "ConflictGroups": [[0, 7], [5, 4, 7, 6], [0, 7]],
-  "MalformedConstraints": []
+  "MalformedConstraints": [],
+  "GeometryValidation": {
+    "MaxDeviation_mm": 0.0,
+    "MaxDeviationPrimitive": -1,
+    "Passed": true,
+    "Threshold_mm": 50.0
+  }
 }
 </solver_output>
 ```
@@ -939,7 +980,13 @@ When the set is consistent:
   "ConflictingConstraints": [],
   "RedundantConstraints": [],
   "ConflictGroups": [],
-  "MalformedConstraints": []
+  "MalformedConstraints": [],
+  "GeometryValidation": {
+    "MaxDeviation_mm": 0.0,
+    "MaxDeviationPrimitive": -1,
+    "Passed": true,
+    "Threshold_mm": 50.0
+  }
 }
 </solver_output>
 ```
@@ -951,6 +998,9 @@ When the set is consistent:
 4. Use the exact IDs provided in the Primitives Information.
 5. If you cannot name all the constraints to achieve DoF=2, output the constraints you have identified so far to achieve the lowest DoF.
 6. **CRITICAL**: You MUST call <solver_call> AT LEAST ONCE before outputting your final answer. Answers without solver verification are INVALID and will be rejected.
+7. **NEVER** use abbreviations like `[... Existing constraints ...]` in your JSON output. You MUST list ALL constraints explicitly.
+8. **NEVER** include comments (e.g., `// Original Constraints`) in your JSON output. JSON does not support comments.
+9. If the solver returns an ERROR message (e.g., invalid JSON), you MUST immediately correct your output and call <solver_call> again.
 
 [Process and Output Instructions]
 1. **Thinking Process**: You MUST start with a <think> block. Analyze the geometry and iteratively use the <solver_call> tool to verify your constraints until reaching DoF=2 or being unable to be reduced further.
@@ -1018,6 +1068,9 @@ Use the 2D sketch image as your visual reference.
 ```
 {constraints_text}
 ```
+
+[Initial Solver Status]
+{initial_solver_output}
 """
     user_messages.append({"type": "text", "text": user_prompt_text})
 
@@ -1043,7 +1096,39 @@ def extract_json_from_thinking_output(text: str) -> str:
         return text
 
 
-def run_solver_tool(primitives_list: list, constraints_json_list: list) -> str:
+def parse_solver_call_json(call_content: str) -> tuple[list, str | None]:
+    """Parse JSON from <solver_call> content with validation.
+
+    Checks for common invalid patterns before parsing:
+    - Abbreviations like '...'
+    - JS-style comments like '// comment'
+
+    Args:
+        call_content: Raw content extracted from <solver_call> tags
+
+    Returns:
+        Tuple of (constraints_list, None) on success, or (None, error_msg) on failure
+    """
+    # Check for abbreviations like "..."
+    if re.search(r'\.\.\.|…', call_content):
+        return [], "You MUST output ALL constraints explicitly. Abbreviations '...' are NOT allowed."
+
+    # Check for JS-style comments (lines starting with //)
+    if re.search(r'^\s*//', call_content, re.MULTILINE):
+        return [], "JSON does NOT support comments. Remove all '//' comment lines from your output."
+
+    # Attempt JSON parse
+    try:
+        constraints = json.loads(call_content)
+        if not isinstance(constraints, list):
+            return [], f"Expected a JSON array, got {type(constraints).__name__}."
+        return constraints, None
+    except json.JSONDecodeError as e:
+        error_detail = f"Invalid JSON syntax: {str(e)[:50]}. Check for trailing commas, missing quotes, or other syntax errors."
+        return [], error_detail
+
+
+def run_solver_tool(primitives_list: list, constraints_json_list: list, geo_threshold_mm: float = 50.0) -> str:
     """Run FreeCAD solver for the provided constraints and return status JSON string."""
     doc = None
     try:
@@ -1085,6 +1170,20 @@ def run_solver_tool(primitives_list: list, constraints_json_list: list) -> str:
             'ConflictGroups': convert_groups(status.get('ConflictGroups', [])),
             'MalformedConstraints': convert_indices(status.get('MalformedConstraints', []))
         }
+
+        # --- Geometry Validation ---
+        max_dev, max_dev_primitive_idx, geo_passed, geo_error = validate_geometry_from_lists(
+            primitives_list, constraints_json_list, geo_threshold_mm
+        )
+
+        response['GeometryValidation'] = {
+            'MaxDeviation_mm': round(max_dev, 2),
+            'MaxDeviationPrimitive': max_dev_primitive_idx,
+            'Passed': geo_passed,
+            'Threshold_mm': geo_threshold_mm
+        }
+        if geo_error:
+            response['GeometryValidation']['Error'] = geo_error
 
     except Exception as e:
         response = {'Error': str(e)}
@@ -1371,7 +1470,7 @@ def add_constraints_to_sketch(
                     if value is not None and e1 is not None:
                         fc_sketch.addConstraint(Sketcher.Constraint(ctype, e1, value))
         except Exception:
-            print(f"ERROR: Failed to add constraint {idx}: {constraint}")
+            print(f"\n\n\nERROR: Failed to add constraint {idx}: {c}\n\n\n")
             pass  # Skip constraints that fail to add
 
 
@@ -1387,7 +1486,7 @@ def validate_geometry_from_lists(
     primitives: list,
     constraints: list,
     threshold_mm: float = 50.0,
-) -> tuple[float, bool, str]:
+) -> tuple[float, int, bool, str]:
     """
     Validate geometry impact of constraints by comparing before/after.
 
@@ -1402,10 +1501,11 @@ def validate_geometry_from_lists(
         threshold_mm: Maximum allowed deviation in mm
 
     Returns:
-        Tuple of (max_deviation, all_passed, error_message)
+        Tuple of (max_deviation, max_deviation_primitive_idx, all_passed, error_message)
     """
     doc = None
     max_deviation = 0.0
+    max_deviation_primitive_idx = -1
     all_passed = True
     error_msg = ""
 
@@ -1443,7 +1543,9 @@ def validate_geometry_from_lists(
 
             for (bx, by), (ax, ay) in zip(before, after):
                 deviation = ((bx - ax) ** 2 + (by - ay) ** 2) ** 0.5
-                max_deviation = max(max_deviation, deviation)
+                if deviation > max_deviation:
+                    max_deviation = deviation
+                    max_deviation_primitive_idx = geo_id
 
         all_passed = max_deviation < threshold_mm
 
@@ -1458,7 +1560,7 @@ def validate_geometry_from_lists(
             except:
                 pass
 
-    return max_deviation, all_passed, error_msg
+    return max_deviation, max_deviation_primitive_idx, all_passed, error_msg
 
 
 def verify_constraints(
@@ -1526,7 +1628,7 @@ def verify_constraints(
 
     # Step 3: Geometry validation (only if solver check passed)
     if result.success and result.malformed_count == 0 and result.conflicting_count == 0:
-        max_dev, geo_passed, geo_error = validate_geometry_from_lists(
+        max_dev, _max_dev_prim_idx, geo_passed, geo_error = validate_geometry_from_lists(
             primitives, constraints, geo_threshold_mm
         )
         result.geo_max_deviation = max_dev
@@ -1807,8 +1909,23 @@ if __name__ == '__main__':
     parser.add_argument('--keep_gt', action="store_true", help="Keep GT constraints")
     parser.add_argument('--output_dir', type=str, default='qwen3_refined_data_with_solver', help="Output directory")
     parser.add_argument('--start_idx', type=int, default=0, help="Start index of sequences to process")
-    parser.add_argument('--end_idx', type=int, default=100000000, help="End index of sequences to process")
+    parser.add_argument('--end_idx', type=int, default=1000, help="End index of sequences to process")
     args = parser.parse_args()
+
+    # Initialize LLM
+    llm = Llama(
+        model_path=MODEL_PATH,
+        chat_handler=Qwen3VLChatHandler(
+            clip_model_path=MMPROJ_PATH,
+            force_reasoning=True,
+            image_min_tokens=1024,
+            verbose=False,
+        ),
+        n_gpu_layers=-1,
+        n_ctx=65536,
+        swa_full=True,
+        verbose=False,
+    )
 
     os.makedirs(args.output_dir, exist_ok=True)
     os.makedirs(args.output_dir + "/svg", exist_ok=True)
@@ -1837,16 +1954,18 @@ if __name__ == '__main__':
         try:
             doc, fc_sketch, history_commands, entity_to_geoid, mapping = convert_sketch_to_freecad(sketch)
 
-            # dump paths
-            output_cmd_path = f"{args.output_dir}/commands/{i:07d}_original.py"
-            output_svg_path = f"{args.output_dir}/svg/{i:07d}_original.svg"
-
             # Dump History to File
+            output_cmd_path = f"{args.output_dir}/commands/{i:07d}_original.py"
             with open(output_cmd_path, "w") as f:
                 f.write("\n".join(history_commands))
 
-            # Dump SVG
-            draw_svg(doc, fc_sketch, output_svg_path)
+            # Dump Sketch to PNG
+            output_png_path = f"{args.output_dir}/svg/{i:07d}_original.png"
+            output_vlm_image_path = output_png_path
+
+            # Extract data from the saved script
+            sketch_data = load_and_extract_from_file(output_cmd_path)
+            visualize_sketch_for_vlm(sketch_data, save_path=output_png_path, title=None)
 
         except Exception as e:
             print(f"Error processing sequence {i}: {e}")
@@ -1902,7 +2021,7 @@ if __name__ == '__main__':
 
         # ストリーミングモードで実行
         # Use cleaned GT constraints as input to Qwen3
-        messages = prepare_prompts(sample_primitives, gt_cleaned, output_svg_path)
+        messages = prepare_prompts(sample_primitives, gt_cleaned, output_vlm_image_path)
         llm.reset()
 
         # Main Inference Loop with Tool Use
@@ -1942,19 +2061,32 @@ if __name__ == '__main__':
                 # Note: We don't try to consume remaining stream chunks as it would block
                 # until generation completes, causing multi-minute hangs
 
+                # If tool call detected, remove any erroneous </think> tags
+                # (model sometimes closes thinking block prematurely when making tool calls)
+                if tool_call_detected and "</think>" in current_turn_text:
+                    current_turn_text = current_turn_text.replace("</think>", "")
+
                 # Append the model's output for this turn
                 messages.append({"role": "assistant", "content": current_turn_text})
 
                 if tool_call_detected:
-                    # Parse tool call
-                    try:
-                        # Extract content between <solver_call> tags
-                        call_content = current_turn_text.split("<solver_call>")[-1].split("</solver_call>")[0].strip()
-                        constraints_to_verify = json.loads(call_content)
+                    # Extract content between <solver_call> tags
+                    call_content = current_turn_text.split("<solver_call>")[-1].split("</solver_call>")[0].strip()
 
+                    # Parse and validate JSON
+                    constraints_to_verify, parse_error = parse_solver_call_json(call_content)
+
+                    if parse_error:
+                        # Return structured error
+                        tool_output = f'<solver_output>\n{{"DoF": "null", "Error": "{parse_error}"}}\n</solver_output>'
+                        print(f"{tool_output}\n", flush=True)
+                        messages.append({"role": "user", "content": tool_output})
+                        continue
+
+                    # Run solver with validated constraints
+                    try:
                         solver_call_count += 1
 
-                        # Run Tool
                         tool_output = run_solver_tool(sample_primitives, constraints_to_verify)
                         print(f"{tool_output}\n", flush=True)
 
@@ -1971,31 +2103,13 @@ if __name__ == '__main__':
                                     if not msg["content"]:
                                         msg["content"] = "[Image context already processed]"
 
-                        # Loop continues to generate next response
-                        continue
-
-                    except json.JSONDecodeError as e:
-                        # Show preview of invalid content for debugging
-                        preview = call_content[:100] + "..." if len(call_content) > 100 else call_content
-                        print(f"\n[JSON Parse Error]: {e} (content={preview})")
-
-                        # Provide clear, actionable error message for the model
-                        error_msg = """<solver_output>
-ERROR: YOUR previous <solver_call> contained invalid JSON. Common issues:
-1. Using "..." or abbreviations - YOU MUST list ALL constraints explicitly
-2. Including irrelevant comments (e.g., `// Original Constraints`)
-3. Missing quotes around keys (e.g., use "type" not type)
-4. Trailing commas before ] or }
-
-Retry with a COMPLETE, VALID JSON array containing ALL constraints.
-</solver_output>"""
-                        messages.append({"role": "user", "content": error_msg})
-                        print(f"{error_msg}", flush=True)
                         continue
 
                     except Exception as e:
                         print(f"\n  [Tool Error]: {e}")
-                        messages.append({"role": "user", "content": f"<solver_output>\nError running solver: {str(e)}\n</solver_output>"})
+                        error_detail = f"Solver error: {str(e)[:80]}"
+                        tool_output = f'<solver_output>\n{{"DoF": "null", "Error": "{error_detail}"}}\n</solver_output>'
+                        messages.append({"role": "user", "content": tool_output})
                         continue
 
                 else:
