@@ -806,6 +806,9 @@ The tool will return a JSON object with the solver status:
 5. If the solver reports 'MalformedConstraints', remove the constraints or modify their syntax.
 6. Keep the position of the primitives almost the same by applying the constraints; they are assumed to be correctly configured from the input.
 7. The solver output indices are 0-based and correspond to the order in your <solver_call> list.
+8. If 'GeometryValidation.Passed' is False, your constraints are moving the geometry too much. You MUST remove or revise the problematic constraints (check 'MaxDeviationPrimitive' for the affected primitive index).
+
+**Desirable solver status**: DoF=2, Status=Converged, no Conflicting/Redundant/Malformed constraints, and GeometryValidation.Passed=true.
 
 [Tool Use Interaction Examples]
 Here are examples of how the solver responds to different constraint sets.
@@ -994,7 +997,7 @@ When the set is consistent:
 [Rules]
 1. Identify relationships strictly based on the visual appearance in the image and the provided IDs.
 2. Prioritize geometric relationships (Coincident, Horizontal, Vertical, Tangent, Parallel, Perpendicular, etc.).
-3. Only use dimensional constraints (Length, Radius, etc.) if the geometry cannot be fixed by relationships alone.
+3. Only use dimensional constraints (Length, Radius, etc.) if the geometry cannot be fixed by relationships alone. Also, the position to add dimension constraints must reflect design intent of the CAD sketch.
 4. Use the exact IDs provided in the Primitives Information.
 5. If you cannot name all the constraints to achieve DoF=2, output the constraints you have identified so far to achieve the lowest DoF.
 6. **CRITICAL**: You MUST call <solver_call> AT LEAST ONCE before outputting your final answer. Answers without solver verification are INVALID and will be rejected.
@@ -1008,22 +1011,6 @@ When the set is consistent:
 
 [Final Answer Format]
 The final answer (outside the thinking block) MUST be a valid JSON array, including all the given partial constraints and your inferred additional constraints.
-The JSON must strictly follow this schema:
-```
-[
-  {
-    "type": "ConstraintTypeName",
-    "entity1": 0,
-    "subnode1": 0,
-    ... // Omit fields that are not applicable
-  }
-]
-```
-Field descriptions:
-- "type": String, the constraint type (e.g., "Coincident", "Horizontal", "Parallel", "Tangent", etc.)
-- "entity1", "entity2", "entity3": Integer (0-based primitive index). Omit if not applicable.
-- "subnode1", "subnode2", "subnode3": Integer (0=Entity, 1=Start, 2=End, 3=Center). Omit if not applicable.
-
 Example output for two constraints:
 ```
 [
@@ -1040,6 +1027,11 @@ Example output for two constraints:
   }
 ]
 ```
+Field descriptions:
+- "type": String, the constraint type (e.g., "Coincident", "Horizontal", "Parallel", "Tangent", etc.)
+- "entity1", "entity2", "entity3": Integer (0-based primitive index). Omit if not applicable.
+- "subnode1", "subnode2", "subnode3": Integer (0=Entity, 1=Start, 2=End, 3=Center). Omit if not applicable.
+
 The final JSON output (after </think>) must be a valid JSON array starting with '[' and ending with ']'."""
 
     # 6. Construct User Message Content
@@ -1699,22 +1691,27 @@ def cleanup_constraints_from_lists(
 
             # Map FC indices back to original constraint indices
             # FC getSolverStatus returns 1-based indices
-            problem_orig_indices = set()
-            for fc_idx in malformed_fc + conflicting_fc:
-                orig_idx = fc_to_orig.get(fc_idx - 1)  # Convert 1-based to 0-based
-                if orig_idx is not None:
-                    # Only consider removing if not in prefix
-                    if orig_idx >= prefix_size:
-                        problem_orig_indices.add(orig_idx)
 
-            # For redundant, remove only the last one (highest index)
+            # Malformed: remove all (these are syntax errors)
+            malformed_orig_indices = set()
+            for fc_idx in malformed_fc:
+                orig_idx = fc_to_orig.get(fc_idx - 1)  # Convert 1-based to 0-based
+                if orig_idx is not None and orig_idx >= prefix_size:
+                    malformed_orig_indices.add(orig_idx)
+
+            # Conflicting: collect all, but will remove only last one
+            conflicting_orig_indices = set()
+            for fc_idx in conflicting_fc:
+                orig_idx = fc_to_orig.get(fc_idx - 1)
+                if orig_idx is not None and orig_idx >= prefix_size:
+                    conflicting_orig_indices.add(orig_idx)
+
+            # Redundant: collect all, but will remove only last one
             redundant_orig_indices = set()
             for fc_idx in redundant_fc:
                 orig_idx = fc_to_orig.get(fc_idx - 1)
-                if orig_idx is not None:
-                    # Only consider removing if not in prefix
-                    if orig_idx >= prefix_size:
-                        redundant_orig_indices.add(orig_idx)
+                if orig_idx is not None and orig_idx >= prefix_size:
+                    redundant_orig_indices.add(orig_idx)
 
             # Build final result
             final_result = VerificationResult(
@@ -1729,9 +1726,14 @@ def cleanup_constraints_from_lists(
             FreeCAD.closeDocument(doc.Name)
             doc = None
 
-            # Prioritize: malformed/conflicting > redundant
-            if problem_orig_indices:
-                indices_to_remove = problem_orig_indices
+            # Prioritize: malformed > conflicting > redundant
+            # Malformed: remove all at once (syntax errors)
+            # Conflicting/Redundant: remove only highest index (one at a time)
+            if malformed_orig_indices:
+                indices_to_remove = malformed_orig_indices
+            elif conflicting_orig_indices:
+                # Remove only the highest index conflicting constraint
+                indices_to_remove = {max(conflicting_orig_indices)}
             elif redundant_orig_indices:
                 # Remove only the highest index redundant constraint
                 indices_to_remove = {max(redundant_orig_indices)}
@@ -1910,6 +1912,7 @@ if __name__ == '__main__':
     parser.add_argument('--output_dir', type=str, default='qwen3_refined_data_with_solver', help="Output directory")
     parser.add_argument('--start_idx', type=int, default=0, help="Start index of sequences to process")
     parser.add_argument('--end_idx', type=int, default=1000, help="End index of sequences to process")
+    parser.add_argument('--min_solver_calls', type=int, default=1, help="Minimum solver calls required before accepting answer")
     args = parser.parse_args()
 
     # Initialize LLM
@@ -2061,12 +2064,7 @@ if __name__ == '__main__':
                 # Note: We don't try to consume remaining stream chunks as it would block
                 # until generation completes, causing multi-minute hangs
 
-                # If tool call detected, remove any erroneous </think> tags
-                # (model sometimes closes thinking block prematurely when making tool calls)
-                if tool_call_detected and "</think>" in current_turn_text:
-                    current_turn_text = current_turn_text.replace("</think>", "")
-
-                # Append the model's output for this turn
+                # Append the model's output for this turn (keep as-is, no manipulation)
                 messages.append({"role": "assistant", "content": current_turn_text})
 
                 if tool_call_detected:
@@ -2078,7 +2076,7 @@ if __name__ == '__main__':
 
                     if parse_error:
                         # Return structured error
-                        tool_output = f'<solver_output>\n{{"DoF": "null", "Error": "{parse_error}"}}\n</solver_output>'
+                        tool_output = f'<solver_output>\n{{\n  "DoF": "null",\n  "Error": "{parse_error}"\n}}\n</solver_output>'
                         print(f"{tool_output}\n", flush=True)
                         messages.append({"role": "user", "content": tool_output})
                         continue
@@ -2108,24 +2106,48 @@ if __name__ == '__main__':
                     except Exception as e:
                         print(f"\n  [Tool Error]: {e}")
                         error_detail = f"Solver error: {str(e)[:80]}"
-                        tool_output = f'<solver_output>\n{{"DoF": "null", "Error": "{error_detail}"}}\n</solver_output>'
+                        tool_output = f'<solver_output>\n{{\n  "DoF": "null",\n  "Error": "{error_detail}"\n}}\n</solver_output>'
                         messages.append({"role": "user", "content": tool_output})
                         continue
 
                 else:
                     # Normal finish (no tool call in this chunk, likely finished)
-                    # But first check: did model finish without using solver?
-                    if solver_call_count == 0 and "</think>" in current_turn_text:
-                        print("\n\n[ENFORCEMENT] Model tried to finish without using solver! Forcing retry...", flush=True)
-                        error_msg = """<system_error>
-ERROR: You attempted to output a final answer WITHOUT using the solver tool.
-This is NOT ALLOWED. You MUST verify your constraints with <solver_call> before outputting your final answer.
+                    # But first check: does model need more solver calls?
+                    if solver_call_count < args.min_solver_calls and "</think>" in current_turn_text:
+                        print(f"\n\n[ENFORCEMENT] Solver calls: {solver_call_count}/{args.min_solver_calls}. Running solver on proposed answer...", flush=True)
 
-Use <solver_call> NOW to verify your constraints, then continue based on the solver feedback.
-</system_error>"""
-                        messages.append({"role": "user", "content": error_msg})
-                        print(f"{error_msg}", flush=True)
-                        continue
+                        # Keep original assistant text as-is (no manipulation)
+                        # messages.append already done above at L.2068
+
+                        # Extract JSON from the final answer
+                        json_text = extract_json_from_thinking_output(current_turn_text)
+
+                        if json_text:
+                            # Parse and run solver
+                            constraints_to_verify, parse_error = parse_solver_call_json(json_text)
+
+                            if parse_error:
+                                tool_output = f'<solver_output>\n{{\n  "DoF": "null",\n  "Error": "{parse_error}"\n}}\n</solver_output>'
+                            else:
+                                tool_output = run_solver_tool(sample_primitives, constraints_to_verify)
+
+                            # Add explanatory user message with solver output
+                            explanation = f"""NOTE: You output </think> without calling <solver_call> first. The system has run the solver on your proposed constraints.
+{tool_output}
+Please review the result and either:
+1. If there are issues, use <solver_call> to verify your revised constraints
+2. If the result is satisfactory, you may output your final answer"""
+
+                            print(f"{tool_output}\n", flush=True)
+                            messages.append({"role": "user", "content": explanation})
+                            solver_call_count += 1
+                            continue
+                        else:
+                            # Couldn't extract JSON
+                            error_msg = f'<solver_output>\n{{\n  "DoF": "null",\n  "Error": "Could not extract JSON from your final answer. Please use <solver_call> to verify your constraints."\n}}\n</solver_output>'
+                            messages.append({"role": "user", "content": error_msg})
+                            print(f"{error_msg}", flush=True)
+                            continue
 
                     print("\n\n=== Generation Complete ===")
                     break
