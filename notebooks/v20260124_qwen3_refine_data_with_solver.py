@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from io import BytesIO
 
 import cairosvg
+import traceback
 import PIL.Image
 from llama_cpp import Llama
 from llama_cpp.llama_chat_format import Qwen3VLChatHandler
@@ -823,7 +824,7 @@ and return the following JSON format:
 ```
 {
   'DoF': int,                         # Current Degrees of Freedom
-  'Status': str,                      # "Converged", "Conflicting", "Redundant", etc.
+  'Status': str,                      # "Converged", "Conflicting", "Redundant", "Failed", etc.
   'ConflictingConstraints': [int...], # List of indices causing conflicts (0-based)
   'RedundantConstraints': [int...],   # List of indices that are redundant (0-based)
   'ConflictGroups': [[int...], ...],  # Groups of constraints causing issues (0-based)
@@ -838,6 +839,7 @@ and return the following JSON format:
 ```
 
 The desirable solver status is DoF=2, Status=Converged, no Conflicting/Redundant/Malformed constraints, and GeometryValidation.Passed=true.
+- If the solver reports 'Status' as 'Failed', it means that the solver failed to converge, indicating that some constraints are geometrically unachievable. As the problem identification is usually very difficult, revert to a point where the solver reports Converged.
 - If the solver reports 'RedundantConstraints', those constraints are deduced from other constraints. Try removing them (prioritize keeping the given partial constraints).
 - If the solver reports 'ConflictingConstraints', there is a contradiction among constraints shown there. Analyze the logic and remove or modify the incorrect constraints.
 - If the solver reports 'MalformedConstraints', those constraints are syntactically incorrect (e.g., missing parameters or referring to non-existent entities). Remove the constraints or modify their syntax.
@@ -976,8 +978,9 @@ Example Tool Outputs (the input primitives and partial constraints are the same 
     b. Prioritize geometric relationships over dimension constraints as much as possible.
     c. When you have to use dimension constraints, follow these rules:
         i. Avoid using angles to the maximum extent possible.
-        ii. Chain dimensions along the two sketch axes, either horizontal or vertical. Chaining means defining length incrementally, for example, A---B and B---C, rather than A---B and A---C.
-        iii. When a sketch has concave regions, define length in the positive sketch area: the line defining that length should be inside the valid sketch area.
+        ii. When defining Distance constraints, prioritize horizontal and vertical directions.
+        iii. Chain dimensions horizontally or vertically. Chaining means defining length incrementally, for example, A---B and B---C, rather than A---B and A---C.
+        iv. When a sketch has concave regions, define length in the positive sketch area: the line defining that length should be inside the valid sketch area.
     d. Always consider that the enforced constraints are intuitive, aligned with the design intent, and easy to understand/modify for post-editing.
 3. You must submit your answer without the <final> tag several rounds to reflect the solver feedback.
 4. If you cannot name all the constraints to achieve DoF=2, output the constraints you have identified so far to achieve the lowest DoF without any malformed or conflicting constraints.
@@ -1074,7 +1077,7 @@ def run_solver_tool(primitives_list: list, constraints_json_list: list, geo_thre
         doc.recompute()
 
         # We need the mapping to convert 1-based FC indices back to 0-based input indices
-        constraint_mapping = add_constraints_to_sketch(primitives_list, constraints_json_list, fc_sketch)
+        constraint_mapping, failed_indices = add_constraints_to_sketch(primitives_list, constraints_json_list, fc_sketch)
         doc.recompute()
 
         # Solve
@@ -1090,6 +1093,11 @@ def run_solver_tool(primitives_list: list, constraints_json_list: list, geo_thre
         def convert_groups(groups):
             return [convert_indices(group) for group in groups]
 
+        # Combine malformed indices (both reported by solver and failed to add)
+        malformed_from_solver = convert_indices(status.get('MalformedConstraints', []))
+        all_malformed = list(set(malformed_from_solver + failed_indices))
+        all_malformed.sort()
+
         # Construct response dict
         response = {
             'DoF': status['DoF'],
@@ -1097,7 +1105,7 @@ def run_solver_tool(primitives_list: list, constraints_json_list: list, geo_thre
             'ConflictingConstraints': convert_indices(status.get('ConflictingConstraints', [])),
             'RedundantConstraints': convert_indices(status.get('RedundantConstraints', [])),
             'ConflictGroups': convert_groups(status.get('ConflictGroups', [])),
-            'MalformedConstraints': convert_indices(status.get('MalformedConstraints', []))
+            'MalformedConstraints': all_malformed
         }
 
         # --- Geometry Validation ---
@@ -1114,8 +1122,8 @@ def run_solver_tool(primitives_list: list, constraints_json_list: list, geo_thre
         if geo_error:
             response['GeometryValidation']['Error'] = geo_error
 
-    except Exception as e:
-        response = {'Error': str(e)}
+    except Exception:
+        response = {'Error': traceback.format_exc()}
 
     finally:
         if doc:
@@ -1256,7 +1264,7 @@ def add_constraints_to_sketch(
     primitives: list,
     constraints: list,
     fc_sketch: "Sketcher.SketchObject"
-) -> dict[int, int]:
+) -> tuple[dict[int, int], list[int]]:
     """Add constraints to FreeCAD sketch object.
 
     Args:
@@ -1265,9 +1273,12 @@ def add_constraints_to_sketch(
         fc_sketch: FreeCAD sketch object to add constraints to
 
     Returns:
-        Mapping from FreeCAD constraint index to original constraint index
+        Tuple of:
+          - Mapping from FreeCAD constraint index to original constraint index
+          - List of indices of constraints that failed to add (malformed/error)
     """
     constraint_mapping = {}
+    failed_indices = []
 
     for idx, c in enumerate(constraints):
         ctype = c.get("type", "")
@@ -1281,55 +1292,55 @@ def add_constraints_to_sketch(
                 if ctype == "Coincident":
                     # args: [e1, s1, e2, s2]
                     if len(args) >= 4:
-                        fc_sketch.addConstraint(Sketcher.Constraint('Coincident', args[0], args[1], args[2], args[3]))
+                        fc_sketch.addConstraint(Sketcher.Constraint('Coincident', int(args[0]), int(args[1]), int(args[2]), int(args[3])))
                 elif ctype == "Tangent":
                     # args: [e1, e2] or [e1, s1, e2, s2]
                     if len(args) == 2:
-                        fc_sketch.addConstraint(Sketcher.Constraint('Tangent', args[0], args[1]))
+                        fc_sketch.addConstraint(Sketcher.Constraint('Tangent', int(args[0]), int(args[1])))
                     elif len(args) >= 4:
-                        fc_sketch.addConstraint(Sketcher.Constraint('Tangent', args[0], args[1], args[2], args[3]))
+                        fc_sketch.addConstraint(Sketcher.Constraint('Tangent', int(args[0]), int(args[1]), int(args[2]), int(args[3])))
                 elif ctype == "TangentViaPoint":
                     # args: [e1, e2, e3, s3]
                     if len(args) >= 4:
-                        fc_sketch.addConstraint(Sketcher.Constraint('TangentViaPoint', args[0], args[1], args[2], args[3]))
+                        fc_sketch.addConstraint(Sketcher.Constraint('TangentViaPoint', int(args[0]), int(args[1]), int(args[2]), int(args[3])))
                 elif ctype == "Concentric":
                     # args: [e1, e2] -> Coincident(e1, 3, e2, 3)
                     if len(args) >= 2:
-                        fc_sketch.addConstraint(Sketcher.Constraint('Coincident', args[0], 3, args[1], 3))
+                        fc_sketch.addConstraint(Sketcher.Constraint('Coincident', int(args[0]), 3, int(args[1]), 3))
                 elif ctype in ["Horizontal", "Vertical"]:
                     # args: [e1] or [e1, s1, e2, s2]
                     if len(args) == 1:
-                        fc_sketch.addConstraint(Sketcher.Constraint(ctype, args[0]))
+                        fc_sketch.addConstraint(Sketcher.Constraint(ctype, int(args[0])))
                     elif len(args) >= 4:
-                        fc_sketch.addConstraint(Sketcher.Constraint(ctype, args[0], args[1], args[2], args[3]))
+                        fc_sketch.addConstraint(Sketcher.Constraint(ctype, int(args[0]), int(args[1]), int(args[2]), int(args[3])))
                 elif ctype in ["Parallel", "Perpendicular", "Equal"]:
                     # args: [e1, e2]
                     if len(args) >= 2:
-                        fc_sketch.addConstraint(Sketcher.Constraint(ctype, args[0], args[1]))
+                        fc_sketch.addConstraint(Sketcher.Constraint(ctype, int(args[0]), int(args[1])))
                 elif ctype == "PointOnObject":
                     # args: [e1, s1, e2]
                     if len(args) >= 3:
-                        fc_sketch.addConstraint(Sketcher.Constraint('PointOnObject', args[0], args[1], args[2]))
+                        fc_sketch.addConstraint(Sketcher.Constraint('PointOnObject', int(args[0]), int(args[1]), int(args[2])))
                 elif ctype == "Symmetric":
                     # args: [e1, s1, e2, s2, e3, s3]
                     if len(args) >= 6:
-                        fc_sketch.addConstraint(Sketcher.Constraint('Symmetric', args[0], args[1], args[2], args[3], args[4], args[5]))
+                        fc_sketch.addConstraint(Sketcher.Constraint('Symmetric', int(args[0]), int(args[1]), int(args[2]), int(args[3]), int(args[4]), int(args[5])))
                 elif ctype == "Distance":
                     # args: [e1, value] or [e1, s1, e2, s2, value]
                     if len(args) == 2:
-                        fc_sketch.addConstraint(Sketcher.Constraint('Distance', args[0], args[1]))
+                        fc_sketch.addConstraint(Sketcher.Constraint('Distance', int(args[0]), float(args[1])))
                     elif len(args) == 5:
-                        fc_sketch.addConstraint(Sketcher.Constraint('Distance', args[0], args[1], args[2], args[3], args[4]))
+                        fc_sketch.addConstraint(Sketcher.Constraint('Distance', int(args[0]), int(args[1]), int(args[2]), int(args[3]), float(args[4])))
                 elif ctype == "Angle":
                     # args: [e1, value] or [e1, e2, value]
                     if len(args) == 2:
-                        fc_sketch.addConstraint(Sketcher.Constraint('Angle', args[0], args[1]))
+                        fc_sketch.addConstraint(Sketcher.Constraint('Angle', int(args[0]), float(args[1])))
                     elif len(args) == 3:
-                        fc_sketch.addConstraint(Sketcher.Constraint('Angle', args[0], args[1], args[2]))
+                        fc_sketch.addConstraint(Sketcher.Constraint('Angle', int(args[0]), int(args[1]), float(args[2])))
                 elif ctype in ["Radius", "Diameter"]:
                     # args: [e1, value]
                     if len(args) >= 2:
-                        fc_sketch.addConstraint(Sketcher.Constraint(ctype, args[0], args[1]))
+                        fc_sketch.addConstraint(Sketcher.Constraint(ctype, int(args[0]), float(args[1])))
             else:
                 # Qwen3 format: entity1/subnode1/entity2/subnode2/...
                 e1 = c.get("entity1")
@@ -1341,66 +1352,75 @@ def add_constraints_to_sketch(
 
                 if ctype == "Coincident":
                     if e1 is not None and s1 is not None and e2 is not None and s2 is not None:
-                        fc_sketch.addConstraint(Sketcher.Constraint('Coincident', e1, s1, e2, s2))
+                        fc_sketch.addConstraint(Sketcher.Constraint('Coincident', int(e1), int(s1), int(e2), int(s2)))
                 elif ctype == "Tangent":
                     # Can be 4-arg (point-to-point) or 2-arg (edge-to-edge)
                     if s1 is not None and s2 is not None:
-                        fc_sketch.addConstraint(Sketcher.Constraint('Tangent', e1, s1, e2, s2))
+                        fc_sketch.addConstraint(Sketcher.Constraint('Tangent', int(e1), int(s1), int(e2), int(s2)))
                     elif e1 is not None and e2 is not None:
-                        fc_sketch.addConstraint(Sketcher.Constraint('Tangent', e1, e2))
+                        fc_sketch.addConstraint(Sketcher.Constraint('Tangent', int(e1), int(e2)))
                 elif ctype == "TangentViaPoint":
                     # TangentViaPoint(e1, e2, e3, s3)
                     if all(v is not None for v in [e1, e2, e3, s3]):
-                        fc_sketch.addConstraint(Sketcher.Constraint('TangentViaPoint', e1, e2, e3, s3))
+                        fc_sketch.addConstraint(Sketcher.Constraint('TangentViaPoint', int(e1), int(e2), int(e3), int(s3)))
                 elif ctype == "Concentric":
                     # Concentric means center points coincide
                     if e1 is not None and e2 is not None:
-                        fc_sketch.addConstraint(Sketcher.Constraint('Coincident', e1, 3, e2, 3))
+                        fc_sketch.addConstraint(Sketcher.Constraint('Coincident', int(e1), 3, int(e2), 3))
                 elif ctype in ["Horizontal", "Vertical"]:
                     if e2 is not None and s1 is not None and s2 is not None:
-                        fc_sketch.addConstraint(Sketcher.Constraint(ctype, e1, s1, e2, s2))
+                        fc_sketch.addConstraint(Sketcher.Constraint(ctype, int(e1), int(s1), int(e2), int(s2)))
                     elif e1 is not None:
-                        fc_sketch.addConstraint(Sketcher.Constraint(ctype, e1))
+                        fc_sketch.addConstraint(Sketcher.Constraint(ctype, int(e1)))
                 elif ctype in ["Parallel", "Perpendicular", "Equal"]:
                     if e1 is not None and e2 is not None:
-                        fc_sketch.addConstraint(Sketcher.Constraint(ctype, e1, e2))
+                        fc_sketch.addConstraint(Sketcher.Constraint(ctype, int(e1), int(e2)))
                 elif ctype == "PointOnObject":
                     if e1 is not None and s1 is not None and e2 is not None:
-                        fc_sketch.addConstraint(Sketcher.Constraint('PointOnObject', e1, s1, e2))
+                        fc_sketch.addConstraint(Sketcher.Constraint('PointOnObject', int(e1), int(s1), int(e2)))
                 elif ctype == "Symmetric":
                     if all(v is not None for v in [e1, s1, e2, s2, e3, s3]):
-                        fc_sketch.addConstraint(Sketcher.Constraint('Symmetric', e1, s1, e2, s2, e3, s3))
+                        fc_sketch.addConstraint(Sketcher.Constraint('Symmetric', int(e1), int(s1), int(e2), int(s2), int(e3), int(s3)))
                 elif ctype == "Distance":
                     value = compute_constraint_value("Distance", primitives, e1, s1, e2, s2)
                     if value is not None:
                         if e2 is not None and s1 is not None and s2 is not None:
-                            fc_sketch.addConstraint(Sketcher.Constraint('Distance', e1, s1, e2, s2, value))
+                            fc_sketch.addConstraint(Sketcher.Constraint('Distance', int(e1), int(s1), int(e2), int(s2), float(value)))
                         elif e2 is not None and s1 is not None:
                             # Point-to-edge distance
-                            fc_sketch.addConstraint(Sketcher.Constraint('Distance', e1, s1, e2, 0, value))
+                            fc_sketch.addConstraint(Sketcher.Constraint('Distance', int(e1), int(s1), int(e2), 0, float(value)))
                         elif e1 is not None:
-                            fc_sketch.addConstraint(Sketcher.Constraint('Distance', e1, value))
+                            fc_sketch.addConstraint(Sketcher.Constraint('Distance', int(e1), float(value)))
                 elif ctype == "Angle":
                     value = compute_constraint_value("Angle", primitives, e1, s1, e2, s2)
                     if value is not None:
                         if e2 is not None:
-                            fc_sketch.addConstraint(Sketcher.Constraint('Angle', e1, e2, value))
+                            fc_sketch.addConstraint(Sketcher.Constraint('Angle', int(e1), int(e2), float(value)))
                         elif e1 is not None:
-                            fc_sketch.addConstraint(Sketcher.Constraint('Angle', e1, value))
+                            fc_sketch.addConstraint(Sketcher.Constraint('Angle', int(e1), float(value)))
                 elif ctype in ["Radius", "Diameter"]:
                     value = compute_constraint_value(ctype, primitives, e1)
                     if value is not None and e1 is not None:
-                        fc_sketch.addConstraint(Sketcher.Constraint(ctype, e1, value))
+                        fc_sketch.addConstraint(Sketcher.Constraint(ctype, int(e1), float(value)))
         except Exception:
-            print(f"\n\n\nERROR: Failed to add constraint {idx}: {c}\n\n\n")
+            print(f"ERROR: FAILED to add constraint {idx}: {c}")
+            failed_indices.append(idx)
             pass  # Skip constraints that fail to add
 
 
         count_after = int(fc_sketch.ConstraintCount)
-        for i in range(count_before, count_after):
-            constraint_mapping[i] = idx
+        # If count increased, map the new indices
+        if count_after > count_before:
+            for i in range(count_before, count_after):
+                constraint_mapping[i] = idx
+        else:
+            # If count didn't increase but it wasn't caught by exception (e.g. logic error), treat as failed if not already added
+            # Note: Some constraints might merge or be ignored silently, but usually logic errors throw.
+            # Here we assume if exception didn't fire, it succeeded or did nothing harmful.
+            # But if we strictly want 1:1, we might check. For now, exception catching is the main one.
+            pass
 
-    return constraint_mapping
+    return constraint_mapping, failed_indices
 
 
 
@@ -1471,8 +1491,8 @@ def validate_geometry_from_lists(
 
         all_passed = max_deviation < threshold_mm
 
-    except Exception as e:
-        error_msg = str(e)[:100]
+    except Exception:
+        error_msg = "ERROR: " + traceback.format_exc()
         all_passed = False
 
     finally:
@@ -1522,7 +1542,7 @@ def verify_constraints(
         doc.recompute()
 
         # Add constraints
-        add_constraints_to_sketch(primitives, constraints, fc_sketch)
+        _mapping, failed_indices = add_constraints_to_sketch(primitives, constraints, fc_sketch)
         doc.recompute()
 
         # Step 2: Get solver status
@@ -1532,14 +1552,19 @@ def verify_constraints(
         result.success = True
         result.dof = status['DoF']
         result.status = status['Status']
-        result.malformed_count = len(status.get('MalformedConstraints', []))
+        # Malformed = Reported by solver + Failed to add
+        result.malformed_count = len(status.get('MalformedConstraints', [])) + len(failed_indices)
         result.conflicting_count = len(status.get('ConflictingConstraints', []))
         result.redundant_count = len(status.get('RedundantConstraints', []))
         # Check if solver converged (Status = 'Converged' means OK)
         result.solver_converged = (status.get('Status', '') == 'Converged')
 
-    except Exception as e:
-        result.error = str(e)[:100]
+    except Exception:
+        result.error = "ERROR: " + traceback.format_exc()
+        result.success = False
+        result.solver_converged = False
+        result.geo_passed = False
+        result.geo_max_deviation = -1.0
 
     finally:
         if doc is not None:
@@ -1604,7 +1629,7 @@ def cleanup_constraints_from_lists(
             doc.recompute()
 
             # Add constraints with mapping
-            constraint_mapping = add_constraints_to_sketch(primitives, current_constraints, fc_sketch)
+            constraint_mapping, failed_indices = add_constraints_to_sketch(primitives, current_constraints, fc_sketch)
             doc.recompute()
 
             # Get solver status
@@ -1624,6 +1649,10 @@ def cleanup_constraints_from_lists(
 
             # Malformed: remove all (these are syntax errors)
             malformed_orig_indices = set()
+            for idx in failed_indices:
+                if idx >= prefix_size:
+                    malformed_orig_indices.add(idx)
+
             for fc_idx in malformed_fc:
                 orig_idx = fc_to_orig.get(fc_idx - 1)  # Convert 1-based to 0-based
                 if orig_idx is not None and orig_idx >= prefix_size:
@@ -1648,7 +1677,7 @@ def cleanup_constraints_from_lists(
                 success=True,
                 dof=status['DoF'],
                 status=status['Status'],
-                malformed_count=len(malformed_fc),
+                malformed_count=len(malformed_fc) + len(failed_indices),
                 conflicting_count=len(conflicting_fc),
                 redundant_count=len(redundant_fc),
             )
@@ -1677,9 +1706,9 @@ def cleanup_constraints_from_lists(
                 if i not in indices_to_remove
             ]
 
-        except Exception as e:
+        except Exception:
             if final_result is None:
-                final_result = VerificationResult(error=str(e)[:100])
+                final_result = VerificationResult(error="ERROR: " + traceback.format_exc())
             break
 
         finally:
@@ -1721,7 +1750,7 @@ if __name__ == '__main__':
     parser.add_argument('--output_dir', type=str, default='qwen3_refined_data_with_solver', help="Output directory")
     parser.add_argument('--start_idx', type=int, default=0, help="Start index of sequences to process")
     parser.add_argument('--end_idx', type=int, default=1000, help="End index of sequences to process")
-    parser.add_argument('--max_turns', type=int, default=5, help="Maximum solver calls before accepting answer")
+    parser.add_argument('--max_turns', type=int, default=10, help="Maximum solver calls before accepting answer")
     args = parser.parse_args()
 
     # --- Model Configuration ---
@@ -1794,6 +1823,12 @@ if __name__ == '__main__':
         sample_constraints_cleaned, sample_cleanup_result = cleanup_constraints_from_lists(
             sample_primitives, sample_constraints
         )
+        if sample_cleanup_result.error:
+            print(f"  ✗ GT CLEANUP ERROR: {sample_cleanup_result.error.splitlines()[-1]}")
+            with open(error_log, "a") as f:
+                f.write(f"GT Cleanup Error for sample {i}:\n{sample_cleanup_result.error}\n")
+            continue
+
         print(f"  Cleanup: {len(sample_constraints)} -> {len(sample_constraints_cleaned)} constraints")
 
         # Convert sample_constraints_cleaned to Qwen3 JSON format for both export and Qwen3 input
@@ -1865,7 +1900,7 @@ if __name__ == '__main__':
                 predicted_constraints, parse_error = parse_solver_call_json(final_match.group(1))
                 predicted_constraints_list.append(predicted_constraints)
                 if parse_error:
-                    solver_output = f'JSON Parse Error: "{parse_error}". Fix the syntax and try again.'
+                    solver_output = json.dumps({"DoF": "null", "Error": f"JSON Parse Error: {parse_error}. Fix the syntax and try again."}, indent=2)
                     messages.append({"role": "user", "content": solver_output})
                     print("User: " + solver_output + "\n")
                     continue
@@ -1881,12 +1916,32 @@ if __name__ == '__main__':
                 predicted_constraints_list.append(predicted_constraints)
 
                 if parse_error:
-                    solver_output = f'{{\n  "DoF": "null",\n  "Error": "{parse_error}"\n}}'
+                    solver_output = json.dumps({"DoF": "null", "Error": parse_error}, indent=2)
                 else:
                     # Run solver with predicted constraints
                     solver_output = run_solver_tool(sample_primitives, predicted_constraints)
             else:
-                solver_output = "You MUST output the JSON array of constraints."
+                solver_output = json.dumps({"DoF": "null", "Error": "You MUST output the JSON array of constraints."}, indent=2)
+
+            # Check for solver error (Top-level or GeometryValidation) and log/truncate
+            # Note: We expect run_solver_tool to ALWAYS return valid JSON. If it fails (JSONDecodeError),
+            # it indicates an implementation bug in run_solver_tool, so we let it raise.
+            solver_resp = json.loads(solver_output)
+
+            # Case 1: Top-level Error (e.g. Exception)
+            if "Error" in solver_resp:
+                with open(error_log, "a") as f:
+                    f.write(f"Solver Error (Top-level) for sample {i} turn {solver_call_count}:\n{solver_resp['Error']}\n")
+                solver_resp['Error'] = solver_resp['Error'][:200]
+
+            # Case 2: Geometry Validation Error
+            if "GeometryValidation" in solver_resp and "Error" in solver_resp["GeometryValidation"]:
+                with open(error_log, "a") as f:
+                    f.write(f"Solver Error (Geometry) for sample {i} turn {solver_call_count}:\n{solver_resp['GeometryValidation']['Error']}\n")
+                solver_resp["GeometryValidation"]["Error"] = solver_resp["GeometryValidation"]["Error"][:200]
+
+            solver_output = json.dumps(solver_resp, indent=2)
+
             messages.append({"role": "user", "content": solver_output})
             print("User: " + solver_output + "\n")
 
@@ -1905,7 +1960,13 @@ if __name__ == '__main__':
 
             # Cleanup the final result
             print("\n--- Qwen3 Output Cleanup ---")
-            predicted_constraints_cleaned, predicted_constraints_cleanup_result = cleanup_constraints_from_lists(sample_primitives, predicted_constraints)
+            predicted_constraints_cleaned, predicted_constraints_cleanup_result = cleanup_constraints_from_lists(
+                sample_primitives, predicted_constraints
+            )
+            if predicted_constraints_cleanup_result.error:
+                 with open(error_log, "a") as f:
+                    f.write(f"Prediction Cleanup Error for sample {i} version {pred_validation_version_id}:\n{predicted_constraints_cleanup_result.error}\n")
+
             print(f"  Cleanup: {len(predicted_constraints)} -> {len(predicted_constraints_cleaned)} constraints")
 
             # Prediction verification

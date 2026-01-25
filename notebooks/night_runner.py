@@ -21,8 +21,8 @@ from datetime import datetime, time
 import signal
 import sys
 
-OUTPUT_DIR = "qwen3_refined_data"
-SCRIPT_PATH = "v20260118_qwen3_refine_data.py"
+OUTPUT_DIR = "qwen3_refined_data_with_solver"
+SCRIPT_PATH = "v20260124_qwen3_refine_data_with_solver.py"
 REQUIRED_GPUS = 4
 MEMORY_THRESHOLD_MB = 10000  # このMB以下なら未使用とみなす（Xorgのみ≒5MB）
 START_HOUR = 1   # 開始時刻 (1時) - cronがこの時刻に起動
