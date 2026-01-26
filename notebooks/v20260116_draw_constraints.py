@@ -123,7 +123,7 @@ def load_and_extract_from_file(file_path: str):
     try:
         exec(script_content, exec_globals)
     except Exception as e:
-        print(f"Error executing script: {e}")
+        print(f"[load_and_extract_from_file] Error executing script: {e}")
         return None
 
     # --- Sketchオブジェクトの探索 ---

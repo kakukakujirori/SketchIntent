@@ -38,120 +38,16 @@ from img2cad_diffusion.convert_sketch_to_freecad import convert_sketch_to_freeca
 from v20260116_draw_constraints import visualize_sketch_for_vlm, load_and_extract_from_file
 
 
+# ============================================================
+# Geometry & Math Utils
+# ============================================================
+
 def parse_vector(vec_str):
     # Extracts numbers from "Vector(x, y, z)"
     # Pattern supports scientific notation like 8.326e-14, 1.5E+10
     nums = re.findall(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?", vec_str)
     # Return x, y as float
     return [float(n) for n in nums[:2]]
-
-
-def parse_freecad_script(filepath_or_commands: str | list[str]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    primitives = []
-    constraints_gt = []
-
-    if isinstance(filepath_or_commands, str):
-        with open(filepath_or_commands, 'r') as f:
-            content = f.read()
-        lines = content.split('\n')
-    else:
-        lines = filepath_or_commands
-
-    for line in lines:
-        line = line.strip()
-        if not line: continue
-
-        # --- Primitives ---
-        if line.startswith('fc_sketch.addGeometry('):
-            is_construction = 'True' in line.split(',')[-1]
-
-            if 'Part.LineSegment' in line:
-                # Part.LineSegment(Vector(...), Vector(...))
-                vecs = re.findall(r'Vector\s*\([^)]+\)', line)
-                if len(vecs) >= 2:
-                    p1 = parse_vector(vecs[0])
-                    p2 = parse_vector(vecs[1])
-                    primitives.append({
-                        "type": "LineSegment",
-                        "start": p1,
-                        "end": p2,
-                        "is_construction": is_construction
-                    })
-            elif 'Part.Point' in line:
-                # Part.Point(Vector(...))
-                vecs = re.findall(r'Vector\s*\([^)]+\)', line)
-                if len(vecs) >= 1:
-                    p1 = parse_vector(vecs[0])
-                    primitives.append({
-                        "type": "Point",
-                        "x": p1[0],
-                        "y": p1[1],
-                        "is_construction": is_construction
-                    })
-            elif 'Part.Circle' in line:
-                # Part.Circle(Vector(...), Vector(...), Radius)
-                inner_match = re.search(r'Part\.Circle\s*\((.*)\)', line)
-                if inner_match:
-                    inner_content = inner_match.group(1)
-                    vecs = re.findall(r'Vector\s*\([^)]+\)', inner_content)
-                    if len(vecs) >= 1:
-                        center = parse_vector(vecs[0])
-                        # Extract radius: find number after second Vector
-                        v2_end_idx = inner_content.rfind('Vector')
-                        if v2_end_idx != -1:
-                            v2_close = inner_content.find(')', v2_end_idx)
-                            if v2_close != -1:
-                                remainder = inner_content[v2_close+1:]
-                                radius_match = re.search(r"[-+]?\d*\.\d+|[-+]?\d+", remainder)
-                                if radius_match:
-                                    radius = float(radius_match.group(0))
-                                    primitives.append({
-                                        "type": "Circle",
-                                        "center": center,
-                                        "radius": radius,
-                                        "is_construction": is_construction,
-                                        "is_clockwise": False
-                                    })
-            elif 'Part.ArcOfCircle' in line:
-                # Part.ArcOfCircle(Start, Mid, End) or similar 3-point in this context
-                vecs = re.findall(r'Vector\s*\([^)]+\)', line)
-                if len(vecs) >= 3:
-                    p1 = parse_vector(vecs[0])
-                    p2 = parse_vector(vecs[1])
-                    p3 = parse_vector(vecs[2])
-                    primitives.append({
-                        "type": "Arc",
-                        "start": p1,
-                        "mid": p2,
-                        "end": p3,
-                        "is_construction": is_construction
-                    })
-
-        # --- Constraints ---
-        elif line.startswith('fc_sketch.addConstraint('):
-            # Example: fc_sketch.addConstraint(Sketcher.Constraint('Tangent', 3, 2, 6, 2))
-            inner = re.search(r"Sketcher\.Constraint\((.*)\)", line)
-            if inner:
-                args_str = inner.group(1).rstrip(')')
-                # Naive CSV split (assuming no commas in strings)
-                raw_args = [a.strip().strip("'").strip('"') for a in args_str.split(',')]
-                if not raw_args: continue
-
-                c_type = raw_args[0]
-                c_args = []
-                for a in raw_args[1:]:
-                    try:
-                        # Convert to float if it has dot, else int
-                        if '.' in a:
-                            c_args.append(float(a))
-                        else:
-                            c_args.append(int(a))
-                    except:
-                        c_args.append(a)
-
-                constraints_gt.append({"type": c_type, "args": c_args})
-
-    return primitives, constraints_gt
 
 
 def compute_arc_center(start: list, mid: list, end: list) -> tuple | None:
@@ -322,6 +218,118 @@ def compute_constraint_value(ctype: str, primitives: list, e1: int, s1: int | No
     return None
 
 
+# ============================================================
+# Parsing & JSON Parsing
+# ============================================================
+
+def parse_freecad_script(filepath_or_commands: str | list[str]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    primitives = []
+    constraints_gt = []
+
+    if isinstance(filepath_or_commands, str):
+        with open(filepath_or_commands, 'r') as f:
+            content = f.read()
+        lines = content.split('\n')
+    else:
+        lines = filepath_or_commands
+
+    for line in lines:
+        line = line.strip()
+        if not line: continue
+
+        # --- Primitives ---
+        if line.startswith('fc_sketch.addGeometry('):
+            is_construction = 'True' in line.split(',')[-1]
+
+            if 'Part.LineSegment' in line:
+                # Part.LineSegment(Vector(...), Vector(...))
+                vecs = re.findall(r'Vector\s*\([^)]+\)', line)
+                if len(vecs) >= 2:
+                    p1 = parse_vector(vecs[0])
+                    p2 = parse_vector(vecs[1])
+                    primitives.append({
+                        "type": "LineSegment",
+                        "start": p1,
+                        "end": p2,
+                        "is_construction": is_construction
+                    })
+            elif 'Part.Point' in line:
+                # Part.Point(Vector(...))
+                vecs = re.findall(r'Vector\s*\([^)]+\)', line)
+                if len(vecs) >= 1:
+                    p1 = parse_vector(vecs[0])
+                    primitives.append({
+                        "type": "Point",
+                        "x": p1[0],
+                        "y": p1[1],
+                        "is_construction": is_construction
+                    })
+            elif 'Part.Circle' in line:
+                # Part.Circle(Vector(...), Vector(...), Radius)
+                inner_match = re.search(r'Part\.Circle\s*\((.*)\)', line)
+                if inner_match:
+                    inner_content = inner_match.group(1)
+                    vecs = re.findall(r'Vector\s*\([^)]+\)', inner_content)
+                    if len(vecs) >= 1:
+                        center = parse_vector(vecs[0])
+                        # Extract radius: find number after second Vector
+                        v2_end_idx = inner_content.rfind('Vector')
+                        if v2_end_idx != -1:
+                            v2_close = inner_content.find(')', v2_end_idx)
+                            if v2_close != -1:
+                                remainder = inner_content[v2_close+1:]
+                                radius_match = re.search(r"[-+]?\d*\.\d+|[-+]?\d+", remainder)
+                                if radius_match:
+                                    radius = float(radius_match.group(0))
+                                    primitives.append({
+                                        "type": "Circle",
+                                        "center": center,
+                                        "radius": radius,
+                                        "is_construction": is_construction,
+                                        "is_clockwise": False
+                                    })
+            elif 'Part.ArcOfCircle' in line:
+                # Part.ArcOfCircle(Start, Mid, End) or similar 3-point in this context
+                vecs = re.findall(r'Vector\s*\([^)]+\)', line)
+                if len(vecs) >= 3:
+                    p1 = parse_vector(vecs[0])
+                    p2 = parse_vector(vecs[1])
+                    p3 = parse_vector(vecs[2])
+                    primitives.append({
+                        "type": "Arc",
+                        "start": p1,
+                        "mid": p2,
+                        "end": p3,
+                        "is_construction": is_construction
+                    })
+
+        # --- Constraints ---
+        elif line.startswith('fc_sketch.addConstraint('):
+            # Example: fc_sketch.addConstraint(Sketcher.Constraint('Tangent', 3, 2, 6, 2))
+            inner = re.search(r"Sketcher\.Constraint\((.*)\)", line)
+            if inner:
+                args_str = inner.group(1).rstrip(')')
+                # Naive CSV split (assuming no commas in strings)
+                raw_args = [a.strip().strip("'").strip('"') for a in args_str.split(',')]
+                if not raw_args: continue
+
+                c_type = raw_args[0]
+                c_args = []
+                for a in raw_args[1:]:
+                    try:
+                        # Convert to float if it has dot, else int
+                        if '.' in a:
+                            c_args.append(float(a))
+                        else:
+                            c_args.append(int(a))
+                    except:
+                        c_args.append(a)
+
+                constraints_gt.append({"type": c_type, "args": c_args})
+
+    return primitives, constraints_gt
+
+
 def format_constraint_to_json(ctype: str, args: list) -> dict:
     """Convert raw FreeCAD constraint arguments to structured JSON format.
 
@@ -461,6 +469,930 @@ def format_constraint_to_json(ctype: str, args: list) -> dict:
     return {k: v for k, v in c_out.items() if v is not None}
 
 
+def parse_qwen_output_json(call_content: str) -> tuple[list, str | None]:
+    """Parse Qwen output JSON.
+
+    Checks for common invalid patterns before parsing:
+    - Abbreviations like '...'
+    - JS-style comments like '// comment'
+
+    Args:
+        call_content: Raw content extracted after </think> tags
+
+    Returns:
+        Tuple of (constraints_list, None) on success, or (None, error_msg) on failure
+    """
+    # Check for abbreviations like "..."
+    if re.search(r'\.\.\.|…', call_content):
+        return [], "You MUST output ALL constraints explicitly. Abbreviations '...' are NOT allowed."
+
+    # Check for JS-style comments (lines starting with //)
+    if re.search(r'^\s*//', call_content, re.MULTILINE):
+        return [], "JSON does NOT support comments. Remove all '//' comment lines from your output."
+
+    # Attempt JSON parse
+    try:
+        constraints = json.loads(call_content)
+        if not isinstance(constraints, list):
+            return [], f"Expected a JSON array, got {type(constraints).__name__}."
+        return constraints, None
+    except json.JSONDecodeError as e:
+        error_detail = f"Invalid JSON syntax: {str(e)[:50]}. Check for trailing commas, missing quotes, or other syntax errors."
+        return [], error_detail
+
+
+# ============================================================
+# FreeCAD Command Generators
+# ============================================================
+
+def generate_freecad_primitives(primitives: list):
+    """
+    Generator that parses primitives and yields normalized FreeCAD arguments.
+
+    Yields:
+        Tuple of (primitive_type, args_list, is_construction, error_msg)
+    """
+    for prim in primitives:
+        ptype = prim.get("type")
+        is_const = prim.get("is_construction", False)
+
+        try:
+            if ptype == "LineSegment":
+                if "start" in prim and "end" in prim:
+                    sx, sy = prim["start"]
+                    ex, ey = prim["end"]
+                    yield "LineSegment", [sx, sy, 0, ex, ey, 0], is_const, None
+                else:
+                    yield "LineSegment", None, is_const, "Missing start/end for LineSegment"
+
+            elif ptype == "Point":
+                if "x" in prim and "y" in prim:
+                    x, y = prim["x"], prim["y"]
+                    yield "Point", [x, y, 0], is_const, None
+                else:
+                    yield "Point", None, is_const, "Missing x/y for Point"
+
+            elif ptype == "Circle":
+                if "center" in prim and "radius" in prim:
+                    cx, cy = prim["center"]
+                    r = prim["radius"]
+                    yield "Circle", [cx, cy, 0, 0, 0, 1, r], is_const, None
+                else:
+                    yield "Circle", None, is_const, "Missing center/radius for Circle"
+
+            elif ptype == "Arc":
+                if "start" in prim and "mid" in prim and "end" in prim:
+                    sx, sy = prim["start"]
+                    mx, my = prim["mid"]
+                    ex, ey = prim["end"]
+                    yield "ArcOfCircle", [sx, sy, 0, mx, my, 0, ex, ey, 0], is_const, None
+                else:
+                    yield "ArcOfCircle", None, is_const, "Missing start/mid/end for Arc"
+
+            else:
+                yield ptype, None, is_const, f"Unknown primitive type: {ptype}"
+
+        except Exception as e:
+            # Report exception as error
+            yield ptype, None, is_const, f"Exception parsing primitive: {e}"
+
+
+def generate_freecad_constraints(primitives: list, constraints: list):
+    """
+    Generator that parses constraints and yields normalized FreeCAD arguments.
+
+    Yields:
+        Tuple of (original_index, constraint_type, args_list, error_msg)
+
+    Note:
+        - Handles both Qwen3 format (keys) and GT format (args list)
+        - Computes/Recomputes values for Distance, Angle, Radius, Diameter
+        - Normalizes arguments (e.g. s2=0 for Point-Line Distance)
+        - Yields only valid constraints (invalid ones report errors)
+    """
+    for idx, c in enumerate(constraints):
+        ctype = c.get("type", "")
+
+        try:
+            # --- 1. Input Source Resolution & Normalization ---
+            final_ctype = ctype
+            final_args = []
+
+            if "args" in c:
+                # GT format: use args directly, but handle specific types
+                raw_args = c.get("args", [])
+
+                # Basic integer conversion for safety
+                if ctype == "Concentric":
+                    # Concentric(e1, e2) -> Coincident(e1, 3, e2, 3)
+                    if len(raw_args) == 2:
+                        final_ctype = "Coincident"
+                        final_args = [int(raw_args[0]), 3, int(raw_args[1]), 3]
+                    else:
+                        yield idx, ctype, None, "Invalid args for Concentric (expected 2)"
+                        continue
+
+                elif ctype == "Distance":
+                    # Check for 4-arg case (Point-Line) and normalize
+                    if len(raw_args) == 4:
+                        # e1, s1, e2, value -> e1, s1, e2, 0, value
+                        final_args = [int(raw_args[0]), int(raw_args[1]), int(raw_args[2]), 0, float(raw_args[3])]
+                    elif len(raw_args) == 2:
+                        # e1, value
+                        final_args = [int(raw_args[0]), float(raw_args[1])]
+                    elif len(raw_args) == 5:
+                        # e1, s1, e2, s2, value
+                        final_args = [int(raw_args[0]), int(raw_args[1]), int(raw_args[2]), int(raw_args[3]), float(raw_args[4])]
+                    else:
+                        yield idx, ctype, None, f"Invalid args for Distance (got {len(raw_args)})"
+                        continue
+
+                elif ctype in ["Angle", "Radius", "Diameter"]:
+                    # Just ensure right types
+                    # Angle: [e1, val] or [e1, e2, val]
+                    # Radius/Diameter: [e1, val]
+                    final_args = [float(x) if i == len(raw_args)-1 else int(x) for i, x in enumerate(raw_args)]
+
+                else:
+                    # Pass through other types, ensuring int for indices
+                    final_args = [int(x) for x in raw_args]
+
+            else:
+                # Qwen3 format: resolve from keys
+                e1 = c.get("entity1")
+                s1 = c.get("subnode1")
+                e2 = c.get("entity2")
+                s2 = c.get("subnode2")
+                e3 = c.get("entity3")
+                s3 = c.get("subnode3")
+
+                # --- Value Recomputation for Dimensional Constraints ---
+                value = None
+                if ctype in ["Distance", "Angle", "Radius", "Diameter"]:
+                    # ALWAYS recompute value
+                    value = compute_constraint_value(ctype, primitives, e1, s1, e2, s2)
+                    if value is None:
+                        yield idx, ctype, None, f"Failed to compute value for {ctype}"
+                        continue # Skip if computation fails
+
+                # --- Type Logic ---
+                if ctype == "Coincident":
+                    if e1 is not None and s1 is not None and e2 is not None and s2 is not None:
+                        final_args = [int(e1), int(s1), int(e2), int(s2)]
+                    else:
+                        yield idx, ctype, None, "Missing args for Coincident"
+                        continue
+
+                elif ctype == "Tangent":
+                    if s1 is not None and s2 is not None:
+                        final_args = [int(e1), int(s1), int(e2), int(s2)]
+                    elif e1 is not None and e2 is not None:
+                        final_args = [int(e1), int(e2)]
+                    else:
+                        yield idx, ctype, None, "Missing args for Tangent"
+                        continue
+
+                elif ctype == "TangentViaPoint":
+                    if all(v is not None for v in [e1, e2, e3, s3]):
+                        final_args = [int(e1), int(e2), int(e3), int(s3)]
+                    else:
+                        yield idx, ctype, None, "Missing args for TangentViaPoint"
+                        continue
+
+                elif ctype == "Concentric":
+                    if e1 is not None and e2 is not None:
+                        final_ctype = "Coincident"
+                        final_args = [int(e1), 3, int(e2), 3]
+                    else:
+                        yield idx, ctype, None, "Missing args for Concentric"
+                        continue
+
+                elif ctype in ["Horizontal", "Vertical"]:
+                    if e2 is not None and s1 is not None and s2 is not None:
+                        final_args = [int(e1), int(s1), int(e2), int(s2)]
+                    elif e1 is not None:
+                        final_args = [int(e1)]
+                    else:
+                        yield idx, ctype, None, f"Missing args for {ctype}"
+                        continue
+
+                elif ctype in ["Parallel", "Perpendicular", "Equal"]:
+                    if e1 is not None and e2 is not None:
+                        final_args = [int(e1), int(e2)]
+                    else:
+                        yield idx, ctype, None, f"Missing args for {ctype}"
+                        continue
+
+                elif ctype == "PointOnObject":
+                    if e1 is not None and s1 is not None and e2 is not None:
+                        final_args = [int(e1), int(s1), int(e2)]
+                    else:
+                        yield idx, ctype, None, "Missing args for PointOnObject"
+                        continue
+
+                elif ctype == "Symmetric":
+                    if all(v is not None for v in [e1, s1, e2, s2, e3]):
+                        final_args = [int(e1), int(s1), int(e2), int(s2), int(e3)]
+                        if s3 is not None:
+                            final_args.append(int(s3))
+                    else:
+                        yield idx, ctype, None, "Missing args for Symmetric"
+                        continue
+
+                elif ctype == "Distance":
+                    if e2 is not None and s1 is not None and s2 is not None:
+                        # Point-Point
+                        final_args = [int(e1), int(s1), int(e2), int(s2), float(value)]
+                    elif e2 is not None and s1 is not None:
+                        # Point-Line (s2 implicit 0)
+                        final_args = [int(e1), int(s1), int(e2), 0, float(value)]
+                    elif e1 is not None:
+                        # Line Length
+                         final_args = [int(e1), float(value)]
+                    else:
+                        yield idx, ctype, None, "Missing args for Distance"
+                        continue
+
+                elif ctype == "Angle":
+                    if e2 is not None:
+                        final_args = [int(e1), int(e2), float(value)]
+                    elif e1 is not None:
+                        final_args = [int(e1), float(value)]
+                    else:
+                        yield idx, ctype, None, "Missing args for Angle"
+                        continue
+
+                elif ctype in ["Radius", "Diameter"]:
+                    if e1 is not None:
+                        final_args = [int(e1), float(value)]
+                    else:
+                        yield idx, ctype, None, f"Missing args for {ctype}"
+                        continue
+
+                else:
+                    # Unknown type
+                    yield idx, ctype, None, f"Unknown constraint type: {ctype}"
+                    continue
+
+            # --- 2. Yield Result ---
+            yield idx, final_ctype, final_args, None
+
+        except Exception as e:
+            # If any parsing fails, skip this constraint but log/track failure if needed
+            yield idx, ctype, None, f"Exception parsing constraint: {e}"
+
+
+
+# ============================================================
+# FreeCAD Interaction (Builders)
+# ============================================================
+
+def add_primitives_to_sketch(primitives: list, fc_sketch: "Sketcher.SketchObject") -> None:
+    """Add primitives to FreeCAD sketch object.
+
+    Args:
+        primitives: List of primitive dicts
+        fc_sketch: FreeCAD sketch object to add primitives to
+    """
+    for ptype, args, is_const, error_msg in generate_freecad_primitives(primitives):
+        if error_msg:
+            print(f"ERROR: Invalid primitive: {error_msg}")
+            continue
+
+        try:
+            if ptype == "LineSegment":
+                # args: [sx, sy, 0, ex, ey, 0]
+                sx, sy, sz, ex, ey, ez = args
+                fc_sketch.addGeometry(
+                    Part.LineSegment(FreeCAD.Vector(sx, sy, sz), FreeCAD.Vector(ex, ey, ez)),
+                    is_const
+                )
+            elif ptype == "Point":
+                # args: [x, y, 0]
+                x, y, z = args
+                fc_sketch.addGeometry(Part.Point(FreeCAD.Vector(x, y, z)), is_const)
+            elif ptype == "Circle":
+                # args: [cx, cy, 0, 0, 0, 1, r]
+                cx, cy, cz, nx, ny, nz, r = args
+                fc_sketch.addGeometry(
+                    Part.Circle(FreeCAD.Vector(cx, cy, cz), FreeCAD.Vector(nx, ny, nz), r),
+                    is_const
+                )
+            elif ptype == "ArcOfCircle":
+                # args: [sx, sy, 0, mx, my, 0, ex, ey, 0]
+                sx, sy, sz, mx, my, mz, ex, ey, ez = args
+                arc = Part.ArcOfCircle(
+                    FreeCAD.Vector(sx, sy, sz),
+                    FreeCAD.Vector(mx, my, mz),
+                    FreeCAD.Vector(ex, ey, ez)
+                )
+                fc_sketch.addGeometry(arc, is_const)
+        except Exception:
+            print(f"ERROR: Failed to add primitive: {ptype}, {args}")
+            pass
+
+
+def add_constraints_to_sketch(
+    primitives: list,
+    constraints: list,
+    fc_sketch: "Sketcher.SketchObject"
+) -> tuple[dict[int, int], list[int]]:
+    """Add constraints to FreeCAD sketch object.
+
+    Args:
+        primitives: List of primitive dicts
+        constraints: List of constraint dicts from Qwen3 output
+        fc_sketch: FreeCAD sketch object to add constraints to
+
+    Returns:
+        Tuple of:
+          - Mapping from FreeCAD constraint index to original constraint index
+          - List of indices of constraints that failed to add (malformed/error)
+    """
+    constraint_mapping = {}
+    failed_indices = []
+
+    # Use the shared generator to get normalized constraints
+    for idx, ctype, args, error_msg in generate_freecad_constraints(primitives, constraints):
+        if error_msg:
+            # print(f"ERROR: Invalid constraint {idx}: {error_msg}")
+            failed_indices.append(idx)
+            continue
+
+        count_before = int(fc_sketch.ConstraintCount)
+
+        try:
+            fc_sketch.addConstraint(Sketcher.Constraint(ctype, *args))
+        except Exception:
+            # print(f"ERROR: FAILED to add constraint {idx}: {ctype}, {args}")
+            failed_indices.append(idx)
+            pass  # Skip constraints that fail to add
+
+
+        count_after = int(fc_sketch.ConstraintCount)
+        # If count increased, map the new indices
+        if count_after > count_before:
+            for i in range(count_before, count_after):
+                constraint_mapping[i] = idx
+        else:
+            # If count didn't increase but it wasn't caught by exception (e.g. logic error), treat as failed if not already added
+            pass
+
+    return constraint_mapping, failed_indices
+
+
+def export_to_freecad_script(primitives: list, constraints: list, output_path: str):
+    """
+    Generates a FreeCAD Python script to create a sketch with given primitives and constraints.
+    """
+    lines = []
+    lines.append("import FreeCAD")
+    lines.append("import Part")
+    lines.append("import Sketcher")
+    lines.append("")
+    lines.append("doc = FreeCAD.newDocument('SketchDoc')")
+    lines.append("body = doc.addObject('PartDesign::Body', 'Body')")
+    lines.append("fc_sketch = body.newObject('Sketcher::SketchObject', 'Sketch')")
+    lines.append("xy_plane = body.Origin.OriginFeatures[3]")
+    lines.append("fc_sketch.AttachmentSupport = xy_plane")
+    lines.append("fc_sketch.MapMode = 'FlatFace'")
+    lines.append("")
+    lines.append("# --- Add Primitives ---")
+    for ptype, args, is_const, error_msg in generate_freecad_primitives(primitives):
+        if error_msg:
+            lines.append(f"# ERROR: Invalid primitive: {error_msg}, Type: {ptype}")
+            continue
+
+        if ptype == "LineSegment":
+            # args: [sx, sy, 0, ex, ey, 0]
+            sx, sy, sz, ex, ey, ez = args
+            lines.append(f"fc_sketch.addGeometry(Part.LineSegment(FreeCAD.Vector({sx}, {sy}, {sz}), FreeCAD.Vector({ex}, {ey}, {ez})), {is_const})")
+        elif ptype == "Point":
+            # args: [x, y, 0]
+            x, y, z = args
+            lines.append(f"fc_sketch.addGeometry(Part.Point(FreeCAD.Vector({x}, {y}, {z})), {is_const})")
+        elif ptype == "Circle":
+            # args: [cx, cy, 0, 0, 0, 1, r]
+            cx, cy, cz, nx, ny, nz, r = args
+            lines.append(f"fc_sketch.addGeometry(Part.Circle(FreeCAD.Vector({cx}, {cy}, {cz}), FreeCAD.Vector({nx}, {ny}, {nz}), {r}), {is_const})")
+        elif ptype == "ArcOfCircle":
+             # args: [sx, sy, 0, mx, my, 0, ex, ey, 0]
+            sx, sy, sz, mx, my, mz, ex, ey, ez = args
+            lines.append(f"try:")
+            lines.append(f"    arc = Part.ArcOfCircle(FreeCAD.Vector({sx}, {sy}, {sz}), FreeCAD.Vector({mx}, {my}, {mz}), FreeCAD.Vector({ex}, {ey}, {ez}))")
+            lines.append(f"    fc_sketch.addGeometry(arc, {is_const})")
+            lines.append(f"except Exception:")
+            lines.append(f"    print(f'ERROR: Failed to add arc: {ptype}, {args}')")
+            lines.append(f"    pass")
+
+    lines.append("")
+    lines.append("# --- Add Constraints ---")
+
+    # Use shared generator for normalized constraints
+    for idx, ctype, args, error_msg in generate_freecad_constraints(primitives, constraints):
+        if error_msg:
+            # args contains error message (or empty if None)
+            lines.append(f"# ERROR: Invalid constraint {idx}: {error_msg}")
+            continue
+
+        # Convert args to string representation for script
+        args_str = ", ".join(map(str, args))
+        lines.append(f"fc_sketch.addConstraint(Sketcher.Constraint('{ctype}', {args_str}))")
+
+    lines.append("")
+    lines.append("doc.recompute()")
+    lines.append("FreeCAD.ActiveDocument.recompute()")
+
+    with open(output_path, 'w') as f:
+        f.write("\n".join(lines))
+
+    print(f"Exported to {output_path}")
+
+
+# ============================================================
+# Verification & Validation
+# ============================================================
+
+def extract_geometry_coords(fc_sketch: "Sketcher.SketchObject") -> dict[int, list[tuple[float, float]]]:
+    """Extract coordinates from all geometries in a FreeCAD sketch.
+
+    Returns dict mapping geo_id -> list of (x, y) points.
+    """
+    coords = {}
+    for geo_id, geo in enumerate(fc_sketch.Geometry):
+        geo_type = type(geo).__name__
+        points = []
+
+        if geo_type == 'Point':
+            points.append((geo.X, geo.Y))
+        elif geo_type == 'LineSegment':
+            sp = geo.StartPoint
+            ep = geo.EndPoint
+            points.append((sp.x, sp.y))
+            points.append((ep.x, ep.y))
+        elif geo_type in ('Circle', 'ArcOfCircle'):
+            if hasattr(geo, 'StartPoint'):
+                sp = geo.StartPoint
+                points.append((sp.x, sp.y))
+            if hasattr(geo, 'EndPoint'):
+                ep = geo.EndPoint
+                points.append((ep.x, ep.y))
+            c = geo.Center
+            points.append((c.x, c.y))
+
+        coords[geo_id] = points
+
+    return coords
+
+
+def validate_geometry_from_lists(
+    primitives: list,
+    constraints: list,
+    threshold_mm: float = 10.0,
+) -> tuple[float, int, bool, str]:
+    """
+    Validate geometry impact of constraints by comparing before/after.
+
+    This function:
+    1. Add primitives only to FreeCAD → capture coordinates
+    2. Add constraints → capture coordinates
+    3. Compare the two to see how much constraints move geometry
+
+    Args:
+        primitives: List of primitive dicts
+        constraints: List of constraint dicts from Qwen3 output
+        threshold_mm: Maximum allowed deviation in mm
+
+    Returns:
+        Tuple of (max_deviation, max_deviation_primitive_idx, all_passed, error_message)
+    """
+    doc = None
+    max_deviation = 0.0
+    max_deviation_primitive_idx = -1
+    all_passed = True
+    error_msg = ""
+
+    try:
+        # Create FreeCAD document
+        doc = FreeCAD.newDocument("GeoValidationDoc")
+        body = doc.addObject('PartDesign::Body', 'Body')
+        fc_sketch = body.newObject('Sketcher::SketchObject', 'Sketch')
+        xy_plane = body.Origin.OriginFeatures[3]
+        fc_sketch.AttachmentSupport = xy_plane
+        fc_sketch.MapMode = 'FlatFace'
+
+        # Step 1: Add primitives only
+        add_primitives_to_sketch(primitives, fc_sketch)
+        doc.recompute()
+
+        # Capture geometry BEFORE constraints
+        coords_before = extract_geometry_coords(fc_sketch)
+        geo_types = {i: type(geo).__name__ for i, geo in enumerate(fc_sketch.Geometry)}
+
+        # Step 2: Add constraints
+        add_constraints_to_sketch(primitives, constraints, fc_sketch)
+        doc.recompute()
+
+        # Capture geometry AFTER constraints
+        coords_after = extract_geometry_coords(fc_sketch)
+
+        # Step 3: Compare before and after
+        for geo_id in coords_before:
+            before = coords_before[geo_id]
+            after = coords_after.get(geo_id, [])
+
+            if len(before) != len(after):
+                continue
+
+            for (bx, by), (ax, ay) in zip(before, after):
+                deviation = ((bx - ax) ** 2 + (by - ay) ** 2) ** 0.5
+                if deviation > max_deviation:
+                    max_deviation = deviation
+                    max_deviation_primitive_idx = geo_id
+
+        all_passed = max_deviation < threshold_mm
+
+    except Exception:
+        error_msg = "ERROR: " + traceback.format_exc()
+        all_passed = False
+
+    finally:
+        if doc is not None:
+            try:
+                FreeCAD.closeDocument(doc.Name)
+            except:
+                pass
+
+    return max_deviation, max_deviation_primitive_idx, all_passed, error_msg
+
+
+@dataclass
+class VerificationResult:
+    """Verification result from FreeCAD solver."""
+    success: bool = False
+    dof: int = -1
+    status: str = "Unknown"
+    malformed_count: int = 0
+    conflicting_count: int = 0
+    redundant_count: int = 0
+    solver_converged: bool = True  # True if solver found a solution
+    dof_decreased: bool = True  # True if Qwen3 DoF <= GT DoF (improved or same)
+    geo_max_deviation: float = -1.0
+    geo_passed: bool = False
+    error: str | None = None
+
+    def is_valid(self) -> bool:
+        """Check if constraints are valid (no issues and geo passed)."""
+        return (
+            self.success and
+            self.malformed_count == 0 and
+            self.conflicting_count == 0 and
+            self.redundant_count == 0 and
+            self.solver_converged and
+            self.dof_decreased and
+            self.geo_passed
+        )
+
+    def summary(self) -> str:
+        """Return a short summary string."""
+        if self.error:
+            return f"ERROR: {self.error[:50]}"
+        issues = []
+        if self.malformed_count > 0:
+            issues.append(f"malformed={self.malformed_count}")
+        if self.conflicting_count > 0:
+            issues.append(f"conflicting={self.conflicting_count}")
+        if self.redundant_count > 0:
+            issues.append(f"redundant={self.redundant_count}")
+        if not self.solver_converged:
+            issues.append("solver_fail")
+        if not self.geo_passed:
+            issues.append(f"geo_fail(dev={self.geo_max_deviation:.1f}mm)")
+        if not self.dof_decreased:
+            issues.append("dof_increased")
+        issue_str = ", ".join(issues) if issues else "OK"
+        return f"DoF={self.dof}, {issue_str}"
+
+
+def verify_constraints(
+    primitives: list,
+    constraints: list,
+    geo_threshold_mm: float = 10.0,
+) -> VerificationResult:
+    """
+    Verify constraints using FreeCAD solver and geometry validation.
+
+    This function performs two checks:
+    1. Solver status check: malformed/conflicting/redundant constraints
+    2. Geometry preservation check: primitives don't move too much after constraints
+
+    Args:
+        primitives: List of primitive dicts
+        constraints: List of constraint dicts from Qwen3 output
+        geo_threshold_mm: Maximum allowed geometry deviation in mm
+
+    Returns:
+        VerificationResult with detailed status
+    """
+    result = VerificationResult()
+    doc = None
+
+    try:
+        # Step 1: Create FreeCAD document and add primitives + constraints
+        doc = FreeCAD.newDocument("VerificationDoc")
+        body = doc.addObject('PartDesign::Body', 'Body')
+        fc_sketch = body.newObject('Sketcher::SketchObject', 'Sketch')
+        xy_plane = body.Origin.OriginFeatures[3]
+        fc_sketch.AttachmentSupport = xy_plane
+        fc_sketch.MapMode = 'FlatFace'
+
+        # Add primitives
+        add_primitives_to_sketch(primitives, fc_sketch)
+        doc.recompute()
+
+        # Add constraints
+        _mapping, failed_indices = add_constraints_to_sketch(primitives, constraints, fc_sketch)
+        doc.recompute()
+
+        # Step 2: Get solver status
+        fc_sketch.solve()
+        status = fc_sketch.getSolverStatus()
+
+        result.success = True
+        result.dof = status['DoF']
+        result.status = status['Status']
+        # Malformed = Reported by solver + Failed to add
+        result.malformed_count = len(status.get('MalformedConstraints', [])) + len(failed_indices)
+        result.conflicting_count = len(status.get('ConflictingConstraints', []))
+        result.redundant_count = len(status.get('RedundantConstraints', []))
+        # Check if solver converged (Status = 'Converged' means OK)
+        result.solver_converged = (status.get('Status', '') == 'Converged')
+
+    except Exception:
+        result.error = "ERROR: " + traceback.format_exc()
+        result.success = False
+        result.solver_converged = False
+        result.geo_passed = False
+        result.geo_max_deviation = -1.0
+
+    finally:
+        if doc is not None:
+            try:
+                FreeCAD.closeDocument(doc.Name)
+            except:
+                pass
+
+    # Step 3: Geometry validation (only if solver check passed)
+    if result.success and result.malformed_count == 0 and result.conflicting_count == 0:
+        max_dev, _max_dev_prim_idx, geo_passed, geo_error = validate_geometry_from_lists(
+            primitives, constraints, geo_threshold_mm
+        )
+        result.geo_max_deviation = max_dev
+        result.geo_passed = geo_passed
+        if geo_error:
+            result.error = geo_error
+    else:
+        result.geo_passed = False
+        result.geo_max_deviation = -1.0
+
+    return result
+
+
+def run_solver_tool(primitives_list: list, constraints_json_list: list, geo_threshold_mm: float = 10.0) -> str:
+    """Run FreeCAD solver for the provided constraints and return status JSON string."""
+    doc = None
+    try:
+        # Create temporary document
+        doc = FreeCAD.newDocument("SolverToolDoc")
+        body = doc.addObject('PartDesign::Body', 'Body')
+        fc_sketch = body.newObject('Sketcher::SketchObject', 'Sketch')
+        xy_plane = body.Origin.OriginFeatures[3]
+        fc_sketch.AttachmentSupport = xy_plane
+        fc_sketch.MapMode = 'FlatFace'
+
+        # Add primitives and constraints
+        add_primitives_to_sketch(primitives_list, fc_sketch)
+        doc.recompute()
+
+        # We need the mapping to convert 1-based FC indices back to 0-based input indices
+        constraint_mapping, failed_indices = add_constraints_to_sketch(primitives_list, constraints_json_list, fc_sketch)
+        doc.recompute()
+
+        # Solve
+        fc_sketch.solve()
+        status = fc_sketch.getSolverStatus()
+
+        # Helper to convert FC 1-based indices to 0-based input indices
+        fc_to_orig = constraint_mapping
+
+        def convert_indices(fc_indices):
+            return [fc_to_orig.get(idx - 1, -1) for idx in fc_indices if (idx - 1) in fc_to_orig]
+
+        def convert_groups(groups):
+            return [convert_indices(group) for group in groups]
+
+        # Combine malformed indices (both reported by solver and failed to add)
+        malformed_from_solver = convert_indices(status.get('MalformedConstraints', []))
+        all_malformed = list(set(malformed_from_solver + failed_indices))
+        all_malformed.sort()
+
+        # Construct response dict
+        response = {
+            'DoF': status['DoF'],
+            'Status': status['Status'],
+            'ConflictingConstraints': convert_indices(status.get('ConflictingConstraints', [])),
+            'RedundantConstraints': convert_indices(status.get('RedundantConstraints', [])),
+            'ConflictGroups': convert_groups(status.get('ConflictGroups', [])),
+            'MalformedConstraints': all_malformed
+        }
+
+        # --- Geometry Validation ---
+        max_dev, max_dev_primitive_idx, geo_passed, geo_error = validate_geometry_from_lists(
+            primitives_list, constraints_json_list, geo_threshold_mm
+        )
+
+        response['GeometryValidation'] = {
+            'MaxDeviation_mm': round(max_dev, 2),
+            'MaxDeviationPrimitive': max_dev_primitive_idx,
+            'Passed': geo_passed,
+            'Threshold_mm': geo_threshold_mm
+        }
+        if geo_error:
+            response['GeometryValidation']['Error'] = geo_error
+
+    except Exception:
+        response = {'Error': traceback.format_exc()}
+
+    finally:
+        if doc:
+            try:
+                FreeCAD.closeDocument(doc.Name)
+            except:
+                pass
+
+    return json.dumps(response, indent=2)
+
+
+def cleanup_constraints_from_lists(
+    primitives: list[dict[str, Any]],
+    constraints: list[dict[str, Any]],
+    max_cleanup_iters: int = 10,
+    prefix_size: int = 0,
+) -> tuple[list[dict[str, Any]], VerificationResult]:
+    """
+    Remove malformed/conflicting/redundant constraints iteratively.
+
+    This function uses FreeCAD solver to detect problematic constraints
+    and removes them one by one until no issues remain or max iterations reached.
+
+    Args:
+        primitives: List of primitive dicts
+        constraints: List of constraint dicts
+        max_cleanup_iters: Maximum cleanup iterations
+        prefix_size: Number of constraints at the start that should NOT be removed (GT prefix)
+
+    Returns:
+        Tuple of (cleaned_constraints, final_verification_result)
+    """
+    current_constraints = constraints.copy()
+    final_result = VerificationResult()
+
+    for iter_idx in range(max_cleanup_iters):
+        doc = None
+        try:
+            # Create FreeCAD document
+            doc = FreeCAD.newDocument(f"CleanupDoc{iter_idx}")
+            body = doc.addObject('PartDesign::Body', 'Body')
+            fc_sketch = body.newObject('Sketcher::SketchObject', 'Sketch')
+            xy_plane = body.Origin.OriginFeatures[3]
+            fc_sketch.AttachmentSupport = xy_plane
+            fc_sketch.MapMode = 'FlatFace'
+
+            # Add primitives
+            add_primitives_to_sketch(primitives, fc_sketch)
+            doc.recompute()
+
+            # Add constraints with mapping
+            constraint_mapping, failed_indices = add_constraints_to_sketch(primitives, current_constraints, fc_sketch)
+            doc.recompute()
+
+            # Get solver status
+            fc_sketch.solve()
+            status = fc_sketch.getSolverStatus()
+
+            # Build reverse mapping: original constraint index -> FC constraint indices
+            fc_to_orig: dict[int, int] = constraint_mapping  # FC index -> original index
+
+            # Collect problem indices (original constraint indices)
+            malformed_fc = status.get('MalformedConstraints', [])
+            conflicting_fc = status.get('ConflictingConstraints', [])
+            redundant_fc = status.get('RedundantConstraints', [])
+
+            # Map FC indices back to original constraint indices
+            # FC getSolverStatus returns 1-based indices
+
+            # Malformed: remove all (these are syntax errors)
+            malformed_orig_indices = set()
+            for idx in failed_indices:
+                if idx >= prefix_size:
+                    malformed_orig_indices.add(idx)
+
+            for fc_idx in malformed_fc:
+                orig_idx = fc_to_orig.get(fc_idx - 1)  # Convert 1-based to 0-based
+                if orig_idx is not None and orig_idx >= prefix_size:
+                    malformed_orig_indices.add(orig_idx)
+
+            # Conflicting: collect all, but will remove only last one
+            conflicting_orig_indices = set()
+            for fc_idx in conflicting_fc:
+                orig_idx = fc_to_orig.get(fc_idx - 1)
+                if orig_idx is not None and orig_idx >= prefix_size:
+                    conflicting_orig_indices.add(orig_idx)
+
+            # Redundant: collect all, but will remove only last one
+            redundant_orig_indices = set()
+            for fc_idx in redundant_fc:
+                orig_idx = fc_to_orig.get(fc_idx - 1)
+                if orig_idx is not None and orig_idx >= prefix_size:
+                    redundant_orig_indices.add(orig_idx)
+
+            # Build final result
+            final_result = VerificationResult(
+                success=True,
+                dof=status['DoF'],
+                status=status['Status'],
+                malformed_count=len(malformed_fc) + len(failed_indices),
+                conflicting_count=len(conflicting_fc),
+                redundant_count=len(redundant_fc),
+            )
+
+            FreeCAD.closeDocument(doc.Name)
+            doc = None
+
+            # Prioritize: malformed > conflicting > redundant
+            # Malformed: remove all at once (syntax errors)
+            # Conflicting/Redundant: remove only highest index (one at a time)
+            if malformed_orig_indices:
+                indices_to_remove = malformed_orig_indices
+            elif conflicting_orig_indices:
+                # Remove only the highest index conflicting constraint
+                indices_to_remove = {max(conflicting_orig_indices)}
+            elif redundant_orig_indices:
+                # Remove only the highest index redundant constraint
+                indices_to_remove = {max(redundant_orig_indices)}
+            else:
+                # No problems, done
+                break
+
+            # Remove problematic constraints
+            current_constraints = [
+                c for i, c in enumerate(current_constraints)
+                if i not in indices_to_remove
+            ]
+
+        except Exception:
+            if final_result is None:
+                final_result = VerificationResult(error="ERROR: " + traceback.format_exc())
+            break
+
+        finally:
+            if doc is not None:
+                try:
+                    FreeCAD.closeDocument(doc.Name)
+                except:
+                    pass
+
+    return current_constraints, final_result
+
+
+def comment_out_file(file_path: str) -> None:
+    """Comment out all lines in a Python file.
+
+    For lines that are already comments, add another # to make # # [Comment].
+    """
+    with open(file_path, 'r') as f:
+        content = f.read()
+
+    lines = content.split('\n')
+    commented_lines = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            # Empty line - keep as is
+            commented_lines.append(line)
+        else:
+            # Add # prefix to all non-empty lines (including existing comments)
+            commented_lines.append('# ' + line)
+
+    with open(file_path, 'w') as f:
+        f.write('\n'.join(commented_lines))
+
+
+
+# ============================================================
+# Main Workflow
+# ============================================================
+
 def prepare_prompts(primitives_list: list, constraints_list: list, image_path_list: str | list[str], max_turns: int):
 
     if isinstance(image_path_list, str):
@@ -568,6 +1500,11 @@ Even though you infer the parameter `Value`, we discard them and instead calcula
 - Symmetric(Entity1, Subnode1, Entity2, Subnode2, Entity3, Subnode3)
     * Constrains Entity1.Subnode1 and Entity2.Subnode2 to be symmetric with respect to Entity3.Subnode3.
     * Entity3 can be a Point (symmetry point) or a Line (symmetry axis).
+    * Examples:
+        - Two points and a symmetry line (you can omit Subnode3 in this case): Symmetric(Line1, PointOfLine1, Line2, PointOfLine2, SymmetryLine)
+        - Two points and a symmetry point: Symmetric(Line1, PointOfLine1, Line2, PointOfLine2, LineS, PointOfLineS)
+        - A line and a symmetry point: Symmetric(Line, 1, Line, 2, LineS, PointOfLineS)
+    * NOTE: Entity1.Subnode1 and Entity2.Subnode2 must be points, so Subnode1/2 must NOT be 0 if Entity1/2 is not a point.
 
 2. Dimensional Constraints (Use only when necessary for fully constraining the sketch):
 - Distance(Entity1, Subnode1, Entity2, Subnode2, Value)
@@ -577,7 +1514,7 @@ Even though you infer the parameter `Value`, we discard them and instead calcula
     * Fixes distance between a point and a line (Entity2).
     * Example: Distance(Point, 1, Line, Value)
 - Distance(Entity1, Value)
-    * Fixes length of a line or distance of a line.
+    * Fixes length of a line.
     * Example: Distance(Line, Value)
 - Diameter(Entity1, Value)
     * Fixes diameter of Circle or Arc.
@@ -709,6 +1646,11 @@ Along with the input primitives and partial constraints, we also provide the ini
 
 IMPORTANT: If the output doesn't conform to the JSON format, we return an error message.
 Immediately fix the error based on the message and re-submit your answer.
+
+IMPORTANT: Even if you achieve DoF=2, we reject your solution if one or more constraints are judged as malformed, conflicting, or redundant.
+Therefore, prioritize no malformed, conflicting, or redundant status. Upon that, focus on reducing DoF.
+If you see a lot of conflicting constraints, first identify the ones that most frequently appear in the ConflictGroups, and try deleting it.
+If you still don't see any improvements, it may be recommended that you start over from the initial constraints.
 
 IMPORTANT: If you achieve the desirable solver status, or judge that it's impossible to improve your solution further,
 encircle your solution JSON array with the <final> tag:
@@ -886,862 +1828,10 @@ Use the 2D sketch image as your visual reference.
     return messages
 
 
-def parse_solver_call_json(call_content: str) -> tuple[list, str | None]:
-    """Parse JSON for CAD solver call.
 
-    Checks for common invalid patterns before parsing:
-    - Abbreviations like '...'
-    - JS-style comments like '// comment'
-
-    Args:
-        call_content: Raw content extracted after </think> tags
-
-    Returns:
-        Tuple of (constraints_list, None) on success, or (None, error_msg) on failure
-    """
-    # Check for abbreviations like "..."
-    if re.search(r'\.\.\.|…', call_content):
-        return [], "You MUST output ALL constraints explicitly. Abbreviations '...' are NOT allowed."
-
-    # Check for JS-style comments (lines starting with //)
-    if re.search(r'^\s*//', call_content, re.MULTILINE):
-        return [], "JSON does NOT support comments. Remove all '//' comment lines from your output."
-
-    # Attempt JSON parse
-    try:
-        constraints = json.loads(call_content)
-        if not isinstance(constraints, list):
-            return [], f"Expected a JSON array, got {type(constraints).__name__}."
-        return constraints, None
-    except json.JSONDecodeError as e:
-        error_detail = f"Invalid JSON syntax: {str(e)[:50]}. Check for trailing commas, missing quotes, or other syntax errors."
-        return [], error_detail
-
-
-def run_solver_tool(primitives_list: list, constraints_json_list: list, geo_threshold_mm: float = 10.0) -> str:
-    """Run FreeCAD solver for the provided constraints and return status JSON string."""
-    doc = None
-    try:
-        # Create temporary document
-        doc = FreeCAD.newDocument("SolverToolDoc")
-        body = doc.addObject('PartDesign::Body', 'Body')
-        fc_sketch = body.newObject('Sketcher::SketchObject', 'Sketch')
-        xy_plane = body.Origin.OriginFeatures[3]
-        fc_sketch.AttachmentSupport = xy_plane
-        fc_sketch.MapMode = 'FlatFace'
-
-        # Add primitives and constraints
-        add_primitives_to_sketch(primitives_list, fc_sketch)
-        doc.recompute()
-
-        # We need the mapping to convert 1-based FC indices back to 0-based input indices
-        constraint_mapping, failed_indices = add_constraints_to_sketch(primitives_list, constraints_json_list, fc_sketch)
-        doc.recompute()
-
-        # Solve
-        fc_sketch.solve()
-        status = fc_sketch.getSolverStatus()
-
-        # Helper to convert FC 1-based indices to 0-based input indices
-        fc_to_orig = constraint_mapping
-
-        def convert_indices(fc_indices):
-            return [fc_to_orig.get(idx - 1, -1) for idx in fc_indices if (idx - 1) in fc_to_orig]
-
-        def convert_groups(groups):
-            return [convert_indices(group) for group in groups]
-
-        # Combine malformed indices (both reported by solver and failed to add)
-        malformed_from_solver = convert_indices(status.get('MalformedConstraints', []))
-        all_malformed = list(set(malformed_from_solver + failed_indices))
-        all_malformed.sort()
-
-        # Construct response dict
-        response = {
-            'DoF': status['DoF'],
-            'Status': status['Status'],
-            'ConflictingConstraints': convert_indices(status.get('ConflictingConstraints', [])),
-            'RedundantConstraints': convert_indices(status.get('RedundantConstraints', [])),
-            'ConflictGroups': convert_groups(status.get('ConflictGroups', [])),
-            'MalformedConstraints': all_malformed
-        }
-
-        # --- Geometry Validation ---
-        max_dev, max_dev_primitive_idx, geo_passed, geo_error = validate_geometry_from_lists(
-            primitives_list, constraints_json_list, geo_threshold_mm
-        )
-
-        response['GeometryValidation'] = {
-            'MaxDeviation_mm': round(max_dev, 2),
-            'MaxDeviationPrimitive': max_dev_primitive_idx,
-            'Passed': geo_passed,
-            'Threshold_mm': geo_threshold_mm
-        }
-        if geo_error:
-            response['GeometryValidation']['Error'] = geo_error
-
-    except Exception:
-        response = {'Error': traceback.format_exc()}
-
-    finally:
-        if doc:
-            try:
-                FreeCAD.closeDocument(doc.Name)
-            except:
-                pass
-
-    return json.dumps(response, indent=2)
-
-
-@dataclass
-class VerificationResult:
-    """Verification result from FreeCAD solver."""
-    success: bool = False
-    dof: int = -1
-    status: str = "Unknown"
-    malformed_count: int = 0
-    conflicting_count: int = 0
-    redundant_count: int = 0
-    solver_converged: bool = True  # True if solver found a solution
-    dof_decreased: bool = True  # True if Qwen3 DoF <= GT DoF (improved or same)
-    geo_max_deviation: float = -1.0
-    geo_passed: bool = False
-    error: str | None = None
-
-    def is_valid(self) -> bool:
-        """Check if constraints are valid (no issues and geo passed)."""
-        return (
-            self.success and
-            self.malformed_count == 0 and
-            self.conflicting_count == 0 and
-            self.redundant_count == 0 and
-            self.solver_converged and
-            self.dof_decreased and
-            self.geo_passed
-        )
-
-    def summary(self) -> str:
-        """Return a short summary string."""
-        if self.error:
-            return f"ERROR: {self.error[:50]}"
-        issues = []
-        if self.malformed_count > 0:
-            issues.append(f"malformed={self.malformed_count}")
-        if self.conflicting_count > 0:
-            issues.append(f"conflicting={self.conflicting_count}")
-        if self.redundant_count > 0:
-            issues.append(f"redundant={self.redundant_count}")
-        if not self.solver_converged:
-            issues.append("solver_fail")
-        if not self.geo_passed:
-            issues.append(f"geo_fail(dev={self.geo_max_deviation:.1f}mm)")
-        if not self.dof_decreased:
-            issues.append("dof_increased")
-        issue_str = ", ".join(issues) if issues else "OK"
-        return f"DoF={self.dof}, {issue_str}"
-
-
-def extract_geometry_coords(fc_sketch: "Sketcher.SketchObject") -> dict[int, list[tuple[float, float]]]:
-    """Extract coordinates from all geometries in a FreeCAD sketch.
-
-    Returns dict mapping geo_id -> list of (x, y) points.
-    """
-    coords = {}
-    for geo_id, geo in enumerate(fc_sketch.Geometry):
-        geo_type = type(geo).__name__
-        points = []
-
-        if geo_type == 'Point':
-            points.append((geo.X, geo.Y))
-        elif geo_type == 'LineSegment':
-            sp = geo.StartPoint
-            ep = geo.EndPoint
-            points.append((sp.x, sp.y))
-            points.append((ep.x, ep.y))
-        elif geo_type in ('Circle', 'ArcOfCircle'):
-            if hasattr(geo, 'StartPoint'):
-                sp = geo.StartPoint
-                points.append((sp.x, sp.y))
-            if hasattr(geo, 'EndPoint'):
-                ep = geo.EndPoint
-                points.append((ep.x, ep.y))
-            c = geo.Center
-            points.append((c.x, c.y))
-
-        coords[geo_id] = points
-
-    return coords
-
-
-def generate_freecad_primitives(primitives: list):
-    """
-    Generator that parses primitives and yields normalized FreeCAD arguments.
-
-    Yields:
-        Tuple of (primitive_type, args_list, is_construction)
-    """
-    for prim in primitives:
-        ptype = prim.get("type")
-        is_const = prim.get("is_construction", False)
-
-        try:
-            if ptype == "LineSegment":
-                if "start" in prim and "end" in prim:
-                    sx, sy = prim["start"]
-                    ex, ey = prim["end"]
-                    yield "LineSegment", [sx, sy, 0, ex, ey, 0], is_const
-
-            elif ptype == "Point":
-                if "x" in prim and "y" in prim:
-                    x, y = prim["x"], prim["y"]
-                    yield "Point", [x, y, 0], is_const
-
-            elif ptype == "Circle":
-                if "center" in prim and "radius" in prim:
-                    cx, cy = prim["center"]
-                    r = prim["radius"]
-                    yield "Circle", [cx, cy, 0, 0, 0, 1, r], is_const
-
-            elif ptype == "Arc":
-                if "start" in prim and "mid" in prim and "end" in prim:
-                    sx, sy = prim["start"]
-                    mx, my = prim["mid"]
-                    ex, ey = prim["end"]
-                    yield "ArcOfCircle", [sx, sy, 0, mx, my, 0, ex, ey, 0], is_const
-
-        except Exception:
-            # Skip invalid primitives
-            continue
-
-
-def generate_freecad_constraints(primitives: list, constraints: list):
-    """
-    Generator that parses constraints and yields normalized FreeCAD arguments.
-
-    Yields:
-        Tuple of (original_index, constraint_type, args_list)
-
-    Note:
-        - Handles both Qwen3 format (keys) and GT format (args list)
-        - Computes/Recomputes values for Distance, Angle, Radius, Diameter
-        - Normalizes arguments (e.g. s2=0 for Point-Line Distance)
-        - Yields only valid constraints (skips invalid ones)
-    """
-    for idx, c in enumerate(constraints):
-        ctype = c.get("type", "")
-
-        try:
-            # --- 1. Input Source Resolution & Normalization ---
-            final_ctype = ctype
-            final_args = []
-
-            if "args" in c:
-                # GT format: use args directly, but handle specific types
-                raw_args = c.get("args", [])
-
-                # Basic integer conversion for safety
-                if ctype == "Concentric":
-                    # Concentric(e1, e2) -> Coincident(e1, 3, e2, 3)
-                    if len(raw_args) >= 2:
-                        final_ctype = "Coincident"
-                        final_args = [int(raw_args[0]), 3, int(raw_args[1]), 3]
-                    else:
-                        continue # Skip invalid
-
-                elif ctype == "Distance":
-                    # Check for 4-arg case (Point-Line) and normalize
-                    if len(raw_args) == 4:
-                        # e1, s1, e2, value -> e1, s1, e2, 0, value
-                        final_args = [int(raw_args[0]), int(raw_args[1]), int(raw_args[2]), 0, float(raw_args[3])]
-                    elif len(raw_args) == 2:
-                        # e1, value
-                        final_args = [int(raw_args[0]), float(raw_args[1])]
-                    elif len(raw_args) == 5:
-                        # e1, s1, e2, s2, value
-                        final_args = [int(raw_args[0]), int(raw_args[1]), int(raw_args[2]), int(raw_args[3]), float(raw_args[4])]
-                    else:
-                        continue
-
-                elif ctype in ["Angle", "Radius", "Diameter"]:
-                    # Just ensure right types
-                    # Angle: [e1, val] or [e1, e2, val]
-                    # Radius/Diameter: [e1, val]
-                    final_args = [float(x) if i == len(raw_args)-1 else int(x) for i, x in enumerate(raw_args)]
-
-                else:
-                    # Pass through other types, ensuring int for indices
-                    final_args = [int(x) for x in raw_args]
-
-            else:
-                # Qwen3 format: resolve from keys
-                e1 = c.get("entity1")
-                s1 = c.get("subnode1")
-                e2 = c.get("entity2")
-                s2 = c.get("subnode2")
-                e3 = c.get("entity3")
-                s3 = c.get("subnode3")
-
-                # --- Value Recomputation for Dimensional Constraints ---
-                value = None
-                if ctype in ["Distance", "Angle", "Radius", "Diameter"]:
-                    # ALWAYS recompute value
-                    value = compute_constraint_value(ctype, primitives, e1, s1, e2, s2)
-                    if value is None:
-                        continue # Skip if computation fails
-
-                # --- Type Logic ---
-                if ctype == "Coincident":
-                    if e1 is not None and s1 is not None and e2 is not None and s2 is not None:
-                        final_args = [int(e1), int(s1), int(e2), int(s2)]
-                    else: continue
-
-                elif ctype == "Tangent":
-                    if s1 is not None and s2 is not None:
-                        final_args = [int(e1), int(s1), int(e2), int(s2)]
-                    elif e1 is not None and e2 is not None:
-                        final_args = [int(e1), int(e2)]
-                    else: continue
-
-                elif ctype == "TangentViaPoint":
-                    if all(v is not None for v in [e1, e2, e3, s3]):
-                        final_args = [int(e1), int(e2), int(e3), int(s3)]
-                    else: continue
-
-                elif ctype == "Concentric":
-                    if e1 is not None and e2 is not None:
-                        final_ctype = "Coincident"
-                        final_args = [int(e1), 3, int(e2), 3]
-                    else: continue
-
-                elif ctype in ["Horizontal", "Vertical"]:
-                    if e2 is not None and s1 is not None and s2 is not None:
-                        final_args = [int(e1), int(s1), int(e2), int(s2)]
-                    elif e1 is not None:
-                        final_args = [int(e1)]
-                    else: continue
-
-                elif ctype in ["Parallel", "Perpendicular", "Equal"]:
-                    if e1 is not None and e2 is not None:
-                        final_args = [int(e1), int(e2)]
-                    else: continue
-
-                elif ctype == "PointOnObject":
-                    if e1 is not None and s1 is not None and e2 is not None:
-                        final_args = [int(e1), int(s1), int(e2)]
-                    else: continue
-
-                elif ctype == "Symmetric":
-                    if all(v is not None for v in [e1, s1, e2, s2, e3, s3]):
-                        final_args = [int(e1), int(s1), int(e2), int(s2), int(e3), int(s3)]
-                    else: continue
-
-                elif ctype == "Distance":
-                    if e2 is not None and s1 is not None and s2 is not None:
-                        # Point-Point
-                        final_args = [int(e1), int(s1), int(e2), int(s2), float(value)]
-                    elif e2 is not None and s1 is not None:
-                        # Point-Line (s2 implicit 0)
-                        final_args = [int(e1), int(s1), int(e2), 0, float(value)]
-                    elif e1 is not None:
-                        # Line Length
-                         final_args = [int(e1), float(value)]
-                    else: continue
-
-                elif ctype == "Angle":
-                    if e2 is not None:
-                        final_args = [int(e1), int(e2), float(value)]
-                    elif e1 is not None:
-                        final_args = [int(e1), float(value)]
-                    else: continue
-
-                elif ctype in ["Radius", "Diameter"]:
-                    if e1 is not None:
-                        final_args = [int(e1), float(value)]
-                    else: continue
-
-                else:
-                    # Unknown type
-                    continue
-
-            # --- 2. Yield Result ---
-            yield idx, final_ctype, final_args
-
-        except Exception:
-            # If any parsing fails, skip this constraint but log/track failure if needed
-            continue
-
-
-def add_primitives_to_sketch(primitives: list, fc_sketch: "Sketcher.SketchObject") -> None:
-    """Add primitives to FreeCAD sketch object.
-
-    Args:
-        primitives: List of primitive dicts
-        fc_sketch: FreeCAD sketch object to add primitives to
-    """
-    for ptype, args, is_const in generate_freecad_primitives(primitives):
-        try:
-            if ptype == "LineSegment":
-                # args: [sx, sy, 0, ex, ey, 0]
-                sx, sy, sz, ex, ey, ez = args
-                fc_sketch.addGeometry(
-                    Part.LineSegment(FreeCAD.Vector(sx, sy, sz), FreeCAD.Vector(ex, ey, ez)),
-                    is_const
-                )
-            elif ptype == "Point":
-                # args: [x, y, 0]
-                x, y, z = args
-                fc_sketch.addGeometry(Part.Point(FreeCAD.Vector(x, y, z)), is_const)
-            elif ptype == "Circle":
-                # args: [cx, cy, 0, 0, 0, 1, r]
-                cx, cy, cz, nx, ny, nz, r = args
-                fc_sketch.addGeometry(
-                    Part.Circle(FreeCAD.Vector(cx, cy, cz), FreeCAD.Vector(nx, ny, nz), r),
-                    is_const
-                )
-            elif ptype == "ArcOfCircle":
-                # args: [sx, sy, 0, mx, my, 0, ex, ey, 0]
-                sx, sy, sz, mx, my, mz, ex, ey, ez = args
-                arc = Part.ArcOfCircle(
-                    FreeCAD.Vector(sx, sy, sz),
-                    FreeCAD.Vector(mx, my, mz),
-                    FreeCAD.Vector(ex, ey, ez)
-                )
-                fc_sketch.addGeometry(arc, is_const)
-        except Exception:
-            print(f"ERROR: Failed to add primitive: {ptype}, {args}")
-            pass
-
-
-def add_constraints_to_sketch(
-    primitives: list,
-    constraints: list,
-    fc_sketch: "Sketcher.SketchObject"
-) -> tuple[dict[int, int], list[int]]:
-    """Add constraints to FreeCAD sketch object.
-
-    Args:
-        primitives: List of primitive dicts
-        constraints: List of constraint dicts from Qwen3 output
-        fc_sketch: FreeCAD sketch object to add constraints to
-
-    Returns:
-        Tuple of:
-          - Mapping from FreeCAD constraint index to original constraint index
-          - List of indices of constraints that failed to add (malformed/error)
-    """
-    constraint_mapping = {}
-    failed_indices = []
-
-    # Use the shared generator to get normalized constraints
-    for idx, ctype, args in generate_freecad_constraints(primitives, constraints):
-        count_before = int(fc_sketch.ConstraintCount)
-
-        try:
-            fc_sketch.addConstraint(Sketcher.Constraint(ctype, *args))
-        except Exception:
-            # print(f"ERROR: FAILED to add constraint {idx}: {ctype}, {args}")
-            failed_indices.append(idx)
-            pass  # Skip constraints that fail to add
-
-
-        count_after = int(fc_sketch.ConstraintCount)
-        # If count increased, map the new indices
-        if count_after > count_before:
-            for i in range(count_before, count_after):
-                constraint_mapping[i] = idx
-        else:
-            # If count didn't increase but it wasn't caught by exception (e.g. logic error), treat as failed if not already added
-            pass
-
-    return constraint_mapping, failed_indices
-
-
-def export_to_freecad_script(primitives: list, constraints: list, output_path: str):
-    """
-    Generates a FreeCAD Python script to create a sketch with given primitives and constraints.
-    """
-    lines = []
-    lines.append("import FreeCAD")
-    lines.append("import Part")
-    lines.append("import Sketcher")
-    lines.append("")
-    lines.append("doc = FreeCAD.newDocument('SketchDoc')")
-    lines.append("body = doc.addObject('PartDesign::Body', 'Body')")
-    lines.append("fc_sketch = body.newObject('Sketcher::SketchObject', 'Sketch')")
-    lines.append("xy_plane = body.Origin.OriginFeatures[3]")
-    lines.append("fc_sketch.AttachmentSupport = xy_plane")
-    lines.append("fc_sketch.MapMode = 'FlatFace'")
-    lines.append("")
-    lines.append("# --- Add Primitives ---")
-    for ptype, args, is_const in generate_freecad_primitives(primitives):
-        # Convert args to string representation for script
-        args_str = ", ".join(map(str, args))
-
-        if ptype == "LineSegment":
-            # args: [sx, sy, 0, ex, ey, 0]
-            sx, sy, sz, ex, ey, ez = args
-            lines.append(f"fc_sketch.addGeometry(Part.LineSegment(FreeCAD.Vector({sx}, {sy}, {sz}), FreeCAD.Vector({ex}, {ey}, {ez})), {is_const})")
-        elif ptype == "Point":
-            # args: [x, y, 0]
-            x, y, z = args
-            lines.append(f"fc_sketch.addGeometry(Part.Point(FreeCAD.Vector({x}, {y}, {z})), {is_const})")
-        elif ptype == "Circle":
-            # args: [cx, cy, 0, 0, 0, 1, r]
-            cx, cy, cz, nx, ny, nz, r = args
-            lines.append(f"fc_sketch.addGeometry(Part.Circle(FreeCAD.Vector({cx}, {cy}, {cz}), FreeCAD.Vector({nx}, {ny}, {nz}), {r}), {is_const})")
-        elif ptype == "ArcOfCircle":
-             # args: [sx, sy, 0, mx, my, 0, ex, ey, 0]
-            sx, sy, sz, mx, my, mz, ex, ey, ez = args
-            lines.append(f"try:")
-            lines.append(f"    arc = Part.ArcOfCircle(FreeCAD.Vector({sx}, {sy}, {sz}), FreeCAD.Vector({mx}, {my}, {mz}), FreeCAD.Vector({ex}, {ey}, {ez}))")
-            lines.append(f"    fc_sketch.addGeometry(arc, {is_const})")
-            lines.append(f"except Exception:")
-            lines.append(f"    print(f'ERROR: Failed to add arc: {ptype}, {args}')")
-            lines.append(f"    pass")
-
-    lines.append("")
-    lines.append("# --- Add Constraints ---")
-
-    # Use shared generator for normalized constraints
-    for idx, ctype, args in generate_freecad_constraints(primitives, constraints):
-        # Convert args to string representation for script
-        args_str = ", ".join(map(str, args))
-        lines.append(f"fc_sketch.addConstraint(Sketcher.Constraint('{ctype}', {args_str}))")
-
-    lines.append("")
-    lines.append("doc.recompute()")
-    lines.append("FreeCAD.ActiveDocument.recompute()")
-    lines.append("print('Sketch created successfully!')")
-    lines.append("print(f'DoF: {fc_sketch.getSolverStatus()['DoF']}')")
-    lines.append("print(f'Status: {fc_sketch.getSolverStatus()['Status']}')")
-
-    with open(output_path, 'w') as f:
-        f.write("\n".join(lines))
-
-    print(f"Exported to {output_path}")
-
-
-
-
-def validate_geometry_from_lists(
-    primitives: list,
-    constraints: list,
-    threshold_mm: float = 10.0,
-) -> tuple[float, int, bool, str]:
-    """
-    Validate geometry impact of constraints by comparing before/after.
-
-    This function:
-    1. Add primitives only to FreeCAD → capture coordinates
-    2. Add constraints → capture coordinates
-    3. Compare the two to see how much constraints move geometry
-
-    Args:
-        primitives: List of primitive dicts
-        constraints: List of constraint dicts from Qwen3 output
-        threshold_mm: Maximum allowed deviation in mm
-
-    Returns:
-        Tuple of (max_deviation, max_deviation_primitive_idx, all_passed, error_message)
-    """
-    doc = None
-    max_deviation = 0.0
-    max_deviation_primitive_idx = -1
-    all_passed = True
-    error_msg = ""
-
-    try:
-        # Create FreeCAD document
-        doc = FreeCAD.newDocument("GeoValidationDoc")
-        body = doc.addObject('PartDesign::Body', 'Body')
-        fc_sketch = body.newObject('Sketcher::SketchObject', 'Sketch')
-        xy_plane = body.Origin.OriginFeatures[3]
-        fc_sketch.AttachmentSupport = xy_plane
-        fc_sketch.MapMode = 'FlatFace'
-
-        # Step 1: Add primitives only
-        add_primitives_to_sketch(primitives, fc_sketch)
-        doc.recompute()
-
-        # Capture geometry BEFORE constraints
-        coords_before = extract_geometry_coords(fc_sketch)
-        geo_types = {i: type(geo).__name__ for i, geo in enumerate(fc_sketch.Geometry)}
-
-        # Step 2: Add constraints
-        add_constraints_to_sketch(primitives, constraints, fc_sketch)
-        doc.recompute()
-
-        # Capture geometry AFTER constraints
-        coords_after = extract_geometry_coords(fc_sketch)
-
-        # Step 3: Compare before and after
-        for geo_id in coords_before:
-            before = coords_before[geo_id]
-            after = coords_after.get(geo_id, [])
-
-            if len(before) != len(after):
-                continue
-
-            for (bx, by), (ax, ay) in zip(before, after):
-                deviation = ((bx - ax) ** 2 + (by - ay) ** 2) ** 0.5
-                if deviation > max_deviation:
-                    max_deviation = deviation
-                    max_deviation_primitive_idx = geo_id
-
-        all_passed = max_deviation < threshold_mm
-
-    except Exception:
-        error_msg = "ERROR: " + traceback.format_exc()
-        all_passed = False
-
-    finally:
-        if doc is not None:
-            try:
-                FreeCAD.closeDocument(doc.Name)
-            except:
-                pass
-
-    return max_deviation, max_deviation_primitive_idx, all_passed, error_msg
-
-
-def verify_constraints(
-    primitives: list,
-    constraints: list,
-    geo_threshold_mm: float = 10.0,
-) -> VerificationResult:
-    """
-    Verify constraints using FreeCAD solver and geometry validation.
-
-    This function performs two checks:
-    1. Solver status check: malformed/conflicting/redundant constraints
-    2. Geometry preservation check: primitives don't move too much after constraints
-
-    Args:
-        primitives: List of primitive dicts
-        constraints: List of constraint dicts from Qwen3 output
-        geo_threshold_mm: Maximum allowed geometry deviation in mm
-
-    Returns:
-        VerificationResult with detailed status
-    """
-    result = VerificationResult()
-    doc = None
-
-    try:
-        # Step 1: Create FreeCAD document and add primitives + constraints
-        doc = FreeCAD.newDocument("VerificationDoc")
-        body = doc.addObject('PartDesign::Body', 'Body')
-        fc_sketch = body.newObject('Sketcher::SketchObject', 'Sketch')
-        xy_plane = body.Origin.OriginFeatures[3]
-        fc_sketch.AttachmentSupport = xy_plane
-        fc_sketch.MapMode = 'FlatFace'
-
-        # Add primitives
-        add_primitives_to_sketch(primitives, fc_sketch)
-        doc.recompute()
-
-        # Add constraints
-        _mapping, failed_indices = add_constraints_to_sketch(primitives, constraints, fc_sketch)
-        doc.recompute()
-
-        # Step 2: Get solver status
-        fc_sketch.solve()
-        status = fc_sketch.getSolverStatus()
-
-        result.success = True
-        result.dof = status['DoF']
-        result.status = status['Status']
-        # Malformed = Reported by solver + Failed to add
-        result.malformed_count = len(status.get('MalformedConstraints', [])) + len(failed_indices)
-        result.conflicting_count = len(status.get('ConflictingConstraints', []))
-        result.redundant_count = len(status.get('RedundantConstraints', []))
-        # Check if solver converged (Status = 'Converged' means OK)
-        result.solver_converged = (status.get('Status', '') == 'Converged')
-
-    except Exception:
-        result.error = "ERROR: " + traceback.format_exc()
-        result.success = False
-        result.solver_converged = False
-        result.geo_passed = False
-        result.geo_max_deviation = -1.0
-
-    finally:
-        if doc is not None:
-            try:
-                FreeCAD.closeDocument(doc.Name)
-            except:
-                pass
-
-    # Step 3: Geometry validation (only if solver check passed)
-    if result.success and result.malformed_count == 0 and result.conflicting_count == 0:
-        max_dev, _max_dev_prim_idx, geo_passed, geo_error = validate_geometry_from_lists(
-            primitives, constraints, geo_threshold_mm
-        )
-        result.geo_max_deviation = max_dev
-        result.geo_passed = geo_passed
-        if geo_error:
-            result.error = geo_error
-    else:
-        result.geo_passed = False
-        result.geo_max_deviation = -1.0
-
-    return result
-
-
-def cleanup_constraints_from_lists(
-    primitives: list[dict[str, Any]],
-    constraints: list[dict[str, Any]],
-    max_cleanup_iters: int = 10,
-    prefix_size: int = 0,
-) -> tuple[list[dict[str, Any]], VerificationResult]:
-    """
-    Remove malformed/conflicting/redundant constraints iteratively.
-
-    This function uses FreeCAD solver to detect problematic constraints
-    and removes them one by one until no issues remain or max iterations reached.
-
-    Args:
-        primitives: List of primitive dicts
-        constraints: List of constraint dicts
-        max_cleanup_iters: Maximum cleanup iterations
-        prefix_size: Number of constraints at the start that should NOT be removed (GT prefix)
-
-    Returns:
-        Tuple of (cleaned_constraints, final_verification_result)
-    """
-    current_constraints = constraints.copy()
-    final_result = VerificationResult()
-
-    for iter_idx in range(max_cleanup_iters):
-        doc = None
-        try:
-            # Create FreeCAD document
-            doc = FreeCAD.newDocument(f"CleanupDoc{iter_idx}")
-            body = doc.addObject('PartDesign::Body', 'Body')
-            fc_sketch = body.newObject('Sketcher::SketchObject', 'Sketch')
-            xy_plane = body.Origin.OriginFeatures[3]
-            fc_sketch.AttachmentSupport = xy_plane
-            fc_sketch.MapMode = 'FlatFace'
-
-            # Add primitives
-            add_primitives_to_sketch(primitives, fc_sketch)
-            doc.recompute()
-
-            # Add constraints with mapping
-            constraint_mapping, failed_indices = add_constraints_to_sketch(primitives, current_constraints, fc_sketch)
-            doc.recompute()
-
-            # Get solver status
-            fc_sketch.solve()
-            status = fc_sketch.getSolverStatus()
-
-            # Build reverse mapping: original constraint index -> FC constraint indices
-            fc_to_orig: dict[int, int] = constraint_mapping  # FC index -> original index
-
-            # Collect problem indices (original constraint indices)
-            malformed_fc = status.get('MalformedConstraints', [])
-            conflicting_fc = status.get('ConflictingConstraints', [])
-            redundant_fc = status.get('RedundantConstraints', [])
-
-            # Map FC indices back to original constraint indices
-            # FC getSolverStatus returns 1-based indices
-
-            # Malformed: remove all (these are syntax errors)
-            malformed_orig_indices = set()
-            for idx in failed_indices:
-                if idx >= prefix_size:
-                    malformed_orig_indices.add(idx)
-
-            for fc_idx in malformed_fc:
-                orig_idx = fc_to_orig.get(fc_idx - 1)  # Convert 1-based to 0-based
-                if orig_idx is not None and orig_idx >= prefix_size:
-                    malformed_orig_indices.add(orig_idx)
-
-            # Conflicting: collect all, but will remove only last one
-            conflicting_orig_indices = set()
-            for fc_idx in conflicting_fc:
-                orig_idx = fc_to_orig.get(fc_idx - 1)
-                if orig_idx is not None and orig_idx >= prefix_size:
-                    conflicting_orig_indices.add(orig_idx)
-
-            # Redundant: collect all, but will remove only last one
-            redundant_orig_indices = set()
-            for fc_idx in redundant_fc:
-                orig_idx = fc_to_orig.get(fc_idx - 1)
-                if orig_idx is not None and orig_idx >= prefix_size:
-                    redundant_orig_indices.add(orig_idx)
-
-            # Build final result
-            final_result = VerificationResult(
-                success=True,
-                dof=status['DoF'],
-                status=status['Status'],
-                malformed_count=len(malformed_fc) + len(failed_indices),
-                conflicting_count=len(conflicting_fc),
-                redundant_count=len(redundant_fc),
-            )
-
-            FreeCAD.closeDocument(doc.Name)
-            doc = None
-
-            # Prioritize: malformed > conflicting > redundant
-            # Malformed: remove all at once (syntax errors)
-            # Conflicting/Redundant: remove only highest index (one at a time)
-            if malformed_orig_indices:
-                indices_to_remove = malformed_orig_indices
-            elif conflicting_orig_indices:
-                # Remove only the highest index conflicting constraint
-                indices_to_remove = {max(conflicting_orig_indices)}
-            elif redundant_orig_indices:
-                # Remove only the highest index redundant constraint
-                indices_to_remove = {max(redundant_orig_indices)}
-            else:
-                # No problems, done
-                break
-
-            # Remove problematic constraints
-            current_constraints = [
-                c for i, c in enumerate(current_constraints)
-                if i not in indices_to_remove
-            ]
-
-        except Exception:
-            if final_result is None:
-                final_result = VerificationResult(error="ERROR: " + traceback.format_exc())
-            break
-
-        finally:
-            if doc is not None:
-                try:
-                    FreeCAD.closeDocument(doc.Name)
-                except:
-                    pass
-
-    return current_constraints, final_result
-
-
-def comment_out_file(file_path: str) -> None:
-    """Comment out all lines in a Python file.
-
-    For lines that are already comments, add another # to make # # [Comment].
-    """
-    with open(file_path, 'r') as f:
-        content = f.read()
-
-    lines = content.split('\n')
-    commented_lines = []
-    for line in lines:
-        stripped = line.strip()
-        if not stripped:
-            # Empty line - keep as is
-            commented_lines.append(line)
-        else:
-            # Add # prefix to all non-empty lines (including existing comments)
-            commented_lines.append('# ' + line)
-
-    with open(file_path, 'w') as f:
-        f.write('\n'.join(commented_lines))
-
+# ============================================================
+# Main Execution
+# ============================================================
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Save FC GT and predictions that pass all validation criteria")
@@ -1872,7 +1962,7 @@ if __name__ == '__main__':
             try:
                 stream = llm.create_chat_completion(
                     messages=messages,
-                    max_tokens=32768,
+                    max_tokens=None,  # 65536
                     temperature=0.7,
                     stream=True
                 )
@@ -1897,7 +1987,7 @@ if __name__ == '__main__':
             # 1. Check for <final> tag
             final_match = re.search(r"<final>\n(.*?)\n</final>", current_turn_text, re.DOTALL)
             if final_match:
-                predicted_constraints, parse_error = parse_solver_call_json(final_match.group(1))
+                predicted_constraints, parse_error = parse_qwen_output_json(final_match.group(1))
                 predicted_constraints_list.append(predicted_constraints)
                 if parse_error:
                     solver_output = json.dumps({"DoF": "null", "Error": f"JSON Parse Error: {parse_error}. Fix the syntax and try again."}, indent=2)
@@ -1912,7 +2002,7 @@ if __name__ == '__main__':
             content_to_parse = parts[-1] if len(parts) > 1 else current_turn_text
             json_match = re.search(r'\[[\s\S]*?\]', content_to_parse)
             if json_match:
-                predicted_constraints, parse_error = parse_solver_call_json(json_match.group(0))
+                predicted_constraints, parse_error = parse_qwen_output_json(json_match.group(0))
                 predicted_constraints_list.append(predicted_constraints)
 
                 if parse_error:
