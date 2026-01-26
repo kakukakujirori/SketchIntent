@@ -322,169 +322,6 @@ def compute_constraint_value(ctype: str, primitives: list, e1: int, s1: int | No
     return None
 
 
-def export_to_freecad_script(primitives: list[dict[str, Any]], constraints: list[dict[str, Any]], output_path: str):
-    """
-    Convert parsed primitives and inferred constraints JSON to a FreeCAD Python script.
-
-    Args:
-        primitives: List of primitive dicts (from parse_freecad_script)
-        constraints: List of constraint dicts (from extract_json_from_thinking_output)
-        output_path: Path to save the generated .py file
-    """
-    lines = []
-    lines.append("import FreeCAD")
-    lines.append("import Part")
-    lines.append("import Sketcher")
-    lines.append("from FreeCAD import Vector")
-    lines.append("")
-    lines.append("# Create a new document")
-    lines.append("doc = FreeCAD.newDocument('ConstraintTest')")
-    lines.append("body = doc.addObject('PartDesign::Body', 'Body')")
-    lines.append("fc_sketch = doc.addObject('Sketcher::SketchObject', 'Sketch')")
-    lines.append("body.addObject(fc_sketch)")
-    lines.append("")
-    lines.append("# --- Add Primitives ---")
-
-    for i, prim in enumerate(primitives):
-        ptype = prim.get("type")
-        is_const = prim.get("is_construction", False)
-
-        if ptype == "LineSegment":
-            sx, sy = prim["start"]
-            ex, ey = prim["end"]
-            lines.append(f"fc_sketch.addGeometry(Part.LineSegment(Vector({sx}, {sy}, 0), Vector({ex}, {ey}, 0)), {is_const})")
-        elif ptype == "Point":
-            x, y = prim["x"], prim["y"]
-            lines.append(f"fc_sketch.addGeometry(Part.Point(Vector({x}, {y}, 0)), {is_const})")
-        elif ptype == "Circle":
-            cx, cy = prim["center"]
-            r = prim["radius"]
-            lines.append(f"fc_sketch.addGeometry(Part.Circle(Vector({cx}, {cy}, 0), Vector(0, 0, 1), {r}), {is_const})")
-        elif ptype == "Arc":
-            sx, sy = prim["start"]
-            mx, my = prim["mid"]
-            ex, ey = prim["end"]
-            lines.append(f"fc_sketch.addGeometry(Part.ArcOfCircle(Vector({sx}, {sy}, 0), Vector({mx}, {my}, 0), Vector({ex}, {ey}, 0)), {is_const})")
-
-    lines.append("")
-    lines.append("# --- Add Constraints ---")
-
-    for c in constraints:
-        ctype = c.get("type", "")
-        e1 = c.get("entity1")
-        s1 = c.get("subnode1")
-        e2 = c.get("entity2")
-        s2 = c.get("subnode2")
-        e3 = c.get("entity3")
-        s3 = c.get("subnode3")
-
-        # Build constraint arguments based on type
-        if ctype == "Coincident":
-            # 4-arg: entity1, subnode1, entity2, subnode2
-            if s1 is not None and s2 is not None:
-                lines.append(f"fc_sketch.addConstraint(Sketcher.Constraint('Coincident', {e1}, {s1}, {e2}, {s2}))")
-            else:
-                lines.append(f"# Skipped Coincident: missing subnode info")
-        elif ctype == "Tangent":
-            # Can be 4-arg (point-to-point) or 2-arg (edge-to-edge)
-            if s1 is not None and s2 is not None:
-                lines.append(f"fc_sketch.addConstraint(Sketcher.Constraint('Tangent', {e1}, {s1}, {e2}, {s2}))")
-            elif e1 is not None and e2 is not None:
-                # Edge-to-edge tangent (no subnode required)
-                lines.append(f"fc_sketch.addConstraint(Sketcher.Constraint('Tangent', {e1}, {e2}))")
-            else:
-                lines.append(f"# Skipped Tangent: missing required args")
-        elif ctype == "TangentViaPoint":
-            # TangentViaPoint(e1, e2, ePoint, sPoint) - 4 args
-            # entity3 and subnode3 hold the point reference
-            if all(v is not None for v in [e1, e2, e3, s3]):
-                lines.append(f"fc_sketch.addConstraint(Sketcher.Constraint('TangentViaPoint', {e1}, {e2}, {e3}, {s3}))")
-            else:
-                lines.append(f"# Skipped TangentViaPoint: missing args")
-        elif ctype == "Concentric":
-            # Concentric means center points coincide: Coincident(e1, 3, e2, 3)
-            if e1 is not None and e2 is not None:
-                lines.append(f"fc_sketch.addConstraint(Sketcher.Constraint('Coincident', {e1}, 3, {e2}, 3))  # Concentric")
-            else:
-                lines.append(f"# Skipped Concentric: missing args")
-        elif ctype in ["Horizontal", "Vertical"]:
-            # Can be 1-arg (line) or 4-arg (two points)
-            if e2 is not None and s1 is not None and s2 is not None:
-                lines.append(f"fc_sketch.addConstraint(Sketcher.Constraint('{ctype}', {e1}, {s1}, {e2}, {s2}))")
-            else:
-                lines.append(f"fc_sketch.addConstraint(Sketcher.Constraint('{ctype}', {e1}))")
-        elif ctype in ["Parallel", "Perpendicular", "Equal"]:
-            # 2-arg: entity1, entity2
-            if e2 is not None:
-                lines.append(f"fc_sketch.addConstraint(Sketcher.Constraint('{ctype}', {e1}, {e2}))")
-            else:
-                lines.append(f"# Skipped {ctype}: missing entity2")
-        elif ctype == "PointOnObject":
-            # 3-arg: entity1, subnode1, entity2
-            if s1 is not None and e2 is not None:
-                lines.append(f"fc_sketch.addConstraint(Sketcher.Constraint('PointOnObject', {e1}, {s1}, {e2}))")
-            else:
-                lines.append(f"# Skipped PointOnObject: missing args")
-        elif ctype == "Symmetric":
-            # 6-arg: entity1, subnode1, entity2, subnode2, entity3, subnode3
-            if all(v is not None for v in [s1, e2, s2, e3, s3]):
-                lines.append(f"fc_sketch.addConstraint(Sketcher.Constraint('Symmetric', {e1}, {s1}, {e2}, {s2}, {e3}, {s3}))")
-            else:
-                lines.append(f"# Skipped Symmetric: missing args")
-        elif ctype == "Distance":
-            # Always compute value from primitives to ensure accuracy (ignore model output)
-            value = compute_constraint_value("Distance", primitives, e1, s1, e2, s2)
-
-            if value is not None:
-                if e2 is not None and s1 is not None and s2 is not None:
-                    # Point-to-point distance
-                    lines.append(f"fc_sketch.addConstraint(Sketcher.Constraint('Distance', {e1}, {s1}, {e2}, {s2}, {value}))")
-                elif e2 is not None and s1 is not None:
-                    # Point-to-edge distance (s2 is None or 0)
-                    lines.append(f"fc_sketch.addConstraint(Sketcher.Constraint('Distance', {e1}, {s1}, {e2}, 0, {value}))")
-                elif e1 is not None:
-                    # Line length
-                    lines.append(f"fc_sketch.addConstraint(Sketcher.Constraint('Distance', {e1}, {value}))")
-                else:
-                    lines.append(f"# Skipped Distance: missing args")
-            else:
-                lines.append(f"# Skipped Distance: could not compute value")
-
-        elif ctype == "Angle":
-            # Always compute value from primitives to ensure accuracy (ignore model output)
-            value = compute_constraint_value("Angle", primitives, e1, s1, e2, s2)
-
-            if value is not None:
-                if e2 is not None:
-                    lines.append(f"fc_sketch.addConstraint(Sketcher.Constraint('Angle', {e1}, {e2}, {value}))")
-                elif e1 is not None:
-                    lines.append(f"fc_sketch.addConstraint(Sketcher.Constraint('Angle', {e1}, {value}))")
-                else:
-                    lines.append(f"# Skipped Angle: missing args")
-            else:
-                lines.append(f"# Skipped Angle: could not compute value")
-
-        elif ctype in ["Radius", "Diameter"]:
-            # Always compute value from primitives to ensure accuracy (ignore model output)
-            value = compute_constraint_value(ctype, primitives, e1)
-
-            if value is not None and e1 is not None:
-                lines.append(f"fc_sketch.addConstraint(Sketcher.Constraint('{ctype}', {e1}, {value}))")
-            else:
-                lines.append(f"# Skipped {ctype}: could not compute value")
-        else:
-            lines.append(f"# Unknown constraint type: {ctype}")
-
-    lines.append("")
-    lines.append("# Recompute")
-    lines.append("doc.recompute()")
-
-    with open(output_path, 'w') as f:
-        f.write("\n".join(lines))
-
-    print(f"Exported to {output_path}")
-
-
 def format_constraint_to_json(ctype: str, args: list) -> dict:
     """Convert raw FreeCAD constraint arguments to structured JSON format.
 
@@ -1236,6 +1073,204 @@ def extract_geometry_coords(fc_sketch: "Sketcher.SketchObject") -> dict[int, lis
     return coords
 
 
+def generate_freecad_primitives(primitives: list):
+    """
+    Generator that parses primitives and yields normalized FreeCAD arguments.
+
+    Yields:
+        Tuple of (primitive_type, args_list, is_construction)
+    """
+    for prim in primitives:
+        ptype = prim.get("type")
+        is_const = prim.get("is_construction", False)
+
+        try:
+            if ptype == "LineSegment":
+                if "start" in prim and "end" in prim:
+                    sx, sy = prim["start"]
+                    ex, ey = prim["end"]
+                    yield "LineSegment", [sx, sy, 0, ex, ey, 0], is_const
+
+            elif ptype == "Point":
+                if "x" in prim and "y" in prim:
+                    x, y = prim["x"], prim["y"]
+                    yield "Point", [x, y, 0], is_const
+
+            elif ptype == "Circle":
+                if "center" in prim and "radius" in prim:
+                    cx, cy = prim["center"]
+                    r = prim["radius"]
+                    yield "Circle", [cx, cy, 0, 0, 0, 1, r], is_const
+
+            elif ptype == "Arc":
+                if "start" in prim and "mid" in prim and "end" in prim:
+                    sx, sy = prim["start"]
+                    mx, my = prim["mid"]
+                    ex, ey = prim["end"]
+                    yield "ArcOfCircle", [sx, sy, 0, mx, my, 0, ex, ey, 0], is_const
+
+        except Exception:
+            # Skip invalid primitives
+            continue
+
+
+def generate_freecad_constraints(primitives: list, constraints: list):
+    """
+    Generator that parses constraints and yields normalized FreeCAD arguments.
+
+    Yields:
+        Tuple of (original_index, constraint_type, args_list)
+
+    Note:
+        - Handles both Qwen3 format (keys) and GT format (args list)
+        - Computes/Recomputes values for Distance, Angle, Radius, Diameter
+        - Normalizes arguments (e.g. s2=0 for Point-Line Distance)
+        - Yields only valid constraints (skips invalid ones)
+    """
+    for idx, c in enumerate(constraints):
+        ctype = c.get("type", "")
+
+        try:
+            # --- 1. Input Source Resolution & Normalization ---
+            final_ctype = ctype
+            final_args = []
+
+            if "args" in c:
+                # GT format: use args directly, but handle specific types
+                raw_args = c.get("args", [])
+
+                # Basic integer conversion for safety
+                if ctype == "Concentric":
+                    # Concentric(e1, e2) -> Coincident(e1, 3, e2, 3)
+                    if len(raw_args) >= 2:
+                        final_ctype = "Coincident"
+                        final_args = [int(raw_args[0]), 3, int(raw_args[1]), 3]
+                    else:
+                        continue # Skip invalid
+
+                elif ctype == "Distance":
+                    # Check for 4-arg case (Point-Line) and normalize
+                    if len(raw_args) == 4:
+                        # e1, s1, e2, value -> e1, s1, e2, 0, value
+                        final_args = [int(raw_args[0]), int(raw_args[1]), int(raw_args[2]), 0, float(raw_args[3])]
+                    elif len(raw_args) == 2:
+                        # e1, value
+                        final_args = [int(raw_args[0]), float(raw_args[1])]
+                    elif len(raw_args) == 5:
+                        # e1, s1, e2, s2, value
+                        final_args = [int(raw_args[0]), int(raw_args[1]), int(raw_args[2]), int(raw_args[3]), float(raw_args[4])]
+                    else:
+                        continue
+
+                elif ctype in ["Angle", "Radius", "Diameter"]:
+                    # Just ensure right types
+                    # Angle: [e1, val] or [e1, e2, val]
+                    # Radius/Diameter: [e1, val]
+                    final_args = [float(x) if i == len(raw_args)-1 else int(x) for i, x in enumerate(raw_args)]
+
+                else:
+                    # Pass through other types, ensuring int for indices
+                    final_args = [int(x) for x in raw_args]
+
+            else:
+                # Qwen3 format: resolve from keys
+                e1 = c.get("entity1")
+                s1 = c.get("subnode1")
+                e2 = c.get("entity2")
+                s2 = c.get("subnode2")
+                e3 = c.get("entity3")
+                s3 = c.get("subnode3")
+
+                # --- Value Recomputation for Dimensional Constraints ---
+                value = None
+                if ctype in ["Distance", "Angle", "Radius", "Diameter"]:
+                    # ALWAYS recompute value
+                    value = compute_constraint_value(ctype, primitives, e1, s1, e2, s2)
+                    if value is None:
+                        continue # Skip if computation fails
+
+                # --- Type Logic ---
+                if ctype == "Coincident":
+                    if e1 is not None and s1 is not None and e2 is not None and s2 is not None:
+                        final_args = [int(e1), int(s1), int(e2), int(s2)]
+                    else: continue
+
+                elif ctype == "Tangent":
+                    if s1 is not None and s2 is not None:
+                        final_args = [int(e1), int(s1), int(e2), int(s2)]
+                    elif e1 is not None and e2 is not None:
+                        final_args = [int(e1), int(e2)]
+                    else: continue
+
+                elif ctype == "TangentViaPoint":
+                    if all(v is not None for v in [e1, e2, e3, s3]):
+                        final_args = [int(e1), int(e2), int(e3), int(s3)]
+                    else: continue
+
+                elif ctype == "Concentric":
+                    if e1 is not None and e2 is not None:
+                        final_ctype = "Coincident"
+                        final_args = [int(e1), 3, int(e2), 3]
+                    else: continue
+
+                elif ctype in ["Horizontal", "Vertical"]:
+                    if e2 is not None and s1 is not None and s2 is not None:
+                        final_args = [int(e1), int(s1), int(e2), int(s2)]
+                    elif e1 is not None:
+                        final_args = [int(e1)]
+                    else: continue
+
+                elif ctype in ["Parallel", "Perpendicular", "Equal"]:
+                    if e1 is not None and e2 is not None:
+                        final_args = [int(e1), int(e2)]
+                    else: continue
+
+                elif ctype == "PointOnObject":
+                    if e1 is not None and s1 is not None and e2 is not None:
+                        final_args = [int(e1), int(s1), int(e2)]
+                    else: continue
+
+                elif ctype == "Symmetric":
+                    if all(v is not None for v in [e1, s1, e2, s2, e3, s3]):
+                        final_args = [int(e1), int(s1), int(e2), int(s2), int(e3), int(s3)]
+                    else: continue
+
+                elif ctype == "Distance":
+                    if e2 is not None and s1 is not None and s2 is not None:
+                        # Point-Point
+                        final_args = [int(e1), int(s1), int(e2), int(s2), float(value)]
+                    elif e2 is not None and s1 is not None:
+                        # Point-Line (s2 implicit 0)
+                        final_args = [int(e1), int(s1), int(e2), 0, float(value)]
+                    elif e1 is not None:
+                        # Line Length
+                         final_args = [int(e1), float(value)]
+                    else: continue
+
+                elif ctype == "Angle":
+                    if e2 is not None:
+                        final_args = [int(e1), int(e2), float(value)]
+                    elif e1 is not None:
+                        final_args = [int(e1), float(value)]
+                    else: continue
+
+                elif ctype in ["Radius", "Diameter"]:
+                    if e1 is not None:
+                        final_args = [int(e1), float(value)]
+                    else: continue
+
+                else:
+                    # Unknown type
+                    continue
+
+            # --- 2. Yield Result ---
+            yield idx, final_ctype, final_args
+
+        except Exception:
+            # If any parsing fails, skip this constraint but log/track failure if needed
+            continue
+
+
 def add_primitives_to_sketch(primitives: list, fc_sketch: "Sketcher.SketchObject") -> None:
     """Add primitives to FreeCAD sketch object.
 
@@ -1243,42 +1278,38 @@ def add_primitives_to_sketch(primitives: list, fc_sketch: "Sketcher.SketchObject
         primitives: List of primitive dicts
         fc_sketch: FreeCAD sketch object to add primitives to
     """
-    for prim in primitives:
-        ptype = prim.get("type")
-        is_const = prim.get("is_construction", False)
-
-        if ptype == "LineSegment":
-            sx, sy = prim["start"]
-            ex, ey = prim["end"]
-            fc_sketch.addGeometry(
-                Part.LineSegment(FreeCAD.Vector(sx, sy, 0), FreeCAD.Vector(ex, ey, 0)),
-                is_const
-            )
-        elif ptype == "Point":
-            x, y = prim["x"], prim["y"]
-            fc_sketch.addGeometry(Part.Point(FreeCAD.Vector(x, y, 0)), is_const)
-        elif ptype == "Circle":
-            cx, cy = prim["center"]
-            r = prim["radius"]
-            fc_sketch.addGeometry(
-                Part.Circle(FreeCAD.Vector(cx, cy, 0), FreeCAD.Vector(0, 0, 1), r),
-                is_const
-            )
-        elif ptype == "Arc":
-            # ArcOfCircle requires special handling - use 3 points
-            sx, sy = prim["start"]
-            mx, my = prim["mid"]
-            ex, ey = prim["end"]
-            try:
+    for ptype, args, is_const in generate_freecad_primitives(primitives):
+        try:
+            if ptype == "LineSegment":
+                # args: [sx, sy, 0, ex, ey, 0]
+                sx, sy, sz, ex, ey, ez = args
+                fc_sketch.addGeometry(
+                    Part.LineSegment(FreeCAD.Vector(sx, sy, sz), FreeCAD.Vector(ex, ey, ez)),
+                    is_const
+                )
+            elif ptype == "Point":
+                # args: [x, y, 0]
+                x, y, z = args
+                fc_sketch.addGeometry(Part.Point(FreeCAD.Vector(x, y, z)), is_const)
+            elif ptype == "Circle":
+                # args: [cx, cy, 0, 0, 0, 1, r]
+                cx, cy, cz, nx, ny, nz, r = args
+                fc_sketch.addGeometry(
+                    Part.Circle(FreeCAD.Vector(cx, cy, cz), FreeCAD.Vector(nx, ny, nz), r),
+                    is_const
+                )
+            elif ptype == "ArcOfCircle":
+                # args: [sx, sy, 0, mx, my, 0, ex, ey, 0]
+                sx, sy, sz, mx, my, mz, ex, ey, ez = args
                 arc = Part.ArcOfCircle(
-                    FreeCAD.Vector(sx, sy, 0),
-                    FreeCAD.Vector(mx, my, 0),
-                    FreeCAD.Vector(ex, ey, 0)
+                    FreeCAD.Vector(sx, sy, sz),
+                    FreeCAD.Vector(mx, my, mz),
+                    FreeCAD.Vector(ex, ey, ez)
                 )
                 fc_sketch.addGeometry(arc, is_const)
-            except Exception:
-                print(f"ERROR: Failed to add arc: {prim}")
-                pass  # Skip invalid arcs
+        except Exception:
+            print(f"ERROR: Failed to add primitive: {ptype}, {args}")
+            pass
 
 
 def add_constraints_to_sketch(
@@ -1301,133 +1332,14 @@ def add_constraints_to_sketch(
     constraint_mapping = {}
     failed_indices = []
 
-    for idx, c in enumerate(constraints):
-        ctype = c.get("type", "")
+    # Use the shared generator to get normalized constraints
+    for idx, ctype, args in generate_freecad_constraints(primitives, constraints):
         count_before = int(fc_sketch.ConstraintCount)
 
         try:
-            if "args" in c:
-                # GT format: use args directly based on constraint type
-                args = c.get("args", [])
-
-                if ctype == "Coincident":
-                    # args: [e1, s1, e2, s2]
-                    if len(args) >= 4:
-                        fc_sketch.addConstraint(Sketcher.Constraint('Coincident', int(args[0]), int(args[1]), int(args[2]), int(args[3])))
-                elif ctype == "Tangent":
-                    # args: [e1, e2] or [e1, s1, e2, s2]
-                    if len(args) == 2:
-                        fc_sketch.addConstraint(Sketcher.Constraint('Tangent', int(args[0]), int(args[1])))
-                    elif len(args) >= 4:
-                        fc_sketch.addConstraint(Sketcher.Constraint('Tangent', int(args[0]), int(args[1]), int(args[2]), int(args[3])))
-                elif ctype == "TangentViaPoint":
-                    # args: [e1, e2, e3, s3]
-                    if len(args) >= 4:
-                        fc_sketch.addConstraint(Sketcher.Constraint('TangentViaPoint', int(args[0]), int(args[1]), int(args[2]), int(args[3])))
-                elif ctype == "Concentric":
-                    # args: [e1, e2] -> Coincident(e1, 3, e2, 3)
-                    if len(args) >= 2:
-                        fc_sketch.addConstraint(Sketcher.Constraint('Coincident', int(args[0]), 3, int(args[1]), 3))
-                elif ctype in ["Horizontal", "Vertical"]:
-                    # args: [e1] or [e1, s1, e2, s2]
-                    if len(args) == 1:
-                        fc_sketch.addConstraint(Sketcher.Constraint(ctype, int(args[0])))
-                    elif len(args) >= 4:
-                        fc_sketch.addConstraint(Sketcher.Constraint(ctype, int(args[0]), int(args[1]), int(args[2]), int(args[3])))
-                elif ctype in ["Parallel", "Perpendicular", "Equal"]:
-                    # args: [e1, e2]
-                    if len(args) >= 2:
-                        fc_sketch.addConstraint(Sketcher.Constraint(ctype, int(args[0]), int(args[1])))
-                elif ctype == "PointOnObject":
-                    # args: [e1, s1, e2]
-                    if len(args) >= 3:
-                        fc_sketch.addConstraint(Sketcher.Constraint('PointOnObject', int(args[0]), int(args[1]), int(args[2])))
-                elif ctype == "Symmetric":
-                    # args: [e1, s1, e2, s2, e3, s3]
-                    if len(args) >= 6:
-                        fc_sketch.addConstraint(Sketcher.Constraint('Symmetric', int(args[0]), int(args[1]), int(args[2]), int(args[3]), int(args[4]), int(args[5])))
-                elif ctype == "Distance":
-                    # args: [e1, value] or [e1, s1, e2, s2, value]
-                    if len(args) == 2:
-                        fc_sketch.addConstraint(Sketcher.Constraint('Distance', int(args[0]), float(args[1])))
-                    elif len(args) == 4:
-                        # Point-Line Distance: e1, s1, e2, value -> s2=0
-                        fc_sketch.addConstraint(Sketcher.Constraint('Distance', int(args[0]), int(args[1]), int(args[2]), 0, float(args[3])))
-                    elif len(args) == 5:
-                        fc_sketch.addConstraint(Sketcher.Constraint('Distance', int(args[0]), int(args[1]), int(args[2]), int(args[3]), float(args[4])))
-                elif ctype == "Angle":
-                    # args: [e1, value] or [e1, e2, value]
-                    if len(args) == 2:
-                        fc_sketch.addConstraint(Sketcher.Constraint('Angle', int(args[0]), float(args[1])))
-                    elif len(args) == 3:
-                        fc_sketch.addConstraint(Sketcher.Constraint('Angle', int(args[0]), int(args[1]), float(args[2])))
-                elif ctype in ["Radius", "Diameter"]:
-                    # args: [e1, value]
-                    if len(args) >= 2:
-                        fc_sketch.addConstraint(Sketcher.Constraint(ctype, int(args[0]), float(args[1])))
-            else:
-                # Qwen3 format: entity1/subnode1/entity2/subnode2/...
-                e1 = c.get("entity1")
-                s1 = c.get("subnode1")
-                e2 = c.get("entity2")
-                s2 = c.get("subnode2")
-                e3 = c.get("entity3")
-                s3 = c.get("subnode3")
-
-                if ctype == "Coincident":
-                    if e1 is not None and s1 is not None and e2 is not None and s2 is not None:
-                        fc_sketch.addConstraint(Sketcher.Constraint('Coincident', int(e1), int(s1), int(e2), int(s2)))
-                elif ctype == "Tangent":
-                    # Can be 4-arg (point-to-point) or 2-arg (edge-to-edge)
-                    if s1 is not None and s2 is not None:
-                        fc_sketch.addConstraint(Sketcher.Constraint('Tangent', int(e1), int(s1), int(e2), int(s2)))
-                    elif e1 is not None and e2 is not None:
-                        fc_sketch.addConstraint(Sketcher.Constraint('Tangent', int(e1), int(e2)))
-                elif ctype == "TangentViaPoint":
-                    # TangentViaPoint(e1, e2, e3, s3)
-                    if all(v is not None for v in [e1, e2, e3, s3]):
-                        fc_sketch.addConstraint(Sketcher.Constraint('TangentViaPoint', int(e1), int(e2), int(e3), int(s3)))
-                elif ctype == "Concentric":
-                    # Concentric means center points coincide
-                    if e1 is not None and e2 is not None:
-                        fc_sketch.addConstraint(Sketcher.Constraint('Coincident', int(e1), 3, int(e2), 3))
-                elif ctype in ["Horizontal", "Vertical"]:
-                    if e2 is not None and s1 is not None and s2 is not None:
-                        fc_sketch.addConstraint(Sketcher.Constraint(ctype, int(e1), int(s1), int(e2), int(s2)))
-                    elif e1 is not None:
-                        fc_sketch.addConstraint(Sketcher.Constraint(ctype, int(e1)))
-                elif ctype in ["Parallel", "Perpendicular", "Equal"]:
-                    if e1 is not None and e2 is not None:
-                        fc_sketch.addConstraint(Sketcher.Constraint(ctype, int(e1), int(e2)))
-                elif ctype == "PointOnObject":
-                    if e1 is not None and s1 is not None and e2 is not None:
-                        fc_sketch.addConstraint(Sketcher.Constraint('PointOnObject', int(e1), int(s1), int(e2)))
-                elif ctype == "Symmetric":
-                    if all(v is not None for v in [e1, s1, e2, s2, e3, s3]):
-                        fc_sketch.addConstraint(Sketcher.Constraint('Symmetric', int(e1), int(s1), int(e2), int(s2), int(e3), int(s3)))
-                elif ctype == "Distance":
-                    value = compute_constraint_value("Distance", primitives, e1, s1, e2, s2)
-                    if value is not None:
-                        if e2 is not None and s1 is not None and s2 is not None:
-                            fc_sketch.addConstraint(Sketcher.Constraint('Distance', int(e1), int(s1), int(e2), int(s2), float(value)))
-                        elif e2 is not None and s1 is not None:
-                            # Point-to-edge distance
-                            fc_sketch.addConstraint(Sketcher.Constraint('Distance', int(e1), int(s1), int(e2), 0, float(value)))
-                        elif e1 is not None:
-                            fc_sketch.addConstraint(Sketcher.Constraint('Distance', int(e1), float(value)))
-                elif ctype == "Angle":
-                    value = compute_constraint_value("Angle", primitives, e1, s1, e2, s2)
-                    if value is not None:
-                        if e2 is not None:
-                            fc_sketch.addConstraint(Sketcher.Constraint('Angle', int(e1), int(e2), float(value)))
-                        elif e1 is not None:
-                            fc_sketch.addConstraint(Sketcher.Constraint('Angle', int(e1), float(value)))
-                elif ctype in ["Radius", "Diameter"]:
-                    value = compute_constraint_value(ctype, primitives, e1)
-                    if value is not None and e1 is not None:
-                        fc_sketch.addConstraint(Sketcher.Constraint(ctype, int(e1), float(value)))
+            fc_sketch.addConstraint(Sketcher.Constraint(ctype, *args))
         except Exception:
-            print(f"ERROR: FAILED to add constraint {idx}: {c}")
+            # print(f"ERROR: FAILED to add constraint {idx}: {ctype}, {args}")
             failed_indices.append(idx)
             pass  # Skip constraints that fail to add
 
@@ -1439,12 +1351,75 @@ def add_constraints_to_sketch(
                 constraint_mapping[i] = idx
         else:
             # If count didn't increase but it wasn't caught by exception (e.g. logic error), treat as failed if not already added
-            # Note: Some constraints might merge or be ignored silently, but usually logic errors throw.
-            # Here we assume if exception didn't fire, it succeeded or did nothing harmful.
-            # But if we strictly want 1:1, we might check. For now, exception catching is the main one.
             pass
 
     return constraint_mapping, failed_indices
+
+
+def export_to_freecad_script(primitives: list, constraints: list, output_path: str):
+    """
+    Generates a FreeCAD Python script to create a sketch with given primitives and constraints.
+    """
+    lines = []
+    lines.append("import FreeCAD")
+    lines.append("import Part")
+    lines.append("import Sketcher")
+    lines.append("")
+    lines.append("doc = FreeCAD.newDocument('SketchDoc')")
+    lines.append("body = doc.addObject('PartDesign::Body', 'Body')")
+    lines.append("fc_sketch = body.newObject('Sketcher::SketchObject', 'Sketch')")
+    lines.append("xy_plane = body.Origin.OriginFeatures[3]")
+    lines.append("fc_sketch.AttachmentSupport = xy_plane")
+    lines.append("fc_sketch.MapMode = 'FlatFace'")
+    lines.append("")
+    lines.append("# --- Add Primitives ---")
+    for ptype, args, is_const in generate_freecad_primitives(primitives):
+        # Convert args to string representation for script
+        args_str = ", ".join(map(str, args))
+
+        if ptype == "LineSegment":
+            # args: [sx, sy, 0, ex, ey, 0]
+            sx, sy, sz, ex, ey, ez = args
+            lines.append(f"fc_sketch.addGeometry(Part.LineSegment(FreeCAD.Vector({sx}, {sy}, {sz}), FreeCAD.Vector({ex}, {ey}, {ez})), {is_const})")
+        elif ptype == "Point":
+            # args: [x, y, 0]
+            x, y, z = args
+            lines.append(f"fc_sketch.addGeometry(Part.Point(FreeCAD.Vector({x}, {y}, {z})), {is_const})")
+        elif ptype == "Circle":
+            # args: [cx, cy, 0, 0, 0, 1, r]
+            cx, cy, cz, nx, ny, nz, r = args
+            lines.append(f"fc_sketch.addGeometry(Part.Circle(FreeCAD.Vector({cx}, {cy}, {cz}), FreeCAD.Vector({nx}, {ny}, {nz}), {r}), {is_const})")
+        elif ptype == "ArcOfCircle":
+             # args: [sx, sy, 0, mx, my, 0, ex, ey, 0]
+            sx, sy, sz, mx, my, mz, ex, ey, ez = args
+            lines.append(f"try:")
+            lines.append(f"    arc = Part.ArcOfCircle(FreeCAD.Vector({sx}, {sy}, {sz}), FreeCAD.Vector({mx}, {my}, {mz}), FreeCAD.Vector({ex}, {ey}, {ez}))")
+            lines.append(f"    fc_sketch.addGeometry(arc, {is_const})")
+            lines.append(f"except Exception:")
+            lines.append(f"    print(f'ERROR: Failed to add arc: {ptype}, {args}')")
+            lines.append(f"    pass")
+
+    lines.append("")
+    lines.append("# --- Add Constraints ---")
+
+    # Use shared generator for normalized constraints
+    for idx, ctype, args in generate_freecad_constraints(primitives, constraints):
+        # Convert args to string representation for script
+        args_str = ", ".join(map(str, args))
+        lines.append(f"fc_sketch.addConstraint(Sketcher.Constraint('{ctype}', {args_str}))")
+
+    lines.append("")
+    lines.append("doc.recompute()")
+    lines.append("FreeCAD.ActiveDocument.recompute()")
+    lines.append("print('Sketch created successfully!')")
+    lines.append("print(f'DoF: {fc_sketch.getSolverStatus()['DoF']}')")
+    lines.append("print(f'Status: {fc_sketch.getSolverStatus()['Status']}')")
+
+    with open(output_path, 'w') as f:
+        f.write("\n".join(lines))
+
+    print(f"Exported to {output_path}")
+
 
 
 
