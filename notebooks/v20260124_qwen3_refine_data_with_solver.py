@@ -242,34 +242,46 @@ def compute_constraint_value(ctype: str, primitives: list, e1: int, s1: int | No
     prim1 = primitives[e1]
 
     if ctype == "Distance":
-        if e2 is not None and s1 is not None and s2 is not None:
-            # Point-to-point distance
-            p1 = get_point_from_primitive(primitives, e1, s1)
-            p2 = get_point_from_primitive(primitives, e2, s2)
-            if p1 and p2:
-                return math.sqrt((p2[0] - p1[0])**2 + (p2[1] - p1[1])**2)
-        elif e2 is not None and s1 is not None and s2 is None:
-            # Point-to-edge distance: compute perpendicular distance from point to line
-            p1 = get_point_from_primitive(primitives, e1, s1)
-            prim2 = primitives[e2] if e2 < len(primitives) else None
-            if p1 and prim2 and prim2["type"] == "LineSegment":
-                lx1, ly1 = prim2["start"]
-                lx2, ly2 = prim2["end"]
-                # Vector from line start to point
-                dx, dy = lx2 - lx1, ly2 - ly1
-                line_len_sq = dx**2 + dy**2
-                if line_len_sq > 1e-9:
-                    # Project point onto line and compute perpendicular dist
-                    t = ((p1[0] - lx1) * dx + (p1[1] - ly1) * dy) / line_len_sq
-                    closest_x = lx1 + t * dx
-                    closest_y = ly1 + t * dy
-                    return math.sqrt((p1[0] - closest_x)**2 + (p1[1] - closest_y)**2)
-        elif e2 is None or (s1 is None and s2 is None):
-            # Line length (single entity)
+        # Case 1: Single entity (e.g. Line Length)
+        if e2 is None:
             if prim1["type"] == "LineSegment":
                 sx, sy = prim1["start"]
                 ex, ey = prim1["end"]
                 return math.sqrt((ex - sx)**2 + (ey - sy)**2)
+            return None
+
+        # Case 2: Two entities (Point-Point or Point-Line)
+        if e2 >= len(primitives):
+            return None
+
+        if s1 is None:
+            return None
+
+        p1 = get_point_from_primitive(primitives, e1, s1)
+        if p1 is None:
+            return None
+
+        # Attempt to get p2 (Point-to-Point)
+        # Use subnode2 if present, else default to 0
+        sub2 = s2 if s2 is not None else 0
+        p2 = get_point_from_primitive(primitives, e2, sub2)
+
+        if p2 is not None:
+            # Point-to-Point distance
+            return math.sqrt((p2[0] - p1[0])**2 + (p2[1] - p1[1])**2)
+
+        # If p2 is None, check for Point-to-Line
+        prim2 = primitives[e2]
+        if prim2["type"] == "LineSegment":
+            lx1, ly1 = prim2["start"]
+            lx2, ly2 = prim2["end"]
+            dx, dy = lx2 - lx1, ly2 - ly1
+            line_len_sq = dx**2 + dy**2
+            if line_len_sq > 1e-9:
+                t = ((p1[0] - lx1) * dx + (p1[1] - ly1) * dy) / line_len_sq
+                closest_x = lx1 + t * dx
+                closest_y = ly1 + t * dy
+                return math.sqrt((p1[0] - closest_x)**2 + (p1[1] - closest_y)**2)
 
     elif ctype == "Radius":
         if prim1["type"] == "Circle":
@@ -420,10 +432,9 @@ def export_to_freecad_script(primitives: list[dict[str, Any]], constraints: list
             else:
                 lines.append(f"# Skipped Symmetric: missing args")
         elif ctype == "Distance":
-            # Use value from Qwen3 output if available, otherwise compute
-            value = c.get("value")
-            if value is None:
-                value = compute_constraint_value("Distance", primitives, e1, s1, e2, s2)
+            # Always compute value from primitives to ensure accuracy (ignore model output)
+            value = compute_constraint_value("Distance", primitives, e1, s1, e2, s2)
+
             if value is not None:
                 if e2 is not None and s1 is not None and s2 is not None:
                     # Point-to-point distance
@@ -431,39 +442,36 @@ def export_to_freecad_script(primitives: list[dict[str, Any]], constraints: list
                 elif e2 is not None and s1 is not None:
                     # Point-to-edge distance (s2 is None or 0)
                     lines.append(f"fc_sketch.addConstraint(Sketcher.Constraint('Distance', {e1}, {s1}, {e2}, 0, {value}))")
-                else:
+                elif e1 is not None:
                     # Line length
                     lines.append(f"fc_sketch.addConstraint(Sketcher.Constraint('Distance', {e1}, {value}))")
+                else:
+                    lines.append(f"# Skipped Distance: missing args")
             else:
                 lines.append(f"# Skipped Distance: could not compute value")
+
         elif ctype == "Angle":
-            # Use value from Qwen3 output if available, otherwise compute
-            value = c.get("value")
-            if value is None:
-                value = compute_constraint_value("Angle", primitives, e1, s1, e2, s2)
+            # Always compute value from primitives to ensure accuracy (ignore model output)
+            value = compute_constraint_value("Angle", primitives, e1, s1, e2, s2)
+
             if value is not None:
                 if e2 is not None:
                     lines.append(f"fc_sketch.addConstraint(Sketcher.Constraint('Angle', {e1}, {e2}, {value}))")
-                else:
+                elif e1 is not None:
                     lines.append(f"fc_sketch.addConstraint(Sketcher.Constraint('Angle', {e1}, {value}))")
+                else:
+                    lines.append(f"# Skipped Angle: missing args")
             else:
                 lines.append(f"# Skipped Angle: could not compute value")
-        elif ctype == "Radius":
-            value = c.get("value")
-            if value is None:
-                value = compute_constraint_value("Radius", primitives, e1)
-            if value is not None:
-                lines.append(f"fc_sketch.addConstraint(Sketcher.Constraint('Radius', {e1}, {value}))")
+
+        elif ctype in ["Radius", "Diameter"]:
+            # Always compute value from primitives to ensure accuracy (ignore model output)
+            value = compute_constraint_value(ctype, primitives, e1)
+
+            if value is not None and e1 is not None:
+                lines.append(f"fc_sketch.addConstraint(Sketcher.Constraint('{ctype}', {e1}, {value}))")
             else:
-                lines.append(f"# Skipped Radius: could not compute value")
-        elif ctype == "Diameter":
-            value = c.get("value")
-            if value is None:
-                value = compute_constraint_value("Diameter", primitives, e1)
-            if value is not None:
-                lines.append(f"fc_sketch.addConstraint(Sketcher.Constraint('Diameter', {e1}, {value}))")
-            else:
-                lines.append(f"# Skipped Diameter: could not compute value")
+                lines.append(f"# Skipped {ctype}: could not compute value")
         else:
             lines.append(f"# Unknown constraint type: {ctype}")
 
@@ -567,17 +575,23 @@ def format_constraint_to_json(ctype: str, args: list) -> dict:
         c_out["subnode3"] = get_arg(5)
 
     elif ctype == "Distance":
-        # Distance(e1, value) - 2 args (line length)
-        # Distance(e1, s1, e2, s2, value) - 5 args (point-point or point-edge)
+        # Distance(e1, value) - 2 args (line length) -- e.g. Distance(Line, Value)
+        # Distance(e1, s1, e2, value) - 4 args (point-line distance) -- e.g. Distance(Point, Sub, Line, Value)
+        # Distance(e1, s1, e2, s2, value) - 5 args (point-point distance) -- e.g. Distance(Point, Sub, Point, Sub, Value)
         if len(args) == 2:
             c_out["entity1"] = get_arg(0)
-            c_out["value"] = get_arg(1)  # Preserve the value
+            c_out["value"] = get_arg(1)
+        elif len(args) == 4:
+            c_out["entity1"] = get_arg(0)
+            c_out["subnode1"] = get_arg(1)
+            c_out["entity2"] = get_arg(2)
+            c_out["value"] = get_arg(3)
         elif len(args) >= 5:
             c_out["entity1"] = get_arg(0)
             c_out["subnode1"] = get_arg(1)
             c_out["entity2"] = get_arg(2)
             c_out["subnode2"] = get_arg(3)
-            c_out["value"] = get_arg(4)  # Preserve the value
+            c_out["value"] = get_arg(4)
 
     elif ctype in ["Diameter", "Radius"]:
         # Diameter(e1, value) - 2 args
@@ -720,9 +734,14 @@ Even though you infer the parameter `Value`, we discard them and instead calcula
 
 2. Dimensional Constraints (Use only when necessary for fully constraining the sketch):
 - Distance(Entity1, Subnode1, Entity2, Subnode2, Value)
-    * Fixes distance between two points or a point to a line.
-    * Length of a line: Distance(Line, 1, Line, 2, Value)
-    * Distance from a point to a line: Distance(Entity1, Subnode1, Line, 0, Value) or Distance(Entity1, Subnode1, Line, Value) for shorthand notation.
+    * Fixes distance between two points.
+    * Example: Distance(Point1, 1, Point2, 1, Value)
+- Distance(Entity1, Subnode1, Entity2, Value)
+    * Fixes distance between a point and a line (Entity2).
+    * Example: Distance(Point, 1, Line, Value)
+- Distance(Entity1, Value)
+    * Fixes length of a line or distance of a line.
+    * Example: Distance(Line, Value)
 - Diameter(Entity1, Value)
     * Fixes diameter of Circle or Arc.
 - Radius(Entity1, Value)
@@ -1331,6 +1350,9 @@ def add_constraints_to_sketch(
                     # args: [e1, value] or [e1, s1, e2, s2, value]
                     if len(args) == 2:
                         fc_sketch.addConstraint(Sketcher.Constraint('Distance', int(args[0]), float(args[1])))
+                    elif len(args) == 4:
+                        # Point-Line Distance: e1, s1, e2, value -> s2=0
+                        fc_sketch.addConstraint(Sketcher.Constraint('Distance', int(args[0]), int(args[1]), int(args[2]), 0, float(args[3])))
                     elif len(args) == 5:
                         fc_sketch.addConstraint(Sketcher.Constraint('Distance', int(args[0]), int(args[1]), int(args[2]), int(args[3]), float(args[4])))
                 elif ctype == "Angle":
