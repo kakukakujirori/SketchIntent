@@ -720,7 +720,9 @@ Even though you infer the parameter `Value`, we discard them and instead calcula
 
 2. Dimensional Constraints (Use only when necessary for fully constraining the sketch):
 - Distance(Entity1, Subnode1, Entity2, Subnode2, Value)
-    * Fixes distance between two points.
+    * Fixes distance between two points or a point to a line.
+    * Length of a line: Distance(Line, 1, Line, 2, Value)
+    * Distance from a point to a line: Distance(Entity1, Subnode1, Line, 0, Value) or Distance(Entity1, Subnode1, Line, Value) for shorthand notation.
 - Diameter(Entity1, Value)
     * Fixes diameter of Circle or Arc.
 - Radius(Entity1, Value)
@@ -883,7 +885,7 @@ Example Tool Outputs (the input primitives and partial constraints are the same 
     "MaxDeviation_mm": 0.0,
     "MaxDeviationPrimitive": -1,
     "Passed": true,
-    "Threshold_mm": 50.0
+    "Threshold_mm": 10.0
   }
 }
 
@@ -910,7 +912,7 @@ Example Tool Outputs (the input primitives and partial constraints are the same 
     "MaxDeviation_mm": 0.0,
     "MaxDeviationPrimitive": -1,
     "Passed": true,
-    "Threshold_mm": 50.0
+    "Threshold_mm": 10.0
   }
 }
 
@@ -937,7 +939,7 @@ Example Tool Outputs (the input primitives and partial constraints are the same 
     "MaxDeviation_mm": 0.0,
     "MaxDeviationPrimitive": -1,
     "Passed": true,
-    "Threshold_mm": 50.0
+    "Threshold_mm": 10.0
   }
 }
 
@@ -966,20 +968,20 @@ Example Tool Outputs (the input primitives and partial constraints are the same 
     "MaxDeviation_mm": 0.0,
     "MaxDeviationPrimitive": -1,
     "Passed": true,
-    "Threshold_mm": 50.0
+    "Threshold_mm": 10.0
   }
 }
 ```
 
-[Rules]
+[IMPORTANT RULES]
 1. Identify geometric relationships based on the visual appearance in the image and the provided primitive IDs.
-2. Achieve fully constrained (DoF=2) CAD sketches with constraints maintaining the design intent. As a rule of thumb,
-    a. Fewer constraints are better.
-    b. Prioritize geometric relationships over dimension constraints as much as possible.
-    c. When you have to use dimension constraints, follow these rules:
+2. Achieve fully constrained (DoF=2) CAD sketches with constraints maintaining the design intent.
+    a. Try to achieve it with fewer constraints.
+    b. Always prioritize relational constraints over dimensional constraints.
+    c. When you have to use dimensional constraints, follow these rules:
         i. Avoid using angles to the maximum extent possible.
-        ii. When defining Distance constraints, prioritize horizontal and vertical directions.
-        iii. Chain dimensions horizontally or vertically. Chaining means defining length incrementally, for example, A---B and B---C, rather than A---B and A---C.
+        ii. When defining Distance constraints, prioritize HORIZONTAL and VERTICAL directions, and avoid diagonal or slanted directions.
+        iii. Chain dimensions horizontally or vertically. Chaining means defining length incrementally without overlaps, for example, A---B and B---C, rather than A---B and A---C.
         iv. When a sketch has concave regions, define length in the positive sketch area: the line defining that length should be inside the valid sketch area.
     d. Always consider that the enforced constraints are intuitive, aligned with the design intent, and easy to understand/modify for post-editing.
 3. You must submit your answer without the <final> tag several rounds to reflect the solver feedback.
@@ -1060,7 +1062,7 @@ def parse_solver_call_json(call_content: str) -> tuple[list, str | None]:
         return [], error_detail
 
 
-def run_solver_tool(primitives_list: list, constraints_json_list: list, geo_threshold_mm: float = 50.0) -> str:
+def run_solver_tool(primitives_list: list, constraints_json_list: list, geo_threshold_mm: float = 10.0) -> str:
     """Run FreeCAD solver for the provided constraints and return status JSON string."""
     doc = None
     try:
@@ -1427,7 +1429,7 @@ def add_constraints_to_sketch(
 def validate_geometry_from_lists(
     primitives: list,
     constraints: list,
-    threshold_mm: float = 50.0,
+    threshold_mm: float = 10.0,
 ) -> tuple[float, int, bool, str]:
     """
     Validate geometry impact of constraints by comparing before/after.
@@ -1508,7 +1510,7 @@ def validate_geometry_from_lists(
 def verify_constraints(
     primitives: list,
     constraints: list,
-    geo_threshold_mm: float = 50.0,
+    geo_threshold_mm: float = 10.0,
 ) -> VerificationResult:
     """
     Verify constraints using FreeCAD solver and geometry validation.
@@ -1746,11 +1748,12 @@ def comment_out_file(file_path: str) -> None:
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Save FC GT and predictions that pass all validation criteria")
-    parser.add_argument('--geo_threshold', type=float, default=50.0, help="Geometry validation threshold in mm")
+    parser.add_argument('--geo_threshold', type=float, default=10.0, help="Geometry validation threshold in mm")
     parser.add_argument('--output_dir', type=str, default='qwen3_refined_data_with_solver', help="Output directory")
     parser.add_argument('--start_idx', type=int, default=0, help="Start index of sequences to process")
-    parser.add_argument('--end_idx', type=int, default=1000, help="End index of sequences to process")
+    parser.add_argument('--process_num', type=int, default=1000, help="Number of sequences to process")
     parser.add_argument('--max_turns', type=int, default=10, help="Maximum solver calls before accepting answer")
+    parser.add_argument('--skip_viz_comparison', action='store_true', help="Skip visual comparison before and after refinement")
     args = parser.parse_args()
 
     # --- Model Configuration ---
@@ -1787,13 +1790,12 @@ if __name__ == '__main__':
     seq_data = flat_array.load_dictionary_flat(sequence_path)
     sequences = seq_data['sequences']
 
-    for i, seq in enumerate(sequences[args.start_idx : args.end_idx]):
-        i += args.start_idx
-
+    for i in range(args.start_idx, args.start_idx + args.process_num):
         # output file paths
         output_history_original = f"{args.output_dir}/commands/{i:07d}_original.py"
         output_history_refined = f"{args.output_dir}/commands/{i:07d}_refined.py"
-        output_image_path = f"{args.output_dir}/images/{i:07d}_original.png"
+        output_image_path_original = f"{args.output_dir}/images/{i:07d}_original.png"
+        output_image_path_refined = f"{args.output_dir}/images/{i:07d}_original_refined.png"
 
         # Skip if refined file already exists (resume support)
         if os.path.isfile(output_history_refined):
@@ -1802,6 +1804,7 @@ if __name__ == '__main__':
         print(f"=== Processing sample {i} ===")
 
         # load and convert original data to commands
+        seq = sequences[i]
         sketch = datalib.sketch_from_sequence(seq)
         doc = None
         try:
@@ -1844,7 +1847,7 @@ if __name__ == '__main__':
 
         # Export GT sketch image with cleaned constraints
         sketch_data = load_and_extract_from_file(output_history_original)
-        visualize_sketch_for_vlm(sketch_data, save_path=output_image_path, title=None)
+        visualize_sketch_for_vlm(sketch_data, save_path=output_image_path_original, title=None)
 
         # Sanity check
         sample_verification = verify_constraints(sample_primitives, sample_constraints_cleaned, args.geo_threshold)
@@ -1852,13 +1855,13 @@ if __name__ == '__main__':
         if not sample_verification.is_valid():
             print("  ✗ GT INVALID: Issues detected - commenting out GT file")
             os.remove(output_history_original)
-            os.remove(output_image_path)
+            os.remove(output_image_path_original)
             continue
 
         # ======== VLM PROCESSING ========
 
         print("\n--- Qwen3 Generation (Interactive) ---")
-        messages = prepare_prompts(sample_primitives, sample_constraints_cleaned, output_image_path, args.max_turns)
+        messages = prepare_prompts(sample_primitives, sample_constraints_cleaned, output_image_path_original, args.max_turns)
         predicted_constraints_list = []
 
         for solver_call_count in range(args.max_turns):
@@ -2008,3 +2011,22 @@ if __name__ == '__main__':
         with open(os.path.join(args.output_dir, "verification_log.txt"), "a") as f:
             valid_str = "PASS" if predicted_verification.is_valid() else "FAIL"
             f.write(f"{i:07d}: [GT] {sample_summary} | [Qwen3] {predicted_summary} | solver_calls={solver_call_count} [{valid_str}]\n")
+
+        # visualize the sketch after refinement
+        if not args.skip_viz_comparison:
+            sketch_data = load_and_extract_from_file(output_history_refined)
+            visualize_sketch_for_vlm(sketch_data, save_path=output_image_path_refined, title="Refined")
+
+            # combine
+            if os.path.isfile(output_image_path_original) and os.path.isfile(output_image_path_refined):
+                original_image = PIL.Image.open(output_image_path_original)
+                refined_image = PIL.Image.open(output_image_path_refined)
+
+                max_height = max(original_image.height, refined_image.height)
+                total_width = original_image.width + refined_image.width
+
+                combined_image = PIL.Image.new('RGB', (total_width, max_height), (255, 255, 255))
+                combined_image.paste(original_image, (0, 0))
+                combined_image.paste(refined_image, (original_image.width, 0))
+                combined_image.save(output_image_path_refined)
+                os.remove(output_image_path_original)
