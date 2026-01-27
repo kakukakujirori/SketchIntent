@@ -876,14 +876,9 @@ def export_to_freecad_script(primitives: list, constraints: list, output_path: s
             cx, cy, cz, nx, ny, nz, r = args
             lines.append(f"fc_sketch.addGeometry(Part.Circle(FreeCAD.Vector({cx}, {cy}, {cz}), FreeCAD.Vector({nx}, {ny}, {nz}), {r}), {is_const})")
         elif ptype == "ArcOfCircle":
-             # args: [sx, sy, 0, mx, my, 0, ex, ey, 0]
+            # args: [sx, sy, 0, mx, my, 0, ex, ey, 0]
             sx, sy, sz, mx, my, mz, ex, ey, ez = args
-            lines.append(f"try:")
-            lines.append(f"    arc = Part.ArcOfCircle(FreeCAD.Vector({sx}, {sy}, {sz}), FreeCAD.Vector({mx}, {my}, {mz}), FreeCAD.Vector({ex}, {ey}, {ez}))")
-            lines.append(f"    fc_sketch.addGeometry(arc, {is_const})")
-            lines.append(f"except Exception:")
-            lines.append(f"    print(f'ERROR: Failed to add arc: {ptype}, {args}')")
-            lines.append(f"    pass")
+            lines.append(f"fc_sketch.addGeometry(Part.ArcOfCircle(FreeCAD.Vector({sx}, {sy}, {sz}), FreeCAD.Vector({mx}, {my}, {mz}), FreeCAD.Vector({ex}, {ey}, {ez})), {is_const})")
 
     lines.append("")
     lines.append("# --- Add Constraints ---")
@@ -913,10 +908,10 @@ def export_to_freecad_script(primitives: list, constraints: list, output_path: s
 # Verification & Validation
 # ============================================================
 
-def extract_geometry_coords(fc_sketch: "Sketcher.SketchObject") -> dict[int, list[tuple[float, float]]]:
-    """Extract coordinates from all geometries in a FreeCAD sketch.
+def extract_geometry_coords(fc_sketch: "Sketcher.SketchObject") -> dict[int, dict]:
+    """Extract coordinates and length from all geometries in a FreeCAD sketch.
 
-    Returns dict mapping geo_id -> list of (x, y) points.
+    Returns dict mapping geo_id -> {'points': [(x,y), ...], 'length': float}.
     """
     coords = {}
     for geo_id, geo in enumerate(fc_sketch.Geometry):
@@ -940,7 +935,15 @@ def extract_geometry_coords(fc_sketch: "Sketcher.SketchObject") -> dict[int, lis
             c = geo.Center
             points.append((c.x, c.y))
 
-        coords[geo_id] = points
+        # safely get length (some primitives might use Length or length)
+        fn_len = getattr(geo, 'Length', getattr(geo, 'length', 0.0))
+        if callable(fn_len):
+            fn_len = fn_len()
+
+        coords[geo_id] = {
+            'points': points,
+            'length': float(fn_len)
+        }
 
     return coords
 
@@ -949,7 +952,7 @@ def validate_geometry_from_lists(
     primitives: list,
     constraints: list,
     threshold_mm: float = 10.0,
-) -> tuple[float, int, bool, str]:
+) -> tuple[float, float, int, bool, str]:
     """
     Validate geometry impact of constraints by comparing before/after.
 
@@ -964,10 +967,11 @@ def validate_geometry_from_lists(
         threshold_mm: Maximum allowed deviation in mm
 
     Returns:
-        Tuple of (max_deviation, max_deviation_primitive_idx, all_passed, error_message)
+        Tuple of (max_coord_deviation, max_length_deviation, max_deviation_primitive_idx, all_passed, error_message)
     """
     doc = None
-    max_deviation = 0.0
+    max_coord_deviation = 0.0
+    max_length_deviation = 0.0
     max_deviation_primitive_idx = -1
     all_passed = True
     error_msg = ""
@@ -991,6 +995,9 @@ def validate_geometry_from_lists(
 
         # Step 2: Add constraints
         add_constraints_to_sketch(primitives, constraints, fc_sketch)
+
+        # Explicitly solve to ensure geometry updates
+        fc_sketch.solve()
         doc.recompute()
 
         # Capture geometry AFTER constraints
@@ -998,19 +1005,40 @@ def validate_geometry_from_lists(
 
         # Step 3: Compare before and after
         for geo_id in coords_before:
-            before = coords_before[geo_id]
-            after = coords_after.get(geo_id, [])
+            before_data = coords_before[geo_id]
+            after_data = coords_after.get(geo_id, None)
 
-            if len(before) != len(after):
+            if not after_data:
                 continue
 
-            for (bx, by), (ax, ay) in zip(before, after):
-                deviation = ((bx - ax) ** 2 + (by - ay) ** 2) ** 0.5
-                if deviation > max_deviation:
-                    max_deviation = deviation
-                    max_deviation_primitive_idx = geo_id
+            before_points = before_data['points']
+            after_points = after_data['points']
 
-        all_passed = max_deviation < threshold_mm
+            if len(before_points) != len(after_points):
+                continue
+
+            # 3a. Check Coordinate Deviation
+            for (bx, by), (ax, ay) in zip(before_points, after_points):
+                deviation = ((bx - ax) ** 2 + (by - ay) ** 2) ** 0.5
+                if deviation > max_coord_deviation:
+                    max_coord_deviation = deviation
+                    if max_coord_deviation > max_length_deviation:
+                        max_deviation_primitive_idx = geo_id
+
+            # 3b. Check Length Deviation (for Arcs/Circles flipping/resizing)
+            len_b = before_data['length']
+            len_a = after_data['length']
+            # Only check if verify length is non-zero (Point has 0 length)
+            if len_b > 1e-6:
+                len_dev = abs(len_b - len_a)
+                if len_dev > max_length_deviation:
+                    max_length_deviation = len_dev
+                    if max_length_deviation > max_coord_deviation:
+                        max_deviation_primitive_idx = geo_id
+
+        # Consider both deviations for pass/fail
+        max_total_dev = max(max_coord_deviation, max_length_deviation)
+        all_passed = max_total_dev < threshold_mm
 
     except Exception:
         error_msg = "ERROR: " + traceback.format_exc()
@@ -1023,7 +1051,7 @@ def validate_geometry_from_lists(
             except:
                 pass
 
-    return max_deviation, max_deviation_primitive_idx, all_passed, error_msg
+    return max_coord_deviation, max_length_deviation, max_deviation_primitive_idx, all_passed, error_msg
 
 
 @dataclass
@@ -1038,6 +1066,7 @@ class VerificationResult:
     solver_converged: bool = True  # True if solver found a solution
     dof_decreased: bool = True  # True if Qwen3 DoF <= GT DoF (improved or same)
     geo_max_deviation: float = -1.0
+    geo_max_length_deviation: float = -1.0
     geo_passed: bool = False
     error: str | None = None
 
@@ -1067,7 +1096,7 @@ class VerificationResult:
         if not self.solver_converged:
             issues.append("solver_fail")
         if not self.geo_passed:
-            issues.append(f"geo_fail(dev={self.geo_max_deviation:.1f}mm)")
+            issues.append(f"geo_fail(c={self.geo_max_deviation:.1f}mm, l={self.geo_max_length_deviation:.1f}mm)")
         if not self.dof_decreased:
             issues.append("dof_increased")
         issue_str = ", ".join(issues) if issues else "OK"
@@ -1144,16 +1173,18 @@ def verify_constraints(
 
     # Step 3: Geometry validation (only if solver check passed)
     if result.success and result.malformed_count == 0 and result.conflicting_count == 0:
-        max_dev, _max_dev_prim_idx, geo_passed, geo_error = validate_geometry_from_lists(
+        max_coord_dev, max_len_dev, _max_dev_prim_idx, geo_passed, geo_error = validate_geometry_from_lists(
             primitives, constraints, geo_threshold_mm
         )
-        result.geo_max_deviation = max_dev
+        result.geo_max_deviation = max_coord_dev
+        result.geo_max_length_deviation = max_len_dev
         result.geo_passed = geo_passed
         if geo_error:
             result.error = geo_error
     else:
         result.geo_passed = False
         result.geo_max_deviation = -1.0
+        result.geo_max_length_deviation = -1.0
 
     return result
 
@@ -1207,12 +1238,13 @@ def run_solver_tool(primitives_list: list, constraints_json_list: list, geo_thre
         }
 
         # --- Geometry Validation ---
-        max_dev, max_dev_primitive_idx, geo_passed, geo_error = validate_geometry_from_lists(
+        max_coord_dev, max_len_dev, max_dev_primitive_idx, geo_passed, geo_error = validate_geometry_from_lists(
             primitives_list, constraints_json_list, geo_threshold_mm
         )
 
         response['GeometryValidation'] = {
-            'MaxDeviation_mm': round(max_dev, 2),
+            'MaxCoordDeviation_mm': round(max_coord_dev, 2),
+            'MaxLengthDeviation_mm': round(max_len_dev, 2),
             'MaxDeviationPrimitive': max_dev_primitive_idx,
             'Passed': geo_passed,
             'Threshold_mm': geo_threshold_mm
@@ -1624,11 +1656,11 @@ and return the following JSON format:
   'RedundantConstraints': [int...],   # List of indices that are redundant (0-based)
   'ConflictGroups': [[int...], ...],  # Groups of constraints causing issues (0-based)
   'MalformedConstraints': [int...],   # Malformed constraints (0-based)
-  'GeometryValidation': {             # Geometry impact check
-      'MaxDeviation_mm': float,       # Maximum deviation of primitives (mm)
-      'MaxDeviationPrimitive': int,   # 0-based index of primitive with max deviation (-1 if none)
-      'Passed': bool,                 # True if deviation < Threshold_mm. False means the geometry was moved unacceptably yoo much.
-      'Threshold_mm': float           # Threshold value used for judgement
+      'MaxCoordDeviation_mm': float,  # Maximum displacement of any point (Start, End, Center) from the original position.
+      'MaxLengthDeviation_mm': float, # Maximum change in length of any primitive (e.g. Arc length). Large values >10mm indicate severe distortion/flipping.
+      'MaxDeviationPrimitive': int,   # 0-based index of primitive with the largest error (either coordinate or length deviation). -1 means None.
+      'Passed': bool,                 # True if both deviations < Threshold_mm.
+      'Threshold_mm': float,          # Threshold value used for judgement
   }
 }
 ```
@@ -1680,7 +1712,8 @@ Example Tool Outputs (the input primitives and partial constraints are the same 
   "ConflictGroups": [],
   "MalformedConstraints": [],
   "GeometryValidation": {
-    "MaxDeviation_mm": 0.0,
+    "MaxCoordDeviation_mm": 0.0,
+    "MaxLengthDeviation_mm": 0.0,
     "MaxDeviationPrimitive": -1,
     "Passed": true,
     "Threshold_mm": 10.0
@@ -1734,7 +1767,8 @@ Example Tool Outputs (the input primitives and partial constraints are the same 
   "ConflictGroups": [[0, 7], [5, 4, 7, 6], [0, 7]],
   "MalformedConstraints": [],
   "GeometryValidation": {
-    "MaxDeviation_mm": 0.0,
+    "MaxCoordDeviation_mm": 0.0,
+    "MaxLengthDeviation_mm": 0.0,
     "MaxDeviationPrimitive": -1,
     "Passed": true,
     "Threshold_mm": 10.0
@@ -1763,7 +1797,8 @@ Example Tool Outputs (the input primitives and partial constraints are the same 
   "ConflictGroups": [],
   "MalformedConstraints": [],
   "GeometryValidation": {
-    "MaxDeviation_mm": 0.0,
+    "MaxCoordDeviation_mm": 0.0,
+    "MaxLengthDeviation_mm": 0.0,
     "MaxDeviationPrimitive": -1,
     "Passed": true,
     "Threshold_mm": 10.0
