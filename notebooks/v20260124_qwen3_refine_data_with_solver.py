@@ -1425,7 +1425,13 @@ def comment_out_file(file_path: str) -> None:
 # Main Workflow
 # ============================================================
 
-def prepare_prompts(primitives_list: list, constraints_list: list, image_path_list: str | list[str], max_turns: int):
+def prepare_prompts(
+    primitives_list: list,
+    constraints_list: list,
+    image_path_list: str | list[str],
+    max_turns: int,
+    geo_threshold_mm: float = 10.0,
+):
 
     if isinstance(image_path_list, str):
         image_path_list = [image_path_list]
@@ -1451,7 +1457,7 @@ def prepare_prompts(primitives_list: list, constraints_list: list, image_path_li
     constraints_text = json.dumps(constraints_json_list, indent=2)
 
     # Run solver on partial constraints to get initial status
-    initial_solver_output = run_solver_tool(primitives_list, constraints_list)
+    initial_solver_output = run_solver_tool(primitives_list, constraints_list, geo_threshold_mm)
 
     system_prompt_text = """You are an expert CAD engineer.
 Analyze the provided 2D sketch image, the list of geometric primitives, and the list of partial geometric constraints.
@@ -1980,7 +1986,7 @@ if __name__ == '__main__':
         # ======== VLM PROCESSING ========
 
         print("\n--- Qwen3 Generation (Interactive) ---")
-        messages = prepare_prompts(sample_primitives, sample_constraints_cleaned, output_image_path_original, args.max_turns)
+        messages = prepare_prompts(sample_primitives, sample_constraints_cleaned, output_image_path_original, args.max_turns, args.geo_threshold)
         predicted_constraints_list = []
 
         for solver_call_count in range(args.max_turns):
@@ -2041,7 +2047,7 @@ if __name__ == '__main__':
                     solver_output = json.dumps({"DoF": "null", "Error": parse_error}, indent=2)
                 else:
                     # Run solver with predicted constraints
-                    solver_output = run_solver_tool(sample_primitives, predicted_constraints)
+                    solver_output = run_solver_tool(sample_primitives, predicted_constraints, args.geo_threshold)
             else:
                 solver_output = json.dumps({"DoF": "null", "Error": "You MUST output the JSON array of constraints."}, indent=2)
 
