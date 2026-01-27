@@ -1533,21 +1533,18 @@ Even though you infer the parameter `Value`, we discard them and instead calcula
     * Constrains Entity1.Subnode1 and Entity2.Subnode2 to be symmetric with respect to Entity3.Subnode3.
     * Entity3 can be a Point (symmetry point) or a Line (symmetry axis).
     * Examples:
-        - Two points and a symmetry line (you can omit Subnode3 in this case): Symmetric(Line1, PointOfLine1, Line2, PointOfLine2, SymmetryLine)
+        - Two points and a symmetry line (you can omit Subnode3 = 0 in this case): Symmetric(Line1, PointOfLine1, Line2, PointOfLine2, SymmetryLine)
         - Two points and a symmetry point: Symmetric(Line1, PointOfLine1, Line2, PointOfLine2, LineS, PointOfLineS)
         - A line and a symmetry point: Symmetric(Line, 1, Line, 2, LineS, PointOfLineS)
     * NOTE: Entity1.Subnode1 and Entity2.Subnode2 must be points, so Subnode1/2 must NOT be 0 if Entity1/2 is not a point.
 
 2. Dimensional Constraints (Use only when necessary for fully constraining the sketch):
 - Distance(Entity1, Subnode1, Entity2, Subnode2, Value)
-    * Fixes distance between two points.
-    * Example: Distance(Point1, 1, Point2, 1, Value)
-- Distance(Entity1, Subnode1, Entity2, Value)
-    * Fixes distance between a point and a line (Entity2).
-    * Example: Distance(Point, 1, Line, Value)
-- Distance(Entity1, Value)
-    * Fixes length of a line.
-    * Example: Distance(Line, Value)
+    * Examples:
+        - Fixes distance between two points: Distance(Entity1, Subnode1, Entity2, Subnode2, Value)
+        - Fixes distance between a point and a line (you can omit Subnode2 = 0 in this case): Distance(Entity1, Subnode1, Line2, Value)
+        - Fixes length of a line: Distance(Line, 1, Line, 2, Value), or Distance(Line, Value) for shorthand notation.
+    * NOTE: You CANNOT define the distance between two lines: Distance(Line1, 0, Line2, 0, Value) is judged as malformed.
 - Diameter(Entity1, Value)
     * Fixes diameter of Circle or Arc.
 - Radius(Entity1, Value)
