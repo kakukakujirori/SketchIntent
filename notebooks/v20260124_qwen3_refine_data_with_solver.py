@@ -1926,7 +1926,7 @@ if __name__ == '__main__':
         if os.path.isfile(output_history_refined):
             print(f"=== Skipping sample {i} (refined already exists) ===")
             continue
-        print(f"=== Processing sample {i} ===")
+        print(f"\n\n====== Processing sample {i} ======")
 
         # load and convert original data to commands
         seq = sequences[i]
@@ -2080,10 +2080,10 @@ if __name__ == '__main__':
                 f.write(f"Error: No predicted constraints found for sequence {i}\n")
             continue
 
-        valid_prediction_found = False
+        valid_candidates = []
 
-        for pred_validation_version_id, predicted_constraints in enumerate(predicted_constraints_list[::-1]):
-
+        # Iterate through all predictions
+        for pred_validation_version_id, predicted_constraints in enumerate(predicted_constraints_list):
             print(f"\n~~~~~~~~ Qwen3 Output Version {pred_validation_version_id + 1} ~~~~~~~~")
 
             # Cleanup the final result
@@ -2113,19 +2113,32 @@ if __name__ == '__main__':
 
             if predicted_verification.is_valid():
                 print("  ✓ VALID: Constraints are well-formed and geometry preserved")
-                valid_prediction_found = True
-                # Export cleaned constraints
-                export_to_freecad_script(sample_primitives, predicted_constraints_cleaned, output_history_refined)
-                break
+                valid_candidates.append({
+                    'dof': predicted_verification.dof,
+                    'constraints': predicted_constraints_cleaned,
+                    'version': pred_validation_version_id,
+                    'verification': predicted_verification
+                })
             else:
-                print("  ✗ INVALID: Issues detected - commenting out output file")
+                print("  ✗ INVALID: Issues detected")
                 if predicted_verification.error:
                     print(f"  Error: {predicted_verification.error}")
 
-        if not valid_prediction_found:
+        if valid_candidates:
+            # Sort by DoF (ascending), then by version (descending) to prefer later refined versions if DoF is same
+            valid_candidates.sort(key=lambda x: (x['dof'], -x['version']))
+            best_candidate = valid_candidates[0]
+            print(f"\n★ SELECTED BEST CANDIDATE: Version {best_candidate['version'] + 1} with DoF={best_candidate['dof']}")
+            export_to_freecad_script(sample_primitives, best_candidate['constraints'], output_history_refined)
+
+            # Update variables for logging
+            predicted_verification = best_candidate['verification']
+            predicted_summary = predicted_verification.summary()
+        else:
+            print("\n✗ NO VALID CANDIDATES FOUND. Exporting last prediction (commented out).")
             # Take the last prediction, and comment out the output file
             predicted_constraints = predicted_constraints_list[-1]
-            predicted_constraints_cleaned, predicted_constraints_cleanup_result = cleanup_constraints_from_lists(sample_primitives, predicted_constraints)
+            predicted_constraints_cleaned, _ = cleanup_constraints_from_lists(sample_primitives, predicted_constraints)
             export_to_freecad_script(sample_primitives, predicted_constraints_cleaned, output_history_refined)
             comment_out_file(output_history_refined)
             predicted_verification = verify_constraints(sample_primitives, predicted_constraints_cleaned, args.geo_threshold)
