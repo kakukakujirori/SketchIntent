@@ -35,7 +35,7 @@ from sketchgraphs.data import flat_array
 
 
 from img2cad_diffusion.convert_sketch_to_freecad import convert_sketch_to_freecad, draw_svg
-from v20260116_draw_constraints import visualize_sketch_for_vlm, load_and_extract_from_file
+from v20260116_draw_constraints import visualize_sketch_for_vlm, load_and_extract_from_file, export_sketch_to_dict
 
 
 # ============================================================
@@ -95,17 +95,21 @@ def get_point_from_primitive(primitives: list, entity_idx: int, subnode: int) ->
             return [prim["x"], prim["y"]]
         return None
 
-    elif subnode == 1:  # StartPoint
+    elif subnode == 1:  # StartPoint (or Point Vertex 1)
         if ptype == "LineSegment":
             return prim["start"]
         elif ptype == "Arc":
             return prim["start"]
+        elif ptype == "Point":
+            return [prim["x"], prim["y"]]
 
     elif subnode == 2:  # EndPoint
         if ptype == "LineSegment":
             return prim["end"]
         elif ptype == "Arc":
             return prim["end"]
+        elif ptype == "Point":
+            return [prim["x"], prim["y"]]
 
     elif subnode == 3:  # CenterPoint
         if ptype == "Circle":
@@ -1189,7 +1193,140 @@ def verify_constraints(
     return result
 
 
-def run_solver_tool(primitives_list: list, constraints_json_list: list, geo_threshold_mm: float = 10.0) -> str:
+
+def find_problematic_constraint_incremental(
+    primitives: list,
+    constraints: list,
+    geo_threshold_mm: float = 10.0
+) -> int:
+    """
+    Incrementally add constraints to find the first one that causes geometry deviation > threshold.
+    Returns the index of the problematic constraint (0-based) or -1 if no single constraint triggers it.
+    """
+    doc = None
+    problematic_index = -1
+
+    try:
+        # Create temp doc
+        doc = FreeCAD.newDocument("IncrementalDebugDoc")
+        body = doc.addObject('PartDesign::Body', 'Body')
+        fc_sketch = body.newObject('Sketcher::SketchObject', 'Sketch')
+        xy_plane = body.Origin.OriginFeatures[3]
+        fc_sketch.AttachmentSupport = xy_plane
+        fc_sketch.MapMode = 'FlatFace'
+
+        # Add primitives (base state)
+        add_primitives_to_sketch(primitives, fc_sketch)
+        doc.recompute()
+
+        # Capture Initial Coordinates (Ground Truth for deviation)
+        coords_before = extract_geometry_coords(fc_sketch)
+
+        for i, constr in enumerate(constraints):
+            # Add ONE constraint
+            # WE MUST ADD IT CUMULATIVELY
+            # 'add_constraints_to_sketch' expects a list. We pass a single-item listing.
+            # It appends to the sketch.
+            _, failed = add_constraints_to_sketch(primitives, [constr], fc_sketch)
+
+            if failed:
+                continue
+
+            doc.recompute()
+            fc_sketch.solve()
+
+            # Check deviation against ORIGINAL coords_before
+            coords_after = extract_geometry_coords(fc_sketch)
+
+            max_dev = 0.0
+            max_len_dev = 0.0
+
+            for geo_id, before_data in coords_before.items():
+                if geo_id not in coords_after: continue
+                after_data = coords_after[geo_id]
+
+                # Coord dev
+                for (bx, by), (ax, ay) in zip(before_data['points'], after_data['points']):
+                    dist = ((bx-ax)**2 + (by-ay)**2)**0.5
+                    if dist > max_dev: max_dev = dist
+
+                # Length dev
+                l_dev = abs(before_data['length'] - after_data['length'])
+                if l_dev > max_len_dev: max_len_dev = l_dev
+
+            if max_dev > geo_threshold_mm or max_len_dev > geo_threshold_mm:
+                problematic_index = i
+                break
+
+    except Exception as e:
+        print(f"Incremental Check Error: {e}")
+
+    finally:
+        if doc:
+            try:
+                FreeCAD.closeDocument(doc.Name)
+            except:
+                pass
+
+    return problematic_index
+
+
+def static_constraints_diagnosis(
+    primitives_list: list[dict[str, Any]],
+    constraints_json_list: list[dict[str, Any]],
+):
+    warnings = []
+
+    for i, c in enumerate(constraints_json_list):
+
+        # Check for malformed constraints
+        if c["type"] == "Symmetric":
+            if "entity1" in c and "entity2" in c:
+                e1, s1 = c["entity1"], c.get("subnode1", 0)
+                e2, s2 = c["entity2"], c.get("subnode2", 0)
+                e3, s3 = c["entity3"], c.get("subnode3", 0)
+
+                p1 = get_point_from_primitive(primitives_list, e1, s1)
+                p2 = get_point_from_primitive(primitives_list, e2, s2)
+
+                if p1 is None or p2 is None:
+                    warnings.append(f"Constraint {i} (Symmetric({e1}, {s1}, {e2}, {s2}, {e3}, {s3})) is malformed: if entity1/2 itself is not a point, subnode1/2 must be >= 1.")
+
+        # Check for diagonal distance constraints
+        if c["type"] == "Distance":
+            # Check if Point-to-Point
+            if "entity1" in c and "entity2" in c:
+                e1, s1 = c["entity1"], c.get("subnode1", 0)
+                e2, s2 = c["entity2"], c.get("subnode2", 0)
+
+                # STRICT CHECK: Ensure both targets are Points.
+                p1 = get_point_from_primitive(primitives_list, e1, s1)
+                p2 = get_point_from_primitive(primitives_list, e2, s2)
+
+                if p1 is None or p2 is None:
+                    continue
+
+                # p1, p2 are [x, y] lists
+                dx = abs(p1[0] - p2[0])
+                dy = abs(p1[1] - p2[1])
+
+                # Threshold for "Diagonal": neither H nor V (e.g. > 0.1mm deviation in both axes)
+                if dx > 0.1 and dy > 0.1:
+                    warnings.append(f"Constraint {i} (Distance({e1}, {s1}, {e2}, {s2})) is diagonally placed. If possible, replace it with another constraint, such as horizontal/vertical point-to-line distance or radius constraint.")
+
+    # # DEBUG
+    # if warnings:
+    #     warnings.append(primitives_list)
+
+    return warnings
+
+
+def run_solver_tool(
+    primitives_list: list,
+    constraints_json_list: list,
+    geo_threshold_mm: float = 10.0,
+    viz_image_path: str | None = None,
+) -> str:
     """Run FreeCAD solver for the provided constraints and return status JSON string."""
     doc = None
     try:
@@ -1252,11 +1389,37 @@ def run_solver_tool(primitives_list: list, constraints_json_list: list, geo_thre
         if geo_error:
             response['GeometryValidation']['Error'] = geo_error
 
+        # Incremental check if validation failed
+        if not geo_passed:
+            prob_idx = find_problematic_constraint_incremental(primitives_list, constraints_json_list, geo_threshold_mm)
+            if prob_idx >= 0:
+                response['GeometryValidation']['ProblematicConstraintIndex'] = prob_idx
+
+        # --- Diagnostic Warnings (Diagonal Distance, Syntax Error) ---
+        warnings = static_constraints_diagnosis(primitives_list, constraints_json_list)
+        if warnings:
+            response["Warnings"] = warnings
+
     except Exception:
         response = {'Error': traceback.format_exc()}
 
     finally:
-        if doc:
+        # --- Image Generation for Feedback ---
+        if doc and viz_image_path:
+            try:
+                # Export sketch data for visualization
+                sketch_data = export_sketch_to_dict(fc_sketch)
+                # Use 384x384 size as requested to save tokens
+                visualize_sketch_for_vlm(
+                    sketch_data,
+                    save_path=viz_image_path,
+                    title=None,
+                    icon_fontsize=10,
+                    figsize=(640, 640),
+                )
+            except Exception as e:
+                print(f"Failed to generate feedback image: {e}")
+
             try:
                 FreeCAD.closeDocument(doc.Name)
             except:
@@ -1653,17 +1816,21 @@ At every end of your turn, we will call the solver tool to verify your current c
 and return the following JSON format:
 ```
 {
-  'DoF': int,                         # Current Degrees of Freedom
-  'Status': str,                      # "Converged", "Conflicting", "Redundant", "Failed", etc.
-  'ConflictingConstraints': [int...], # List of indices causing conflicts (0-based)
-  'RedundantConstraints': [int...],   # List of indices that are redundant (0-based)
-  'ConflictGroups': [[int...], ...],  # Groups of constraints causing issues (0-based)
-  'MalformedConstraints': [int...],   # Malformed constraints (0-based)
-      'MaxCoordDeviation_mm': float,  # Maximum displacement of any point (Start, End, Center) from the original position.
-      'MaxLengthDeviation_mm': float, # Maximum change in length of any primitive (e.g. Arc length). Large values >10mm indicate severe distortion/flipping.
-      'MaxDeviationPrimitive': int,   # 0-based index of primitive with the largest error (either coordinate or length deviation). -1 means None.
-      'Passed': bool,                 # True if both deviations < Threshold_mm.
-      'Threshold_mm': float,          # Threshold value used for judgement
+  'DoF': int,                          # Current Degrees of Freedom
+  'Status': str,                       # "Converged", "Conflicting", "Redundant", "Failed", etc.
+  'ConflictingConstraints': [int...],  # List of indices causing conflicts (0-based)
+  'RedundantConstraints': [int...],    # List of indices that are redundant (0-based)
+  'ConflictGroups': [[int...], ...],   # Groups of constraints causing issues (0-based)
+  'MalformedConstraints': [int...],    # Malformed constraints (0-based)
+  'GeometryValidation': {
+    'MaxCoordDeviation_mm': float,     # Maximum displacement of any point (Start, End, Center) from the original position.
+    'MaxLengthDeviation_mm': float,    # Maximum change in length of any primitive (e.g. Arc length). Large values >10mm indicate severe distortion/flipping.
+    'MaxDeviationPrimitive': int,      # 0-based index of primitive with the largest error (either coordinate or length deviation). -1 means None.
+    'Passed': bool,                    # True if both deviations < Threshold_mm.
+    'Threshold_mm': float,             # Threshold value used for judgement
+    'ProblematicConstraintIndex': int, # The index of the first constraint (in your output list) that caused the geometry to deviate. Use this to identify and fix the bad constraint.
+  }
+  'Warnings': [str...],                # Other recommendations to note, e.g., replace diagonally defined distance constraints with horizontal/vertical ones.
   }
 }
 ```
@@ -1678,6 +1845,7 @@ The desirable solver status is DoF=2, Status=Converged, no Conflicting/Redundant
 - The solver output indices are 0-based and correspond to the order in your <solver_call> list.
 
 Along with the input primitives and partial constraints, we also provide the initial solver output for your reference.
+In addition, we provide the 2D sketch image with your inferred constraints applied at every turn. Refer to it for understanding geometric relationships and your solution's integrity.
 
 IMPORTANT: If the output doesn't conform to the JSON format, we return an error message.
 Immediately fix the error based on the message and re-submit your answer.
@@ -1817,8 +1985,9 @@ Example Tool Outputs (the input primitives and partial constraints are the same 
     c. When you have to use dimensional constraints, follow these rules:
         i. Avoid using angles to the maximum extent possible.
         ii. When defining Distance constraints, prioritize HORIZONTAL and VERTICAL directions, and avoid diagonal or slanted directions.
-        iii. Chain dimensions horizontally or vertically. Chaining means defining length incrementally without overlaps, for example, A---B and B---C, rather than A---B and A---C.
-        iv. When a sketch has concave regions, define length in the positive sketch area: the line defining that length should be inside the valid sketch area.
+        iii. You may use point-line distances to achieve HORIZONTAL or VERTICAL distance constraints: Distance(Entity1, Subnode1, Line2, 0, Value) or Distance(Entity1, Subnode1, Line2, Value) for short.
+        iv. Chain dimensions horizontally or vertically. Chaining means defining length incrementally without overlaps, for example, A---B and B---C, rather than A---B and A---C.
+        v. When a sketch has concave regions, define length in the positive sketch area: the line defining that length should be inside the valid sketch area.
     d. Always consider that the enforced constraints are intuitive, aligned with the design intent, and easy to understand/modify for post-editing.
 3. You must submit your answer without the <final> tag several rounds to reflect the solver feedback.
 4. If you cannot name all the constraints to achieve DoF=2, output the constraints you have identified so far to achieve the lowest DoF without any malformed or conflicting constraints.
@@ -1898,7 +2067,7 @@ if __name__ == '__main__':
             verbose=False,
         ),
         n_gpu_layers=-1,
-        n_ctx=65536,
+        n_ctx=81920, #65536,
         swa_full=True,
         verbose=False,
     )
@@ -1972,7 +2141,13 @@ if __name__ == '__main__':
 
         # Export GT sketch image with cleaned constraints
         sketch_data = load_and_extract_from_file(output_history_original)
-        visualize_sketch_for_vlm(sketch_data, save_path=output_image_path_original, title=None)
+        visualize_sketch_for_vlm(
+            sketch_data,
+            save_path=output_image_path_original,
+            title=None,
+            icon_fontsize=10,
+            figsize=(640, 640),
+        )
 
         # Sanity check
         sample_verification = verify_constraints(sample_primitives, sample_constraints_cleaned, args.geo_threshold)
@@ -2036,6 +2211,7 @@ if __name__ == '__main__':
                     break
 
             # 2. Check for </think> and extract JSON
+            FEEDBACK_IMAGE_PATH = f"{args.output_dir}/images/{i:07d}_feedback_{solver_call_count:02d}.png"
             parts = current_turn_text.split("</think>")
             content_to_parse = parts[-1] if len(parts) > 1 else current_turn_text
             json_match = re.search(r'\[[\s\S]*?\]', content_to_parse)
@@ -2045,11 +2221,13 @@ if __name__ == '__main__':
 
                 if parse_error:
                     solver_output = json.dumps({"DoF": "null", "Error": parse_error}, indent=2)
+                    FEEDBACK_IMAGE_PATH = None
                 else:
                     # Run solver with predicted constraints
-                    solver_output = run_solver_tool(sample_primitives, predicted_constraints, args.geo_threshold)
+                    solver_output = run_solver_tool(sample_primitives, predicted_constraints, args.geo_threshold, FEEDBACK_IMAGE_PATH)
             else:
                 solver_output = json.dumps({"DoF": "null", "Error": "You MUST output the JSON array of constraints."}, indent=2)
+                FEEDBACK_IMAGE_PATH = None
 
             # Check for solver error (Top-level or GeometryValidation) and log/truncate
             # Note: We expect run_solver_tool to ALWAYS return valid JSON. If it fails (JSONDecodeError),
@@ -2070,8 +2248,24 @@ if __name__ == '__main__':
 
             solver_output = json.dumps(solver_resp, indent=2)
 
-            messages.append({"role": "user", "content": solver_output})
+            # Construct Visual Feedback Message
+            user_content = []
+
+            if FEEDBACK_IMAGE_PATH and os.path.isfile(FEEDBACK_IMAGE_PATH):
+                try:
+                    with open(FEEDBACK_IMAGE_PATH, "rb") as img_f:
+                        feedback_b64 = base64.b64encode(img_f.read()).decode("utf-8")
+                    user_content.append({"type": "image_url", "image_url": {"url": f"data:image/png;base64,{feedback_b64}"}})
+                    solver_output += "\n\nAttached is a sketch with your constraints applied. Identify and fix any invalid constraints from it if any, then find missing constraints."
+                except Exception as e:
+                    print(f"Error encoding feedback image: {e}")
+
+            user_content.append({"type": "text", "text": solver_output})
+            messages.append({"role": "user", "content": user_content})
+
             print("User: " + solver_output + "\n")
+            if FEEDBACK_IMAGE_PATH:
+                print(f"[Visual Feedback] Image appended: {FEEDBACK_IMAGE_PATH}\n")
 
         # Select the best solution so far
         if len(predicted_constraints_list) == 0:
@@ -2153,7 +2347,14 @@ if __name__ == '__main__':
         # visualize the sketch after refinement
         if not args.skip_viz_comparison:
             sketch_data = load_and_extract_from_file(output_history_refined)
-            visualize_sketch_for_vlm(sketch_data, save_path=output_image_path_refined, title="Refined")
+            visualize_sketch_for_vlm(
+                sketch_data,
+                save_path=output_image_path_refined,
+                title="Refined",
+                title_fontsize=10,
+                icon_fontsize=10,
+                figsize=(640, 640),
+            )
 
             # combine
             if os.path.isfile(output_image_path_original) and os.path.isfile(output_image_path_refined):

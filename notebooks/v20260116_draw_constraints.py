@@ -164,7 +164,15 @@ def load_and_extract_from_file(file_path: str):
 # ==========================================
 
 
-def visualize_sketch_for_vlm(data, save_path: str = "vlm_input.png", title: str | None = None, title_fontsize: int = 24):
+def visualize_sketch_for_vlm(
+    data,
+    save_path: str = "vlm_input.png",
+    title: str | None = None,
+    title_fontsize: int = 24,
+    icon_fontsize: int = 10,
+    figsize: tuple[int, int] = (800, 800),
+    dpi: int = 100,
+    ):
     """
     Visualize sketch with primitives and constraints.
 
@@ -173,10 +181,12 @@ def visualize_sketch_for_vlm(data, save_path: str = "vlm_input.png", title: str 
         save_path: Path to save the output image
         title: Optional label (e.g., "Sketch A") to display in top-left corner
         title_fontsize: Font size for the title label
+        figsize: Target canvas size in pixels (default: (800, 800))
+        dpi: Dots per inch (default: 100)
     """
     if not data: return
 
-    fig, ax = plt.subplots(figsize=(8, 8))
+    fig, ax = plt.subplots(figsize=(figsize[0] / dpi, figsize[1] / dpi), dpi=dpi)
     ax.set_aspect('equal')
 
     all_x, all_y = [], []
@@ -246,7 +256,14 @@ def visualize_sketch_for_vlm(data, save_path: str = "vlm_input.png", title: str 
             if pos == 1: return prim["start"]
             if pos == 2: return prim["end"]
             if pos == 3: return prim["center"]
-            mid = math.radians((prim["start_angle"] + prim["end_angle"])/2)
+            start_ang = prim["start_angle"]
+            end_ang = prim["end_angle"]
+            if end_ang < start_ang:
+                mid_ang = (start_ang + end_ang + 360) / 2
+                if mid_ang >= 360: mid_ang -= 360
+            else:
+                mid_ang = (start_ang + end_ang) / 2
+            mid = math.radians(mid_ang)
             return (prim["center"][0] + prim["radius"]*math.cos(mid), prim["center"][1] + prim["radius"]*math.sin(mid))
         if prim["type"] == "Circle":
             if pos == 3: return prim["center"]
@@ -311,7 +328,7 @@ def visualize_sketch_for_vlm(data, save_path: str = "vlm_input.png", title: str 
         ax.scatter([dim_start[0], dim_end[0]], [dim_start[1], dim_end[1]], color='blue', s=20, zorder=7)
 
         mx, my = (dim_start[0] + dim_end[0])/2, (dim_start[1] + dim_end[1])/2
-        ax.text(mx, my, text, color='blue', fontsize=11, weight='bold', ha='center', va='center',
+        ax.text(mx, my, text, color='blue', fontsize=icon_fontsize, weight='bold', ha='center', va='center',
                 bbox=dict(facecolor='#f0f8ff', edgecolor='blue', boxstyle='round,pad=0.2', alpha=1.0), zorder=20)
 
     # Angles ordered to maximize separation, starting with 45 degrees to avoid overlap with horizontal/vertical primitives
@@ -380,7 +397,7 @@ def visualize_sketch_for_vlm(data, save_path: str = "vlm_input.png", title: str 
 
         # Apply position-based offset to label to avoid overlapping with other labels
         label_x, label_y = get_label_offset(p_outer[0], p_outer[1])
-        ax.text(label_x, label_y, label, color='blue', fontsize=11, weight='bold', ha='left', va='center',
+        ax.text(label_x, label_y, label, color='blue', fontsize=icon_fontsize, weight='bold', ha='left', va='center',
                 bbox=dict(facecolor='#f0f8ff', edgecolor='blue', boxstyle='round,pad=0.2', alpha=1.0), zorder=20)
 
     align_counter = 0
@@ -391,7 +408,7 @@ def visualize_sketch_for_vlm(data, save_path: str = "vlm_input.png", title: str 
         mx = p1[0] + (p2[0]-p1[0]) * ratio
         my = p1[1] + (p2[1]-p1[1]) * ratio
         label = "H" if type_str == "Horizontal" else "V"
-        ax.text(mx, my, label, color='red', fontsize=11, weight='bold', ha='center', va='center', zorder=30,
+        ax.text(mx, my, label, color='red', fontsize=icon_fontsize, weight='bold', ha='center', va='center', zorder=30,
                 bbox=dict(facecolor='white', edgecolor='red', boxstyle='square,pad=0.1', alpha=1.0))
 
 
@@ -486,7 +503,7 @@ def visualize_sketch_for_vlm(data, save_path: str = "vlm_input.png", title: str 
                 tid = t["id"]
                 mx, my = get_pos_coord({"id": tid, "pos": 0})
                 mx, my = get_label_offset(mx, my)
-                ax.text(mx, my, label, color='red', fontsize=12, **text_props,
+                ax.text(mx, my, label, color='red', fontsize=icon_fontsize, **text_props,
                         bbox=dict(facecolor='white', edgecolor='none', pad=0, alpha=0.8))
             continue
 
@@ -498,7 +515,7 @@ def visualize_sketch_for_vlm(data, save_path: str = "vlm_input.png", title: str 
                 tid = t["id"]
                 mx, my = get_pos_coord({"id": tid, "pos": 0})
                 mx, my = get_label_offset(mx, my)
-                ax.text(mx, my, label, color='red', fontsize=12, **text_props,
+                ax.text(mx, my, label, color='red', fontsize=icon_fontsize, **text_props,
                         bbox=dict(facecolor='white', edgecolor='none', pad=0, alpha=0.8))
             continue
 
@@ -554,7 +571,7 @@ def visualize_sketch_for_vlm(data, save_path: str = "vlm_input.png", title: str 
                     dist = math.sqrt(vx*vx + vy*vy)
                     if dist > 0:
                         off = scale_ref * 0.4
-                        ax.text(tx + vx/dist*off, ty + vy/dist*off, "T", color='red', fontsize=11, weight='bold', ha='center', va='center',
+                        ax.text(tx + vx/dist*off, ty + vy/dist*off, "T", color='red', fontsize=icon_fontsize, weight='bold', ha='center', va='center',
                                 bbox=dict(facecolor='white', edgecolor='red', boxstyle='square,pad=0.1', alpha=1.0), zorder=30)
                     continue
 
@@ -575,12 +592,12 @@ def visualize_sketch_for_vlm(data, save_path: str = "vlm_input.png", title: str 
                         off = scale_ref * 0.4
                         fx, fy = mx + nx*off, my + ny*off
                         label = "H" if c_type == "Horizontal" else "V"
-                        ax.text(fx, fy, label, color='red', fontsize=11, weight='bold', ha='center', va='center',
+                        ax.text(fx, fy, label, color='red', fontsize=icon_fontsize, weight='bold', ha='center', va='center',
                                 bbox=dict(facecolor='white', edgecolor='red', boxstyle='square,pad=0.1', alpha=1.0))
                     else:
                         mx, my = get_pos_coord({"id": tid, "pos": 0})
                         mx, my = get_label_offset(mx, my)
-                        ax.text(mx, my, c_type[0], color='red', fontsize=12, **text_props,
+                        ax.text(mx, my, c_type[0], color='red', fontsize=icon_fontsize, **text_props,
                                 bbox=dict(facecolor='white', edgecolor='red', boxstyle='circle,pad=0.1'))
             continue
 
@@ -599,7 +616,7 @@ def visualize_sketch_for_vlm(data, save_path: str = "vlm_input.png", title: str 
                 ln = math.sqrt(vx*vx + vy*vy)
                 if ln > 0: vx, vy = vx/ln, vy/ln
                 off = scale_ref * 0.8
-                ax.text(dx + vx*off, dy + vy*off, "⊥", color='red', fontsize=20, weight='bold', ha='center', va='center')
+                ax.text(dx + vx*off, dy + vy*off, "⊥", color='red', fontsize=icon_fontsize*2, weight='bold', ha='center', va='center')
             else:
                 ax.scatter([dx], [dy], color='red', s=50, zorder=20, edgecolors='white', linewidth=1.0)
             continue
@@ -609,7 +626,7 @@ def visualize_sketch_for_vlm(data, save_path: str = "vlm_input.png", title: str 
             tid = t["id"]
             mx, my = get_pos_coord({"id": tid, "pos": 0})
             mx, my = get_label_offset(mx, my)
-            ax.text(mx, my, c_type[:3], color='red', fontsize=10, **text_props,
+            ax.text(mx, my, c_type[:3], color='red', fontsize=icon_fontsize, **text_props,
                     bbox=dict(facecolor='white', edgecolor='red', pad=0.1))
 
     ax.set_xlim(view_min_x, view_max_x)
@@ -632,7 +649,7 @@ def visualize_sketch_for_vlm(data, save_path: str = "vlm_input.png", title: str 
             zorder=1000
         )
 
-    plt.savefig(save_path, bbox_inches='tight', dpi=100)
+    plt.savefig(save_path, bbox_inches='tight', dpi=dpi)
     plt.close()
 
 
