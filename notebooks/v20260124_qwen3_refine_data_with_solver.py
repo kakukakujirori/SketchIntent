@@ -223,6 +223,236 @@ def compute_constraint_value(ctype: str, primitives: list, e1: int, s1: int | No
 
 
 # ============================================================
+# Two-Pass Constraint Helpers
+# ============================================================
+
+DIMENSIONAL_CONSTRAINT_TYPES = {"Distance", "Angle", "Radius", "Diameter"}
+
+
+def classify_constraints(constraints: list) -> tuple[list, list]:
+    """
+    Classify constraints into relational and dimensional.
+
+    Returns:
+        Tuple of (relational_constraints, dimensional_constraints)
+    """
+    relational = []
+    dimensional = []
+
+    for c in constraints:
+        ctype = c.get("type", "")
+        if ctype in DIMENSIONAL_CONSTRAINT_TYPES:
+            dimensional.append(c)
+        else:
+            relational.append(c)
+
+    return relational, dimensional
+
+
+def extract_primitives_from_sketch(fc_sketch: "Sketcher.SketchObject") -> list:
+    """
+    Extract primitive coordinates from FreeCAD sketch geometry.
+
+    Derives type and construction flag directly from fc_sketch.
+
+    Args:
+        fc_sketch: FreeCAD sketch object
+
+    Returns:
+        List of primitive dicts with coordinates from fc_sketch.Geometry.
+    """
+    # Map FreeCAD geometry type names to our internal type names
+    FC_TYPE_TO_PTYPE = {
+        "Point": "Point",
+        "LineSegment": "LineSegment",
+        "Circle": "Circle",
+        "ArcOfCircle": "Arc",
+    }
+
+    updated_primitives = []
+
+    for geo_id, geo in enumerate(fc_sketch.Geometry):
+        geo_type = type(geo).__name__
+
+        # Determine primitive type
+        ptype = FC_TYPE_TO_PTYPE.get(geo_type)
+        if ptype is None:
+            raise NotImplementedError(f"Unsupported geometry type: {geo_type}")
+
+        new_prim = {"type": ptype}
+
+        # Get construction flag from fc_sketch
+        try:
+            is_construction = fc_sketch.getConstruction(geo_id)
+            if is_construction:
+                new_prim["construction"] = True
+        except Exception:
+            pass  # Not a construction line
+
+        # Extract coordinates based on geometry type
+        if geo_type == "Point":
+            new_prim["x"] = geo.X
+            new_prim["y"] = geo.Y
+        elif geo_type == "LineSegment":
+            sp = geo.StartPoint
+            ep = geo.EndPoint
+            new_prim["start"] = [sp.x, sp.y]
+            new_prim["end"] = [ep.x, ep.y]
+        elif geo_type == "Circle":
+            c = geo.Center
+            new_prim["center"] = [c.x, c.y]
+            new_prim["radius"] = geo.Radius
+        elif geo_type == "ArcOfCircle":
+            sp = geo.StartPoint
+            ep = geo.EndPoint
+            # Get midpoint on arc curve using center and angles
+            # This handles wrap-around cases correctly
+            cx, cy = geo.Center.x, geo.Center.y
+            r = geo.Radius
+            # Compute angles from center to start/end points
+            start_angle = math.atan2(sp.y - cy, sp.x - cx)
+            end_angle = math.atan2(ep.y - cy, ep.x - cx)
+            # Normalize and handle wrap-around
+            if end_angle < start_angle:
+                end_angle += 2 * math.pi
+            mid_angle = (start_angle + end_angle) / 2.0
+            mx = cx + r * math.cos(mid_angle)
+            my = cy + r * math.sin(mid_angle)
+            new_prim["start"] = [sp.x, sp.y]
+            new_prim["mid"] = [mx, my]
+            new_prim["end"] = [ep.x, ep.y]
+        else:
+            # Unknown geometry type, skip
+            continue
+
+        updated_primitives.append(new_prim)
+
+    return updated_primitives
+
+
+def compute_centroid_aligned_deviation(
+    primitives_before: list, primitives_after: list
+) -> tuple[float, float, int]:
+    """
+    Compute max deviation between two primitive sets after aligning their centroids.
+
+    Also computes length/radius deviations for lines, circles, and arcs.
+
+    Returns:
+        (max_coord_deviation, max_length_deviation, max_deviation_primitive_idx)
+        - max_coord_deviation: Maximum point deviation in mm after centroid alignment
+        - max_length_deviation: Maximum length/radius deviation in mm
+        - max_deviation_primitive_idx: Index of primitive with largest deviation (-1 if none)
+    """
+    def get_all_points(primitives):
+        points = []
+        for p in primitives:
+            ptype = p["type"]
+            if ptype == "Point":
+                points.append([p["x"], p["y"]])
+            elif ptype == "LineSegment":
+                points.append(list(p["start"]))
+                points.append(list(p["end"]))
+            elif ptype == "Circle":
+                points.append(list(p["center"]))
+            elif ptype == "Arc":
+                points.append(list(p["start"]))
+                points.append(list(p["mid"]))
+                points.append(list(p["end"]))
+        return points
+
+    pts_before = get_all_points(primitives_before)
+    pts_after = get_all_points(primitives_after)
+
+    if len(pts_before) != len(pts_after) or len(pts_before) == 0:
+        return float('inf'), float('inf'), -1
+
+    # Compute centroids
+    cx_b = sum(p[0] for p in pts_before) / len(pts_before)
+    cy_b = sum(p[1] for p in pts_before) / len(pts_before)
+    cx_a = sum(p[0] for p in pts_after) / len(pts_after)
+    cy_a = sum(p[1] for p in pts_after) / len(pts_after)
+
+    # Offset to align centroids
+    offset_x = cx_b - cx_a
+    offset_y = cy_b - cy_a
+
+    # Compute coordinate deviation per primitive and track which has max
+    max_coord_deviation = 0.0
+    max_coord_primitive_idx = -1
+    point_idx = 0
+
+    for geo_id, prim in enumerate(primitives_before):
+        ptype = prim["type"]
+        if ptype == "Point":
+            num_pts = 1
+        elif ptype == "LineSegment":
+            num_pts = 2
+        elif ptype == "Circle":
+            num_pts = 1
+        elif ptype == "Arc":
+            num_pts = 3
+        else:
+            continue
+
+        prim_max_dev = 0.0
+        for _ in range(num_pts):
+            if point_idx >= len(pts_before):
+                break
+            bx, by = pts_before[point_idx]
+            ax, ay = pts_after[point_idx]
+            ax_aligned = ax + offset_x
+            ay_aligned = ay + offset_y
+            dev = math.sqrt((bx - ax_aligned)**2 + (by - ay_aligned)**2)
+            prim_max_dev = max(prim_max_dev, dev)
+            point_idx += 1
+
+        if prim_max_dev > max_coord_deviation:
+            max_coord_deviation = prim_max_dev
+            max_coord_primitive_idx = geo_id
+
+    # Compute length/radius deviation per primitive
+    max_length_deviation = 0.0
+    max_length_primitive_idx = -1
+
+    for geo_id, (prim_b, prim_a) in enumerate(zip(primitives_before, primitives_after)):
+        ptype = prim_b["type"]
+        len_dev = 0.0
+
+        if ptype == "LineSegment":
+            len_b = math.sqrt((prim_b["end"][0] - prim_b["start"][0])**2 +
+                              (prim_b["end"][1] - prim_b["start"][1])**2)
+            len_a = math.sqrt((prim_a["end"][0] - prim_a["start"][0])**2 +
+                              (prim_a["end"][1] - prim_a["start"][1])**2)
+            len_dev = abs(len_b - len_a)
+
+        elif ptype == "Circle":
+            r_b = prim_b.get("radius", 0)
+            r_a = prim_a.get("radius", 0)
+            len_dev = abs(r_b - r_a)
+
+        elif ptype == "Arc":
+            arc_result_b = compute_arc_center(prim_b["start"], prim_b["mid"], prim_b["end"])
+            arc_result_a = compute_arc_center(prim_a["start"], prim_a["mid"], prim_a["end"])
+            if arc_result_b and arc_result_a:
+                r_b = arc_result_b[2]
+                r_a = arc_result_a[2]
+                len_dev = abs(r_b - r_a)
+
+        if len_dev > max_length_deviation:
+            max_length_deviation = len_dev
+            max_length_primitive_idx = geo_id
+
+    # Determine which primitive has the overall maximum deviation
+    if max_coord_deviation >= max_length_deviation:
+        max_deviation_primitive_idx = max_coord_primitive_idx
+    else:
+        max_deviation_primitive_idx = max_length_primitive_idx
+
+    return max_coord_deviation, max_length_deviation, max_deviation_primitive_idx
+
+
+# ============================================================
 # Parsing & JSON Parsing
 # ============================================================
 
@@ -800,8 +1030,14 @@ def add_constraints_to_sketch(
     primitives: list,
     constraints: list,
     fc_sketch: "Sketcher.SketchObject"
-) -> tuple[dict[int, int], list[int]]:
-    """Add constraints to FreeCAD sketch object.
+) -> tuple[dict[int, int], list[int], list]:
+    """Add constraints to FreeCAD sketch object using two-pass approach.
+
+    Two-pass approach:
+    1. Apply relational constraints first (Coincident, Symmetric, etc.)
+    2. Extract updated primitives after relational constraints
+    3. Apply dimensional constraints (Distance, Angle, etc.) using updated primitives
+       to compute correct dimension values
 
     Args:
         primitives: List of primitive dicts
@@ -812,43 +1048,135 @@ def add_constraints_to_sketch(
         Tuple of:
           - Mapping from FreeCAD constraint index to original constraint index
           - List of indices of constraints that failed to add (malformed/error)
+          - Updated primitives list (after all constraints applied)
     """
     constraint_mapping = {}
     failed_indices = []
 
-    # Use the shared generator to get normalized constraints
-    for idx, ctype, args, error_msg in generate_freecad_constraints(primitives, constraints):
+    # Classify constraints into relational and dimensional
+    relational_constraints, dimensional_constraints = classify_constraints(constraints)
+
+    # Build index mapping: constraint -> original index in constraints list
+    def get_original_index(c):
+        for i, orig_c in enumerate(constraints):
+            if orig_c is c:
+                return i
+        return -1
+
+    # --- Pass 1: Apply relational constraints ---
+    for idx, ctype, args, error_msg in generate_freecad_constraints(primitives, relational_constraints):
+        orig_idx = get_original_index(relational_constraints[idx])
         if error_msg:
-            # print(f"ERROR: Invalid constraint {idx}: {error_msg}")
-            failed_indices.append(idx)
+            failed_indices.append(orig_idx)
             continue
 
-        count_before = int(fc_sketch.ConstraintCount)
+        fc_idx = int(fc_sketch.ConstraintCount)
 
         try:
             fc_sketch.addConstraint(Sketcher.Constraint(ctype, *args))
+            constraint_mapping[fc_idx] = orig_idx
         except Exception:
-            # print(f"ERROR: FAILED to add constraint {idx}: {ctype}, {args}")
-            failed_indices.append(idx)
-            pass  # Skip constraints that fail to add
+            failed_indices.append(orig_idx)
 
+    # Solve after relational constraints
+    fc_sketch.solve()
 
-        count_after = int(fc_sketch.ConstraintCount)
-        # If count increased, map the new indices
-        if count_after > count_before:
-            for i in range(count_before, count_after):
-                constraint_mapping[i] = idx
-        else:
-            # If count didn't increase but it wasn't caught by exception (e.g. logic error), treat as failed if not already added
-            pass
+    # Extract updated primitives (after relational constraints)
+    updated_primitives = extract_primitives_from_sketch(fc_sketch)
 
-    return constraint_mapping, failed_indices
+    # --- Pass 2: Apply dimensional constraints using updated primitives ---
+    for idx, ctype, args, error_msg in generate_freecad_constraints(updated_primitives, dimensional_constraints):
+        orig_idx = get_original_index(dimensional_constraints[idx])
+        if error_msg:
+            failed_indices.append(orig_idx)
+            continue
+
+        fc_idx = int(fc_sketch.ConstraintCount)
+
+        try:
+            fc_sketch.addConstraint(Sketcher.Constraint(ctype, *args))
+            constraint_mapping[fc_idx] = orig_idx
+        except Exception:
+            failed_indices.append(orig_idx)
+
+    # Final solve
+    fc_sketch.solve()
+
+    # Get final primitives (after all constraints)
+    final_primitives = extract_primitives_from_sketch(fc_sketch)
+
+    return constraint_mapping, failed_indices, final_primitives
 
 
 def export_to_freecad_script(primitives: list, constraints: list, output_path: str):
     """
     Generates a FreeCAD Python script to create a sketch with given primitives and constraints.
+
+    Uses two-pass constraint application:
+    1. Apply relational constraints to get updated primitives
+    2. Use updated primitives for dimensional constraint values
+    3. Export script with updated primitive coordinates
     """
+    # First, apply constraints to get updated primitives and correct dimensional values
+    doc = None
+    updated_primitives = primitives
+    relational_constraints, dimensional_constraints = classify_constraints(constraints)
+
+    try:
+        # Create temporary FreeCAD document to apply constraints
+        doc = FreeCAD.newDocument("ExportTempDoc")
+        body = doc.addObject('PartDesign::Body', 'Body')
+        fc_sketch = body.newObject('Sketcher::SketchObject', 'Sketch')
+        xy_plane = body.Origin.OriginFeatures[3]
+        fc_sketch.AttachmentSupport = xy_plane
+        fc_sketch.MapMode = 'FlatFace'
+
+        # Add primitives
+        add_primitives_to_sketch(primitives, fc_sketch)
+        doc.recompute()
+
+        # Apply relational constraints first
+        for _idx, ctype, args, error_msg in generate_freecad_constraints(primitives, relational_constraints):
+            if error_msg or args is None:
+                continue
+            try:
+                fc_sketch.addConstraint(Sketcher.Constraint(ctype, *args))
+            except Exception:
+                pass
+
+        fc_sketch.solve()
+        doc.recompute()
+
+        # Extract updated primitives after relational constraints
+        updated_primitives = extract_primitives_from_sketch(fc_sketch)
+
+        # Apply dimensional constraints with updated primitives
+        for _idx, ctype, args, error_msg in generate_freecad_constraints(updated_primitives, dimensional_constraints):
+            if error_msg or args is None:
+                continue
+            try:
+                fc_sketch.addConstraint(Sketcher.Constraint(ctype, *args))
+            except Exception:
+                pass
+
+        fc_sketch.solve()
+        doc.recompute()
+
+        # Get final primitives
+        updated_primitives = extract_primitives_from_sketch(fc_sketch)
+
+    except Exception as e:
+        print(f"Warning: Failed to compute updated primitives for export: {e}")
+        # Fall back to original primitives
+
+    finally:
+        if doc is not None:
+            try:
+                FreeCAD.closeDocument(doc.Name)
+            except:
+                pass
+
+    # Now generate the script with updated primitives
     lines = []
     lines.append("import FreeCAD")
     lines.append("import Part")
@@ -862,7 +1190,9 @@ def export_to_freecad_script(primitives: list, constraints: list, output_path: s
     lines.append("fc_sketch.MapMode = 'FlatFace'")
     lines.append("")
     lines.append("# --- Add Primitives ---")
-    for ptype, args, is_const, error_msg in generate_freecad_primitives(primitives):
+
+    # Use updated primitives for export
+    for ptype, args, is_const, error_msg in generate_freecad_primitives(updated_primitives):
         if error_msg:
             lines.append(f"# ERROR: Invalid primitive: {error_msg}, Type: {ptype}")
             continue
@@ -887,11 +1217,21 @@ def export_to_freecad_script(primitives: list, constraints: list, output_path: s
     lines.append("")
     lines.append("# --- Add Constraints ---")
 
-    # Use shared generator for normalized constraints
-    for idx, ctype, args, error_msg in generate_freecad_constraints(primitives, constraints):
+    # Generate constraints with two-pass approach (relational first, then dimensional with updated primitives)
+    # Relational constraints
+    for idx, ctype, args, error_msg in generate_freecad_constraints(updated_primitives, relational_constraints):
         if error_msg:
-            # args contains error message (or empty if None)
-            lines.append(f"# ERROR: Invalid constraint {idx}: {error_msg}")
+            lines.append(f"# ERROR: Invalid constraint (relational): {error_msg}")
+            continue
+
+        # Convert args to string representation for script
+        args_str = ", ".join(map(str, args))
+        lines.append(f"fc_sketch.addConstraint(Sketcher.Constraint('{ctype}', {args_str}))")
+
+    # Dimensional constraints (values already computed from updated_primitives in generate_freecad_constraints)
+    for idx, ctype, args, error_msg in generate_freecad_constraints(updated_primitives, dimensional_constraints):
+        if error_msg:
+            lines.append(f"# ERROR: Invalid constraint (dimensional): {error_msg}")
             continue
 
         # Convert args to string representation for script
@@ -962,8 +1302,8 @@ def validate_geometry_from_lists(
 
     This function:
     1. Add primitives only to FreeCAD → capture coordinates
-    2. Add constraints → capture coordinates
-    3. Compare the two to see how much constraints move geometry
+    2. Add constraints (two-pass) → capture coordinates
+    3. Compare the two with centroid alignment (to ignore global translation)
 
     Args:
         primitives: List of primitive dicts
@@ -993,52 +1333,22 @@ def validate_geometry_from_lists(
         add_primitives_to_sketch(primitives, fc_sketch)
         doc.recompute()
 
-        # Capture geometry BEFORE constraints
-        coords_before = extract_geometry_coords(fc_sketch)
-        geo_types = {i: type(geo).__name__ for i, geo in enumerate(fc_sketch.Geometry)}
+        # Capture primitives BEFORE constraints
+        primitives_before = extract_primitives_from_sketch(fc_sketch)
 
-        # Step 2: Add constraints
-        add_constraints_to_sketch(primitives, constraints, fc_sketch)
+        # Step 2: Add constraints (two-pass)
+        _, _, primitives_after = add_constraints_to_sketch(primitives, constraints, fc_sketch)
 
         # Explicitly solve to ensure geometry updates
         fc_sketch.solve()
         doc.recompute()
 
-        # Capture geometry AFTER constraints
-        coords_after = extract_geometry_coords(fc_sketch)
+        # Get final primitives after constraints
+        primitives_after = extract_primitives_from_sketch(fc_sketch)
 
-        # Step 3: Compare before and after
-        for geo_id in coords_before:
-            before_data = coords_before[geo_id]
-            after_data = coords_after.get(geo_id, None)
-
-            if not after_data:
-                continue
-
-            before_points = before_data['points']
-            after_points = after_data['points']
-
-            if len(before_points) != len(after_points):
-                continue
-
-            # 3a. Check Coordinate Deviation
-            for (bx, by), (ax, ay) in zip(before_points, after_points):
-                deviation = ((bx - ax) ** 2 + (by - ay) ** 2) ** 0.5
-                if deviation > max_coord_deviation:
-                    max_coord_deviation = deviation
-                    if max_coord_deviation > max_length_deviation:
-                        max_deviation_primitive_idx = geo_id
-
-            # 3b. Check Length Deviation (for Arcs/Circles flipping/resizing)
-            len_b = before_data['length']
-            len_a = after_data['length']
-            # Only check if verify length is non-zero (Point has 0 length)
-            if len_b > 1e-6:
-                len_dev = abs(len_b - len_a)
-                if len_dev > max_length_deviation:
-                    max_length_deviation = len_dev
-                    if max_length_deviation > max_coord_deviation:
-                        max_deviation_primitive_idx = geo_id
+        # Step 3: Compute all deviations using unified function
+        max_coord_deviation, max_length_deviation, max_deviation_primitive_idx = \
+            compute_centroid_aligned_deviation(primitives_before, primitives_after)
 
         # Consider both deviations for pass/fail
         max_total_dev = max(max_coord_deviation, max_length_deviation)
@@ -1144,7 +1454,7 @@ def verify_constraints(
         doc.recompute()
 
         # Add constraints
-        _mapping, failed_indices = add_constraints_to_sketch(primitives, constraints, fc_sketch)
+        _mapping, failed_indices, _ = add_constraints_to_sketch(primitives, constraints, fc_sketch)
         doc.recompute()
 
         # Step 2: Get solver status
@@ -1227,7 +1537,7 @@ def find_problematic_constraint_incremental(
             # WE MUST ADD IT CUMULATIVELY
             # 'add_constraints_to_sketch' expects a list. We pass a single-item listing.
             # It appends to the sketch.
-            _, failed = add_constraints_to_sketch(primitives, [constr], fc_sketch)
+            _, failed, _ = add_constraints_to_sketch(primitives, [constr], fc_sketch)
 
             if failed:
                 continue
@@ -1279,7 +1589,7 @@ def static_constraints_diagnosis(
 
     for i, c in enumerate(constraints_json_list):
 
-        # Check for malformed constraints
+        # Check for malformed symmetric constraints
         if c["type"] == "Symmetric":
             if "entity1" in c and "entity2" in c:
                 e1, s1 = c["entity1"], c.get("subnode1", 0)
@@ -1292,7 +1602,7 @@ def static_constraints_diagnosis(
                 if p1 is None or p2 is None:
                     warnings.append(f"Constraint {i} (Symmetric({e1}, {s1}, {e2}, {s2}, {e3}, {s3})) is malformed: if entity1/2 itself is not a point, subnode1/2 must be >= 1.")
 
-        # Check for diagonal distance constraints
+        # Check for malformed/diagonal distance constraints
         if c["type"] == "Distance":
             # Check if Point-to-Point
             if "entity1" in c and "entity2" in c:
@@ -1303,16 +1613,16 @@ def static_constraints_diagnosis(
                 p1 = get_point_from_primitive(primitives_list, e1, s1)
                 p2 = get_point_from_primitive(primitives_list, e2, s2)
 
-                if p1 is None or p2 is None:
-                    continue
+                if p1 is None and p2 is None:
+                    warnings.append(f"Constraint {i} (Distance({e1}, {s1}, {e2}, {s2})) is malformed: You cannot define a distance between lines. Either Subnode1 or Subnode2 must be >= 1.")
+                elif p1 and p2:
+                    # p1, p2 are [x, y] lists
+                    dx = abs(p1[0] - p2[0])
+                    dy = abs(p1[1] - p2[1])
 
-                # p1, p2 are [x, y] lists
-                dx = abs(p1[0] - p2[0])
-                dy = abs(p1[1] - p2[1])
-
-                # Threshold for "Diagonal": neither H nor V (e.g. > 0.1mm deviation in both axes)
-                if dx > 0.1 and dy > 0.1:
-                    warnings.append(f"Constraint {i} (Distance({e1}, {s1}, {e2}, {s2})) is diagonally placed. If possible, replace it with another constraint, such as horizontal/vertical point-to-line distance or radius constraint.")
+                    # Threshold for "Diagonal": neither H nor V (e.g. > 0.1mm deviation in both axes)
+                    if dx > 0.1 and dy > 0.1:
+                        warnings.append(f"Constraint {i} (Distance({e1}, {s1}, {e2}, {s2})) is diagonally placed. If possible, replace it with another constraint, such as horizontal/vertical point-to-line distance or radius constraint.")
 
     # # DEBUG
     # if warnings:
@@ -1343,7 +1653,7 @@ def run_solver_tool(
         doc.recompute()
 
         # We need the mapping to convert 1-based FC indices back to 0-based input indices
-        constraint_mapping, failed_indices = add_constraints_to_sketch(primitives_list, constraints_json_list, fc_sketch)
+        constraint_mapping, failed_indices, _ = add_constraints_to_sketch(primitives_list, constraints_json_list, fc_sketch)
         doc.recompute()
 
         # Solve
@@ -1468,7 +1778,7 @@ def cleanup_constraints_from_lists(
             doc.recompute()
 
             # Add constraints with mapping
-            constraint_mapping, failed_indices = add_constraints_to_sketch(primitives, current_constraints, fc_sketch)
+            constraint_mapping, failed_indices, _ = add_constraints_to_sketch(primitives, current_constraints, fc_sketch)
             doc.recompute()
 
             # Get solver status
@@ -1854,6 +2164,7 @@ IMPORTANT: Even if you achieve DoF=2, we reject your solution if one or more con
 Therefore, prioritize no malformed, conflicting, or redundant status. Upon that, focus on reducing DoF.
 If you see a lot of conflicting constraints, first identify the ones that most frequently appear in the ConflictGroups, and try deleting it.
 If you still don't see any improvements, it may be recommended that you start over from the initial constraints.
+Also, solver status can be 'Failed' without any invalid constraints or geometric deviation. This is a solver's limitation and it is extremely hard to recover from here. Consider reverting to a previous 'Converged' state.
 
 IMPORTANT: If you achieve the desirable solver status, or judge that it's impossible to improve your solution further,
 encircle your solution JSON array with the <final> tag:
@@ -2042,7 +2353,7 @@ Use the 2D sketch image as your visual reference.
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Save FC GT and predictions that pass all validation criteria")
-    parser.add_argument('--geo_threshold', type=float, default=10.0, help="Geometry validation threshold in mm")
+    parser.add_argument('--geo_threshold', type=float, default=50.0, help="Geometry validation threshold in mm")
     parser.add_argument('--output_dir', type=str, default='qwen3_refined_data_with_solver', help="Output directory")
     parser.add_argument('--start_idx', type=int, default=0, help="Start index of sequences to process")
     parser.add_argument('--process_num', type=int, default=1000, help="Number of sequences to process")
