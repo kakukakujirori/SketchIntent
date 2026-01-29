@@ -74,7 +74,7 @@ def compute_arc_center(start: list, mid: list, end: list) -> tuple | None:
     return (ux, uy, radius)
 
 
-def get_point_from_primitive(primitives: list, entity_idx: int, subnode: int) -> list | None:
+def get_point_from_primitive(primitives: list, entity_idx: int, subnode: int | None) -> list | None:
     """
     Get a point [x, y] from a primitive based on entity index and subnode.
 
@@ -90,7 +90,7 @@ def get_point_from_primitive(primitives: list, entity_idx: int, subnode: int) ->
     prim = primitives[entity_idx]
     ptype = prim["type"]
 
-    if subnode == 0:  # Entity itself
+    if subnode == 0 or subnode is None:  # Entity itself
         if ptype == "Point":
             return [prim["x"], prim["y"]]
         return None
@@ -1589,40 +1589,50 @@ def static_constraints_diagnosis(
 
     for i, c in enumerate(constraints_json_list):
 
+        e1, s1 = c.get("entity1"), c.get("subnode1")
+        e2, s2 = c.get("entity2"), c.get("subnode2")
+        e3, s3 = c.get("entity3"), c.get("subnode3")
+        p1 = get_point_from_primitive(primitives_list, e1, s1) if e1 is not None else None
+        p2 = get_point_from_primitive(primitives_list, e2, s2) if e2 is not None else None
+        p3 = get_point_from_primitive(primitives_list, e3, s3) if e3 is not None else None
+        constraint_name = f"{c['type']}(" + ", ".join(str(x) for x in [e1, s1, e2, s2, e3, s3] if x is not None) + ")"
+
+        # Check for non-existing primitive references
+        entity1_valid = e1 is None or 0 <= e1 < len(primitives_list)
+        entity2_valid = e2 is None or 0 <= e2 < len(primitives_list)
+        entity3_valid = e3 is None or 0 <= e3 < len(primitives_list)
+        if not entity1_valid:
+            warnings.append(f"Constraint {i} ({constraint_name}) is malformed: entity1={e1} is out of bounds.")
+        if not entity2_valid:
+            warnings.append(f"Constraint {i} ({constraint_name}) is malformed: entity2={e2} is out of bounds.")
+        if not entity3_valid:
+            warnings.append(f"Constraint {i} ({constraint_name}) is malformed: entity3={e3} is out of bounds.")
+
+        # Check if point entity subnode is set to 1
+        if e1 is not None and primitives_list[e1]["type"] == "Point" and s1 != 1:
+            warnings.append(f"Constraint {i} ({constraint_name}) is malformed: point entity subnode must be 1.")
+        if e2 is not None and primitives_list[e2]["type"] == "Point" and s2 != 1:
+            warnings.append(f"Constraint {i} ({constraint_name}) is malformed: point entity subnode must be 1.")
+        if e3 is not None and primitives_list[e3]["type"] == "Point" and s3 != 1:
+            warnings.append(f"Constraint {i} ({constraint_name}) is malformed: point entity subnode must be 1.")
+
         # Check for malformed symmetric constraints
         if c["type"] == "Symmetric":
-            if "entity1" in c and "entity2" in c:
-                e1, s1 = c["entity1"], c.get("subnode1", 0)
-                e2, s2 = c["entity2"], c.get("subnode2", 0)
-                e3, s3 = c["entity3"], c.get("subnode3", 0)
-
-                p1 = get_point_from_primitive(primitives_list, e1, s1)
-                p2 = get_point_from_primitive(primitives_list, e2, s2)
-
-                if p1 is None or p2 is None:
-                    warnings.append(f"Constraint {i} (Symmetric({e1}, {s1}, {e2}, {s2}, {e3}, {s3})) is malformed: if entity1/2 itself is not a point, subnode1/2 must be >= 1.")
+            if p1 is None or p2 is None:
+                warnings.append(f"Constraint {i} ({constraint_name}) is malformed: if entity1/2 itself is not a point, subnode1/2 must be >= 1.")
 
         # Check for malformed/diagonal distance constraints
         if c["type"] == "Distance":
-            # Check if Point-to-Point
-            if "entity1" in c and "entity2" in c:
-                e1, s1 = c["entity1"], c.get("subnode1", 0)
-                e2, s2 = c["entity2"], c.get("subnode2", 0)
+            if p1 is None and p2 is None:
+                warnings.append(f"Constraint {i} ({constraint_name}) is malformed: You cannot define a distance between lines. Either Subnode1 or Subnode2 must be >= 1.")
+            elif p1 and p2:
+                # p1, p2 are [x, y] lists
+                dx = abs(p1[0] - p2[0])
+                dy = abs(p1[1] - p2[1])
 
-                # STRICT CHECK: Ensure both targets are Points.
-                p1 = get_point_from_primitive(primitives_list, e1, s1)
-                p2 = get_point_from_primitive(primitives_list, e2, s2)
-
-                if p1 is None and p2 is None:
-                    warnings.append(f"Constraint {i} (Distance({e1}, {s1}, {e2}, {s2})) is malformed: You cannot define a distance between lines. Either Subnode1 or Subnode2 must be >= 1.")
-                elif p1 and p2:
-                    # p1, p2 are [x, y] lists
-                    dx = abs(p1[0] - p2[0])
-                    dy = abs(p1[1] - p2[1])
-
-                    # Threshold for "Diagonal": neither H nor V (e.g. > 0.1mm deviation in both axes)
-                    if dx > 0.1 and dy > 0.1:
-                        warnings.append(f"Constraint {i} (Distance({e1}, {s1}, {e2}, {s2})) is diagonally placed. If possible, replace it with another constraint, such as horizontal/vertical point-to-line distance or radius constraint.")
+                # Threshold for "Diagonal": neither H nor V (e.g. > 0.1mm deviation in both axes)
+                if dx > 0.1 and dy > 0.1:
+                    warnings.append(f"Constraint {i} ({constraint_name}) is diagonally placed. Replace it with another constraint if possible, such as horizontal/vertical point-to-line distance or radius constraint.")
 
     # # DEBUG
     # if warnings:
@@ -1976,6 +1986,8 @@ General Argument Structure follows the pattern below:
 
 Depending on the Type, some arguments may be omitted. For example, Horizontal constraint only requires Entity1.
 
+NOTE: When you reference a point entity, you must set subnode=1, not 0.
+
 [Constraint Types and Signatures]
 Strictly adhere to the following signatures for each constraint type. Arguments not listed for a type should be omitted.
 
@@ -2300,6 +2312,7 @@ Example Tool Outputs (the input primitives and partial constraints are the same 
         iv. Chain dimensions horizontally or vertically. Chaining means defining length incrementally without overlaps, for example, A---B and B---C, rather than A---B and A---C.
         v. When a sketch has concave regions, define length in the positive sketch area: the line defining that length should be inside the valid sketch area.
     d. Always consider that the enforced constraints are intuitive, aligned with the design intent, and easy to understand/modify for post-editing.
+    e. Even if you achieve DoF=2 without any invalid constraints, you MUST NOT leave any redundant constraints and MUST strive to remove warnings such as diagonal constraints.
 3. You must submit your answer without the <final> tag several rounds to reflect the solver feedback.
 4. If you cannot name all the constraints to achieve DoF=2, output the constraints you have identified so far to achieve the lowest DoF without any malformed or conflicting constraints.
 5. Make sure to add the <final> tag to your final answer.
