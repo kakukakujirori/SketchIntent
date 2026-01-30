@@ -1712,12 +1712,23 @@ def static_constraints_diagnosis(
         if e3 is not None and e3 >= 0 and e3 < len(primitives_list) and primitives_list[e3]["type"] == "Point" and s3 != 1:
             warnings.append(f"Constraint {i} ({constraint_name}) is malformed: point entity subnode must be 1.")
 
-        # Check for malformed symmetric constraints
+
+        # Check for malformed Coincident constraints
+        if c["type"] == "Coincident":
+            if p1 is None or p2 is None:
+                warnings.append(f"Constraint {i} ({constraint_name}) is malformed: subnode1/2 must be >= 1.")
+
+        # Check for malformed PointsOnObject constraints
+        if c["type"] == "PointOnObject":
+            if p1 is None:
+                warnings.append(f"Constraint {i} ({constraint_name}) is malformed: entity1.subnode1 must be a point.")
+
+        # Check for malformed Symmetric constraints
         if c["type"] == "Symmetric":
             if p1 is None or p2 is None:
-                warnings.append(f"Constraint {i} ({constraint_name}) is malformed: if entity1/2 itself is not a point, subnode1/2 must be >= 1.")
+                warnings.append(f"Constraint {i} ({constraint_name}) is malformed: subnode1/2 must be >= 1.")
 
-        # Check for malformed/diagonal distance constraints
+        # Check for malformed/diagonal Distance constraints
         if c["type"] == "Distance":
             if p1 is None and p2 is None:
                 warnings.append(f"Constraint {i} ({constraint_name}) is malformed: You cannot define a distance between lines. Either Subnode1 or Subnode2 must be >= 1.")
