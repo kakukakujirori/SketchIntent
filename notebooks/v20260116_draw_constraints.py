@@ -197,8 +197,8 @@ def visualize_sketch_for_vlm(
     prim_map = {p["id"]: p for p in data["primitives"]}
     # Add external entities (X-Axis, Y-Axis) for constraint visualization
     # Full-range lines for visualization purposes
-    prim_map[-1] = {"type": "Line", "start": (-1e9, 0.0), "end": (1e9, 0.0)}   # X-Axis (horizontal)
-    prim_map[-2] = {"type": "Line", "start": (0.0, -1e9), "end": (0.0, 1e9)}   # Y-Axis (vertical)
+    prim_map[-1] = {"type": "Line", "start": (0.0, 0.0), "end": (1.0, 0.0)}   # X-Axis (unit vector from origin)
+    prim_map[-2] = {"type": "Line", "start": (0.0, 0.0), "end": (0.0, 1.0)}   # Y-Axis (unit vector from origin)
 
     # --- 1. Primitives (Geometry) ---
     STYLE_GEO = dict(color='black', linewidth=2.5, zorder=10, solid_capstyle='round')
@@ -251,16 +251,12 @@ def visualize_sketch_for_vlm(
     view_min_x, view_max_x = min(all_x)-margin, max(all_x)+margin
     view_min_y, view_max_y = min(all_y)-margin, max(all_y)+margin
 
-    # Update X/Y axis coordinates to use view bounds (instead of 1e9) for proper rendering
-    prim_map[-1] = {"type": "Line", "start": (view_min_x, 0.0), "end": (view_max_x, 0.0)}   # X-Axis
-    prim_map[-2] = {"type": "Line", "start": (0.0, view_min_y), "end": (0.0, view_max_y)}   # Y-Axis
-
     # --- Draw X/Y Axes if requested ---
     if draw_axes:
         AXIS_STYLE = dict(linewidth=1.0, linestyle='--', alpha=0.7, zorder=1)
-        # X-axis (horizontal, red)
+        # X-axis (horizontal, red) - draws infinite line
         ax.axhline(y=0, color='red', **AXIS_STYLE)
-        # Y-axis (vertical, green)
+        # Y-axis (vertical, green) - draws infinite line
         ax.axvline(x=0, color='green', **AXIS_STYLE)
         # Axis labels near the edge of view
         label_offset = scale_ref * 0.5
@@ -275,6 +271,8 @@ def visualize_sketch_for_vlm(
         prim = prim_map.get(tid)
         if not prim: return (0,0)
         if prim["type"] == "Line":
+            if tid in [-1, -2] and pos == 2:
+                return None # Invalid reference to axis end
             if pos == 1: return prim["start"]
             if pos == 2: return prim["end"]
             return ((prim["start"][0]+prim["end"][0])/2, (prim["start"][1]+prim["end"][1])/2)
@@ -457,6 +455,7 @@ def visualize_sketch_for_vlm(
         t1, t2 = targets[0], targets[1]
         p1 = get_pos_coord(t1)
         p2 = get_pos_coord(t2)
+        if p1 is None or p2 is None: return
 
         # Draw line between points
         ax.plot([p1[0], p2[0]], [p1[1], p2[1]], color=AXIS_COLOR, linestyle='-', lw=1.0, zorder=5, alpha=0.8)
@@ -503,6 +502,7 @@ def visualize_sketch_for_vlm(
                 t1, t2 = targets[0], targets[1]
                 type1 = prim_map[t1["id"]]["type"]; type2 = prim_map[t2["id"]]["type"]
                 c1 = get_pos_coord(t1); c2 = get_pos_coord(t2)
+                if c1 is None or c2 is None: continue
                 if type1 == "Line" and t1["pos"] == 0 and t2["pos"] != 0:
                     l_start = prim_map[t1["id"]]["start"]; l_end = prim_map[t1["id"]]["end"]
                     c1 = project_point_onto_line(c2, l_start, l_end)
@@ -527,7 +527,9 @@ def visualize_sketch_for_vlm(
             label = f"={constraint_counters['Equal']}"
             for t in targets:
                 tid = t["id"]
-                mx, my = get_pos_coord({"id": tid, "pos": 0})
+                coords = get_pos_coord({"id": tid, "pos": 0})
+                if coords is None: continue
+                mx, my = coords
                 mx, my = get_label_offset(mx, my)
                 ax.text(mx, my, label, color='red', fontsize=icon_fontsize, **text_props,
                         bbox=dict(facecolor='white', edgecolor='none', pad=0, alpha=0.8))
@@ -539,7 +541,9 @@ def visualize_sketch_for_vlm(
             label = f"//{constraint_counters['Parallel']}"
             for t in targets:
                 tid = t["id"]
-                mx, my = get_pos_coord({"id": tid, "pos": 0})
+                coords = get_pos_coord({"id": tid, "pos": 0})
+                if coords is None: continue
+                mx, my = coords
                 mx, my = get_label_offset(mx, my)
                 ax.text(mx, my, label, color='red', fontsize=icon_fontsize, **text_props,
                         bbox=dict(facecolor='white', edgecolor='none', pad=0, alpha=0.8))
@@ -551,6 +555,7 @@ def visualize_sketch_for_vlm(
                 raise ValueError(f"PointOnObject constraint requires 2 targets, got {len(targets)}: {targets}")
             pt_target = targets[0] if prim_map[targets[0]["id"]]["type"] == "Point" else targets[1]
             c = get_pos_coord(pt_target)
+            if c is None: continue
             ax.scatter([c[0]], [c[1]], color='red', s=80, zorder=15, edgecolors='white', linewidth=1.0)
             continue
 
@@ -607,7 +612,8 @@ def visualize_sketch_for_vlm(
         if c_type in ["Horizontal", "Vertical"]:
             if len(targets) == 2:
                 p1 = get_pos_coord(targets[0]); p2 = get_pos_coord(targets[1])
-                draw_alignment_line(p1, p2, c_type)
+                if p1 is not None and p2 is not None:
+                    draw_alignment_line(p1, p2, c_type)
             else:
                 for t in targets:
                     tid = t["id"]
@@ -625,7 +631,9 @@ def visualize_sketch_for_vlm(
                         ax.text(fx, fy, label, color='red', fontsize=icon_fontsize, weight='bold', ha='center', va='center',
                                 bbox=dict(facecolor='white', edgecolor='red', boxstyle='square,pad=0.1', alpha=1.0))
                     else:
-                        mx, my = get_pos_coord({"id": tid, "pos": 0})
+                        coords = get_pos_coord({"id": tid, "pos": 0})
+                        if coords is None: continue
+                        mx, my = coords
                         mx, my = get_label_offset(mx, my)
                         ax.text(mx, my, c_type[0], color='red', fontsize=icon_fontsize, **text_props,
                                 bbox=dict(facecolor='white', edgecolor='red', boxstyle='circle,pad=0.1'))
@@ -638,8 +646,10 @@ def visualize_sketch_for_vlm(
                 dx, dy = shared_v
             else:
                 coords = [get_pos_coord(t) for t in targets]
-                dx = np.mean([p[0] for p in coords])
-                dy = np.mean([p[1] for p in coords])
+                valid_coords = [c for c in coords if c is not None]
+                if not valid_coords: continue
+                dx = np.mean([p[0] for p in valid_coords])
+                dy = np.mean([p[1] for p in valid_coords])
 
             if c_type == "Perpendicular":
                 vx, vy = center_x - dx, center_y - dy
@@ -654,7 +664,9 @@ def visualize_sketch_for_vlm(
         # 9. Others
         for t in targets:
             tid = t["id"]
-            mx, my = get_pos_coord({"id": tid, "pos": 0})
+            coords = get_pos_coord({"id": tid, "pos": 0})
+            if coords is None: continue
+            mx, my = coords
             mx, my = get_label_offset(mx, my)
             ax.text(mx, my, c_type[:3], color='red', fontsize=icon_fontsize, **text_props,
                     bbox=dict(facecolor='white', edgecolor='red', pad=0.1))
