@@ -32,7 +32,7 @@ def export_sketch_to_dict(sketch_obj):
 
     # --- A. Primitives ---
     for i, geom in enumerate(sketch_obj.Geometry):
-        p_id = str(i)
+        p_id = i  # Integer ID to match constraint entity IDs
         prim_data = {"id": p_id}
 
         if isinstance(geom, Part.LineSegment):
@@ -79,12 +79,14 @@ def export_sketch_to_dict(sketch_obj):
         # PosId: 0=Edge itself, 1=Start/Center, 2=End, 3=Center(Circle) etc.
 
         targets = []
-        if const.First > -1:
-            targets.append({"id": str(const.First), "pos": const.FirstPos})
-        if const.Second > -1:
-            targets.append({"id": str(const.Second), "pos": const.SecondPos})
-        if const.Third > -1:
-            targets.append({"id": str(const.Third), "pos": const.ThirdPos})
+        # Note: External entity IDs are -1 (X-Axis), -2 (Y-Axis)
+        # FreeCAD sets unused constraint fields to -2000, so we check for >= -2
+        if const.First >= -2:
+            targets.append({"id": const.First, "pos": const.FirstPos})
+        if const.Second >= -2:
+            targets.append({"id": const.Second, "pos": const.SecondPos})
+        if const.Third >= -2:
+            targets.append({"id": const.Third, "pos": const.ThirdPos})
 
         c_data["target"] = targets
 
@@ -172,6 +174,7 @@ def visualize_sketch_for_vlm(
     icon_fontsize: int = 10,
     figsize: tuple[int, int] = (800, 800),
     dpi: int = 100,
+    draw_axes: bool = False,
     ):
     """
     Visualize sketch with primitives and constraints.
@@ -183,6 +186,7 @@ def visualize_sketch_for_vlm(
         title_fontsize: Font size for the title label
         figsize: Target canvas size in pixels (default: (800, 800))
         dpi: Dots per inch (default: 100)
+        draw_axes: If True, draw X-axis (red) and Y-axis (green) with origin marker
     """
     if not data: return
 
@@ -191,6 +195,10 @@ def visualize_sketch_for_vlm(
 
     all_x, all_y = [], []
     prim_map = {p["id"]: p for p in data["primitives"]}
+    # Add external entities (X-Axis, Y-Axis) for constraint visualization
+    # Full-range lines for visualization purposes
+    prim_map[-1] = {"type": "Line", "start": (-1e9, 0.0), "end": (1e9, 0.0)}   # X-Axis (horizontal)
+    prim_map[-2] = {"type": "Line", "start": (0.0, -1e9), "end": (0.0, 1e9)}   # Y-Axis (vertical)
 
     # --- 1. Primitives (Geometry) ---
     STYLE_GEO = dict(color='black', linewidth=2.5, zorder=10, solid_capstyle='round')
@@ -242,6 +250,24 @@ def visualize_sketch_for_vlm(
     margin = scale_ref * 4
     view_min_x, view_max_x = min(all_x)-margin, max(all_x)+margin
     view_min_y, view_max_y = min(all_y)-margin, max(all_y)+margin
+
+    # Update X/Y axis coordinates to use view bounds (instead of 1e9) for proper rendering
+    prim_map[-1] = {"type": "Line", "start": (view_min_x, 0.0), "end": (view_max_x, 0.0)}   # X-Axis
+    prim_map[-2] = {"type": "Line", "start": (0.0, view_min_y), "end": (0.0, view_max_y)}   # Y-Axis
+
+    # --- Draw X/Y Axes if requested ---
+    if draw_axes:
+        AXIS_STYLE = dict(linewidth=1.0, linestyle='--', alpha=0.7, zorder=1)
+        # X-axis (horizontal, red)
+        ax.axhline(y=0, color='red', **AXIS_STYLE)
+        # Y-axis (vertical, green)
+        ax.axvline(x=0, color='green', **AXIS_STYLE)
+        # Axis labels near the edge of view
+        label_offset = scale_ref * 0.5
+        ax.text(view_max_x - label_offset, label_offset, 'X', color='red',
+                fontsize=icon_fontsize, fontweight='bold', ha='right', va='bottom', zorder=3)
+        ax.text(label_offset, view_max_y - label_offset, 'Y', color='green',
+                fontsize=icon_fontsize, fontweight='bold', ha='left', va='top', zorder=3)
 
     # --- Helper Functions ---
     def get_pos_coord(target_info):
@@ -521,6 +547,8 @@ def visualize_sketch_for_vlm(
 
         # 5. PointOnObject
         if c_type == "PointOnObject":
+            if len(targets) < 2:
+                raise ValueError(f"PointOnObject constraint requires 2 targets, got {len(targets)}: {targets}")
             pt_target = targets[0] if prim_map[targets[0]["id"]]["type"] == "Point" else targets[1]
             c = get_pos_coord(pt_target)
             ax.scatter([c[0]], [c[1]], color='red', s=80, zorder=15, edgecolors='white', linewidth=1.0)
@@ -584,6 +612,8 @@ def visualize_sketch_for_vlm(
                 for t in targets:
                     tid = t["id"]
                     prim = prim_map.get(tid)
+                    if prim is None:
+                        raise ValueError(f"Primitive not found in prim_map for id={tid}")
                     if prim["type"] == "Line":
                         s, e = prim["start"], prim["end"]
                         mx = s[0] + (e[0] - s[0]) * 0.2

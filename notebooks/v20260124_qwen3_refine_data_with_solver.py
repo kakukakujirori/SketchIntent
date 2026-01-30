@@ -39,6 +39,18 @@ from v20260116_draw_constraints import visualize_sketch_for_vlm, load_and_extrac
 
 
 # ============================================================
+# External Entity IDs (FreeCAD special geometry references)
+# ============================================================
+# These are special entity IDs for referencing the sketch's external geometry:
+# - X-Axis (-1): The horizontal axis through origin (subnode 1 = origin point)
+# - Y-Axis (-2): The vertical axis through origin (subnode 1 = origin point)
+# Note: Origin point is accessed via X-Axis with subnode=1, not as a separate entity
+X_AXIS_ENTITY_ID = -1
+Y_AXIS_ENTITY_ID = -2
+EXTERNAL_ENTITY_IDS = {X_AXIS_ENTITY_ID, Y_AXIS_ENTITY_ID}
+
+
+# ============================================================
 # Geometry & Math Utils
 # ============================================================
 
@@ -83,7 +95,24 @@ def get_point_from_primitive(primitives: list, entity_idx: int, subnode: int | N
         1: StartPoint
         2: EndPoint
         3: CenterPoint (Circle or Arc)
+
+    Special Entity IDs (external geometry):
+        -1 (X-Axis): Horizontal axis. subnode 1 returns origin point [0, 0], subnode 0 returns None (the line itself)
+        -2 (Y-Axis): Vertical axis. subnode 1 returns origin point [0, 0], subnode 0 returns None (the line itself)
     """
+    # Handle external entity IDs (X-Axis, Y-Axis)
+    if entity_idx == X_AXIS_ENTITY_ID:
+        # X-Axis: subnode 1 = origin point (start of axis)
+        if subnode == 1:
+            return [0.0, 0.0]
+        return None
+    elif entity_idx == Y_AXIS_ENTITY_ID:
+        # Y-Axis: subnode 1 = origin point (start of axis)
+        if subnode == 1:
+            return [0.0, 0.0]
+        return None
+
+    # Regular primitive lookup
     if entity_idx < 0 or entity_idx >= len(primitives):
         return None
 
@@ -122,8 +151,48 @@ def get_point_from_primitive(primitives: list, entity_idx: int, subnode: int | N
     return None
 
 
+
+def is_valid_entity_id(entity_id: int | None, primitives: list) -> bool:
+    """Check if an entity ID is valid (either external or within primitives range)."""
+    if entity_id is None:
+        return True  # None is valid (optional parameter)
+    if entity_id in EXTERNAL_ENTITY_IDS:
+        return True  # External entity IDs are valid
+    return 0 <= entity_id < len(primitives)
+
+
+def get_primitive_for_entity(primitives: list, entity_id: int) -> dict | None:
+    """
+    Get a primitive-like dict for any entity (regular or external).
+
+    For regular primitives (entity_id >= 0), returns primitives[entity_id].
+    For external entities, returns a synthetic primitive dict:
+        - X-Axis (-1): Horizontal LineSegment through origin
+        - Y-Axis (-2): Vertical LineSegment through origin
+
+    Note: Origin point is accessed via X-Axis (entity_id=-1) with subnode=1
+
+    Args:
+        primitives: List of primitive dicts
+        entity_id: Entity index (can be negative for external entities)
+
+    Returns:
+        Primitive dict or None if invalid
+    """
+    INF = float('inf')
+    if entity_id == X_AXIS_ENTITY_ID:
+        # X-Axis: horizontal axis through origin, extends to +infinity
+        return {"type": "LineSegment", "start": [0.0, 0.0], "end": [INF, 0.0]}
+    elif entity_id == Y_AXIS_ENTITY_ID:
+        # Y-Axis: vertical axis through origin, extends to +infinity
+        return {"type": "LineSegment", "start": [0.0, 0.0], "end": [0.0, INF]}
+    elif 0 <= entity_id < len(primitives):
+        return primitives[entity_id]
+    return None
+
+
 def compute_constraint_value(ctype: str, primitives: list, e1: int, s1: int | None = None,
-                              e2: int | None = None, s2: int | None = None) -> float | None:
+                              e2: int | None = None, s2: int | None = None) -> float:
     """
     Compute the value for a dimensional constraint based on primitive coordinates.
 
@@ -134,12 +203,17 @@ def compute_constraint_value(ctype: str, primitives: list, e1: int, s1: int | No
         e2, s2: Second entity index and subnode (optional)
 
     Returns:
-        Computed value or None if unable to compute
+        Computed value. Returns float('nan') if unable to compute.
+        Callers should use math.isfinite() to validate the result.
     """
-    if e1 is None or e1 < 0 or e1 >= len(primitives):
-        return None
+    NAN = float('nan')
 
-    prim1 = primitives[e1]
+    if e1 is None or not is_valid_entity_id(e1, primitives):
+        return NAN
+
+    prim1 = get_primitive_for_entity(primitives, e1)
+    if prim1 is None:
+        return NAN
 
     if ctype == "Distance":
         # Case 1: Single entity (e.g. Line Length)
@@ -148,44 +222,53 @@ def compute_constraint_value(ctype: str, primitives: list, e1: int, s1: int | No
                 sx, sy = prim1["start"]
                 ex, ey = prim1["end"]
                 return math.sqrt((ex - sx)**2 + (ey - sy)**2)
-            return None
+            return NAN
 
         # Case 2: Two entities (Point-Point or Point-Line)
-        if e2 >= len(primitives):
-            return None
-
-        if s1 is None:
-            return None
-
-        p1 = get_point_from_primitive(primitives, e1, s1)
+        p1 = get_point_from_primitive(primitives, e1, s1) if s1 is not None else None
         if p1 is None:
-            return None
+            return NAN
+
+        prim2 = get_primitive_for_entity(primitives, e2)
+        if prim2 is None:
+            return NAN
 
         # Attempt to get p2 (Point-to-Point)
-        # Use subnode2 if present, else default to 0
         sub2 = s2 if s2 is not None else 0
         p2 = get_point_from_primitive(primitives, e2, sub2)
 
+        # Case 2.1: Point-to-Point distance
         if p2 is not None:
-            # Point-to-Point distance
             return math.sqrt((p2[0] - p1[0])**2 + (p2[1] - p1[1])**2)
 
-        # If p2 is None, check for Point-to-Line
-        prim2 = primitives[e2]
+        # If a specific point (subnode != 0) was requested but not found, return NAN
+        # This can happen for X/Y axes (e2 is -1 or -2 and s2=2 is wrongly set)
+        if s2 is not None and s2 != 0:
+            return NAN
+
+        # Case 2.2: Point-to-Line distance
         if prim2["type"] == "LineSegment":
             lx1, ly1 = prim2["start"]
             lx2, ly2 = prim2["end"]
             dx, dy = lx2 - lx1, ly2 - ly1
             line_len_sq = dx**2 + dy**2
-            if line_len_sq > 1e-9:
+            if math.isfinite(line_len_sq) and line_len_sq > 1e-9:
                 t = ((p1[0] - lx1) * dx + (p1[1] - ly1) * dy) / line_len_sq
                 closest_x = lx1 + t * dx
                 closest_y = ly1 + t * dy
                 return math.sqrt((p1[0] - closest_x)**2 + (p1[1] - closest_y)**2)
+            # For infinite axes (X-Axis or Y-Axis)
+            elif ly2 == 0:  # X-Axis (horizontal)
+                return abs(p1[1])
+            elif lx2 == 0:  # Y-Axis (vertical)
+                return abs(p1[0])
+            else:
+                return NAN  # Invalid line (zero length or other)
 
     elif ctype == "Radius":
         if prim1["type"] == "Circle":
-            return prim1.get("radius")
+            r = prim1.get("radius")
+            return r if r is not None else NAN
         elif prim1["type"] == "Arc":
             result = compute_arc_center(prim1["start"], prim1["mid"], prim1["end"])
             if result:
@@ -194,7 +277,7 @@ def compute_constraint_value(ctype: str, primitives: list, e1: int, s1: int | No
     elif ctype == "Diameter":
         if prim1["type"] == "Circle":
             r = prim1.get("radius")
-            return r * 2 if r else None
+            return r * 2 if r is not None else NAN
         elif prim1["type"] == "Arc":
             result = compute_arc_center(prim1["start"], prim1["mid"], prim1["end"])
             if result:
@@ -203,8 +286,13 @@ def compute_constraint_value(ctype: str, primitives: list, e1: int, s1: int | No
     elif ctype == "Angle":
         if e2 is not None:
             # Angle between two lines
-            prim2 = primitives[e2] if e2 < len(primitives) else None
-            if prim1["type"] == "LineSegment" and prim2 and prim2["type"] == "LineSegment":
+            if not is_valid_entity_id(e2, primitives):
+                return NAN
+            prim2 = get_primitive_for_entity(primitives, e2)
+            if prim2 is None:
+                return NAN
+
+            if prim1["type"] == "LineSegment" and prim2["type"] == "LineSegment":
                 dx1 = prim1["end"][0] - prim1["start"][0]
                 dy1 = prim1["end"][1] - prim1["start"][1]
                 dx2 = prim2["end"][0] - prim2["start"][0]
@@ -219,7 +307,7 @@ def compute_constraint_value(ctype: str, primitives: list, e1: int, s1: int | No
                 dy = prim1["end"][1] - prim1["start"][1]
                 return math.atan2(dy, dx)  # radian
 
-    return None
+    return NAN
 
 
 # ============================================================
@@ -865,7 +953,7 @@ def generate_freecad_constraints(primitives: list, constraints: list):
                 if ctype in ["Distance", "Angle", "Radius", "Diameter"]:
                     # ALWAYS recompute value
                     value = compute_constraint_value(ctype, primitives, e1, s1, e2, s2)
-                    if value is None:
+                    if not math.isfinite(value):
                         yield idx, ctype, None, f"Failed to compute value for {ctype}"
                         continue # Skip if computation fails
 
@@ -1597,10 +1685,10 @@ def static_constraints_diagnosis(
         p3 = get_point_from_primitive(primitives_list, e3, s3) if e3 is not None else None
         constraint_name = f"{c['type']}(" + ", ".join(str(x) for x in [e1, s1, e2, s2, e3, s3] if x is not None) + ")"
 
-        # Check for non-existing primitive references
-        entity1_valid = e1 is None or 0 <= e1 < len(primitives_list)
-        entity2_valid = e2 is None or 0 <= e2 < len(primitives_list)
-        entity3_valid = e3 is None or 0 <= e3 < len(primitives_list)
+        # Check for non-existing primitive references (allow external entity IDs)
+        entity1_valid = is_valid_entity_id(e1, primitives_list)
+        entity2_valid = is_valid_entity_id(e2, primitives_list)
+        entity3_valid = is_valid_entity_id(e3, primitives_list)
         if not entity1_valid:
             warnings.append(f"Constraint {i} ({constraint_name}) is malformed: entity1={e1} is out of bounds.")
         if not entity2_valid:
@@ -1608,12 +1696,20 @@ def static_constraints_diagnosis(
         if not entity3_valid:
             warnings.append(f"Constraint {i} ({constraint_name}) is malformed: entity3={e3} is out of bounds.")
 
-        # Check if point entity subnode is set to 1
-        if e1 is not None and primitives_list[e1]["type"] == "Point" and s1 != 1:
+        # Check for invalid subnode=2 on X/Y axes (EndPoint is at infinity)
+        if e1 in (X_AXIS_ENTITY_ID, Y_AXIS_ENTITY_ID) and s1 == 2:
+            warnings.append(f"Constraint {i} ({constraint_name}) is malformed: X/Y axis does not have EndPoint (subnode=2).")
+        if e2 in (X_AXIS_ENTITY_ID, Y_AXIS_ENTITY_ID) and s2 == 2:
+            warnings.append(f"Constraint {i} ({constraint_name}) is malformed: X/Y axis does not have EndPoint (subnode=2).")
+        if e3 in (X_AXIS_ENTITY_ID, Y_AXIS_ENTITY_ID) and s3 == 2:
+            warnings.append(f"Constraint {i} ({constraint_name}) is malformed: X/Y axis does not have EndPoint (subnode=2).")
+
+        # Check if point entity subnode is set to 1 (only for regular primitives, not external entities)
+        if e1 is not None and e1 >= 0 and e1 < len(primitives_list) and primitives_list[e1]["type"] == "Point" and s1 != 1:
             warnings.append(f"Constraint {i} ({constraint_name}) is malformed: point entity subnode must be 1.")
-        if e2 is not None and primitives_list[e2]["type"] == "Point" and s2 != 1:
+        if e2 is not None and e2 >= 0 and e2 < len(primitives_list) and primitives_list[e2]["type"] == "Point" and s2 != 1:
             warnings.append(f"Constraint {i} ({constraint_name}) is malformed: point entity subnode must be 1.")
-        if e3 is not None and primitives_list[e3]["type"] == "Point" and s3 != 1:
+        if e3 is not None and e3 >= 0 and e3 < len(primitives_list) and primitives_list[e3]["type"] == "Point" and s3 != 1:
             warnings.append(f"Constraint {i} ({constraint_name}) is malformed: point entity subnode must be 1.")
 
         # Check for malformed symmetric constraints
@@ -1736,9 +1832,14 @@ def run_solver_tool(
                     title=None,
                     icon_fontsize=10,
                     figsize=(640, 640),
+                    draw_axes=True,
                 )
+                # Verify file was created
+                if not os.path.isfile(viz_image_path):
+                    print(f"[DEBUG] Image file NOT created after visualize_sketch_for_vlm: {viz_image_path}")
             except Exception as e:
                 print(f"Failed to generate feedback image: {e}")
+                print(f"[DEBUG] Full traceback:\n{traceback.format_exc()}")
 
             try:
                 FreeCAD.closeDocument(doc.Name)
@@ -1945,12 +2046,11 @@ def prepare_prompts(
     system_prompt_text = """You are an expert CAD engineer.
 Analyze the provided 2D sketch image, the list of geometric primitives, and the list of partial geometric constraints.
 
-Your task is to **add missing constraints** to the provided partial constraint list until the sketch is fully constrained.
+Your task is to **add missing constraints** to the provided partial constraint list until the sketch is fully constrained, i.e., Degree of Freedom = 0.
 MOST CRUCIALLY, THESE CONSTRAINTS MUST REFLECT THE DESIGN INTENT OF THE ORIGINAL SKETCH.
 Therefore, the constraints you infer must be intuitive, easy for post-editing, and human-friendly.
 
 The output must include ALL constraints: both the given partial constraints AND the new constraints you infer.
-Note that we define that the sketch is fully constrained if its Degree of Freedom is 2, i.e., leaving only the global xy translation.
 It is also important that the constraints are not malformed, conflicting, or redundant.
 
 The constraint types and grammar follow that of FreeCAD. The primitives are assigned reference numbers in the defined order,
@@ -1976,7 +2076,9 @@ General Argument Structure follows the pattern below:
 {Type, Entity1, Subnode1, Entity2, Subnode2, Entity3, Subnode3, Value}
 
 - Type: The type of the constraint (e.g., "Coincident", "Horizontal", "Parallel", "Tangent", etc. See [Constraint Types and Signatures] below).
-- EntityN: The 0-based index of the primitive.
+- EntityN: The index of the primitive. Regular primitives use 0-based indices. Special external entities use negative indices:
+    - -1: X-Axis (LineSegment entity: horizontal axis through origin. subnode=0: entire line, subnode=1: origin point, subnode=2 is invalid)
+    - -2: Y-Axis (LineSegment entity: vertical axis through origin. subnode=0: entire line, subnode=1: origin point, subnode=2 is invalid)
 - SubnodeN: One of the following numbers, specifying which part of the primitive is being referenced.
     - 0: The Entity itself (e.g., the edge of a line or circle)
     - 1: StartPoint (Vertex)
@@ -1987,6 +2089,9 @@ General Argument Structure follows the pattern below:
 Depending on the Type, some arguments may be omitted. For example, Horizontal constraint only requires Entity1.
 
 NOTE: When you reference a point entity, you must set subnode=1, not 0.
+NOTE: To fix the sketch position (achieve DoF=0), use the Axes as constraint references.
+      The origin point (0, 0) is accessed via X-Axis (entity -1) with subnode 1.
+      Example: PointOnObject(0, 1, -1) fixes the start of Line0 on the X axis.
 
 [Constraint Types and Signatures]
 Strictly adhere to the following signatures for each constraint type. Arguments not listed for a type should be omitted.
@@ -2157,7 +2262,7 @@ and return the following JSON format:
 }
 ```
 
-The desirable solver status is DoF=2, Status=Converged, no Conflicting/Redundant/Malformed constraints, and GeometryValidation.Passed=true.
+The desirable solver status is DoF=0, Status=Converged, no Conflicting/Redundant/Malformed constraints, and GeometryValidation.Passed=true.
 - If the solver reports 'Status' as 'Failed', it means that the solver failed to converge, indicating that some constraints are geometrically unachievable. As the problem identification is usually very difficult, revert to a point where the solver reports Converged.
 - If the solver reports 'RedundantConstraints', those constraints are deduced from other constraints. Try removing them (prioritize keeping the given partial constraints).
 - If the solver reports 'ConflictingConstraints', there is a contradiction among constraints shown there. Analyze the logic and remove or modify the incorrect constraints.
@@ -2172,8 +2277,8 @@ In addition, we provide the 2D sketch image with your inferred constraints appli
 IMPORTANT: If the output doesn't conform to the JSON format, we return an error message.
 Immediately fix the error based on the message and re-submit your answer.
 
-IMPORTANT: Even if you achieve DoF=2, we reject your solution if one or more constraints are judged as malformed, conflicting, or redundant.
-Therefore, prioritize no malformed, conflicting, or redundant status. Upon that, focus on reducing DoF.
+IMPORTANT: Even if you achieve DoF=0, we reject your solution if one or more constraints are judged as malformed, conflicting, or redundant.
+Therefore, prioritize no malformed, conflicting, or redundant status. Upon that, focus on reducing DoF to 0.
 If you see a lot of conflicting constraints, first identify the ones that most frequently appear in the ConflictGroups, and try deleting it.
 If you still don't see any improvements, it may be recommended that you start over from the initial constraints.
 Also, solver status can be 'Failed' without any invalid constraints or geometric deviation. This is a solver's limitation and it is extremely hard to recover from here. Consider reverting to a previous 'Converged' state.
@@ -2280,11 +2385,12 @@ Example Tool Outputs (the input primitives and partial constraints are the same 
   {"type": "Perpendicular", "entity1": 1, "entity2": 2},
   {"type": "Perpendicular", "entity1": 0, "entity2": 3},
   {"type": "Distance", "entity1": 2, "Subnode1": 1, "Entity2": 2, "Subnode2": 2},
-  {"type": "Distance", "entity1": 1, "Subnode1": 1, "Entity2": 1, "Subnode2": 2}
+  {"type": "Distance", "entity1": 1, "Subnode1": 1, "Entity2": 1, "Subnode2": 2},
+  {"type": "Symmetric", "entity1": 0, "subnode1": 2, "entity2": 2, "subnode2": 2, "entity3": -1, "subnode3": 1}
 ]
 # Example 3 Solver Output (Since it is verified as fully constrained, you must re-submit the answer constraints with <final></final> tag in the next turn.)
 {
-  "DoF": 2,
+  "DoF": 0,
   "Status": "Converged",
   "ConflictingConstraints": [],
   "RedundantConstraints": [],
@@ -2302,7 +2408,7 @@ Example Tool Outputs (the input primitives and partial constraints are the same 
 
 [IMPORTANT RULES]
 1. Identify geometric relationships based on the visual appearance in the image and the provided primitive IDs.
-2. Achieve fully constrained (DoF=2) CAD sketches with constraints maintaining the design intent.
+2. Achieve fully constrained (DoF=0) CAD sketches with constraints maintaining the design intent.
     a. Try to achieve it with fewer constraints.
     b. Always prioritize relational constraints over dimensional constraints.
     c. When you have to use dimensional constraints, follow these rules:
@@ -2312,9 +2418,9 @@ Example Tool Outputs (the input primitives and partial constraints are the same 
         iv. Chain dimensions horizontally or vertically. Chaining means defining length incrementally without overlaps, for example, A---B and B---C, rather than A---B and A---C.
         v. When a sketch has concave regions, define length in the positive sketch area: the line defining that length should be inside the valid sketch area.
     d. Always consider that the enforced constraints are intuitive, aligned with the design intent, and easy to understand/modify for post-editing.
-    e. Even if you achieve DoF=2 without any invalid constraints, you MUST NOT leave any redundant constraints and MUST strive to remove warnings such as diagonal constraints.
+    e. Even if you achieve DoF=0 without any invalid constraints, you MUST NOT leave any redundant constraints and MUST strive to remove warnings such as diagonal constraints.
 3. You must submit your answer without the <final> tag several rounds to reflect the solver feedback.
-4. If you cannot name all the constraints to achieve DoF=2, output the constraints you have identified so far to achieve the lowest DoF without any malformed or conflicting constraints.
+4. If you cannot name all the constraints to achieve DoF=0, output the constraints you have identified so far to achieve the lowest DoF without any malformed or conflicting constraints.
 5. Make sure to add the <final> tag to your final answer.
 6. The final JSON output (after </think>) must be a valid JSON array starting with '[' and ending with ']'.
     a. NEVER use abbreviations like `[... Existing constraints ...]`. You MUST list ALL constraints explicitly, including the given input constraints.
@@ -2332,7 +2438,7 @@ Example Tool Outputs (the input primitives and partial constraints are the same 
 
     # Add final text prompt
     user_prompt_text = f"""
-Complete the constraint list by adding missing constraints to achieve DoF=2.
+Complete the constraint list by adding missing constraints to achieve DoF=0.
 At each turn, submit your answer in the specified JSON format, and integrate the feedback of the CAD solver to improve your constraints.
 You can submit your answer up to {max_turns} times.
 Your final output must:
@@ -2471,6 +2577,7 @@ if __name__ == '__main__':
             title=None,
             icon_fontsize=10,
             figsize=(640, 640),
+            draw_axes=True,
         )
 
         # Sanity check
@@ -2588,7 +2695,7 @@ if __name__ == '__main__':
             messages.append({"role": "user", "content": user_content})
 
             print("User: " + solver_output + "\n")
-            if FEEDBACK_IMAGE_PATH:
+            if FEEDBACK_IMAGE_PATH and os.path.isfile(FEEDBACK_IMAGE_PATH):
                 print(f"[Visual Feedback] Image appended: {FEEDBACK_IMAGE_PATH}\n")
 
         # Select the best solution so far
@@ -2678,6 +2785,7 @@ if __name__ == '__main__':
                 title_fontsize=10,
                 icon_fontsize=10,
                 figsize=(640, 640),
+                draw_axes=True,
             )
 
             # combine
