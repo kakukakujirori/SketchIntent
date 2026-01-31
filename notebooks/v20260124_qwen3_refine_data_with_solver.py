@@ -1597,31 +1597,38 @@ def static_constraints_diagnosis(
         p3 = get_point_from_primitive(primitives_list, e3, s3) if e3 is not None else None
         constraint_name = f"{c['type']}(" + ", ".join(str(x) for x in [e1, s1, e2, s2, e3, s3] if x is not None) + ")"
 
-        # Check for non-existing primitive references
-        entity1_valid = e1 is None or 0 <= e1 < len(primitives_list)
-        entity2_valid = e2 is None or 0 <= e2 < len(primitives_list)
-        entity3_valid = e3 is None or 0 <= e3 < len(primitives_list)
-        if not entity1_valid:
+        # Check for non-existing primitive references (allow external entity IDs)
+        if e1 is not None and (e1 < 0 or len(primitives_list) <= e1):
             warnings.append(f"Constraint {i} ({constraint_name}) is malformed: entity1={e1} is out of bounds.")
-        if not entity2_valid:
+        if e2 is not None and (e2 < 0 or len(primitives_list) <= e2):
             warnings.append(f"Constraint {i} ({constraint_name}) is malformed: entity2={e2} is out of bounds.")
-        if not entity3_valid:
+        if e3 is not None and (e3 < 0 or len(primitives_list) <= e3):
             warnings.append(f"Constraint {i} ({constraint_name}) is malformed: entity3={e3} is out of bounds.")
 
-        # Check if point entity subnode is set to 1
-        if e1 is not None and primitives_list[e1]["type"] == "Point" and s1 != 1:
+        # Check if point entity subnode is set to 1 (only for regular primitives, not external entities)
+        if e1 is not None and 0 <= e1 < len(primitives_list) and primitives_list[e1]["type"] == "Point" and s1 != 1:
             warnings.append(f"Constraint {i} ({constraint_name}) is malformed: point entity subnode must be 1.")
-        if e2 is not None and primitives_list[e2]["type"] == "Point" and s2 != 1:
+        if e2 is not None and 0 <= e2 < len(primitives_list) and primitives_list[e2]["type"] == "Point" and s2 != 1:
             warnings.append(f"Constraint {i} ({constraint_name}) is malformed: point entity subnode must be 1.")
-        if e3 is not None and primitives_list[e3]["type"] == "Point" and s3 != 1:
+        if e3 is not None and 0 <= e3 < len(primitives_list) and primitives_list[e3]["type"] == "Point" and s3 != 1:
             warnings.append(f"Constraint {i} ({constraint_name}) is malformed: point entity subnode must be 1.")
 
-        # Check for malformed symmetric constraints
+        # Check for malformed Coincident constraints
+        if c["type"] == "Coincident":
+            if p1 is None or p2 is None:
+                warnings.append(f"Constraint {i} ({constraint_name}) is malformed: Coincident applies between points, so subnode1/2 must be >= 1.")
+
+        # Check for malformed PointsOnObject constraints
+        if c["type"] == "PointOnObject":
+            if p1 is None:
+                warnings.append(f"Constraint {i} ({constraint_name}) is malformed: entity1.subnode1 must be a point.")
+
+        # Check for malformed Symmetric constraints
         if c["type"] == "Symmetric":
             if p1 is None or p2 is None:
-                warnings.append(f"Constraint {i} ({constraint_name}) is malformed: if entity1/2 itself is not a point, subnode1/2 must be >= 1.")
+                warnings.append(f"Constraint {i} ({constraint_name}) is malformed: subnode1/2 must be >= 1.")
 
-        # Check for malformed/diagonal distance constraints
+        # Check for malformed/diagonal Distance constraints
         if c["type"] == "Distance":
             if p1 is None and p2 is None:
                 warnings.append(f"Constraint {i} ({constraint_name}) is malformed: You cannot define a distance between lines. Either Subnode1 or Subnode2 must be >= 1.")
