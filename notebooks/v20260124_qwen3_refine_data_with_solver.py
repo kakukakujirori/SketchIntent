@@ -1605,13 +1605,21 @@ def static_constraints_diagnosis(
         if e3 is not None and (e3 < 0 or len(primitives_list) <= e3):
             warnings.append(f"Constraint {i} ({constraint_name}) is malformed: entity3={e3} is out of bounds.")
 
-        # Check if point entity subnode is set to 1 (only for regular primitives, not external entities)
+        # Check if point entity subnode is set to 1
         if e1 is not None and 0 <= e1 < len(primitives_list) and primitives_list[e1]["type"] == "Point" and s1 != 1:
             warnings.append(f"Constraint {i} ({constraint_name}) is malformed: point entity subnode must be 1.")
         if e2 is not None and 0 <= e2 < len(primitives_list) and primitives_list[e2]["type"] == "Point" and s2 != 1:
             warnings.append(f"Constraint {i} ({constraint_name}) is malformed: point entity subnode must be 1.")
         if e3 is not None and 0 <= e3 < len(primitives_list) and primitives_list[e3]["type"] == "Point" and s3 != 1:
             warnings.append(f"Constraint {i} ({constraint_name}) is malformed: point entity subnode must be 1.")
+
+        # Check if line entity subnode <= 2
+        if e1 is not None and 0 <= e1 < len(primitives_list) and primitives_list[e1]["type"] == "LineSegment" and s1 == 3:
+            warnings.append(f"Constraint {i} ({constraint_name}) is malformed: line entity subnode must be <= 2.")
+        if e2 is not None and 0 <= e2 < len(primitives_list) and primitives_list[e2]["type"] == "LineSegment" and s2 == 3:
+            warnings.append(f"Constraint {i} ({constraint_name}) is malformed: line entity subnode must be <= 2.")
+        if e3 is not None and 0 <= e3 < len(primitives_list) and primitives_list[e3]["type"] == "LineSegment" and s3 == 3:
+            warnings.append(f"Constraint {i} ({constraint_name}) is malformed: line entity subnode must be <= 2.")
 
         # Check for malformed Coincident constraints
         if c["type"] == "Coincident":
@@ -1626,7 +1634,7 @@ def static_constraints_diagnosis(
         # Check for malformed Symmetric constraints
         if c["type"] == "Symmetric":
             if p1 is None or p2 is None:
-                warnings.append(f"Constraint {i} ({constraint_name}) is malformed: subnode1/2 must be >= 1.")
+                warnings.append(f"Constraint {i} ({constraint_name}) is malformed: subnode1 and subnode2 must be >= 1.")
 
         # Check for malformed/diagonal Distance constraints
         if c["type"] == "Distance":
