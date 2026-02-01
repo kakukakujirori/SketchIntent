@@ -20,7 +20,7 @@ from llama_cpp import Llama
 from llama_cpp.llama_chat_format import Qwen3VLChatHandler
 
 # Add FreeCAD Libs (conditionally)
-freecad_lib = os.path.expanduser("~/github/FreeCAD/build/lib")
+freecad_lib = "/data/ryotaro/github/FreeCAD/build/lib"
 if freecad_lib not in sys.path:
     sys.path.insert(0, freecad_lib)
 
@@ -1999,9 +1999,8 @@ General Argument Structure follows the pattern below:
     - 3: CenterPoint (Strictly the center of a Circle or Arc, NOT the midpoint of a line or an arc)
 - Value: The parameter value of dimension constraints (e.g., length, angle, etc.)
 
-Depending on the Type, some arguments may be omitted. For example, Horizontal constraint only requires Entity1.
-
-NOTE: When you reference a point entity, you must set subnode=1, not 0.
+NOTE: Depending on the Type, some arguments may be omitted. For example, Horizontal constraint only requires Entity1.
+NOTE: For "Point" primitives, always use subnode=1 instead of 0.
 
 [Constraint Types and Signatures]
 Strictly adhere to the following signatures for each constraint type. Arguments not listed for a type should be omitted.
@@ -2042,7 +2041,7 @@ Even though you infer the parameter `Value`, we discard them and instead calcula
         - Two points and a symmetry line (you can omit Subnode3 = 0 in this case): Symmetric(Line1, PointOfLine1, Line2, PointOfLine2, SymmetryLine)
         - Two points and a symmetry point: Symmetric(Line1, PointOfLine1, Line2, PointOfLine2, LineS, PointOfLineS)
         - A line and a symmetry point: Symmetric(Line, 1, Line, 2, LineS, PointOfLineS)
-    * NOTE: Entity1.Subnode1 and Entity2.Subnode2 must be points, so Subnode1/2 must NOT be 0 if Entity1/2 is not a point.
+    * NOTE: Entity1.Subnode1 and Entity2.Subnode2 must be points, so Subnode1/2 must be >= 1.
 
 2. Dimensional Constraints (Use only when necessary for fully constraining the sketch):
 - Distance(Entity1, Subnode1, Entity2, Subnode2, Value)
@@ -2327,7 +2326,6 @@ Example Tool Outputs (the input primitives and partial constraints are the same 
         iv. Chain dimensions horizontally or vertically. Chaining means defining length incrementally without overlaps, for example, A---B and B---C, rather than A---B and A---C.
         v. When a sketch has concave regions, define length in the positive sketch area: the line defining that length should be inside the valid sketch area.
     d. Always consider that the enforced constraints are intuitive, aligned with the design intent, and easy to understand/modify for post-editing.
-    e. Even if you achieve DoF=2 without any invalid constraints, you MUST NOT leave any redundant constraints and MUST strive to remove warnings such as diagonal constraints.
 3. You must submit your answer without the <final> tag several rounds to reflect the solver feedback.
 4. If you cannot name all the constraints to achieve DoF=2, output the constraints you have identified so far to achieve the lowest DoF without any malformed or conflicting constraints.
 5. Make sure to add the <final> tag to your final answer.
@@ -2393,8 +2391,8 @@ if __name__ == '__main__':
     # MODEL_PATH = "/home/ryotaro/github/llama.cpp/models/Qwen3VL-235B-A22B-Thinking-Q4_K_M-split-00001-of-00003.gguf"
     # MMPROJ_PATH = "/home/ryotaro/github/llama.cpp/models/mmproj-Qwen3VL-235B-A22B-Thinking-F16.gguf"
 
-    MODEL_PATH = "/home/ryotaro/github/llama.cpp/models/Qwen3VL-30B-A3B-Thinking-Q8_0.gguf"
-    MMPROJ_PATH = "/home/ryotaro/github/llama.cpp/models/mmproj-Qwen3VL-30B-A3B-Thinking-F16.gguf"
+    MODEL_PATH = "/data/ryotaro/github/llama.cpp/models/Qwen3VL-30B-A3B-Thinking-Q8_0.gguf"
+    MMPROJ_PATH = "/data/ryotaro/github/llama.cpp/models/mmproj-Qwen3VL-30B-A3B-Thinking-F16.gguf"
 
     # Initialize LLM
     llm = Llama(
@@ -2419,7 +2417,7 @@ if __name__ == '__main__':
     error_log = os.path.join(args.output_dir, "error_log.txt")
 
     # load data
-    sequence_path = "/home/ryotaro/my_works/My-Vitruvion/data_processed/sg_filtered_unique.npy"
+    sequence_path = "/data/ryotaro/my_works/My-Vitruvion/data_processed/sg_filtered_unique.npy"
     seq_data = flat_array.load_dictionary_flat(sequence_path)
     sequences = seq_data['sequences']
 
