@@ -578,6 +578,7 @@ def format_constraint_to_json(ctype: str, args: list) -> dict:
     """
     c_out = {
         "type": ctype,
+        "args": args,
         "entity1": None, "subnode1": None,
         "entity2": None, "subnode2": None,
         "entity3": None, "subnode3": None
@@ -1292,71 +1293,97 @@ def extract_geometry_coords(fc_sketch: "Sketcher.SketchObject") -> dict[int, dic
     return coords
 
 
-def validate_geometry_from_lists(
+def validate_geometry_preservation(
     primitives: list,
     constraints: list,
     threshold_mm: float = 10.0,
-) -> tuple[float, float, int, bool, str]:
+) -> tuple[list[int], str]:
     """
-    Validate geometry impact of constraints by comparing before/after.
-
-    This function:
-    1. Add primitives only to FreeCAD → capture coordinates
-    2. Add constraints (two-pass) → capture coordinates
-    3. Compare the two with centroid alignment (to ignore global translation)
+    Validate geometry impact of constraints greedily, filtering out those that cause deviation or solver failure.
 
     Args:
         primitives: List of primitive dicts
-        constraints: List of constraint dicts from Qwen3 output
+        constraints: List of constraint dicts
         threshold_mm: Maximum allowed deviation in mm
 
     Returns:
-        Tuple of (max_coord_deviation, max_length_deviation, max_deviation_primitive_idx, all_passed, error_message)
+        Tuple of (distorting_indices, error_msg)
+        - distorting_indices: List of original indices of constraints that were filtered out
     """
     doc = None
-    max_coord_deviation = 0.0
-    max_length_deviation = 0.0
-    max_deviation_primitive_idx = -1
-    all_passed = True
+    distorting_indices = []
     error_msg = ""
 
     try:
-        # Create FreeCAD document
+        # Create FreeCAD document for base state
         doc = FreeCAD.newDocument("GeoValidationDoc")
         body = doc.addObject('PartDesign::Body', 'Body')
         fc_sketch = body.newObject('Sketcher::SketchObject', 'Sketch')
-        xy_plane = body.Origin.OriginFeatures[3]
-        fc_sketch.AttachmentSupport = xy_plane
+        fc_sketch.AttachmentSupport = body.Origin.OriginFeatures[3]
         fc_sketch.MapMode = 'FlatFace'
 
-        # Step 1: Add primitives only
+        # Base State: Add primitives only
         add_primitives_to_sketch(primitives, fc_sketch)
         doc.recompute()
-
-        # Capture primitives BEFORE constraints
         primitives_before = extract_primitives_from_sketch(fc_sketch)
 
-        # Step 2: Add constraints (two-pass)
-        _, _, primitives_after = add_constraints_to_sketch(primitives, constraints, fc_sketch)
+        # Prepare indexed constraints for iteration
+        # Note: We process Relational then Dimensional, but must track original indices
+        indexed_constraints = list(enumerate(constraints))
 
-        # Explicitly solve to ensure geometry updates
-        fc_sketch.solve()
-        doc.recompute()
+        dim_types = {"Distance", "Angle", "Radius", "Diameter"}
+        rel_indexed = [(i, c) for i, c in indexed_constraints if c.get("type") not in dim_types]
+        dim_indexed = [(i, c) for i, c in indexed_constraints if c.get("type") in dim_types]
 
-        # Get final primitives after constraints
-        primitives_after = extract_primitives_from_sketch(fc_sketch)
+        def apply_and_check(constr):
+            """Apply constraint and return status: 'KEPT', 'DISTORTING', 'SKIPPED'."""
 
-        # Step 3: Compute all deviations using unified function
-        max_coord_deviation, max_length_deviation, max_deviation_primitive_idx = \
-            compute_centroid_aligned_deviation(primitives_before, primitives_after)
+            # Use current primitives to ensure dimensional constraints use correct values
+            current_primitives = extract_primitives_from_sketch(fc_sketch)
+            _, failed, _ = add_constraints_to_sketch(current_primitives, [constr], fc_sketch)
+            if failed:
+                return 'SKIPPED' # Failed to add (Malformed)
 
-        # Consider both deviations for pass/fail
-        max_total_dev = max(max_coord_deviation, max_length_deviation)
-        all_passed = max_total_dev < threshold_mm
+            # Solve and check
+            fc_sketch.solve()
+            doc.recompute()
+
+            # Check solver status
+            status = fc_sketch.getSolverStatus()
+            is_solver_broken = (
+                status.get('Status', '') != 'Converged' or
+                len(status.get('ConflictingConstraints', [])) > 0 or
+                len(status.get('MalformedConstraints', [])) > 0 or
+                len(status.get('RedundantConstraints', [])) > 0
+            )
+            # Check deviation first (Priority: Distorting > Broken)
+            primitives_now = extract_primitives_from_sketch(fc_sketch)
+            m_c, m_l, _ = compute_centroid_aligned_deviation(primitives_before, primitives_now)
+            if m_c > threshold_mm or m_l > threshold_mm:
+                return 'DISTORTING'
+
+            if is_solver_broken:
+                return 'SKIPPED'
+
+            return 'KEPT'
+
+        # Iterate and filter using transactions
+        for constr_idx, constr in rel_indexed + dim_indexed:
+            doc.openTransaction(f"AddConstraint_{constr_idx}")
+            status = apply_and_check(constr)
+
+            if status == 'DISTORTING':
+                doc.abortTransaction()
+                distorting_indices.append(constr_idx)
+            elif status == 'SKIPPED':
+                doc.abortTransaction()
+            elif status == 'KEPT':
+                doc.commitTransaction()
+            else:
+                raise NotImplementedError(f"Unknown status: {status}")
 
     except Exception:
         error_msg = "ERROR: " + traceback.format_exc()
-        all_passed = False
 
     finally:
         if doc is not None:
@@ -1365,35 +1392,32 @@ def validate_geometry_from_lists(
             except:
                 pass
 
-    return max_coord_deviation, max_length_deviation, max_deviation_primitive_idx, all_passed, error_msg
+    return distorting_indices, error_msg
 
 
 @dataclass
 class VerificationResult:
     """Verification result from FreeCAD solver."""
-    success: bool = False
     dof: int = -1
     status: str = "Unknown"
     malformed_count: int = 0
     conflicting_count: int = 0
     redundant_count: int = 0
-    solver_converged: bool = True  # True if solver found a solution
+    distorting_count: int = 0
     dof_decreased: bool = True  # True if Qwen3 DoF <= GT DoF (improved or same)
-    geo_max_deviation: float = -1.0
-    geo_max_length_deviation: float = -1.0
-    geo_passed: bool = False
     error: str | None = None
 
+
     def is_valid(self) -> bool:
-        """Check if constraints are valid (no issues and geo passed)."""
+        """Check if constraints are valid (no issues and no distorting constraints)."""
         return (
-            self.success and
+            self.status == "Converged" and
             self.malformed_count == 0 and
             self.conflicting_count == 0 and
             self.redundant_count == 0 and
-            self.solver_converged and
+            self.distorting_count == 0 and
             self.dof_decreased and
-            self.geo_passed
+            (self.error is None or self.error == "")
         )
 
     def summary(self) -> str:
@@ -1407,10 +1431,10 @@ class VerificationResult:
             issues.append(f"conflicting={self.conflicting_count}")
         if self.redundant_count > 0:
             issues.append(f"redundant={self.redundant_count}")
-        if not self.solver_converged:
-            issues.append("solver_fail")
-        if not self.geo_passed:
-            issues.append(f"geo_fail(c={self.geo_max_deviation:.1f}mm, l={self.geo_max_length_deviation:.1f}mm)")
+        if self.status != "Converged":
+            issues.append(self.status)
+        if self.distorting_count > 0:
+            issues.append(f"distorting={self.distorting_count}")
         if not self.dof_decreased:
             issues.append("dof_increased")
         issue_str = ", ".join(issues) if issues else "OK"
@@ -1461,22 +1485,16 @@ def verify_constraints(
         fc_sketch.solve()
         status = fc_sketch.getSolverStatus()
 
-        result.success = True
         result.dof = status['DoF']
         result.status = status['Status']
         # Malformed = Reported by solver + Failed to add
         result.malformed_count = len(status.get('MalformedConstraints', [])) + len(failed_indices)
         result.conflicting_count = len(status.get('ConflictingConstraints', []))
         result.redundant_count = len(status.get('RedundantConstraints', []))
-        # Check if solver converged (Status = 'Converged' means OK)
-        result.solver_converged = (status.get('Status', '') == 'Converged')
 
     except Exception:
         result.error = "ERROR: " + traceback.format_exc()
-        result.success = False
-        result.solver_converged = False
-        result.geo_passed = False
-        result.geo_max_deviation = -1.0
+        result.status = "Error"
 
     finally:
         if doc is not None:
@@ -1485,100 +1503,15 @@ def verify_constraints(
             except:
                 pass
 
-    # Step 3: Geometry validation (only if solver check passed)
-    if result.success and result.malformed_count == 0 and result.conflicting_count == 0:
-        max_coord_dev, max_len_dev, _max_dev_prim_idx, geo_passed, geo_error = validate_geometry_from_lists(
-            primitives, constraints, geo_threshold_mm
-        )
-        result.geo_max_deviation = max_coord_dev
-        result.geo_max_length_deviation = max_len_dev
-        result.geo_passed = geo_passed
-        if geo_error:
-            result.error = geo_error
-    else:
-        result.geo_passed = False
-        result.geo_max_deviation = -1.0
-        result.geo_max_length_deviation = -1.0
+    # Step 3: Geometry validation (Greedy check to find specific bad constraints)
+    distorting_indices, geo_error = validate_geometry_preservation(
+        primitives, constraints, geo_threshold_mm
+    )
+    result.distorting_count = len(distorting_indices)
+    if geo_error:
+        result.error = geo_error
 
     return result
-
-
-
-def find_problematic_constraint_incremental(
-    primitives: list,
-    constraints: list,
-    geo_threshold_mm: float = 10.0
-) -> int:
-    """
-    Incrementally add constraints to find the first one that causes geometry deviation > threshold.
-    Returns the index of the problematic constraint (0-based) or -1 if no single constraint triggers it.
-    """
-    doc = None
-    problematic_index = -1
-
-    try:
-        # Create temp doc
-        doc = FreeCAD.newDocument("IncrementalDebugDoc")
-        body = doc.addObject('PartDesign::Body', 'Body')
-        fc_sketch = body.newObject('Sketcher::SketchObject', 'Sketch')
-        xy_plane = body.Origin.OriginFeatures[3]
-        fc_sketch.AttachmentSupport = xy_plane
-        fc_sketch.MapMode = 'FlatFace'
-
-        # Add primitives (base state)
-        add_primitives_to_sketch(primitives, fc_sketch)
-        doc.recompute()
-
-        # Capture Initial Coordinates (Ground Truth for deviation)
-        coords_before = extract_geometry_coords(fc_sketch)
-
-        for i, constr in enumerate(constraints):
-            # Add ONE constraint
-            # WE MUST ADD IT CUMULATIVELY
-            # 'add_constraints_to_sketch' expects a list. We pass a single-item listing.
-            # It appends to the sketch.
-            _, failed, _ = add_constraints_to_sketch(primitives, [constr], fc_sketch)
-
-            if failed:
-                continue
-
-            doc.recompute()
-            fc_sketch.solve()
-
-            # Check deviation against ORIGINAL coords_before
-            coords_after = extract_geometry_coords(fc_sketch)
-
-            max_dev = 0.0
-            max_len_dev = 0.0
-
-            for geo_id, before_data in coords_before.items():
-                if geo_id not in coords_after: continue
-                after_data = coords_after[geo_id]
-
-                # Coord dev
-                for (bx, by), (ax, ay) in zip(before_data['points'], after_data['points']):
-                    dist = ((bx-ax)**2 + (by-ay)**2)**0.5
-                    if dist > max_dev: max_dev = dist
-
-                # Length dev
-                l_dev = abs(before_data['length'] - after_data['length'])
-                if l_dev > max_len_dev: max_len_dev = l_dev
-
-            if max_dev > geo_threshold_mm or max_len_dev > geo_threshold_mm:
-                problematic_index = i
-                break
-
-    except Exception as e:
-        print(f"Incremental Check Error: {e}")
-
-    finally:
-        if doc:
-            try:
-                FreeCAD.closeDocument(doc.Name)
-            except:
-                pass
-
-    return problematic_index
 
 
 def static_constraints_diagnosis(
@@ -1677,6 +1610,12 @@ def run_solver_tool(
         add_primitives_to_sketch(primitives_list, fc_sketch)
         doc.recompute()
 
+        # Normalize constraints (ensure keys like entity1 exist for diagnosis)
+        for c in constraints_json_list:
+            if "args" in c and "entity1" not in c:
+                formatted = format_constraint_to_json(c["type"], c["args"])
+                c.update(formatted)
+
         # We need the mapping to convert 1-based FC indices back to 0-based input indices
         constraint_mapping, failed_indices, _ = add_constraints_to_sketch(primitives_list, constraints_json_list, fc_sketch)
         doc.recompute()
@@ -1692,7 +1631,7 @@ def run_solver_tool(
             return [fc_to_orig.get(idx - 1, -1) for idx in fc_indices if (idx - 1) in fc_to_orig]
 
         def convert_groups(groups):
-            return [convert_indices(group) for group in groups]
+            return [convert_indices(set(group)) for group in groups]
 
         # Combine malformed indices (both reported by solver and failed to add)
         malformed_from_solver = convert_indices(status.get('MalformedConstraints', []))
@@ -1710,25 +1649,14 @@ def run_solver_tool(
         }
 
         # --- Geometry Validation ---
-        max_coord_dev, max_len_dev, max_dev_primitive_idx, geo_passed, geo_error = validate_geometry_from_lists(
+        distorting_indices, geo_error = validate_geometry_preservation(
             primitives_list, constraints_json_list, geo_threshold_mm
         )
 
-        response['GeometryValidation'] = {
-            'MaxCoordDeviation_mm': round(max_coord_dev, 2),
-            'MaxLengthDeviation_mm': round(max_len_dev, 2),
-            'MaxDeviationPrimitive': max_dev_primitive_idx,
-            'Passed': geo_passed,
-            'Threshold_mm': geo_threshold_mm
-        }
-        if geo_error:
-            response['GeometryValidation']['Error'] = geo_error
+        response['DistortingConstraints'] = distorting_indices
 
-        # Incremental check if validation failed
-        if not geo_passed:
-            prob_idx = find_problematic_constraint_incremental(primitives_list, constraints_json_list, geo_threshold_mm)
-            if prob_idx >= 0:
-                response['GeometryValidation']['ProblematicConstraintIndex'] = prob_idx
+        if geo_error:
+            print("[run_solver_tool] geo_error: ", geo_error)
 
         # --- Diagnostic Warnings (Diagonal Distance, Syntax Error) ---
         warnings = static_constraints_diagnosis(primitives_list, constraints_json_list)
@@ -1848,7 +1776,6 @@ def cleanup_constraints_from_lists(
 
             # Build final result
             final_result = VerificationResult(
-                success=True,
                 dof=status['DoF'],
                 status=status['Status'],
                 malformed_count=len(malformed_fc) + len(failed_indices),
@@ -1951,7 +1878,10 @@ def prepare_prompts(
     for c in constraints_list:
         if "args" not in c:
             raise ValueError(f"prepare_prompts expects constraints with 'args' key, got: {c}")
-        constraints_json_list.append(format_constraint_to_json(c["type"], c["args"]))
+        formatted_json = format_constraint_to_json(c["type"], c["args"])
+        if "args" in formatted_json:
+            del formatted_json["args"]
+        constraints_json_list.append(formatted_json)
     constraints_text = json.dumps(constraints_json_list, indent=2)
 
     # Run solver on partial constraints to get initial status
@@ -2158,26 +2088,20 @@ and return the following JSON format:
   'RedundantConstraints': [int...],    # List of indices that are redundant (0-based)
   'ConflictGroups': [[int...], ...],   # Groups of constraints causing issues (0-based)
   'MalformedConstraints': [int...],    # Malformed constraints (0-based)
-  'GeometryValidation': {
-    'MaxCoordDeviation_mm': float,     # Maximum displacement of any point (Start, End, Center) from the original position.
-    'MaxLengthDeviation_mm': float,    # Maximum change in length of any primitive (e.g. Arc length). Large values >10mm indicate severe distortion/flipping.
-    'MaxDeviationPrimitive': int,      # 0-based index of primitive with the largest error (either coordinate or length deviation). -1 means None.
-    'Passed': bool,                    # True if both deviations < Threshold_mm.
-    'Threshold_mm': float,             # Threshold value used for judgement
-    'ProblematicConstraintIndex': int, # The index of the first constraint (in your output list) that caused the geometry to deviate. Use this to identify and fix the bad constraint.
-  }
+  'MalformedConstraints': [int...],    # Malformed constraints (0-based)
+  'DistortingConstraints': [int...],   # List of indices that are valid but cause severe geometry distortion (0-based).
   'Warnings': [str...],                # Other recommendations to note, e.g., replace diagonally defined distance constraints with horizontal/vertical ones.
   }
 }
 ```
 
-The desirable solver status is DoF=2, Status=Converged, no Conflicting/Redundant/Malformed constraints, and GeometryValidation.Passed=true.
+The desirable solver status is DoF=2, Status=Converged, no Conflicting/Redundant/Malformed/Distorting constraints.
 - If the solver reports 'Status' as 'Failed', it means that the solver failed to converge, indicating that some constraints are geometrically unachievable. As the problem identification is usually very difficult, revert to a point where the solver reports Converged.
 - If the solver reports 'RedundantConstraints', those constraints are deduced from other constraints. Try removing them (prioritize keeping the given partial constraints).
 - If the solver reports 'ConflictingConstraints', there is a contradiction among constraints shown there. Analyze the logic and remove or modify the incorrect constraints.
 - If the solver reports 'MalformedConstraints', those constraints are syntactically incorrect (e.g., missing parameters or referring to non-existent entities). Remove the constraints or modify their syntax.
-- If the solver reports 'GeometryValidation.Passed' is False, your constraints are moving the geometry too much. You MUST remove or revise the problematic constraints (check 'MaxDeviationPrimitive' for the affected primitive index).
-- The criticalness is Malformed > Conflicting > GeometryValidation > Redundant.
+- If the solver reports 'DistortingConstraints', these constraints are causing the geometry to distort significantly. You MUST remove or revise these constraints.
+- The criticalness is Malformed > Conflicting > Distorting > Redundant.
 - The solver output indices are 0-based and correspond to the order in your <solver_call> list.
 
 Along with the input primitives and partial constraints, we also provide the initial solver output for your reference.
@@ -2219,13 +2143,7 @@ Example Tool Outputs (the input primitives and partial constraints are the same 
   "RedundantConstraints": [],
   "ConflictGroups": [],
   "MalformedConstraints": [],
-  "GeometryValidation": {
-    "MaxCoordDeviation_mm": 0.0,
-    "MaxLengthDeviation_mm": 0.0,
-    "MaxDeviationPrimitive": -1,
-    "Passed": true,
-    "Threshold_mm": 10.0
-  }
+  "DistortingConstraints": []
 }
 
 # Example 1: Redundant Constraints (Vertical(0), Vertical(2), Perpendicular(1,2) implies Perpendicular(0,1)):
@@ -2247,12 +2165,7 @@ Example Tool Outputs (the input primitives and partial constraints are the same 
   "RedundantConstraints": [7],
   "ConflictGroups": [[4, 7, 5, 6]],
   "MalformedConstraints": [],
-  "GeometryValidation": {
-    "MaxDeviation_mm": 0.0,
-    "MaxDeviationPrimitive": -1,
-    "Passed": true,
-    "Threshold_mm": 10.0
-  }
+  "DistortingConstraints": []
 }
 
 # Example 2: Conflicting Constraints
@@ -2274,13 +2187,7 @@ Example Tool Outputs (the input primitives and partial constraints are the same 
   "RedundantConstraints": [0],
   "ConflictGroups": [[0, 7], [5, 4, 7, 6], [0, 7]],
   "MalformedConstraints": [],
-  "GeometryValidation": {
-    "MaxCoordDeviation_mm": 0.0,
-    "MaxLengthDeviation_mm": 0.0,
-    "MaxDeviationPrimitive": -1,
-    "Passed": true,
-    "Threshold_mm": 10.0
-  }
+  "DistortingConstraints": []
 }
 
 # Example 3: Valid Constraints (NOTE: You can omit "Value" in Distance constraints)
@@ -2304,13 +2211,7 @@ Example Tool Outputs (the input primitives and partial constraints are the same 
   "RedundantConstraints": [],
   "ConflictGroups": [],
   "MalformedConstraints": [],
-  "GeometryValidation": {
-    "MaxCoordDeviation_mm": 0.0,
-    "MaxLengthDeviation_mm": 0.0,
-    "MaxDeviationPrimitive": -1,
-    "Passed": true,
-    "Threshold_mm": 10.0
-  }
+  "DistortingConstraints": []
 }
 ```
 
@@ -2344,8 +2245,7 @@ Example Tool Outputs (the input primitives and partial constraints are the same 
         user_messages.append({"type": "image_url", "image_url": {"url": encoded_text}})
 
     # Add final text prompt
-    user_prompt_text = f"""
-Complete the constraint list by adding missing constraints to achieve DoF=2.
+    user_prompt_text = f"""Complete the constraint list by adding missing constraints to achieve DoF=2.
 At each turn, submit your answer in the specified JSON format, and integrate the feedback of the CAD solver to improve your constraints.
 You can submit your answer up to {max_turns} times.
 Your final output must:
@@ -2499,6 +2399,11 @@ if __name__ == '__main__':
 
         print("\n--- Qwen3 Generation (Interactive) ---")
         messages = prepare_prompts(sample_primitives, sample_constraints_cleaned, output_image_path_original, args.max_turns, args.geo_threshold)
+        print(messages[0]["content"])
+        for msg in messages[1]["content"]:
+            if "text" in msg:
+                print(msg["text"])
+
         predicted_constraints_list = []
 
         for solver_call_count in range(args.max_turns):
@@ -2534,6 +2439,9 @@ if __name__ == '__main__':
 
             messages.append({"role": "assistant", "content": current_turn_text})
 
+            # Define image path at start
+            FEEDBACK_IMAGE_PATH = f"{args.output_dir}/images/{i:07d}_feedback_{solver_call_count:02d}.png"
+
             # 1. Check for <final> tag
             final_match = re.search(r"<final>\n(.*?)\n</final>", current_turn_text, re.DOTALL)
             if final_match:
@@ -2545,10 +2453,14 @@ if __name__ == '__main__':
                     print("User: " + solver_output + "\n")
                     continue
                 else:
+                    # Run solver to provide feedback for the final answer (to terminal)
+                    solver_output = run_solver_tool(sample_primitives, predicted_constraints, args.geo_threshold, FEEDBACK_IMAGE_PATH)
+                    print("User: " + solver_output + "\n")
+                    if os.path.isfile(FEEDBACK_IMAGE_PATH):
+                        print(f"[Visual Feedback] Image appended: {FEEDBACK_IMAGE_PATH}\n")
                     break
 
             # 2. Check for </think> and extract JSON
-            FEEDBACK_IMAGE_PATH = f"{args.output_dir}/images/{i:07d}_feedback_{solver_call_count:02d}.png"
             parts = current_turn_text.split("</think>")
             content_to_parse = parts[-1] if len(parts) > 1 else current_turn_text
             json_match = re.search(r'\[[\s\S]*?\]', content_to_parse)
@@ -2639,8 +2551,6 @@ if __name__ == '__main__':
 
             predicted_summary = predicted_verification.summary()
             print(f"  Result: {predicted_summary}")
-            if predicted_verification.geo_max_deviation >= 0:
-                print(f"  Geometry deviation: {predicted_verification.geo_max_deviation:.2f}mm")
 
             if predicted_verification.is_valid():
                 print("  ✓ VALID: Constraints are well-formed and geometry preserved")
