@@ -5,6 +5,8 @@ import os
 import math
 import sys
 
+import io
+from PIL import Image
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 import numpy as np
@@ -163,31 +165,10 @@ def load_and_extract_from_file(file_path: str):
 # 3. 可視化ロジック (Visualizing)
 # ==========================================
 
-
-def visualize_sketch_for_vlm(
-    data,
-    save_path: str = "vlm_input.png",
-    title: str | None = None,
-    title_fontsize: int = 24,
-    icon_fontsize: int = 10,
-    figsize: tuple[int, int] = (800, 800),
-    dpi: int = 100,
-    ):
-    """
-    Visualize sketch with primitives and constraints.
-
-    Args:
-        data: Sketch data dictionary with primitives and constraints
-        save_path: Path to save the output image
-        title: Optional label (e.g., "Sketch A") to display in top-left corner
-        title_fontsize: Font size for the title label
-        figsize: Target canvas size in pixels (default: (800, 800))
-        dpi: Dots per inch (default: 100)
-    """
-    if not data: return
-
-    fig, ax = plt.subplots(figsize=(figsize[0] / dpi, figsize[1] / dpi), dpi=dpi)
+def _draw_single_sketch(ax, data, title: str | None = None, title_fontsize: int = 24, icon_fontsize: int = 10):
+    """Helper function to draw a single sketch on a given axes."""
     ax.set_aspect('equal')
+    ax.axis('off') # Hide axes for cleaner look
 
     all_x, all_y = [], []
     prim_map = {p["id"]: p for p in data["primitives"]}
@@ -649,8 +630,37 @@ def visualize_sketch_for_vlm(
             zorder=1000
         )
 
-    plt.savefig(save_path, bbox_inches='tight', dpi=dpi)
+
+def visualize_sketch_for_vlm(
+    data,
+    save_path: str | None = None,
+    title: str | None = None,
+    title_fontsize: int = 24,
+    icon_fontsize: int = 10,
+    figsize: tuple[int, int] = (800, 800),
+    dpi: int = 100,
+    ):
+    """
+    Visualize sketch wrapper.
+
+    If save_path is None, returns a PIL.Image object.
+    If save_path is specified, saves the image and returns None.
+    """
+    if not data: return None
+
+    # Single view
+    fig, ax = plt.subplots(figsize=(figsize[0] / dpi, figsize[1] / dpi), dpi=dpi)
+    _draw_single_sketch(ax, data, title=title,
+                        title_fontsize=title_fontsize, icon_fontsize=icon_fontsize)
+
+    if save_path:
+        plt.savefig(save_path, bbox_inches='tight', dpi=dpi)
+
+    buf = io.BytesIO()
+    plt.savefig(buf, bbox_inches='tight', dpi=dpi, format='png')
     plt.close()
+    buf.seek(0)
+    return Image.open(buf)
 
 
 if __name__ == "__main__":
