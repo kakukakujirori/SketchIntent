@@ -44,67 +44,173 @@ class ConstraintType(enum.IntEnum):
     Subnode = 101
 
     @property
-    def _numeric_schema(self):
-        """Supported numerical constraint schemas; will be added to over time.
+    def _numeric_schemas(self):
+        """Supported numerical constraint schemas (list of alternatives).
 
         For Offset we do 2nd most popular since we can only handle 2 entity references atm.
+        Returns a list of tuples, where each tuple is a valid schema for the constraint type.
         """
         return {
-            ConstraintType.Angle: ('aligned', 'angle', 'clockwise', 'local0',
-                                   'local1'),
-            ConstraintType.Distance: ('direction', 'halfSpace0', 'halfSpace1',
-                                      'length', 'local0', 'local1'),
-            ConstraintType.Length: ('direction', 'length', 'local0'),
-            ConstraintType.Offset: ('local0', 'local1'),
-            ConstraintType.Diameter: ('length', 'local0'),
-            ConstraintType.Radius: ('length', 'local0')
-        }.get(self)
+            ConstraintType.Angle: [
+                ('aligned', 'angle', 'clockwise', 'local0', 'local1'),
+                ('aligned', 'angle', 'clockwise', 'local1'),  # External reference for local0
+                ('aligned', 'angle', 'clockwise', 'local0'),  # External reference for local1
+                ('aligned', 'clockwise', 'local0', 'local1'),  # Driven (no angle value)
+                ('aligned', 'clockwise', 'local1'),  # Driven external for local0
+                ('aligned', 'clockwise', 'local0'),  # Driven external for local1
+                # Relaxed schemas for simpleAngle (no aligned/clockwise)
+                ('angle', 'local0', 'local1'),
+                ('angle', 'local0'),
+            ],
+            ConstraintType.Distance: [
+                # --- Double Reference Schemas ---
+                # Standard (with length)
+                ('direction', 'halfSpace0', 'halfSpace1', 'length', 'local0', 'local1'),
+                ('direction', 'alignment', 'length', 'local0', 'local1'),
+                ('direction', 'length', 'local0', 'local1'),
+                ('halfSpace0', 'halfSpace1', 'length', 'local0', 'local1'),
+                ('alignment', 'length', 'local0', 'local1'),
+                ('length', 'local0', 'local1'),
+
+                # Driven (no length)
+                ('direction', 'halfSpace0', 'halfSpace1', 'local0', 'local1'),
+                ('direction', 'alignment', 'local0', 'local1'),
+                ('direction', 'local0', 'local1'),
+                ('halfSpace0', 'halfSpace1', 'local0', 'local1'),
+                ('alignment', 'local0', 'local1'),
+                ('local0', 'local1'),
+
+                # --- Single Reference Schemas (External Reference) ---
+                # Standard (with length)
+                ('direction', 'halfSpace0', 'halfSpace1', 'length', 'local0'),
+                ('direction', 'halfSpace0', 'halfSpace1', 'length', 'local1'),
+                ('length', 'local0'),
+                ('length', 'local1'),
+
+                # Driven (no length)
+                ('direction', 'halfSpace0', 'halfSpace1', 'local0'),
+                ('direction', 'halfSpace0', 'halfSpace1', 'local1'),
+                ('direction', 'halfSpace0', 'local0'),
+                ('direction', 'halfSpace0', 'local1'),
+                ('direction', 'halfSpace1', 'local0'),
+                ('direction', 'halfSpace1', 'local1'),
+                ('direction', 'alignment', 'local0'),
+                ('direction', 'alignment', 'local1'),
+                ('direction', 'local0'),
+                ('direction', 'local1'),
+                ('alignment', 'local0'),
+                ('alignment', 'local1'),
+            ],
+            ConstraintType.Length: [
+                ('direction', 'length', 'local0'),
+                ('alignment', 'direction', 'length', 'local0'),
+                ('direction', 'local0'),  # Driven
+                ('alignment', 'direction', 'local0'),  # Driven with alignment
+            ],
+            ConstraintType.Offset: [
+                ('local0', 'local1'),
+                ('local1',),  # External reference for local0
+                ('local0',),  # External reference for local1
+                ('halfSpace0', 'halfSpace1', 'local1'),
+                ('halfSpace0', 'halfSpace1', 'halfSpace2', 'halfSpace3', 'local1'),
+                # 4-reference Offset (localMaster, localOffset, localSecond, localSecondOffset)
+                ('local0', 'local1', 'local2', 'local3'),
+                ('halfSpace0', 'halfSpace1', 'halfSpace2', 'halfSpace3', 'local0', 'local1', 'local2', 'local3'),
+                ('halfSpace0', 'halfSpace1', 'halfSpace2', 'halfSpace3', 'local0', 'local1'),
+            ],
+            ConstraintType.Diameter: [
+                ('length', 'local0'),
+                ('local0',),  # Driven
+            ],
+            ConstraintType.Radius: [
+                ('length', 'local0'),
+                ('local0',),  # Driven
+            ]
+        }.get(self, [])
 
     @property
     def has_parameters(self) -> bool:
         """A boolean value indicating whether the given constraint has parameters."""
-        return self._numeric_schema is not None
+        return len(self._numeric_schemas) > 0
+
+    def normalize_param_id(self, param_id):
+        """Normalizes a single parameter ID based on the constraint type."""
+        if param_id == 'localFirst':
+            return 'local0'
+        elif param_id == 'localSecond':
+            if self == ConstraintType.Offset:
+                return 'local2'  # Third reference in Offset
+            return 'local1'
+        elif param_id == 'localMaster':
+            return 'local0'
+        elif param_id == 'localOffset':
+            return 'local1'
+        elif param_id == 'localSecondOffset':
+            return 'local3'  # Fourth reference in Offset
+        return param_id
 
     def normalize(self, schema):
         """Normalizes supported schemas for numerical constraintType.
 
         We will consider identical any schemas that only differ by local# vs. localWord.
+        Supports multiple alternative schemas and warns if none match.
+        Uses superset matching: constraint is valid if it contains all required params.
 
         Parameters
         ----------
-        schema: an interable containing parameter ID strings
-        constraitType: an instance of ConstraintType
+        schema: an iterable containing parameter ID strings
 
         Returns
         -------
         If schema is supported, returns ref_schema, the set of relevant params; otherwise returns False.
         """
-        ignored_params = ('labelAngle', 'labelDistance', 'labelRatio', 'radiusDisplay')
-        ref_schema = self._numeric_schema
-        if ref_schema is None:
-            raise ValueError("Only call schema_comp on numerical constraints.")
+        import warnings
+
+        # Display/tool-related params that don't affect constraint semantics
+        ignored_params = (
+            'labelAngle', 'labelDistance', 'labelRatio', 'radiusDisplay',
+            'sketchToolType',  # Tool identifier
+            'flipped',         # Display orientation
+            'driven',          # Driven vs driving dimension
+            'externalFirst', 'externalSecond', 'externalMaster',  # External reference flags
+        )
+        ref_schemas = self._numeric_schemas
+        if not ref_schemas:
+            raise ValueError("Only call normalize on numerical constraints.")
+
+        # Normalize input schema
         norm_schema = []
         for param_id in schema:
             if param_id in ignored_params:
                 continue
-            # TODO: address these magic strings
-            if param_id == 'localFirst':
-                param_id = 'local0'
-            elif param_id == 'localSecond':
-                param_id = 'local1'
-            norm_schema.append(param_id)
-        if set(norm_schema) == set(ref_schema):
-            return set(ref_schema)
-        else:
-            return False
+            norm_schema.append(self.normalize_param_id(param_id))
+        norm_schema_set = set(norm_schema)
+
+        # Check against all alternative schemas using superset matching
+        # The input schema is valid if it contains all required params (may have extras)
+        # Sort by length descending to match the most specific schema first
+        sorted_ref_schemas = sorted(ref_schemas, key=len, reverse=True)
+        for ref_schema in sorted_ref_schemas:
+            ref_set = set(ref_schema)
+            if ref_set.issubset(norm_schema_set):
+                return ref_set
+
+        # No match found - warn and return False
+        warnings.warn(
+            f"Unrecognized schema for {self.name}: {sorted(norm_schema_set)}. "
+            f"Expected superset of one of: {[sorted(set(s)) for s in ref_schemas]}. "
+            f"Constraint will be skipped.",
+            UserWarning
+        )
+        return False
 
 
 string_to_constraint_type = {e.name.upper(): e for e in ConstraintType}
 
 
 NUMERIC_IDS = ('angle', 'length')
-ENUM_IDS = ('direction', 'halfSpace0', 'halfSpace1', 'alignment')
-BOOL_IDS = ('aligned', 'clockwise')
+ENUM_IDS = ('direction', 'halfSpace0', 'halfSpace1', 'halfSpace2', 'halfSpace3', 'alignment')
+BOOL_IDS = ('aligned', 'clockwise', 'driven')
 
 
 class DirectionValue(enum.IntEnum):
@@ -142,6 +248,8 @@ param_id_to_options = {
     'direction': DirectionValue,
     'halfSpace0': HalfSpaceValue,
     'halfSpace1': HalfSpaceValue,
+    'halfSpace2': HalfSpaceValue,
+    'halfSpace3': HalfSpaceValue,
     'alignment': AlignmentValue
 }
 
@@ -359,8 +467,8 @@ class EnumParameter(ConstraintParameter):
         return f"EnumParam({self.parameterId}: {self.value})"
 
     def to_dict(self):
-        enumNames = {'direction': 'DimensionDirection', 
-                     'halfSpace0': 'DimensionHalfSpace', 
+        enumNames = {'direction': 'DimensionDirection',
+                     'halfSpace0': 'DimensionHalfSpace',
                      'halfSpace1': 'DimensionHalfSpace',
                      'halfSpace2': 'DimensionHalfSpace',
                      'halfSpace3': 'DimensionHalfSpace',

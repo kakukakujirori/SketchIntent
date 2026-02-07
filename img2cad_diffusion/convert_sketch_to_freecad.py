@@ -423,39 +423,74 @@ def _resolve_tangent(
     # Find Tangent constraints that have matching Coincident
     for tid, t in constraints.items():
         if t.constraint_type.name == 'Tangent':
-            geo_ids = []
+            tan_refs = []
             for p in t.parameters:
                 if type(p).__name__ == 'LocalReferenceParameter':
                     ref_str = str(p.value)
-                    base = ref_str.split('.')[0] if '.' in ref_str else ref_str
+                    base, subnode = ref_str.split('.', 1) if '.' in ref_str else (ref_str, None)
                     try:
                         base_idx = int(base)
                         if base_idx in entity_to_geoid:
-                            geo_ids.append(entity_to_geoid[base_idx])
+                            geo_id = entity_to_geoid[base_idx]
+                            pt_id = 0
+                            if subnode:
+                                # Infer pt_id (similar to logic in _get_refs_from_constraint)
+                                # Simplified for check: just distinguish 0 vs >0
+                                # Or reuse helper if available.
+                                # For now, assume simple mapping or check string
+                                sl = subnode.lower()
+                                if sl == 'start': pt_id = 1
+                                elif sl == 'end': pt_id = 2
+                                elif sl == 'center': pt_id = 3
+                            tan_refs.append((geo_id, pt_id))
                     except ValueError:
                         pass
 
-            if len(geo_ids) == 2:
-                key = (min(geo_ids[0], geo_ids[1]), max(geo_ids[0], geo_ids[1]))
+            if len(tan_refs) == 2:
+                # normalize order for key
+                tr1, tr2 = tan_refs[0], tan_refs[1]
+                key = (min(tr1[0], tr2[0]), max(tr1[0], tr2[0]))
+
                 if key in coincident_map:
-                    # Find the best Coincident to use (prioritize point-point)
+                    # Find candidates
                     candidates = coincident_map[key]
                     best_refs = None
                     best_cid = None
+
                     for refs_parsed, cid in candidates:
-                        pt1, pt2 = refs_parsed[0][1], refs_parsed[1][1]
-                        if pt1 > 0 and pt2 > 0:
-                            # Point-point: prefer this
-                            best_refs = refs_parsed
-                            best_cid = cid
-                            break
-                        elif best_refs is None:
-                            # First candidate as fallback
-                            best_refs = refs_parsed
-                            best_cid = cid
+                        # Check compatibility
+                        # Compatible if Tangent ref is 0 (Edge) OR matches Coincident ref exactly
+                        # We need to map tan_refs items to refs_parsed items by geo_id
+
+                        # Match by geo_id
+                        c_r1, c_r2 = refs_parsed[0], refs_parsed[1]
+
+                        # Find corresponding refs
+                        # tan_refs might be [ (g1, p1), (g2, p2) ]
+                        # c_refs might be [ (g1, q1), (g2, q2) ] or swapped
+
+                        t_match_1 = tr1 if tr1[0] == c_r1[0] else tr2
+                        t_match_2 = tr2 if tr2[0] == c_r2[0] else tr1
+
+                        # Check compatibility
+                        # If Tangent specifies a point (pt > 0), Coincident MUST have same point
+                        # If Tangent is Edge (0), Coincident can be Point or Edge (we upgrade Edge to Point)
+
+                        valid = True
+                        if t_match_1[1] > 0 and t_match_1[1] != c_r1[1]: valid = False
+                        if t_match_2[1] > 0 and t_match_2[1] != c_r2[1]: valid = False
+
+                        if valid:
+                            pt1, pt2 = c_r1[1], c_r2[1]
+                            if pt1 > 0 and pt2 > 0:
+                                best_refs = refs_parsed
+                                best_cid = cid
+                                break # Found Point-Point match, optimal
+                            elif best_refs is None:
+                                best_refs = refs_parsed
+                                best_cid = cid
 
                     if best_refs is not None:
-                        # Sort refs_parsed so smaller geo_id comes first (like Sequence converter)
                         if best_refs[0][0] > best_refs[1][0]:
                             best_refs = [best_refs[1], best_refs[0]]
                         resolved_tangent_refs[tid] = best_refs
@@ -594,7 +629,44 @@ def _add_constraint(
 
     try:
         # ===== Geometric Constraints =====
-        if ctype == 'Coincident':
+        if ctype == 'Angle':
+            # Angle constraint
+            # Value is in Degrees in Sequence, convert to Radians for FreeCAD
+            val_deg = 0.0
+            for p in constraint.parameters:
+                if p.type == datalib.ConstraintParameterType.Quantity:
+                    # Expect "X DEGREE"
+                    try:
+                        val_str = p.expression.split(' ')[0]
+                        val_deg = float(val_str)
+                    except (ValueError, IndexError):
+                        pass
+
+            val_rad = math.radians(val_deg)
+
+            if len(refs) == 1 and r1:
+                # Single ref Angle (e.g. Arc Span)
+                fc_sketch.addConstraint(Sketcher.Constraint('Angle', r1[0], val_rad))
+                cmd = f"fc_sketch.addConstraint(Sketcher.Constraint('Angle', {r1[0]}, {val_rad}))"
+            elif len(refs) == 2 and r1 and r2:
+                # Line-Line Angle (or Line-Axis if supported, but typically 2 refs)
+                fc_sketch.addConstraint(Sketcher.Constraint('Angle', r1[0], r1[1], r2[0], r2[1], val_rad))
+                cmd = f"fc_sketch.addConstraint(Sketcher.Constraint('Angle', {r1[0]}, {r1[1]}, {r2[0]}, {r2[1]}, {val_rad}))"
+
+        elif ctype == 'Fix':
+            if r1:
+                # Lock Point or Block Edge
+                if r1[1] > 0:
+                    # Lock constraint crashes on Point in this version
+                    # User requested to skip workaround (DistanceX/Y) and accept higher DoF
+                    # fc_sketch.addConstraint(Sketcher.Constraint('DistanceX', r1[0], r1[1], 0.0))
+                    # fc_sketch.addConstraint(Sketcher.Constraint('DistanceY', r1[0], r1[1], 0.0))
+                    cmd = f"# Skipped explicit Fix on Point {r1[0]},{r1[1]} (likely Origin Node 0)"
+                else:
+                    fc_sketch.addConstraint(Sketcher.Constraint('Block', r1[0]))
+                    cmd = f"fc_sketch.addConstraint(Sketcher.Constraint('Block', {r1[0]}))"
+
+        elif ctype == 'Coincident':
             if r1 and r2:
                 if r1[0] == -1 or r2[0] == -1:
                     cmd = f"# Skipped External Coincident"
@@ -636,8 +708,14 @@ def _add_constraint(
 
         elif ctype == 'Perpendicular':
             if r1 and r2:
-                fc_sketch.addConstraint(Sketcher.Constraint('Perpendicular', r1[0], r2[0]))
-                cmd = f"fc_sketch.addConstraint(Sketcher.Constraint('Perpendicular', {r1[0]}, {r2[0]}))"
+                if r1[1] > 0 or r2[1] > 0:
+                    # 4-argument Perpendicular (Geo1, Pt1, Geo2, Pt2)
+                    fc_sketch.addConstraint(Sketcher.Constraint('Perpendicular', r1[0], r1[1], r2[0], r2[1]))
+                    cmd = f"fc_sketch.addConstraint(Sketcher.Constraint('Perpendicular', {r1[0]}, {r1[1]}, {r2[0]}, {r2[1]}))"
+                else:
+                    # 2-argument Perpendicular (Geo1, Geo2)
+                    fc_sketch.addConstraint(Sketcher.Constraint('Perpendicular', r1[0], r2[0]))
+                    cmd = f"fc_sketch.addConstraint(Sketcher.Constraint('Perpendicular', {r1[0]}, {r2[0]}))"
 
         elif ctype == 'Tangent':
             if r1 and r2:
@@ -667,13 +745,17 @@ def _add_constraint(
                     fc_sketch.addConstraint(Sketcher.Constraint('Tangent', r1[0], r1[1], r2[0], r2[1]))
                     cmd = f"fc_sketch.addConstraint(Sketcher.Constraint('Tangent', {r1[0]}, {r1[1]}, {r2[0]}, {r2[1]}))"
                 elif r1[1] > 0 and r2[1] == 0:
-                    # Point-to-Edge: use TangentViaPoint (e.g., Line.end tangent to Circle)
-                    fc_sketch.addConstraint(Sketcher.Constraint('TangentViaPoint', r1[0], r2[0], r1[0], r1[1]))
-                    cmd = f"fc_sketch.addConstraint(Sketcher.Constraint('TangentViaPoint', {r1[0]}, {r2[0]}, {r1[0]}, {r1[1]}))"
+                    # Point-to-Edge: use Tangent directly (Point, Edge)
+                    # Solves DoF issues better than TangentViaPoint in some cases
+                    fc_sketch.addConstraint(Sketcher.Constraint('Tangent', r1[0], r1[1], r2[0], r2[1]))
+                    cmd = f"fc_sketch.addConstraint(Sketcher.Constraint('Tangent', {r1[0]}, {r1[1]}, {r2[0]}, {r2[1]}))"
                 elif r1[1] == 0 and r2[1] > 0:
-                    # Edge-to-Point: use TangentViaPoint (e.g., Circle tangent to Line.end)
-                    fc_sketch.addConstraint(Sketcher.Constraint('TangentViaPoint', r1[0], r2[0], r2[0], r2[1]))
-                    cmd = f"fc_sketch.addConstraint(Sketcher.Constraint('TangentViaPoint', {r1[0]}, {r2[0]}, {r2[0]}, {r2[1]}))"
+                    # Edge-to-Point: swap to (Point, Edge) order or use (Edge, Point)
+                    # Tangent(Edge, Point) -> Tangent(G2, P2, G1, P1) ??
+                    # FreeCAD usually expects Tangent(G1, P1, G2, P2) or (G1, G2).
+                    # Let's try (G2, P2, G1, 0) -> Point, Edge order is safer?
+                    fc_sketch.addConstraint(Sketcher.Constraint('Tangent', r2[0], r2[1], r1[0], r1[1]))
+                    cmd = f"fc_sketch.addConstraint(Sketcher.Constraint('Tangent', {r2[0]}, {r2[1]}, {r1[0]}, {r1[1]}))"
                 else:
                     # Edge-edge Tangent without point info
                     fc_sketch.addConstraint(Sketcher.Constraint('Tangent', r1[0], r2[0]))
@@ -854,9 +936,28 @@ def _add_constraint(
                     p1 = get_point(r1[0], r1[1])
                     p2 = get_point(r2[0], r2[1])
                     if p1 and p2:
-                        dist = (p1 - p2).Length
-                        fc_sketch.addConstraint(Sketcher.Constraint('Distance', r1[0], r1[1], r2[0], r2[1], dist))
-                        cmd = f"fc_sketch.addConstraint(Sketcher.Constraint('Distance', {r1[0]}, {r1[1]}, {r2[0]}, {r2[1]}, {dist}))"
+                        # Check for direction parameter (from DistanceX/DistanceY)
+                        direction = None
+                        for param in constraint.parameters:
+                            if param.parameterId == 'direction':
+                                direction = param.value
+                                break
+
+                        if direction == 'HORIZONTAL':
+                            # DistanceX: horizontal distance
+                            dist = abs(p2.x - p1.x)
+                            fc_sketch.addConstraint(Sketcher.Constraint('DistanceX', r1[0], r1[1], r2[0], r2[1], dist))
+                            cmd = f"fc_sketch.addConstraint(Sketcher.Constraint('DistanceX', {r1[0]}, {r1[1]}, {r2[0]}, {r2[1]}, {dist}))"
+                        elif direction == 'VERTICAL':
+                            # DistanceY: vertical distance
+                            dist = abs(p2.y - p1.y)
+                            fc_sketch.addConstraint(Sketcher.Constraint('DistanceY', r1[0], r1[1], r2[0], r2[1], dist))
+                            cmd = f"fc_sketch.addConstraint(Sketcher.Constraint('DistanceY', {r1[0]}, {r1[1]}, {r2[0]}, {r2[1]}, {dist}))"
+                        else:
+                            # Regular Distance: euclidean distance
+                            dist = (p1 - p2).Length
+                            fc_sketch.addConstraint(Sketcher.Constraint('Distance', r1[0], r1[1], r2[0], r2[1], dist))
+                            cmd = f"fc_sketch.addConstraint(Sketcher.Constraint('Distance', {r1[0]}, {r1[1]}, {r2[0]}, {r2[1]}, {dist}))"
                     else:
                         cmd = f"# Skipped Distance: Could not get points"
                 elif r1[1] > 0:
@@ -929,28 +1030,6 @@ def _add_constraint(
                     cmd = f"# Skipped Length: geometry has no StartPoint/EndPoint"
             else:
                 cmd = f"# Skipped Length: missing reference"
-
-        elif ctype == 'Angle':
-            # Angle should be calculated from geometry (angle between two lines)
-            if r1 and r2:
-                import math
-                geo1 = fc_sketch.Geometry[r1[0]]
-                geo2 = fc_sketch.Geometry[r2[0]]
-                if hasattr(geo1, 'StartPoint') and hasattr(geo1, 'EndPoint') and \
-                   hasattr(geo2, 'StartPoint') and hasattr(geo2, 'EndPoint'):
-                    # Calculate direction vectors
-                    d1 = geo1.EndPoint - geo1.StartPoint
-                    d2 = geo2.EndPoint - geo2.StartPoint
-                    # Calculate angle between vectors
-                    dot = d1.x * d2.x + d1.y * d2.y
-                    cross = d1.x * d2.y - d1.y * d2.x
-                    angle = math.atan2(cross, dot)
-                    fc_sketch.addConstraint(Sketcher.Constraint('Angle', r1[0], r2[0], angle))
-                    cmd = f"fc_sketch.addConstraint(Sketcher.Constraint('Angle', {r1[0]}, {r2[0]}, {angle}))"
-                else:
-                    cmd = f"# Skipped Angle: geometry has no StartPoint/EndPoint"
-            else:
-                cmd = f"# Skipped Angle: missing references"
 
         else:
             cmd = f"# Skipped constraint type: {ctype}"

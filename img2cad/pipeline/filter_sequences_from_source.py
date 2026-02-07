@@ -29,7 +29,7 @@ class FilterConfiguration:
 
 @dataclasses.dataclass
 class FilterSequenceRunConfiguration:
-    filter: FilterConfiguration = FilterConfiguration()
+    filter: FilterConfiguration = dataclasses.field(default_factory=FilterConfiguration)
     input_folder: str = omegaconf.MISSING
     output_folder: str = omegaconf.MISSING
     total_sketches: int = 16261381
@@ -93,6 +93,10 @@ def main(config: FilterSequenceRunConfiguration):
     result = make_sequence_dataset.process(shards, num_threads, filter_function, total_sketches=config.total_sketches)
 
     output_path = os.path.join(hydra.utils.to_absolute_path(config.output_folder), 'sg_filtered.npy')
+
+    # Ensure output directory exists
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+
     print('Saving result at {0}'.format(output_path))
     np.save(output_path, result, allow_pickle=False)
 

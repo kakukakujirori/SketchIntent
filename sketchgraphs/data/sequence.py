@@ -48,16 +48,20 @@ def _get_constraint_parameters(constraint: Constraint):
     schema = [param.parameterId for param in constraint.parameters]
     ref_schema = constraint.type.normalize(schema)
 
-    if not ref_schema:
-        return parameters  # return empty parameters for unsupported schema
+    if ref_schema is False:
+        # print("[EdgeOp] _get_constraint_parameters() returns False")
+        return None  # return None for unsupported schema
 
     for param in constraint.parameters:
         param_id = param.parameterId
-        if param_id in ref_schema:
+        # Normalize the parameter ID (e.g. localOffset -> local1)
+        normalized_id = constraint.type.normalize_param_id(param_id)
+
+        if normalized_id in ref_schema:
             if param.type == ConstraintParameterType.Quantity:
-                parameters[param_id] = param.expression
+                parameters[normalized_id] = param.expression
             elif param.type in (ConstraintParameterType.Enum, ConstraintParameterType.Boolean):
-                parameters[param_id] = param.value
+                parameters[normalized_id] = param.value
 
     return parameters
 
@@ -139,12 +143,11 @@ def sketch_to_sequence(sketch: Sketch, ignore_invalid_constraints=True) -> typin
         references = tuple(references)
         parameters = _get_constraint_parameters(edge)
 
-        if edge.type.has_parameters and not parameters:
+        if edge.type.has_parameters and parameters is None:
             if ignore_invalid_constraints:
-                # The constraint is expected to have parameters but they could not be obtained.
-                # If set to ignore, skip including this constraint in the sequence
+                # The constraint is expected to have parameters but schema is invalid.
                 continue
-            raise ValueError('Invalid constraint: parameters could not be processed.')
+            raise ValueError('Invalid constraint: schema not supported.')
 
         edge_sequence.append(EdgeOp(edge.type, references, parameters))
 
@@ -167,31 +170,36 @@ def sketch_to_sequence(sketch: Sketch, ignore_invalid_constraints=True) -> typin
     return sequence
 
 
-def sketch_from_sequence(seq) -> Sketch:
+def sketch_from_sequence(seq, ignore_external_constraints=True) -> Sketch:
     """Builds a Sketch object from the given sequence.
 
     Parameters
     ----------
     seq : List[Union[NodeOp, EdgeOp]]
         A construction sequence representing a sketch.
+    ignore_external_constraints : bool, optional
+        If True, ignores external constraints (referencing the external node).
 
     Returns
     -------
     Sketch
         A sketch object representing the given construction sequence.
     """
+    entities = collections.OrderedDict()
+    constraints = collections.OrderedDict()
+
+    # Map from node index in sequence to (main_node_index, subnode_label)
+    # Used for translating subnode references to entity_id.subnode_suffix
+    main_node_map = {}
+
+    # Map from SubnodeType to string suffix
     subnode_label_to_string = {
         SubnodeType.SN_Start: 'start',
         SubnodeType.SN_End: 'end',
         SubnodeType.SN_Center: 'center'
     }
 
-    entities = collections.OrderedDict()
-    constraints = collections.OrderedDict()
-
-    main_node_map = {}
     node_idx = -1
-    last_main_idx = node_idx
     constraint_idx = 1
 
     def create_entity_id(node_idx: int) -> str:
@@ -210,7 +218,11 @@ def sketch_from_sequence(seq) -> Sketch:
                 last_main_idx = node_idx
                 entityId = str(node_idx)
                 # Don't create External or Stop entity
-                if op.label not in (EntityType.External, EntityType.Stop):
+                if op.label == EntityType.External:
+                    if not ignore_external_constraints:
+                        # Create a dummy Point for External geometry to allow constraints to reference it
+                        entities[entityId] = ENTITY_TYPE_TO_CLASS[EntityType.Point](entityId, isConstruction=True)
+                elif op.label != EntityType.Stop:
                     entities[entityId] = ENTITY_TYPE_TO_CLASS[op.label](entityId)
                     # Extract parameters for numerical entities
                     for param_id, val in op.parameters.items():
@@ -220,9 +232,7 @@ def sketch_from_sequence(seq) -> Sketch:
                 main_node_map[node_idx] = (last_main_idx, op.label)
 
         else:
-            if 0 in op.references:
-                # Skipping external constraints for now
-                continue
+
             if op.label == ConstraintType.Subnode:
                 # Verify EdgeOp Subnode matches NodeOp-inferred parent relationship
                 if len(op.references) >= 2:
@@ -239,6 +249,29 @@ def sketch_from_sequence(seq) -> Sketch:
             constraint_ent_id = 'c_%i' % constraint_idx
             constraint_idx += 1
             constraint_type = op.label
+
+            # Check if all referenced entities exist (handling filtered External node)
+            # We need to check if ANY reference points to a missing entity (due to filtering or Stop node)
+            references_valid = True
+            for ref_idx in op.references:
+                # Get main node index if it's a subnode
+                # We must use the same logic as create_entity_id to find the main node
+                if ref_idx in main_node_map:
+                    check_idx, _ = main_node_map[ref_idx]
+                else:
+                    check_idx = ref_idx
+
+                # Convert to string ID for main node
+                check_id = str(check_idx)
+
+                # Check if the main entity exists in our constructed entities dict
+                # This handles both External (if skipped) and Stop nodes (always skipped)
+                if check_id not in entities:
+                    references_valid = False
+                    break
+
+            if not references_valid:
+                continue
 
             # Build reference parameters
             params = []
@@ -275,7 +308,7 @@ def sketch_from_sequence(seq) -> Sketch:
                     val = bool(BooleanValue[val])
                     params.append(BooleanParameter(param_id, val))
                 else:
-                    raise ValueError("Unknown parameter id.")
+                    raise ValueError(f"Unknown parameter id: {param_id}")
 
             if params_are_ok:
                 constraints[constraint_ent_id] = Constraint(constraint_ent_id, constraint_type, params)
