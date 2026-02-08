@@ -54,21 +54,24 @@ class ConstraintToken(enum.IntEnum):
     Fix = 7  # FIXME: BETTER TO REMOVE?
     Horizontal = 8
     Midpoint = 9
-    Normal = 10
-    Offset = 11
-    Parallel = 12
-    Perpendicular = 13
-    Quadrant = 14
-    Tangent = 15
-    Vertical = 16
+    Mirror = 10
+    Normal = 11
+    Offset = 12
+    Parallel = 13
+    Perpendicular = 14
+    Quadrant = 15
+    Tangent = 16
+    Vertical = 17
     # Dimension constraints (numerical parameters not tokenized, only references)
-    Angle = 17
-    Diameter = 18
-    Distance = 19
-    Length = 20
-    Radius = 21
+    Angle = 18
+    Diameter = 19
+    Distance = 20
+    DistanceX = 21
+    DistanceY = 22
+    Length = 23
+    Radius = 24
     # Special tokens
-    InnerPad = 22  # Padding within fixed-length constraint blocks (loss computed)
+    InnerPad = 25  # Padding within fixed-length constraint blocks (loss computed)
 
     @classmethod
     def has_value(cls, value):
@@ -88,8 +91,9 @@ CONSTRAINT_ACCEPTABLE_REF_COUNTS: dict[ConstraintToken, set[int]] = {
     ConstraintToken.Fix: {1},
     ConstraintToken.Horizontal: {1, 2},  # Can be 1 (line) or 2 (two points)
     ConstraintToken.Midpoint: {2, 3},    # 2 (point-curve) or 3 (point-point-point)
+    ConstraintToken.Mirror: {3},         # Explicitly 3 refs (Internal only)
     ConstraintToken.Normal: {2},
-    ConstraintToken.Offset: {2},
+    ConstraintToken.Offset: {2, 3},      # Although typically dropped, schema supports 2 or 3
     ConstraintToken.Parallel: {2},
     ConstraintToken.Perpendicular: {2},
     ConstraintToken.Quadrant: {2},
@@ -99,6 +103,8 @@ CONSTRAINT_ACCEPTABLE_REF_COUNTS: dict[ConstraintToken, set[int]] = {
     ConstraintToken.Angle: {2},          # Two lines/edges
     ConstraintToken.Diameter: {1},       # Circle or arc
     ConstraintToken.Distance: {1, 2},    # 1 (line length) or 2 (point-point, point-line, line-line)
+    ConstraintToken.DistanceX: {1, 2},
+    ConstraintToken.DistanceY: {1, 2},
     ConstraintToken.Length: {1},         # Line
     ConstraintToken.Radius: {1},         # Circle or arc
     # Special tokens

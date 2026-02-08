@@ -35,7 +35,7 @@ class EntityTokenMapping:
     entity_idx: int
     entity_type: type
     entity_token_pos: int
-    param_tokens: list[PrimitiveParamToken]
+    param_tokens: tuple[PrimitiveParamToken, ...]
 
 
 GatherMap = dict[int, EntityTokenMapping]
@@ -131,7 +131,7 @@ def tokenize_primitives(
         pos_tokens.append(pos_idx)
 
         # Parameter tokens
-        params, param_tokens = sketch_utils.parameterize_entity(ent)
+        params, param_tokens = sketch_utils.parameterize_entity(ent)  # type: ignore[no-redef]
 
         # Clip parameters to valid range with warning if significantly outside
         # Use small tolerance to avoid false positives from floating point precision
@@ -195,6 +195,47 @@ CONSTRAINT_TOKEN_LEN = 4  # [Type, Ref1, Ref2orInnerPad, Ref3orInnerPad]
 
 
 ConstraintOrder = str  # Literal["original", "sort_by_ref_id", "random_shuffle"]
+
+
+def _refine_constraint_type(
+    constraint_type: str,
+    refs: list[tuple[int, str | None]],
+    parameters: list,
+) -> str | None:
+    """Refine constraint type based on references and parameters.
+
+    Returns the refined constraint type string (e.g. 'DistanceX') or None if the
+    constraint should be dropped (e.g. invalid Mirror/Offset).
+    """
+    # 1. Mirror Logic
+    if constraint_type == 'Mirror':
+        # 2-ref Mirror usually refers to external entities, so drop it
+        return constraint_type if len(refs) == 3 else None
+
+    # 2. Offset Logic
+    if constraint_type == 'Offset':
+        # hard to treat offset constraint
+        return None
+
+    # 3. Distance Logic (Direction Mapping)
+    if constraint_type == 'Distance':
+        # Identify direction from parameters
+        direction = None
+        for p in parameters:
+            p_id = getattr(p, 'parameterId', '')
+            if p_id == 'direction':
+                direction = getattr(p, 'value', None)
+                break
+
+        if direction == 'HORIZONTAL':
+            return 'DistanceX'
+        elif direction == 'VERTICAL':
+            return 'DistanceY'
+        else:
+            return 'Distance'
+
+    # 4. Other Logics
+    return constraint_type
 
 
 def tokenize_constraints(
@@ -274,7 +315,7 @@ def tokenize_constraints(
             if type(param).__name__ != 'LocalReferenceParameter':
                 continue
 
-            value = param.value
+            value = getattr(param, 'value', None)
             if not isinstance(value, str):
                 raise ValueError(f"LocalReferenceParameter.value should be str, got {type(value)}: {value}")
 
@@ -287,15 +328,27 @@ def tokenize_constraints(
                 entity_idx, subnode_name = int(parts[0]), parts[1]
                 if subnode_name not in ('start', 'end', 'center'):
                     raise ValueError(f"Unknown subnode name: {subnode_name} in {value}")
-                refs.append((entity_idx, subnode_name))
             else:
                 if not value.isdigit():
                     raise ValueError(f"LocalReferenceParameter.value should be numeric, got: {value}")
-                entity_idx = int(value)
-                refs.append((entity_idx, None))
+                entity_idx, subnode_name = int(value), None
 
-        # Skip External constraints (ref not in gather_map)
-        if any(entity_idx not in gather_map for entity_idx, _ in refs):
+            # --- FILTERING: External Entity check ---
+            if entity_idx not in gather_map:
+                # Reference to external entity (not in primitive map) -> DROP
+                refs = []
+                break # To outer loop continue
+
+            refs.append((entity_idx, subnode_name))
+
+        # Check references count and validity
+        if not refs:
+            continue
+
+        # --- SPECIFIC CONSTRAINT MAPPING & FILTERING ---
+        # --- SPECIFIC CONSTRAINT MAPPING & FILTERING ---
+        constraint_type = _refine_constraint_type(constraint_type, refs, constraint.parameters)
+        if constraint_type is None:
             continue
 
         # Deduplicate consecutive refs
