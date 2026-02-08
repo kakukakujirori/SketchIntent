@@ -117,13 +117,8 @@ def _get_entity_bbox(ent):
         if not has_ordered_quadrants(3, 4):
             y0 = min(y_start, y_end)
 
-        # Include center point in bbox for tokenization purposes
-        # (center point is used in parameterize_entity and must be normalized)
-        cx, cy = ent.center_point
-        x0 = min(x0, cx)
-        y0 = min(y0, cy)
-        x1 = max(x1, cx)
-        y1 = max(y1, cy)
+        # NOTE: Center point is NO LONGER INCLUDED in bbox for tokenization purposes!
+        # This prevents normalization issues when center is very far away.
 
         return np.array([[x0, y0], [x1, y1]])
 
@@ -255,22 +250,25 @@ def normalize_sketch(sketch: datalib.Sketch) -> float:
 
 
 def _parameterize_arc(arc: datalib.Arc | None) -> tuple[np.ndarray | None, tuple[PrimitiveParamToken, ...]]:
-    """Extract parameterization for Arc.
+    """Extract parameterization for Arc (Start, Mid, End).
 
-    Returns [center_point, start_point, end_point] to match SketchGraphs
-    Sequence representation where Arc subnodes are ordered as
-    [SN_Center, SN_Start, SN_End].
+    Returns [start_point, mid_point, end_point] to match new tokenization strategy.
+
+    NOTE: Center point is implicitly reconstructed from these 3 points.
+    We return these 6 values.
+    VIRTUAL CENTER tokens (for Pointer Network) should be appended in tokenization.py.
 
     If arc is None, returns (None, param_tokens) for offset derivation.
     """
     param_tokens = (
-        PrimitiveParamToken.CenterX, PrimitiveParamToken.CenterY,
         PrimitiveParamToken.StartX, PrimitiveParamToken.StartY,
+        PrimitiveParamToken.MidX, PrimitiveParamToken.MidY,
         PrimitiveParamToken.EndX, PrimitiveParamToken.EndY,
     )
     if arc is None:
         return None, param_tokens
-    values = np.concatenate([arc.center_point, arc.start_point, arc.end_point])
+
+    values = np.concatenate([arc.start_point, arc.mid_point, arc.end_point])
     return values, param_tokens
 
 def _parameterize_circle(circle: datalib.Circle | None) -> tuple[np.ndarray | None, tuple[PrimitiveParamToken, ...]]:
@@ -334,66 +332,106 @@ def parameterize_entity(ent: datalib.Entity) -> tuple[np.ndarray, tuple[Primitiv
     return param_fn(ent)
 
 
-def _arc_from_params(params, entity_id: str | None = None, clockwise: bool | None = None):
-    """Instantiate an arc from the given parameterization.
-
-    Parameters are expected as [center_point, start_point, end_point] to match
-    SketchGraphs Sequence representation [SN_Center, SN_Start, SN_End].
+def _arc_from_params(params, entity_id: str | None = None):
+    """Instantiate an arc from the given parameterization (Start, Mid, End).
 
     Parameters
     ----------
     params : list
-        Arc parameters [cx, cy, sx, sy, ex, ey]
+        Arc parameters [sx, sy, mx, my, ex, ey]
     entity_id : str, optional
         Entity ID
-    clockwise : bool, optional
-        If provided, use this value for clockwise. Otherwise infer from geometry.
     """
-    center = params[:2]
-    start = params[2:4]
-    end = params[4:]
+    # Extract points
+    # params may have more than 6 values (e.g. 8 if virtual centers included)
+    # We only use the first 6
+    p1 = np.array(params[0:2]) # Start
+    p2 = np.array(params[2:4]) # Mid
+    p3 = np.array(params[4:6]) # End
 
-    # Calculate radius from center to start point
-    radius = ((center[0] - start[0])**2 + (center[1] - start[1])**2)**.5
-    if radius < 1e-9:
-        radius = 1e-9
+    x1, y1 = p1
+    x2, y2 = p2
+    x3, y3 = p3
 
-    # Compute angles from center to start and end
-    v_start = [start[0] - center[0], start[1] - center[1]]
-    v_end = [end[0] - center[0], end[1] - center[1]]
-    start_angle = math.atan2(v_start[1], v_start[0])
-    end_angle = math.atan2(v_end[1], v_end[0])
+    D = 2 * (x1 * (y2 - y3) + x2 * (y3 - y1) + x3 * (y1 - y2))
 
-    # Determine clockwise if not provided
-    if clockwise is None:
-        # Use shorter path heuristic (default to CCW for 180° arcs)
-        ccw_angle = end_angle - start_angle
-        if ccw_angle <= 0:
-            ccw_angle += 2 * math.pi
-        clockwise = ccw_angle > math.pi
+    if abs(D) < 1e-9:
+        # Collinear points -> Degenerate Arc (Infinite radius / Line segment)
+        # Place center far away perpendicular to chord
+        chord_dx = x3 - x1
+        chord_dy = y3 - y1
+        chord_len_sq = chord_dx**2 + chord_dy**2
+
+        if chord_len_sq < 1e-9:
+            # Start ~= End. Treat as small circle/point.
+            cx, cy = x1, y1
+            radius = 1e-6
+            start_angle = 0.0
+            end_angle = 0.0
+            is_clockwise = False
+        else:
+            # Line segment approximation
+            # Midpoint
+            mx, my = (x1 + x3) / 2, (y1 + y3) / 2
+            # Perpendicular vector (-dy, dx) normalized
+            chord_len = np.sqrt(chord_len_sq)
+            nx, ny = -chord_dy / chord_len, chord_dx / chord_len
+
+            radius = 10000.0 # Sufficiently large
+            # Center
+            cx = mx + nx * radius
+            cy = my + ny * radius
+
+            # Angles
+            start_angle = math.atan2(y1 - cy, x1 - cx)
+            end_angle = math.atan2(y3 - cy, x3 - cx)
+            is_clockwise = False # Arbitrary, effectively flat
+    else:
+        cx = ((x1**2 + y1**2) * (y2 - y3) + (x2**2 + y2**2) * (y3 - y1) + (x3**2 + y3**2) * (y1 - y2)) / D
+        cy = ((x1**2 + y1**2) * (x3 - x2) + (x2**2 + y2**2) * (x1 - x3) + (x3**2 + y3**2) * (x2 - x1)) / D
+
+        radius = np.sqrt((cx - x1)**2 + (cy - y1)**2)
+
+        # Determine angles
+        start_angle = math.atan2(y1 - cy, x1 - cx)
+        mid_angle = math.atan2(y2 - cy, x2 - cx)
+        end_angle = math.atan2(y3 - cy, x3 - cx)
+
+        # Normalize angles to [0, 2pi) relative to start_angle
+        def norm_angle(a, ref):
+            diff = a - ref
+            while diff < 0: diff += 2*math.pi
+            while diff >= 2*math.pi: diff -= 2*math.pi
+            return diff
+
+        mid_rel_ccw = norm_angle(mid_angle, start_angle)
+        end_rel_ccw = norm_angle(end_angle, start_angle)
+
+        # If mid is reached before end in CCW sweep, it is CCW.
+        if mid_rel_ccw < end_rel_ccw:
+            is_clockwise = False
+        else:
+            is_clockwise = True
 
     # Compute startParam and endParam based on clockwise
-    if clockwise:
+    if is_clockwise:
         start_param = -start_angle
         end_param = -end_angle
         if start_param > end_param:
             start_param -= 2 * math.pi
     else:
-        # CCW arc: ensure end_angle > start_angle
+        # CCW arc
         start_param = start_angle
         end_param = end_angle
-        # Handle wrap-around: if end < start, add 2π to end
-        # This handles cases like start_angle=π, end_angle=-π/2
-        # which should become start_param=π, end_param=3π/2
         if end_param <= start_param:
             end_param += 2 * math.pi
 
     return Arc(
         entityId=entity_id,
-        xCenter=center[0],
-        yCenter=center[1],
+        xCenter=cx,
+        yCenter=cy,
         radius=radius,
-        clockwise=clockwise,
+        clockwise=is_clockwise,
         xDir=1.0,
         yDir=0.0,
         startParam=start_param,
@@ -422,7 +460,7 @@ def _point_from_params(params, entity_id=None):
     return Point(entity_id, x=params[0], y=params[1])
 
 
-def entity_from_params(params, entity_id: str | None = None, clockwise: bool | None = None):
+def entity_from_params(params, entity_id: str | None = None):
     """Instantiate an entity from the given parameterization.
 
     The length of params uniquely determines the target entity type.
@@ -433,8 +471,6 @@ def entity_from_params(params, entity_id: str | None = None, clockwise: bool | N
         The entity's parameterization
     entity_id : str, optional
         Optional string specifying the id of the entity to create.
-    clockwise : bool, optional
-        For Arc entities, the clockwise flag. Ignored for other entity types.
 
     Returns
     -------
@@ -442,7 +478,7 @@ def entity_from_params(params, entity_id: str | None = None, clockwise: bool | N
         The entity instance corresponding to the input parameterization
     """
     if len(params) == NUM_PARAMS[Arc]:
-        return _arc_from_params(params, entity_id, clockwise=clockwise)
+        return _arc_from_params(params, entity_id)
     elif len(params) == NUM_PARAMS[Circle]:
         return _circle_from_params(params, entity_id)
     elif len(params) == NUM_PARAMS[Line]:
@@ -503,7 +539,7 @@ def dequantize_params(params, n_bins):
     if isinstance(params, list):
         params = np.array(params)
     min_val, max_val = MIN_VAL, MAX_VAL
-    if ((params < 0).any() or (params > (n_bins-1)).any()
+    if ((params < 0).any() or (params > n_bins).any()  # x=n_bins is the void coord for arc.center
         or not np.issubdtype(params.dtype, np.integer)):
         raise ValueError("Invalid quantized params")
     params = params.astype('float32') + 0.5  # center of each bin

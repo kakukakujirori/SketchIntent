@@ -7,7 +7,6 @@ This module provides the inverse operations of tokenization.py:
 
 For tokenization (Sketch -> tokens), see tokenization.py.
 """
-from jinja2.nodes import Const
 import numpy as np
 
 import sketchgraphs.data as datalib
@@ -39,48 +38,50 @@ def param_seq_from_tokens(tokens, num_bins: int):
     Returns
     -------
     all_params : list
-        A list of tuples (params, clockwise, isConstruction) where:
+        A list of tuples (params, isConstruction) where:
         - params: quantized entity parameters
-        - clockwise: True/False for Arc, None for other entities
         - isConstruction: True/False for all entities
     """
     # Attribute token offsets (must match tokenization.py)
-    attribute_offset = len(PrimitiveToken) + num_bins  # 72
+    attribute_offset = len(PrimitiveToken) + num_bins + 1  # +1 is for the void coord of arc.center
 
-    # clockwise: attribute_offset + 0/1 (72=False, 73=True)
-    # isConstruction: attribute_offset + 2/3 (74=False, 75=True)
-    clockwise_base = attribute_offset
-    construction_base = attribute_offset + 2
+    # isConstruction: attribute_offset + 0/1
+    construction_base = attribute_offset
 
     all_params = []
     curr_params = []
-    clockwise = None  # Only set for Arc entities
     isConstruction = False
     for token in tokens:
+        # 1. Handle Control Tokens
         if token == PrimitiveToken.Start:
             continue
-        if token < len(PrimitiveToken):
+        elif token == PrimitiveToken.Pad:
+            continue
+        elif token == PrimitiveToken.Stop:
             if curr_params:
-                all_params.append((curr_params, clockwise, isConstruction))
-                curr_params = []
-                clockwise = None  # Reset for next entity
-                isConstruction = False
-        if token in [PrimitiveToken.Stop, PrimitiveToken.Pad]:
+                all_params.append((curr_params, isConstruction))
             break
-        if token >= len(PrimitiveToken):
-            if token <= len(PrimitiveToken) + (num_bins - 1):
+
+        # 2. Handle Entity Type Tokens (Arc, Line, etc.)
+        # Only treat as new entity if it's a valid primitive type (>= Arc)
+        elif token < len(PrimitiveToken):
+            if curr_params:
+                # Store previous entity
+                all_params.append((curr_params, isConstruction))
+                curr_params = []
+            # Reset for new entity
+            isConstruction = False
+            continue
+
+        # 3. Handle Parameters and Attributes
+        elif token >= len(PrimitiveToken):
+            if token <= len(PrimitiveToken) + num_bins:
                 # Numerical coordinate
                 curr_params.append(token - len(PrimitiveToken))
-            elif token == clockwise_base or token == clockwise_base + 1:
-                # clockwise attribute (Arc only): 72=False, 73=True
-                clockwise = bool(token - clockwise_base)
             elif token == construction_base or token == construction_base + 1:
-                # isConstruction attribute: 74=False, 75=True
+                # isConstruction attribute: False, True
                 isConstruction = bool(token - construction_base)
 
-    if curr_params:
-        # Append possibly leftover entity parameters
-        all_params.append((curr_params, clockwise, isConstruction))
     return all_params
 
 
@@ -101,10 +102,10 @@ def reconstruct_primitives(tokens, num_bins: int) -> datalib.Sketch:
     """
     all_params = param_seq_from_tokens(tokens, num_bins)
     sketch = datalib.Sketch()
-    for idx, (ent_params, clockwise, isConstruction) in enumerate(all_params):
+    for idx, (ent_params, isConstruction) in enumerate(all_params):
         ent_params = sketch_utils.dequantize_params(ent_params, num_bins)
         ent_params = ent_params.tolist()
-        ent = sketch_utils.entity_from_params(ent_params, clockwise=clockwise)
+        ent = sketch_utils.entity_from_params(ent_params)
         entity_id = str(idx + 1)  # 1-based entity ID
         if ent is not None:
             ent.entityId = entity_id
@@ -341,10 +342,11 @@ def reconstruct_sketch(
     # Constraint refs only use X coordinate slots (tokenize_constraints uses StartX, EndX, CenterX).
     # Y coordinate slots should NOT appear - if they do, it's a bug.
     # For Line: params = [StartX, StartY, EndX, EndY] → slot 1=start, slot 3=end
-    # For Arc: params = [CenterX, CenterY, StartX, StartY, EndX, EndY] → slot 1=center, 3=start, 5=end
+    # For Arc: params = [StartX, StartY, MidX, MidY, EndX, EndY, CenterX, CenterY]
+    #   → slot 1=start, 3=mid, 5=end, 7=center
     # For Circle: params = [CenterX, CenterY, Radius] → slot 1=center
     subnode_slot_to_name = {
-        Arc: {1: 'center', 3: 'start', 5: 'end'},
+        Arc: {1: 'start', 3: 'mid', 5: 'end', 7: 'center'},
         Circle: {1: 'center'},
         Line: {1: 'start', 3: 'end'},
         Point: {}
@@ -361,8 +363,13 @@ def reconstruct_sketch(
 
                 # Build reference string (e.g., "1" or "1.start")
                 # entity_id is 1-based (from gather_map which uses sketch.entities keys)
-                if entity_id >= 1 and entity_id <= len(entity_list):
-                    ent = entity_list[entity_id - 1]  # Convert 1-based to 0-based index
+                try:
+                    entity_id_int = int(entity_id)
+                except (ValueError, TypeError) as e:
+                    raise e
+
+                if entity_id_int >= 1 and entity_id_int <= len(entity_list):
+                    ent = entity_list[entity_id_int - 1]  # Convert 1-based to 0-based index
                     if ent is not None:
                         ent_type = type(ent)
                         subnode_name = subnode_slot_to_name.get(ent_type, {}).get(subnode_slot)

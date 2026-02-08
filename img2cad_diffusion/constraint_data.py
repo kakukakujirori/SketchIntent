@@ -91,9 +91,7 @@ def _trunc_normal_entity_noise(entity: datalib.Entity, std: float = 0.2, max_dif
                               scale=std / (2 ** trial), size=params.size)
         new_params = params + noise
 
-        # Preserve clockwise attribute for Arc entities
-        clockwise = entity.clockwise if isinstance(entity, Arc) else None
-        new_ent = sketch_utils.entity_from_params(new_params, entity_id=entity.entityId, clockwise=clockwise)
+        new_ent = sketch_utils.entity_from_params(new_params, entity_id=entity.entityId)
 
         if isinstance(entity, Arc):
             trial += 1

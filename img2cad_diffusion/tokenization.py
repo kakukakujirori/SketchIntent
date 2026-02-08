@@ -115,7 +115,7 @@ def tokenize_primitives(
     # offsets to possibly uniquify val tokens
     if uniquify_val_tokens:
         parameter_offset = len(PrimitiveToken)
-        attribute_offset = len(PrimitiveToken) + num_bins
+        attribute_offset = len(PrimitiveToken) + num_bins + 1  # void coordinate is assigned to arc.center
     else:
         parameter_offset = len(SpecialToken)
         attribute_offset = len(SpecialToken)
@@ -148,19 +148,29 @@ def tokenize_primitives(
 
         param_bins = sketch_utils.quantize_params(params, num_bins)
 
+        # Add Virtual Center Tokens for Arc
+        # These tokens have dummy values (dummy-bin) but semantic coords (Center)
+        # This allows Pointer Network to reference the center even if implicit.
+        if isinstance(ent, datalib.Arc):
+            dummy_bin = num_bins
+            # Append dummy bins for CenterX, CenterY
+            # We must also append to param_tokens to ensure mapping is correct
+            param_bins = np.append(param_bins, [dummy_bin, dummy_bin])
+
+            # Extend param_tokens with Virtual Centers
+            # NOTE: We construct a new tuple for this entity's mapping
+            ent_param_tokens = param_tokens + (
+                PrimitiveParamToken.CenterX, PrimitiveParamToken.CenterY
+            )
+        else:
+            ent_param_tokens = param_tokens
+
         val_tokens.extend(parameter_offset + param_bins)
-        coord_tokens.extend(param_tokens)
+        coord_tokens.extend(ent_param_tokens)
         pos_tokens.extend([pos_idx] * len(param_bins))
 
-        # Arc: clockwise attribute
-        if isinstance(ent, Arc):
-            val_tokens.append(attribute_offset + int(ent.clockwise))
-            coord_tokens.append(PrimitiveParamToken.Clockwise)
-            pos_tokens.append(pos_idx)
-
         # Construction attribute
-        clockwise_offset = 2 if uniquify_val_tokens else 0
-        val_tokens.append(attribute_offset + clockwise_offset + int(ent.isConstruction))
+        val_tokens.append(attribute_offset + int(ent.isConstruction))
         coord_tokens.append(PrimitiveParamToken.Construction)
         pos_tokens.append(pos_idx)
 
@@ -168,8 +178,8 @@ def tokenize_primitives(
         gather_map[entity_idx] = EntityTokenMapping(
             entity_idx=entity_idx,
             entity_type=type(ent),
-            entity_token_pos=entity_start_pos,
-            param_tokens=param_tokens,
+            entity_token_pos=entity_start_pos, # Start position of the entity's TYPE token
+            param_tokens=ent_param_tokens,
         )
 
     # Stop token

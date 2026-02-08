@@ -40,7 +40,7 @@ mixed_precision: True
 num_gpus: 2
 training_seed: 42  # Seed for training randomness (model init, dropout, etc.)
 
-max_epochs: 100 #30
+max_epochs: 30
 
 # test_only: true
 # checkpoint_path: outputs/2025-12-28/23-38-22/lightning_logs/version_0/checkpoints/epoch_29.ckpt

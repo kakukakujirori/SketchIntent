@@ -123,16 +123,17 @@ class PrimitiveParamToken(enum.IntEnum):
     Pad = SpecialToken.Pad    # Padding
     Mask = SpecialToken.Mask  # Mask (unused but included for consistency)
     Type = 2                  # Entity type token (Arc, Line, etc.)
-    Clockwise = 3             # Arc clockwise attribute
-    Construction = 4          # isConstruction attribute
+    Construction = 3          # isConstruction attribute
     # >>> COORDINATE PARAMETERS >>>
-    StartX = 5
-    StartY = 6
-    EndX = 7
-    EndY = 8
-    CenterX = 9
-    CenterY = 10
-    Radius = 11
+    StartX = 4
+    StartY = 5
+    MidX = 6
+    MidY = 7
+    EndX = 8
+    EndY = 9
+    CenterX = 10
+    CenterY = 11
+    Radius = 12
     # <<< COORDINATE PARAMETERS <<<
 
 
@@ -150,7 +151,7 @@ class ConstraintParamToken(enum.IntEnum):
 
 # Number of parameters per entity type (TODO: REMOVE AFTER REFACTORING)
 NUM_PARAMS: dict[type, int] = {
-    Arc: 6,
+    Arc: 8, # Start(2) + Mid(2) + End(2) + Center(2, virtual)
     Circle: 3,
     Line: 4,
     Point: 2,

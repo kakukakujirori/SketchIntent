@@ -88,7 +88,6 @@ class PrimitiveDataConfig:
 # =============================================================================
 
 INCLUDE_CONSTRUCTION = True
-INCLUDE_CLOCKWISE = True  # clockwise tokens for Arc entities
 
 def _pad_or_truncate_to_length(arr: np.ndarray, target_length: int | None = None) -> np.ndarray:
     """Ensures that the array has the given length by truncating or padding.
