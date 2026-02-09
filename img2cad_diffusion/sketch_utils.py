@@ -338,13 +338,15 @@ def _arc_from_params(params, entity_id: str | None = None):
     Parameters
     ----------
     params : list
-        Arc parameters [sx, sy, mx, my, ex, ey]
+        Arc parameters [sx, sy, mx, my, ex, ey, (cx, cy)]
+        Note: cx, cy are optional/ignored for reconstruction stability.
     entity_id : str, optional
         Entity ID
     """
     # Extract points
-    # params may have more than 6 values (e.g. 8 if virtual centers included)
-    # We only use the first 6
+    # params may have 8 values (Start, Mid, End, Center)
+    # We only use the first 6 (Start, Mid, End) to ensure geometric stability
+    # The center is used for Pointer Network to reference it
     p1 = np.array(params[0:2]) # Start
     p2 = np.array(params[2:4]) # Mid
     p3 = np.array(params[4:6]) # End
@@ -356,7 +358,98 @@ def _arc_from_params(params, entity_id: str | None = None):
     D = 2 * (x1 * (y2 - y3) + x2 * (y3 - y1) + x3 * (y1 - y2))
 
     if abs(D) < 1e-9:
-        # Collinear points -> Degenerate Arc (Infinite radius / Line segment)
+        # Collinear points or Coincident S/E -> Degenerate or Closed Loop
+
+        # Check if we have explicit Center tokens (len >= 8) and use them?
+        # Note: Center tokens are quantized, so they are approximate.
+        # But better than nothing for degenerate cases.
+        if len(params) >= 8:
+            cx, cy = params[6], params[7]
+            # Verify if this center makes sense (equidistant to S and M?)
+            r_s = np.sqrt((x1 - cx)**2 + (y1 - cy)**2)
+            r_m = np.sqrt((x2 - cx)**2 + (y2 - cy)**2)
+
+            # If S and M are roughly equidistant, use this center
+            # Tolerance: be generous as center is quantized
+            if abs(r_s - r_m) < 0.1: # 0.1 is 10% of canvas, pretty large but safe
+                radius = (r_s + r_m) / 2
+                if radius < 1e-6:
+                    # Degenerate point logic
+                    start_angle = 0.0
+                    end_angle = 0.0
+                    is_clockwise = False
+                else:
+                    # Recompute angles
+                    start_angle = math.atan2(y1 - cy, x1 - cx)
+                    # mid_angle = math.atan2(y2 - cy, x2 - cx)
+                    end_angle = math.atan2(y3 - cy, x3 - cx)
+
+                    # Determine clockwise using Mid point
+                    mid_angle = math.atan2(y2 - cy, x2 - cx)
+
+                    # Check CW/CCW
+                    def norm_angle(a, ref):
+                        diff = a - ref
+                        while diff < 0: diff += 2*math.pi
+                        while diff >= 2*math.pi: diff -= 2*math.pi
+                        return diff
+
+                    mid_rel = norm_angle(mid_angle, start_angle)
+                    end_rel = norm_angle(end_angle, start_angle)
+
+                    if mid_rel < end_rel:
+                        is_clockwise = False
+                    else:
+                        is_clockwise = True
+
+                    # Special case for Full Circle (S ~= E)
+                    chord_len_sq = (x3 - x1)**2 + (y3 - y1)**2
+                    # Also check if M is far from S (to distinguish from tiny arc S=M=E)
+                    mid_chord_len_sq = (x2 - x1)**2 + (y2 - y1)**2
+
+                    if chord_len_sq < 1e-9 and radius > 1e-3 and mid_chord_len_sq > 1e-4:
+                        # It's a full circle (closed loop)
+                        # Force full CCW loop
+                        start_param = start_angle
+                        end_param = start_angle + 2 * math.pi - 1e-5
+
+                        return Arc(
+                            entityId=entity_id,
+                            xCenter=cx,
+                            yCenter=cy,
+                            radius=radius,
+                            clockwise=False,
+                            xDir=1.0,
+                            yDir=0.0,
+                            startParam=start_param,
+                            endParam=end_param
+                        )
+
+                 # Calculate start/end params
+                if is_clockwise:
+                    start_param = -start_angle
+                    end_param = -end_angle
+                    if start_param > end_param:
+                        start_param -= 2 * math.pi
+                else:
+                    start_param = start_angle
+                    end_param = end_angle
+                    if end_param <= start_param:
+                        end_param += 2 * math.pi
+
+                return Arc(
+                    entityId=entity_id,
+                    xCenter=cx,
+                    yCenter=cy,
+                    radius=radius,
+                    clockwise=is_clockwise,
+                    xDir=1.0,
+                    yDir=0.0,
+                    startParam=start_param,
+                    endParam=end_param
+                )
+
+        # Fallback to Line Segment or Point logic if Center not available or invalid
         # Place center far away perpendicular to chord
         chord_dx = x3 - x1
         chord_dy = y3 - y1
@@ -539,7 +632,7 @@ def dequantize_params(params, n_bins):
     if isinstance(params, list):
         params = np.array(params)
     min_val, max_val = MIN_VAL, MAX_VAL
-    if ((params < 0).any() or (params > n_bins).any()  # x=n_bins is the void coord for arc.center
+    if ((params < 0).any() or (params >= n_bins).any()
         or not np.issubdtype(params.dtype, np.integer)):
         raise ValueError("Invalid quantized params")
     params = params.astype('float32') + 0.5  # center of each bin

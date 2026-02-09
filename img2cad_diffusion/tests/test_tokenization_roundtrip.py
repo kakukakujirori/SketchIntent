@@ -13,9 +13,10 @@ from sketchgraphs.data import flat_array as fa
 
 from img2cad_diffusion.tokenization import tokenize_primitives, tokenize_sketch, tokenize_constraints, CONSTRAINT_TOKEN_LEN
 from img2cad_diffusion.detokenization import reconstruct_primitives, reconstruct_constraints, reconstruct_sketch
+from img2cad_diffusion import sketch_utils
 
 
-DATA_PATH = '/home/ryotaro/github/vitruvion/data_processed/sg_filtered_unique.npy'
+DATA_PATH = '/home/ryotaro/my_works/My-Vitruvion/data_processed/sg_filtered_unique.npy'
 # Use high num_bins for roundtrip tests to verify tokenization/detokenization preserves info.
 # Training uses 64 bins for conditioning, but tests should use high precision.
 NUM_BINS = 8192

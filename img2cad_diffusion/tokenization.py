@@ -115,7 +115,10 @@ def tokenize_primitives(
     # offsets to possibly uniquify val tokens
     if uniquify_val_tokens:
         parameter_offset = len(PrimitiveToken)
-        attribute_offset = len(PrimitiveToken) + num_bins + 1  # void coordinate is assigned to arc.center
+        # Attribute token offsets
+        # [Primitives] + [0..num_bins-1 (coords)]
+        attribute_offset = len(PrimitiveToken) + num_bins
+        # [0 (False), 1 (True)]
     else:
         parameter_offset = len(SpecialToken)
         attribute_offset = len(SpecialToken)
@@ -151,14 +154,29 @@ def tokenize_primitives(
         # Add Virtual Center Tokens for Arc
         # These tokens have dummy values (dummy-bin) but semantic coords (Center)
         # This allows Pointer Network to reference the center even if implicit.
+        # Add Quantized Center Tokens for Arc
+        # Used as a hint for Pointer Network (e.g. Concentric constraints)
         if isinstance(ent, datalib.Arc):
-            dummy_bin = num_bins
-            # Append dummy bins for CenterX, CenterY
-            # We must also append to param_tokens to ensure mapping is correct
-            param_bins = np.append(param_bins, [dummy_bin, dummy_bin])
+            # 1. Get Center
+            cx, cy = ent.xCenter, ent.yCenter
 
-            # Extend param_tokens with Virtual Centers
-            # NOTE: We construct a new tuple for this entity's mapping
+            # 2. Quantize (using same logic as _quantize_params)
+            # Clip to valid range [-0.5, 0.5] before quantization
+            # This handles "infinite" centers of flat arcs by clamping them to the boundary.
+            cx = np.clip(cx, -0.5, 0.5)
+            cy = np.clip(cy, -0.5, 0.5)
+
+            # Map to bins [0, num_bins-1]
+            # (val - min) / (max - min) * num_bins
+            # range is 1.0 (-0.5 to 0.5)
+            # bin = (val + 0.5) * num_bins
+            c_bins = np.floor((np.array([cx, cy]) + 0.5) * num_bins).astype(int)
+            c_bins = np.clip(c_bins, 0, num_bins - 1)
+
+            # Append quantized center bins
+            param_bins = np.append(param_bins, c_bins)
+
+            # Extend param_tokens with CenterX, CenterY
             ent_param_tokens = param_tokens + (
                 PrimitiveParamToken.CenterX, PrimitiveParamToken.CenterY
             )

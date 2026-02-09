@@ -43,7 +43,7 @@ def param_seq_from_tokens(tokens, num_bins: int):
         - isConstruction: True/False for all entities
     """
     # Attribute token offsets (must match tokenization.py)
-    attribute_offset = len(PrimitiveToken) + num_bins + 1  # +1 is for the void coord of arc.center
+    attribute_offset = len(PrimitiveToken) + num_bins
 
     # isConstruction: attribute_offset + 0/1
     construction_base = attribute_offset
@@ -75,7 +75,7 @@ def param_seq_from_tokens(tokens, num_bins: int):
 
         # 3. Handle Parameters and Attributes
         elif token >= len(PrimitiveToken):
-            if token <= len(PrimitiveToken) + num_bins:
+            if token < len(PrimitiveToken) + num_bins:
                 # Numerical coordinate
                 curr_params.append(token - len(PrimitiveToken))
             elif token == construction_base or token == construction_base + 1:
