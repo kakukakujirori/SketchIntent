@@ -1,4 +1,3 @@
-from cryptography.exceptions import InternalError
 from typing import Any
 import random
 import numpy as np
@@ -15,10 +14,8 @@ class SketchTokenizer:
     """
     Tokenizer/Detokenizer for SketchGraphs data.
     """
-    def __init__(self, context: SketchContext, max_token_length: int | None = None, align_constraint_token_length_to: int | None = None, use_stop_padding: bool = False, constraint_order: str = "sort_by_ref_id"):
+    def __init__(self, context: SketchContext):
         self.context = context
-
-        assert align_constraint_token_length_to is None or align_constraint_token_length_to > 0, f"{align_constraint_token_length_to=}"
 
         self.max_token_length = self.context.max_token_length
         self.align_constraint_token_length_to = self.context.align_constraint_token_length_to or -1
@@ -343,4 +340,3 @@ class SketchTokenizer:
         constraints = self.detokenize_constraints(tokens['c_val'], tokenpos_to_primitive)
 
         return datalib.Sketch(entities=entities, constraints=constraints)
-

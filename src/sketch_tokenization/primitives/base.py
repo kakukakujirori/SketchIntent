@@ -1,12 +1,28 @@
+from __future__ import annotations
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import TYPE_CHECKING
 import numpy as np
+
+import sketchgraphs.data as datalib
+from ..freecad_utils import ensure_freecad_imported
+
+if TYPE_CHECKING:
+    FreeCAD, Part, Sketcher = ensure_freecad_imported()
+    Part.Geometry = Part.Point | Part.Line | Part.Circle | Part.Arc | Part.ArcOfCircle
+
 
 class PrimitiveHandler(ABC):
     """
     Base class for primitive handlers.
     Each handler is responsible for a single primitive type (e.g. Line, Circle).
     """
+    def sketch_type_check(self, entity: datalib.Entity) -> datalib.Entity:
+        # Default implementation, can be overridden for specific types
+        return entity
+
+    def freecad_type_check(self, fc_geo: Part.Geometry) -> Part.Geometry:
+        # Default implementation, can be overridden for specific types
+        return fc_geo
 
     @property
     @abstractmethod
@@ -61,7 +77,7 @@ class PrimitiveHandler(ABC):
         return mapping
 
     @abstractmethod
-    def encode(self, entity: Any) -> tuple[np.ndarray, tuple[int, ...]]:
+    def encode(self, entity: datalib.Entity) -> tuple[np.ndarray, tuple[int, ...]]:
         """
         Encode a primitive entity into numerical parameters and coordinate tokens.
 
@@ -75,7 +91,7 @@ class PrimitiveHandler(ABC):
         pass
 
     @abstractmethod
-    def decode(self, params: np.ndarray, entity_id: str) -> Any:
+    def decode(self, params: np.ndarray, entity_id: str) -> datalib.Entity:
         """
         Decode numerical parameters into a primitive entity.
 
@@ -89,28 +105,26 @@ class PrimitiveHandler(ABC):
         pass
 
     @abstractmethod
-    def to_freecad(self, entity: Any, sketch: Any, **kwargs) -> Any:
+    def to_freecad(self, entity: datalib.Entity) -> tuple[Part.Geometry, bool]:
         """
         Create the corresponding FreeCAD geometry in the given sketch.
 
         Args:
             entity: The primitive entity (e.g. datalib.Line)
-            sketch: The FreeCAD SketchObject to add geometry to.
-            **kwargs: Additional arguments if needed.
 
         Returns:
-            The created FreeCAD Geometry object or ID.
+            tuple: (FreeCAD Geometry object, is_construction boolean)
         """
         pass
 
     @abstractmethod
-    def from_freecad(self, fc_geo: Any, **kwargs) -> Any:
+    def from_freecad(self, fc_geo: Part.Geometry, output_id: str) -> datalib.Entity:
         """
         Create a primitive entity from a FreeCAD geometry object.
 
         Args:
             fc_geo: The FreeCAD Geometry object.
-            **kwargs: Additional context if needed.
+            output_id: The ID to attach to the output primitive geometry.
 
         Returns:
             The primitive entity (e.g. datalib.Line).
@@ -118,6 +132,6 @@ class PrimitiveHandler(ABC):
         pass
 
     @abstractmethod
-    def get_bbox(self, entity: Any) -> np.ndarray:
+    def get_bbox(self, entity: datalib.Entity) -> np.ndarray:
         """Calculate the bounding box of the entity."""
         pass

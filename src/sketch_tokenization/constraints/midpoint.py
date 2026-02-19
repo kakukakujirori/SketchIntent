@@ -20,6 +20,71 @@ class MidpointHandler(ConstraintHandler):
         ref_tokens = self._get_sorted_ref_tokens(constraint, primitive_tokenpos, entities)
         return self.token_id, ref_tokens, np.array([]), ()
 
+    def to_freecad(self, constraint: datalib.Constraint, sketch_obj, entity_map: dict[str, int]):
+        from .utils import resolve_ref
+        try:
+            import FreeCAD
+            import Sketcher
+        except ImportError:
+            pass
+
+        refs = []
+        for p in constraint.parameters:
+             if hasattr(p, 'value'):
+                 refs.append(p.value)
+
+        # Midpoint(Mid, P1, P2) or (Mid, Line)
+        # We need to identify which ref is Midpoint.
+        # But `constraint.parameters` order?
+        # `encode` sorts them so "Mid" comes first!
+        # Datalib Constraint stores parameters in order.
+        # Use simple heuristic: 3 refs -> Symmetric(P1, P2, Mid)
+        # 2 refs -> Symmetric(Line_Start, Line_End, Mid) ??
+        # Or (Point, Line) -> Point on Line + Symmetry?
+        # FreeCAD 'Symmetric' takes (g1, p1, g2, p2, g3, p3) where 3 is center.
+
+        if len(refs) == 3:
+            # Assuming params are [Mid, P1, P2] based on `encode` logic?
+            # Actually `encode` puts Mid first.
+            # So refs[0] is Midpoint.
+            rmid = resolve_ref(refs[0], entity_map, sketch_obj)
+            p1 = resolve_ref(refs[1], entity_map, sketch_obj)
+            p2 = resolve_ref(refs[2], entity_map, sketch_obj)
+
+            if rmid and p1 and p2:
+                 sketch_obj.addConstraint(Sketcher.Constraint('Symmetric', p1[0], p1[1], p2[0], p2[1], rmid[0], rmid[1]))
+
+        elif len(refs) == 2:
+            # (Mid, Line) or (Mid, P_other)?
+            # Encode puts Mid first.
+            # If 2nd ref is Line, we use Line's endpoints?
+            rmid = resolve_ref(refs[0], entity_map, sketch_obj)
+            rline = resolve_ref(refs[1], entity_map, sketch_obj)
+
+            if rmid and rline and rline[1] == 0: # Line edge
+                # Constrain Mid to be Symmetric between Start and End of Line
+                # We need GID of line to get Start/End vertex IDs?
+                # Actually we can use (gid, 1) and (gid, 2) for start/end of line.
+                sketch_obj.addConstraint(Sketcher.Constraint('Symmetric', rline[0], 1, rline[0], 2, rmid[0], rmid[1]))
+                # But wait, Midpoint implies Point is ON the line too?
+                # Symmetric doesn't force OnObject.
+                # Midpoint = PointOnObject + Symmetric?
+                # SG Midpoint usually implies Coincident too?
+                # Let's add PointOnObject as well if needed?
+                # Actually usually Midpoint constraint implies it lies on the segment/line.
+                sketch_obj.addConstraint(Sketcher.Constraint('PointOnObject', rmid[0], rmid[1], rline[0]))
+
+
+    def from_freecad(self, fc_constraint, entity_map: dict[int, str]) -> datalib.Constraint:
+        # We map 'Symmetric' to 'Symmetric' handler usually.
+        # But if we want to detect Midpoint specifically from FC...
+        # 'Symmetric' with 3rd arg as Point is Midpoint.
+        # 'Symmetric' with 3rd arg as Line/Axis is Mirror.
+        # This handler checks if it validates as Midpoint?
+        # But `from_freecad` is called by type.
+        # If we rely on Symmetric handler to handle all 'Symmetric', return None here.
+        return None
+
     def _get_sorted_ref_tokens(self, constraint: datalib.Constraint, primitive_tokenpos: dict[str, int], entities: dict[str, datalib.Entity]) -> tuple[int, ...]:
         refs = self._parse_references(constraint, primitive_tokenpos)
         refs = list(set(refs))

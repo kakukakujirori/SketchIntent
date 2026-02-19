@@ -1,4 +1,5 @@
-from typing import Any
+from __future__ import annotations
+from typing import Any, TYPE_CHECKING
 import numpy as np
 import math
 import sketchgraphs.data as datalib
@@ -7,8 +8,16 @@ from ..constants import PrimitiveToken, PrimitiveAttrToken
 from ..freecad_utils import ensure_freecad_imported
 from ..registry import PRIMITIVE_HANDLERS
 
+if TYPE_CHECKING:
+    FreeCAD, Part, _ = ensure_freecad_imported()
 
-def arc_from_three_points(entity_id, p1, p2, p3):
+
+def arc_from_three_points(
+    entity_id: str,
+    p1: tuple[float, float],
+    p2: tuple[float, float],
+    p3: tuple[float, float],
+):
     x1, y1 = p1
     x2, y2 = p2
     x3, y3 = p3
@@ -69,6 +78,7 @@ def arc_from_three_points(entity_id, p1, p2, p3):
 
     return datalib.Arc(
         entityId=entity_id,
+        isConstruction=False,  # NOTE: Construction flag is set by SketchFreeCADConverter
         xCenter=cx,
         yCenter=cy,
         radius=radius,
@@ -99,7 +109,21 @@ class ArcHandler(PrimitiveHandler):
             PrimitiveAttrToken.CenterX, PrimitiveAttrToken.CenterY,
         )
 
-    def encode(self, entity: datalib.Arc) -> tuple[np.ndarray, tuple[int, ...]]:
+    def sketch_type_check(self, entity: datalib.Entity) -> datalib.Arc:
+        if not isinstance(entity, datalib.Arc):
+            raise TypeError(f"{entity=} must be of type datalib.Arc")
+        return entity
+
+    def freecad_type_check(self, fc_geo: Part.Geometry) -> Part.ArcOfCircle:
+        # Lazy import
+        FreeCAD, Part, Sketcher = ensure_freecad_imported()
+
+        if not isinstance(fc_geo, Part.ArcOfCircle):
+            raise TypeError(f"{fc_geo=} must be of type Part.ArcOfCircle")
+        return fc_geo
+
+    def encode(self, entity: datalib.Entity) -> tuple[np.ndarray, tuple[int, ...]]:
+        entity = self.sketch_type_check(entity)
         values = np.concatenate([entity.start_point, entity.mid_point, entity.end_point, entity.center_point])
         return values, self.layout
 
@@ -109,22 +133,22 @@ class ArcHandler(PrimitiveHandler):
         p3 = params[4:6] # End
         return arc_from_three_points(entity_id, p1, p2, p3)
 
-    def to_freecad(self, entity: datalib.Arc, sketch: Any, **kwargs) -> Any:
+    def to_freecad(self, entity: datalib.Entity) -> tuple[Part.ArcOfCircle, bool]:
+        # Lazy import
         FreeCAD, Part, _ = ensure_freecad_imported()
+
+        entity = self.sketch_type_check(entity)
 
         p1 = FreeCAD.Vector(entity.start_point[0], entity.start_point[1], 0)
         p2 = FreeCAD.Vector(entity.mid_point[0], entity.mid_point[1], 0)
         p3 = FreeCAD.Vector(entity.end_point[0], entity.end_point[1], 0)
 
-        try:
-            geo = Part.ArcOfCircle(p1, p2, p3)
-            idx = sketch.addGeometry(geo, entity.isConstruction)
-            return idx
-        except Exception:
-            return -1
+        geo = Part.ArcOfCircle(p1, p2, p3)
+        return geo, entity.isConstruction
 
-    def from_freecad(self, fc_geo: Any, **kwargs) -> datalib.Arc:
-        # Expecting Part.ArcOfCircle
+    def from_freecad(self, fc_geo: Part.Geometry, output_id: str) -> datalib.Arc:
+        fc_geo = self.freecad_type_check(fc_geo)
+
         p_start = np.array([fc_geo.StartPoint.x, fc_geo.StartPoint.y])
         p_end = np.array([fc_geo.EndPoint.x, fc_geo.EndPoint.y])
 
@@ -134,10 +158,11 @@ class ArcHandler(PrimitiveHandler):
         p_mid = np.array([val_mid.x, val_mid.y])
 
         return arc_from_three_points(
-            kwargs.get('id', '0'),
-            p_start, p_mid, p_end
+            output_id,
+            p_start, p_mid, p_end,
         )
 
-    def get_bbox(self, entity: datalib.Arc) -> np.ndarray:
+    def get_bbox(self, entity: datalib.Entity) -> np.ndarray:
+        entity = self.sketch_type_check(entity)
         pts = np.vstack([entity.start_point, entity.mid_point, entity.end_point])
         return np.array([pts.min(axis=0), pts.max(axis=0)])

@@ -11,7 +11,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 import sketchgraphs.data as datalib
 from src.sketch_tokenization.constants import PrimitiveToken
 from src.sketch_tokenization.context import SketchContext
-from src.sketch_tokenization.tokenizer import SketchTokenizer
+from src.sketch_tokenization.sketch_freecad_converter import SketchFreecadConverter
 from src.sketch_tokenization.freecad_utils import ensure_freecad_imported
 
 FreeCAD, Part, Sketcher = ensure_freecad_imported()
@@ -72,10 +72,9 @@ def extract_primitives_from_sketch(fc_sketch: 'Sketcher.SketchObject') -> list[d
         # Get construction flag from fc_sketch
         try:
             is_construction = fc_sketch.getConstruction(geo_id)
-            if is_construction:
-                new_prim["construction"] = True
+            new_prim["construction"] = bool(is_construction)
         except Exception:
-            pass  # Not a construction line
+            new_prim["construction"] = False
 
         # Extract coordinates based on geometry type
         if geo_type == "Point":
@@ -116,10 +115,10 @@ def extract_primitives_from_sketch(fc_sketch: 'Sketcher.SketchObject') -> list[d
 
 def compute_centroid_aligned_deviation(
     primitives_before: list[dict[str, Any]], primitives_after: list[dict[str, Any]]
-) -> tuple[float, float, int]:
+) -> tuple[float, float, int, int]:
     """
     Compute max deviation between two primitive sets after aligning their centroids.
-    Returns (max_coord_deviation, max_length_deviation, max_deviation_primitive_idx)
+    Returns (max_coord_deviation, max_length_deviation, max_deviation_primitive_idx, construction_mismatch_count)
     """
     def get_all_points(primitives: list[dict[str, Any]]):
         points = []
@@ -142,7 +141,7 @@ def compute_centroid_aligned_deviation(
     pts_after = get_all_points(primitives_after)
 
     if len(pts_before) != len(pts_after) or len(pts_before) == 0:
-        return float('inf'), float('inf'), -1
+        return float('inf'), float('inf'), -1, -1
 
     # Compute centroids
     cx_b = sum(p[0] for p in pts_before) / len(pts_before)
@@ -191,8 +190,16 @@ def compute_centroid_aligned_deviation(
     # Compute length/radius deviation per primitive
     max_length_deviation = 0.0
     max_length_primitive_idx = -1
+    construction_mismatch_count = 0
 
     for geo_id, (prim_b, prim_a) in enumerate(zip(primitives_before, primitives_after)):
+        # Check construction flag
+        if prim_b.get("construction", False) is not prim_a.get("construction", False):
+            # Using 'is not' might be too strict if types differ (bool vs int), but let's assume bool
+            if bool(prim_b.get("construction")) != bool(prim_a.get("construction")):
+                print(f"Construction mismatch at index {geo_id}: {prim_b.get('construction')} vs {prim_a.get('construction')}")
+                construction_mismatch_count += 1
+
         ptype = prim_b["type"]
         len_dev = 0.0
 
@@ -226,77 +233,7 @@ def compute_centroid_aligned_deviation(
     else:
         max_deviation_primitive_idx = max_length_primitive_idx
 
-    return max_coord_deviation, max_length_deviation, max_deviation_primitive_idx
-
-
-def freecad_to_sketchgraphs(sketch_obj, tokenizer: SketchTokenizer):
-    """
-    Extracts a datalib.Sketch object from a FreeCAD SketchObject using registered handlers.
-    """
-    entities = {}
-
-    # Iterate over geometry in the FreeCAD sketch
-    for i, geo in enumerate(sketch_obj.Geometry):
-        geo_type = type(geo).__name__
-        handler = None
-
-        # Mapping FreeCAD types to our primitive names
-        if isinstance(geo, Part.LineSegment):
-            handler = tokenizer.context.get_primitive_handler("Line")
-        elif isinstance(geo, Part.Circle):
-            handler = tokenizer.context.get_primitive_handler("Circle")
-        elif isinstance(geo, Part.ArcOfCircle):
-            handler = tokenizer.context.get_primitive_handler("Arc")
-        elif isinstance(geo, Part.Point):
-            handler = tokenizer.context.get_primitive_handler("Point")
-
-        if handler:
-            # from_freecad returns a datalib Entity
-            try:
-                # We use string ID based on index
-                entity = handler.from_freecad(geo, id=str(i))
-                if entity:
-                    entities[entity.entityId] = entity
-            except Exception as e:
-                print(f"  Error converting geometry {i} ({geo_type}): {e}")
-        else:
-            print(f"  Warning: No handler for geometry type {geo_type}")
-
-    # For this verification, we are ignoring constraints as per user request
-    return datalib.Sketch(entities=entities)
-
-
-def sketchgraphs_to_freecad(sg_sketch: datalib.Sketch, tokenizer: SketchTokenizer, doc_name="ReconDoc"):
-    """
-    Converts a datalib.Sketch back to a FreeCAD SketchObject.
-    Creates a new document and sketch for this purpose.
-    """
-    doc = FreeCAD.newDocument(doc_name)
-    sketch_obj = doc.addObject("Sketcher::SketchObject", "Sketch")
-
-    sorted_entities = sorted(sg_sketch.entities.values(), key=lambda e: int(e.entityId) if e.entityId.isdigit() else e.entityId)
-
-    for entity in sorted_entities:
-        handler = None
-        if isinstance(entity, datalib.Line):
-            handler = tokenizer.context.get_primitive_handler("Line")
-        elif isinstance(entity, datalib.Circle):
-            handler = tokenizer.context.get_primitive_handler("Circle")
-        elif isinstance(entity, datalib.Arc):
-            handler = tokenizer.context.get_primitive_handler("Arc")
-        elif isinstance(entity, datalib.Point):
-            handler = tokenizer.context.get_primitive_handler("Point")
-
-        if handler:
-            try:
-                handler.to_freecad(entity, sketch_obj)
-            except Exception as e:
-                print(f"  Error creating FreeCAD geometry for {entity}: {e}")
-        else:
-            print(f"  Warning: No handler for entity {entity}")
-
-    doc.recompute()
-    return doc, sketch_obj
+    return max_coord_deviation, max_length_deviation, max_deviation_primitive_idx, construction_mismatch_count
 
 
 def verify_primitives_freecad(directory: str = 'gt_completed_prim5_py', limit: int = 10000):
@@ -312,7 +249,7 @@ def verify_primitives_freecad(directory: str = 'gt_completed_prim5_py', limit: i
     print(f"Found {len(py_files)} files. Testing {num_files}...")
 
     context = SketchContext()
-    tokenizer = SketchTokenizer(context)
+    converter = SketchFreecadConverter(context)
 
     passed_files = 0
 
@@ -376,12 +313,12 @@ def verify_primitives_freecad(directory: str = 'gt_completed_prim5_py', limit: i
             # -----------------------------------------------------------------
             # 2. FreeCAD (Orig) -> SketchGraphs (Orig)
             # -----------------------------------------------------------------
-            sg_sketch_orig = freecad_to_sketchgraphs(fc_sketch_orig, tokenizer)
+            sg_sketch_orig = converter.from_freecad(fc_sketch_orig)
 
             # -----------------------------------------------------------------
             # 3. SketchGraphs (Orig) -> FreeCAD (Recon)
             # -----------------------------------------------------------------
-            doc_recon, fc_sketch_recon = sketchgraphs_to_freecad(sg_sketch_orig, tokenizer, doc_name=doc_name_recon)
+            doc_recon, fc_sketch_recon, _ = converter.to_freecad_primitives(sg_sketch_orig, doc_name=doc_name_recon)
 
             # -----------------------------------------------------------------
             # 4. Compare FreeCAD (Orig) vs FreeCAD (Recon)
@@ -391,15 +328,16 @@ def verify_primitives_freecad(directory: str = 'gt_completed_prim5_py', limit: i
             primitives_recon = extract_primitives_from_sketch(fc_sketch_recon)
 
             # Compute deviation
-            max_coord_dev, max_len_dev, max_dev_idx = compute_centroid_aligned_deviation(primitives_orig, primitives_recon)
+            max_coord_dev, max_len_dev, max_dev_idx, constr_mismatches = compute_centroid_aligned_deviation(primitives_orig, primitives_recon)
 
             threshold_mm = 1e-3 # 1 micron tolerance
 
-            if max_coord_dev > threshold_mm or max_len_dev > threshold_mm:
-                print(f"[{i}] {os.path.basename(py_file)}: Mismatch (Deviation > {threshold_mm}mm)")
+            if max_coord_dev > threshold_mm or max_len_dev > threshold_mm or constr_mismatches > 0:
+                print(f"[{i}] {os.path.basename(py_file)}: Mismatch (Deviation > {threshold_mm}mm or Construction Mismatch)")
                 print(f"  Max Coord Dev: {max_coord_dev:.6f}")
                 print(f"  Max Len Dev:   {max_len_dev:.6f}")
                 print(f"  Max Dev Idx:   {max_dev_idx}")
+                print(f"  Constr Mismatches: {constr_mismatches}")
             else:
                 passed_files += 1
 

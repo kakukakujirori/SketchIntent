@@ -40,6 +40,29 @@ class ConstraintHandler(ABC):
         """
         pass
 
+    @abstractmethod
+    def to_freecad(self, constraint: datalib.Constraint, sketch_obj, entity_map: dict[str, int]):
+        """
+        Add the constraint to a FreeCAD sketch object.
+
+        Args:
+            constraint: The SketchGraphs Constraint object.
+            sketch_obj: The FreeCAD SketchBase object.
+            entity_map: Dictionary mapping Entity ID (str) -> FreeCAD Geometry ID (int).
+        """
+        pass
+
+    @abstractmethod
+    def from_freecad(self, fc_constraint, entity_map: dict[int, str]) -> datalib.Constraint:
+        """
+        Convert a FreeCAD constraint to a SketchGraphs Constraint.
+
+        Args:
+            fc_constraint: The FreeCAD Constraint object.
+            entity_map: Dictionary mapping FreeCAD Geometry ID (int) -> Entity ID (str).
+        """
+        pass
+
     def get_constraint_value(self, constraint: datalib.Constraint) -> float:
         """Helper to extract value from constraint parameters."""
         for param in constraint.parameters:
@@ -64,15 +87,9 @@ class ConstraintHandler(ABC):
             params.append(LocalReferenceParameter(parameterId=f"local{i}", value=ref))
 
         if value is not None:
-            # Using 'length' as generic parameter ID for quantity, though some might be 'angle'
-            # The exact ID might matter for normalization, but for basic data holding it should be fine?
-            # Let's check _constraint.py schemas. Datalib seems to be strict about schemas.
-            # Distance uses 'length'. Angle uses 'angle'.
             pid = 'angle' if constraint_type_name == 'Angle' else 'length'
             params.append(QuantityParameter(parameterId=pid, value=value, expression=str(value)))
 
-        # Identifier is arbitrary for reconstructed constraints?
-        # Let's use name + sequential ID or something? Or just generic.
         return Constraint(identifier=constraint_type_name, constraint_type=ctype, parameters=params)
 
     @abstractmethod

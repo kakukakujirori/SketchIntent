@@ -7,7 +7,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from src.sketch_tokenization.sketch_utils import normalize_sketch
 from src.sketch_tokenization.context import SketchContext
-from src.sketch_tokenization.tokenizer import SketchTokenizer
+from src.sketch_tokenization.sketch_tokenizer import SketchTokenizer
 from sketchgraphs.data import flat_array
 from sketchgraphs.data.sequence import sketch_from_sequence, NodeOp, EdgeOp
 import sketchgraphs.data as datalib

@@ -20,6 +20,41 @@ class ParallelHandler(ConstraintHandler):
         ref_tokens = self._get_sorted_ref_tokens(constraint, primitive_tokenpos, entities)
         return self.token_id, ref_tokens, np.array([]), ()
 
+    def to_freecad(self, constraint: datalib.Constraint, sketch_obj, entity_map: dict[str, int]):
+        from .utils import resolve_ref
+        try:
+            import FreeCAD
+            import Sketcher
+        except ImportError:
+            pass
+
+        refs = []
+        for p in constraint.parameters:
+            if hasattr(p, 'value'):
+                 refs.append(p.value)
+
+        if len(refs) == 2:
+            res1 = resolve_ref(refs[0], entity_map, sketch_obj)
+            res2 = resolve_ref(refs[1], entity_map, sketch_obj)
+            if res1 and res2:
+                # Parallel(Line1, Line2)
+                sketch_obj.addConstraint(Sketcher.Constraint('Parallel', res1[0], res2[0]))
+
+    def from_freecad(self, fc_constraint, entity_map: dict[int, str]) -> datalib.Constraint:
+        from .utils import make_ref_str
+        if fc_constraint.Type != 'Parallel': return None
+
+        refs = []
+        g1 = fc_constraint.First
+        r1 = make_ref_str(g1, 0, entity_map) # Always edge
+        if r1: refs.append(r1)
+
+        g2 = fc_constraint.Second
+        r2 = make_ref_str(g2, 0, entity_map) # Always edge
+        if r2: refs.append(r2)
+
+        return self.create_constraint('Parallel', tuple(refs))
+
     def decode(self, ref_indices: tuple[int, ...], params: np.ndarray, token_pos_to_id_map: dict[int, str]) -> datalib.Constraint:
         refs = tuple(token_pos_to_id_map[idx] for idx in ref_indices)
         return self.create_constraint(self.name, refs)
