@@ -22,6 +22,11 @@ class AngleHandler(ConstraintHandler):
         val = self.get_constraint_value(constraint)
         return self.token_id, ref_tokens, np.array([val]), ()
 
+    def decode(self, ref_indices: tuple[int, ...], params: np.ndarray, tokenpos_to_primitive: dict[int, str]) -> datalib.Constraint:
+        refs = tuple(tokenpos_to_primitive[idx] for idx in ref_indices)
+        val = float(params[0]) if len(params) > 0 else 0.0
+        return self.create_constraint(self.name, refs, val)
+
     def to_freecad(self, constraint: datalib.Constraint, sketch_obj: Any, entity_map: dict[str, int]) -> int:
         from .utils import resolve_ref
         from ..freecad_utils import ensure_freecad_imported
@@ -94,11 +99,6 @@ class AngleHandler(ConstraintHandler):
         # val = fc_constraint.Value # Already extracted above
 
         return self.create_constraint(self.name, tuple(refs), val)
-
-    def decode(self, ref_indices: tuple[int, ...], params: np.ndarray, token_pos_to_id_map: dict[int, str]) -> datalib.Constraint:
-        refs = tuple(token_pos_to_id_map[idx] for idx in ref_indices)
-        val = float(params[0]) if len(params) > 0 else 0.0
-        return self.create_constraint(self.name, refs, val)
 
     def validate_refs(self, ref_tokens: tuple[int, ...]) -> bool:
         return len(ref_tokens) >= 2

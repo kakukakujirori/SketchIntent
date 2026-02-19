@@ -1,8 +1,13 @@
 from abc import ABC, abstractmethod
-from typing import Any, Tuple, Dict, List, Optional
+from typing import Any, TYPE_CHECKING
 import numpy as np
 import sketchgraphs.data as datalib
 from sketchgraphs.data._constraint import ConstraintParameterType, QuantityParameter
+from sketch_tokenization.freecad_utils import ensure_freecad_imported
+
+if TYPE_CHECKING:
+    FreeCAD, Part, Sketcher = ensure_freecad_imported()
+
 
 class ConstraintHandler(ABC):
     """
@@ -41,25 +46,39 @@ class ConstraintHandler(ABC):
         pass
 
     @abstractmethod
-    def to_freecad(self, constraint: datalib.Constraint, sketch_obj, entity_map: dict[str, int]):
+    def decode(self, ref_indices: tuple[int, ...], params: np.ndarray, tokenpos_to_primitive: dict[int, str]) -> datalib.Constraint:
+        """
+        Reconstruct a constraint from reference indices and parameters.
+
+        Args:
+            ref_indices: Tuple of token positions referenced by this constraint.
+            params: Array of parameter values.
+            tokenpos_to_primitive: Dictionary mapping token position -> Entity ID (or Subnode ID).
+
+        Returns:
+            The reconstructed Constraint object.
+        """
+        pass
+
+    @abstractmethod
+    def to_freecad(self, constraint: datalib.Constraint, primitive_geoID: dict[str, tuple[int, int]]):
         """
         Add the constraint to a FreeCAD sketch object.
 
         Args:
             constraint: The SketchGraphs Constraint object.
-            sketch_obj: The FreeCAD SketchBase object.
-            entity_map: Dictionary mapping Entity ID (str) -> FreeCAD Geometry ID (int).
+            primitive_geoID: Dictionary mapping Entity ID (str) -> FreeCAD Geometry ID and its subnode (int, int).
         """
         pass
 
     @abstractmethod
-    def from_freecad(self, fc_constraint, entity_map: dict[int, str]) -> datalib.Constraint:
+    def from_freecad(self, fc_constraint: 'Sketcher.Constraint', geoID_to_primitive: dict[tuple[int, int], str]) -> datalib.Constraint:
         """
         Convert a FreeCAD constraint to a SketchGraphs Constraint.
 
         Args:
             fc_constraint: The FreeCAD Constraint object.
-            entity_map: Dictionary mapping FreeCAD Geometry ID (int) -> Entity ID (str).
+            geoID_to_primitive: Dictionary mapping FreeCAD Geometry ID and its subnode (int, int) -> Entity ID (str).
         """
         pass
 
@@ -75,7 +94,7 @@ class ConstraintHandler(ABC):
                          return 0.0
         return 0.0
 
-    def create_constraint(self, constraint_type_name: str, refs: tuple[str, ...], value: Optional[float] = None) -> datalib.Constraint:
+    def create_constraint(self, constraint_type_name: str, refs: tuple[str, ...], value: float | None = None) -> datalib.Constraint:
         """Helper to create a sketchgraphs.data.Constraint object."""
         # Map string name to Enum
         # We need to import ConstraintType here or at top level if cyclic dependency issues are resolved
@@ -91,21 +110,6 @@ class ConstraintHandler(ABC):
             params.append(QuantityParameter(parameterId=pid, value=value, expression=str(value)))
 
         return Constraint(identifier=constraint_type_name, constraint_type=ctype, parameters=params)
-
-    @abstractmethod
-    def decode(self, ref_indices: tuple[int, ...], params: np.ndarray, token_pos_to_id_map: dict[int, str]) -> datalib.Constraint:
-        """
-        Reconstruct a constraint from reference indices and parameters.
-
-        Args:
-            ref_indices: Tuple of token positions referenced by this constraint.
-            params: Array of parameter values.
-            token_pos_to_id_map: Dictionary mapping token position -> Entity ID (or Subnode ID).
-
-        Returns:
-            The reconstructed Constraint object.
-        """
-        pass
 
     def _parse_references(self, constraint: Any, primitive_tokenpos: dict[str, int]) -> list[tuple[str, str | None]]:
         """

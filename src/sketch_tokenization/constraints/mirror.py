@@ -27,6 +27,10 @@ class MirrorHandler(ConstraintHandler):
 
         return self.token_id, ref_tokens, np.array([]), ()
 
+    def decode(self, ref_indices: tuple[int, ...], params: np.ndarray, tokenpos_to_primitive: dict[int, str]) -> datalib.Constraint:
+        refs = tuple(tokenpos_to_primitive[idx] for idx in ref_indices)
+        return self.create_constraint(self.name, refs)
+
     def to_freecad(self, constraint: datalib.Constraint, sketch_obj, entity_map: dict[str, int]):
         from .utils import resolve_ref
         try:
@@ -91,6 +95,3 @@ class MirrorHandler(ConstraintHandler):
             return self.create_constraint(self.name, (r1, r2, r3))
 
         return None
-    def decode(self, ref_indices: tuple[int, ...], params: np.ndarray, token_pos_to_id_map: dict[int, str]) -> datalib.Constraint:
-        refs = tuple(token_pos_to_id_map[idx] for idx in ref_indices)
-        return self.create_constraint(self.name, refs)

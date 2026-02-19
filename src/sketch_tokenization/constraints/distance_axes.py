@@ -14,8 +14,8 @@ class DistanceXHandler(DistanceHandler):
     def name(self) -> str:
         return "DistanceX"
 
-    def decode(self, ref_indices: tuple[int, ...], params: np.ndarray, token_pos_to_id_map: dict[int, str]) -> datalib.Constraint:
-        refs = tuple(token_pos_to_id_map[idx] for idx in ref_indices)
+    def decode(self, ref_indices: tuple[int, ...], params: np.ndarray, tokenpos_to_primitive: dict[int, str]) -> datalib.Constraint:
+        refs = tuple(tokenpos_to_primitive[idx] for idx in ref_indices)
         val = float(params[0]) if len(params) > 0 else 0.0
         return self.create_constraint("Distance", refs, val)
 
@@ -35,8 +35,8 @@ class DistanceYHandler(DistanceHandler):
     def name(self) -> str:
         return "DistanceY"
 
-    def decode(self, ref_indices: tuple[int, ...], params: np.ndarray, token_pos_to_id_map: dict[int, str]) -> datalib.Constraint:
-        refs = tuple(token_pos_to_id_map[idx] for idx in ref_indices)
+    def decode(self, ref_indices: tuple[int, ...], params: np.ndarray, tokenpos_to_primitive: dict[int, str]) -> datalib.Constraint:
+        refs = tuple(tokenpos_to_primitive[idx] for idx in ref_indices)
         val = float(params[0]) if len(params) > 0 else 0.0
         return self.create_constraint("Distance", refs, val)
 

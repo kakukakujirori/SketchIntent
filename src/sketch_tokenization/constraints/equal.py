@@ -20,6 +20,10 @@ class EqualHandler(ConstraintHandler):
         ref_tokens = self._get_sorted_ref_tokens(constraint, primitive_tokenpos, entities)
         return self.token_id, ref_tokens, np.array([]), ()
 
+    def decode(self, ref_indices: tuple[int, ...], params: np.ndarray, tokenpos_to_primitive: dict[int, str]) -> datalib.Constraint:
+        refs = tuple(tokenpos_to_primitive[idx] for idx in ref_indices)
+        return self.create_constraint(self.name, refs)
+
     def to_freecad(self, constraint: datalib.Constraint, sketch_obj, entity_map: dict[str, int]):
         from .utils import resolve_ref
         try:
@@ -54,10 +58,6 @@ class EqualHandler(ConstraintHandler):
         if r2: refs.append(r2)
 
         return self.create_constraint('Equal', tuple(refs))
-
-    def decode(self, ref_indices: tuple[int, ...], params: np.ndarray, token_pos_to_id_map: dict[int, str]) -> datalib.Constraint:
-        refs = tuple(token_pos_to_id_map[idx] for idx in ref_indices)
-        return self.create_constraint(self.name, refs)
 
     def validate_refs(self, ref_tokens: tuple[int, ...]) -> bool:
         return len(ref_tokens) >= 2
