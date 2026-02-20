@@ -68,9 +68,10 @@ class ConstraintToken(enum.IntEnum):
     DistanceY = 22
     Length = 23
     Radius = 24
+    Symmetric = 25
 
     # Special tokens
-    InnerPad = 25  # Padding within fixed-length constraint blocks (loss computed)
+    InnerPad = 26  # Padding within fixed-length constraint blocks (loss computed)
 
 class ConstraintAttrToken(enum.IntEnum):
     Pad = SpecialToken.Pad    # Padding

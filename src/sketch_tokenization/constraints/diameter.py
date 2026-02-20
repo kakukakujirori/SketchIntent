@@ -26,42 +26,31 @@ class DiameterHandler(ConstraintHandler):
         val = float(params[0]) if len(params) > 0 else 0.0
         return self.create_constraint(self.name, refs, val)
 
-    def to_freecad(self, constraint: datalib.Constraint, sketch_obj: Any, entity_map: dict[str, int]) -> int:
-        print(f"DEBUG: Entering DiameterHandler.to_freecad for {constraint.identifier}")
-        from .utils import resolve_ref
-        from ..freecad_utils import ensure_freecad_imported
-        FreeCAD, Part, Sketcher = ensure_freecad_imported()
-        refs = constraint.get_references()
-        val = None
-        for p in constraint.parameters:
-             if hasattr(p, 'expression'):
-                 val = p.value
-                 break
+    def to_freecad(self, constraint: datalib.Constraint, primitive_geoID: dict[str, tuple[int, int]]) -> list[tuple[str, list, float | None]]:
+        refs = self._get_ref_strings(constraint)
+        val = self.get_constraint_value(constraint)
 
-        if len(refs) == 1:
-            res1 = resolve_ref(refs[0], entity_map, sketch_obj)
-            if res1:
-                if val is not None:
-                    try:
-                        val = float(val)
-                        idx = sketch_obj.addConstraint(Sketcher.Constraint('Diameter', res1[0], val))
-                    except:
-                        idx = sketch_obj.addConstraint(Sketcher.Constraint('Diameter', res1[0], 0))
-                else:
-                    idx = sketch_obj.addConstraint(Sketcher.Constraint('Diameter', res1[0], 0))
+        if not self.validate_refs(refs):
+            raise ValueError(f"Invalid references for {self.name}: {refs}")
 
-    def from_freecad(self, fc_constraint, entity_map: dict[int, str]) -> datalib.Constraint:
-        from .utils import make_ref_str
-        if fc_constraint.Type != 'Diameter': return None
+        res1 = primitive_geoID.get(refs[0])
+        if res1 and val > 0:
+            # Diameter(Circle/Arc, value)
+            return [('Diameter', [res1[0], float(val)], None)]
 
-        refs = []
+        return []
+
+    def from_freecad(self, fc_constraint, geoID_to_primitive: dict[tuple[int, int], str]) -> datalib.Constraint | None:
+        if fc_constraint.Type != 'Diameter':
+            raise ValueError(f"Invalid constraint type for {self.name}: {fc_constraint.Type}")
+
         g1 = fc_constraint.First
-        r1 = make_ref_str(g1, 0, entity_map)
-        if r1: refs.append(r1)
+        r1 = geoID_to_primitive.get((g1, 0))  # Circle/Arc edge
+        if not r1:
+            raise ValueError(f"Invalid references for {self.name}: {r1}")
 
         val = fc_constraint.Value
+        return self.create_constraint(self.name, (r1,), val)
 
-        return self.create_constraint(self.name, tuple(refs), val)
-
-    def validate_refs(self, ref_tokens: tuple[int, ...]) -> bool:
-        return len(ref_tokens) == 1
+    def validate_refs(self, refs: tuple[int | str, ...]) -> bool:
+        return len(refs) == 1

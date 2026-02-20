@@ -1,12 +1,24 @@
 from typing import Any
 import numpy as np
 import sketchgraphs.data as datalib
-from ..constants import ConstraintToken
 from .base import ConstraintHandler
+from ..constants import ConstraintToken
+
 from ..registry import CONSTRAINT_HANDLERS
 
 @CONSTRAINT_HANDLERS.register_module()
 class MirrorHandler(ConstraintHandler):
+    """
+    Mirror: Two entities are mirrored across an axis (line).
+
+    In SketchGraphs: Mirror with 3 refs:
+        - ref0: point on entity1
+        - ref1: point on entity2
+        - ref2: axis line (edge)
+
+    In FreeCAD: Symmetric(e1, s1, e2, s2, axis_g)
+    """
+
     @property
     def token_id(self) -> int:
         return ConstraintToken.Mirror
@@ -17,81 +29,46 @@ class MirrorHandler(ConstraintHandler):
 
     def encode(self, constraint: datalib.Constraint, primitive_tokenpos: dict[str, int], entities: dict[str, datalib.Entity]) -> tuple[int, tuple[int, ...], np.ndarray, tuple[int, ...]]:
         ref_tokens = self._get_sorted_ref_tokens(constraint, primitive_tokenpos, entities)
-
-        # Mirror Logic: 2-ref Mirror usually refers to external entities, so drop it
-        if len(ref_tokens) != 3:
-             # Mirror token requires 3 refs: (P1, P2, Axis)
-             # If <3 refs, we can't encode it properly as Mirror token?
-             # Or maybe it's valid but we just warn?
-             pass
-
         return self.token_id, ref_tokens, np.array([]), ()
 
     def decode(self, ref_indices: tuple[int, ...], params: np.ndarray, tokenpos_to_primitive: dict[int, str]) -> datalib.Constraint:
         refs = tuple(tokenpos_to_primitive[idx] for idx in ref_indices)
         return self.create_constraint(self.name, refs)
 
-    def to_freecad(self, constraint: datalib.Constraint, sketch_obj, entity_map: dict[str, int]):
-        from .utils import resolve_ref
-        try:
-            import FreeCAD
-            import Sketcher
-        except ImportError:
-            pass
+    def to_freecad(self, constraint: datalib.Constraint, primitive_geoID: dict[str, tuple[int, int]]) -> list[tuple[str, list, float | None]]:
+        refs = self._get_ref_strings(constraint)
+        if len(refs) != 3:
+            return []
 
-        refs = []
-        for p in constraint.parameters:
-             if hasattr(p, 'value'):
-                 refs.append(p.value)
+        res0 = primitive_geoID.get(refs[0])
+        res1 = primitive_geoID.get(refs[1])
+        res2 = primitive_geoID.get(refs[2])
+        if not res0 or not res1 or not res2:
+            return []
 
-        # Mirror(P1, P2, Axis) -> 3 refs
-        if len(refs) == 3:
-            # Assuming params are [P1, P2, Axis]
-            # Wait, `encode` sorts them?
-            # If standard Mirror, it's [P1, P2, Axis].
-            # But we should check which one is the Axis?
-            # `encode` doesn't seem to force Axis to be last?
-            # However in SG data, usually last one is the axis/line?
+        g0, p0 = res0
+        g1, p1 = res1
+        g2, p2 = res2
 
-            p1 = resolve_ref(refs[0], entity_map, sketch_obj)
-            p2 = resolve_ref(refs[1], entity_map, sketch_obj)
-            ax = resolve_ref(refs[2], entity_map, sketch_obj)
+        # Determine which ref is the axis (edge with pid=0)
+        if p2 == 0:
+            # ref2 is axis
+            return [('Symmetric', [g0, p0, g1, p1, g2], None)]
+        elif p0 == 0:
+            # ref0 is axis
+            return [('Symmetric', [g1, p1, g2, p2, g0], None)]
+        elif p1 == 0:
+            # ref1 is axis
+            return [('Symmetric', [g0, p0, g2, p2, g1], None)]
 
-            if p1 and p2 and ax:
-                 sketch_obj.addConstraint(Sketcher.Constraint('Symmetric', p1[0], p1[1], p2[0], p2[1], ax[0], ax[1]))
+        return []
 
-    def from_freecad(self, fc_constraint, entity_map: dict[int, str]) -> datalib.Constraint:
-        # FC uses 'Symmetric' for both Midpoint and Mirror.
-        # If 3rd arg is Line/Axis, it's Mirror.
-        # If 3rd arg is Point, it's Midpoint.
-        # But here we are in MirrorHandler.
-        # Do we look for 'Symmetric'?
-        # If so, we check 3rd arg.
+    def from_freecad(self, fc_constraint, geoID_to_primitive: dict[tuple[int, int], str]) -> datalib.Constraint | None:
+        # Mirror comes in as Symmetric where it's NOT a midpoint
+        # (i.e., First and Second are different entities)
+        # This is handled by SymmetricHandler; Mirror is a SketchGraphs-level
+        # distinction that we only create from specific patterns.
+        raise NotImplementedError(f"{self.name}.from_freecad is not implemented")
 
-        if fc_constraint.Type != 'Symmetric': return None
-
-        from .utils import make_ref_str
-
-        g1, p1 = fc_constraint.First, fc_constraint.FirstPos
-        g2, p2 = fc_constraint.Second, fc_constraint.SecondPos
-        g3, p3 = fc_constraint.Third, fc_constraint.ThirdPos
-
-        # Check if g3 is a Line/Axis... how?
-        # We need to access geometry of g3?
-        # Or just make refs and let downstream sort it out?
-        # But if it's Midpoint, we shouldn't return Mirror constraint?
-        # We can implement a check if we have access to geometry types?
-        # Or we assume if p3 == 0 (Edge)?
-        # If p3 != 0 (Vertex), it's likely a Point -> Midpoint.
-        # If p3 == 0, it's likely a Line -> Mirror.
-
-        if p3 != 0: return None # Likely Midpoint or Point-Symmetric
-
-        r1 = make_ref_str(g1, p1, entity_map)
-        r2 = make_ref_str(g2, p2, entity_map)
-        r3 = make_ref_str(g3, p3, entity_map)
-
-        if r1 and r2 and r3:
-            return self.create_constraint(self.name, (r1, r2, r3))
-
-        return None
+    def validate_refs(self, refs: tuple[int | str, ...]) -> bool:
+        return len(refs) == 3

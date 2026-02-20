@@ -3,7 +3,7 @@ from typing import Any, TYPE_CHECKING
 import numpy as np
 import sketchgraphs.data as datalib
 from sketchgraphs.data._constraint import ConstraintParameterType, QuantityParameter
-from sketch_tokenization.freecad_utils import ensure_freecad_imported
+from ..freecad_utils import ensure_freecad_imported
 
 if TYPE_CHECKING:
     FreeCAD, Part, Sketcher = ensure_freecad_imported()
@@ -61,24 +61,30 @@ class ConstraintHandler(ABC):
         pass
 
     @abstractmethod
-    def to_freecad(self, constraint: datalib.Constraint, primitive_geoID: dict[str, tuple[int, int]]):
+    def to_freecad(self, constraint: datalib.Constraint, primitive_geoID: dict[str, tuple[int, int]]) -> list[tuple[str, list, float | None]]:
         """
-        Add the constraint to a FreeCAD sketch object.
+        Convert a SketchGraphs Constraint to FreeCAD constraint argument tuples.
 
         Args:
             constraint: The SketchGraphs Constraint object.
-            primitive_geoID: Dictionary mapping Entity ID (str) -> FreeCAD Geometry ID and its subnode (int, int).
+            primitive_geoID: Dictionary mapping reference string (e.g. "0", "0.start", "0.center")
+                             -> (GeoID, PointID) tuple.
+
+        Returns:
+            List of (fc_constraint_type, args_list) tuples.
+            Each tuple is used as: Sketcher.Constraint(fc_constraint_type, *args_list)
         """
         pass
 
     @abstractmethod
-    def from_freecad(self, fc_constraint: 'Sketcher.Constraint', geoID_to_primitive: dict[tuple[int, int], str]) -> datalib.Constraint:
+    def from_freecad(self, fc_constraint: 'Sketcher.Constraint', geoID_to_primitive: dict[tuple[int, int], str]) -> datalib.Constraint | None:
         """
         Convert a FreeCAD constraint to a SketchGraphs Constraint.
 
         Args:
             fc_constraint: The FreeCAD Constraint object.
-            geoID_to_primitive: Dictionary mapping FreeCAD Geometry ID and its subnode (int, int) -> Entity ID (str).
+            geoID_to_primitive: Dictionary mapping (GeoID, PointID) tuple -> reference string
+                                (e.g. "0", "0.start", "0.center").
         """
         pass
 
@@ -87,20 +93,27 @@ class ConstraintHandler(ABC):
         for param in constraint.parameters:
             if param.type == ConstraintParameterType.Quantity:
                 if isinstance(param, QuantityParameter):
-                     # value might be string or float
-                     try:
-                         return float(param.value)
-                     except (ValueError, TypeError):
-                         return 0.0
+                    # value might be string or float
+                    try:
+                        return float(param.value)
+                    except (ValueError, TypeError):
+                        return 0.0
         return 0.0
+
+    # Types that don't exist in SketchGraphs ConstraintType -> map to nearest equivalent
+    _SG_TYPE_MAP = {
+        'DistanceX': 'Distance',
+        'DistanceY': 'Distance',
+        'Symmetric': 'Mirror',
+    }
 
     def create_constraint(self, constraint_type_name: str, refs: tuple[str, ...], value: float | None = None) -> datalib.Constraint:
         """Helper to create a sketchgraphs.data.Constraint object."""
-        # Map string name to Enum
-        # We need to import ConstraintType here or at top level if cyclic dependency issues are resolved
         from sketchgraphs.data._constraint import Constraint, ConstraintType, LocalReferenceParameter, QuantityParameter
 
-        ctype = getattr(ConstraintType, constraint_type_name)
+        # Map to valid SketchGraphs enum; keep original name as identifier
+        sg_type_name = self._SG_TYPE_MAP.get(constraint_type_name, constraint_type_name)
+        ctype = getattr(ConstraintType, sg_type_name)
         params = []
         for i, ref in enumerate(refs):
             params.append(LocalReferenceParameter(parameterId=f"local{i}", value=ref))
@@ -161,6 +174,20 @@ class ConstraintHandler(ABC):
             ref_tokens.append(primitive_tokenpos[key])
         return tuple(ref_tokens)
 
-    def validate_refs(self, ref_tokens: tuple[int, ...]) -> bool:
+    def _get_ref_strings(self, constraint: datalib.Constraint) -> tuple[str, ...]:
+        """
+        Extract reference strings from constraint parameters.
+        Returns list of reference strings like ["0.start", "1", "2.center"].
+        """
+        refs = []
+        for param in constraint.parameters:
+            if type(param).__name__ != 'LocalReferenceParameter':
+                continue
+            value = getattr(param, 'value', None)
+            if isinstance(value, str):
+                refs.append(value)
+        return tuple(refs)
+
+    def validate_refs(self, refs: tuple[int | str, ...]) -> bool:
         """Validate if the number of references is correct for this constraint."""
         return True # Default lenient

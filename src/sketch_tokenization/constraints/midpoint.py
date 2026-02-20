@@ -8,6 +8,22 @@ from ..registry import CONSTRAINT_HANDLERS
 
 @CONSTRAINT_HANDLERS.register_module()
 class MidpointHandler(ConstraintHandler):
+    """
+    Midpoint indicates that a point lies at the midpoint of a line.
+
+    In SketchGraphs, this is stored as Midpoint with 2 refs:
+        - ref0: the point
+        - ref1: the line
+    or 3 refs:
+        - ref0: one endpoint of the line
+        - ref1: the other endpoint of the line
+        - ref2: the midpoint
+
+    In FreeCAD, this is implemented as:
+        - Symmetric(g_line, 1, g_line, 2, g_mid_point, p_mid_point) — start/end of line symmetric about midpoint
+        - PointOnObject(g_mid_point, p_mid_point, g_line) — optionally ensure midpoint is on line
+    """
+
     @property
     def token_id(self) -> int:
         return ConstraintToken.Midpoint
@@ -24,161 +40,69 @@ class MidpointHandler(ConstraintHandler):
         refs = tuple(tokenpos_to_primitive[idx] for idx in ref_indices)
         return self.create_constraint(self.name, refs)
 
-    def to_freecad(self, constraint: datalib.Constraint, sketch_obj, entity_map: dict[str, int]):
-        from .utils import resolve_ref
-        try:
-            import FreeCAD
-            import Sketcher
-        except ImportError:
-            pass
+    def to_freecad(self, constraint: datalib.Constraint, primitive_geoID: dict[str, tuple[int, int]]) -> list[tuple[str, list, float | None]]:
+        refs = self._get_ref_strings(constraint)
 
-        refs = []
-        for p in constraint.parameters:
-             if hasattr(p, 'value'):
-                 refs.append(p.value)
+        if len(refs) == 2:
+            # 2-ref form: point + line
+            # Determine which is the point and which is the line
+            res0 = primitive_geoID.get(refs[0])
+            res1 = primitive_geoID.get(refs[1])
+            if not res0 or not res1:
+                return []
 
-        # Midpoint(Mid, P1, P2) or (Mid, Line)
-        # We need to identify which ref is Midpoint.
-        # But `constraint.parameters` order?
-        # `encode` sorts them so "Mid" comes first!
-        # Datalib Constraint stores parameters in order.
-        # Use simple heuristic: 3 refs -> Symmetric(P1, P2, Mid)
-        # 2 refs -> Symmetric(Line_Start, Line_End, Mid) ??
-        # Or (Point, Line) -> Point on Line + Symmetry?
-        # FreeCAD 'Symmetric' takes (g1, p1, g2, p2, g3, p3) where 3 is center.
+            g0, p0 = res0
+            g1, p1 = res1
 
-        if len(refs) == 3:
-            # Assuming params are [Mid, P1, P2] based on `encode` logic?
-            # Actually `encode` puts Mid first.
-            # So refs[0] is Midpoint.
-            rmid = resolve_ref(refs[0], entity_map, sketch_obj)
-            p1 = resolve_ref(refs[1], entity_map, sketch_obj)
-            p2 = resolve_ref(refs[2], entity_map, sketch_obj)
+            # Identify point vs line: the one with pid>0 is the point
+            if p0 > 0 and p1 == 0:
+                mid_g, mid_p = g0, p0
+                line_g = g1
+            elif p1 > 0 and p0 == 0:
+                mid_g, mid_p = g1, p1
+                line_g = g0
+            else:
+                return []
 
-            if rmid and p1 and p2:
-                 sketch_obj.addConstraint(Sketcher.Constraint('Symmetric', p1[0], p1[1], p2[0], p2[1], rmid[0], rmid[1]))
+            # Symmetric: line's start and end are symmetric about the midpoint
+            # Symmetric(line_g, 1, line_g, 2, mid_g, mid_p) — 6 args
+            return [('Symmetric', [line_g, 1, line_g, 2, mid_g, mid_p], None)]
 
-        elif len(refs) == 2:
-            # (Mid, Line) or (Mid, P_other)?
-            # Encode puts Mid first.
-            # If 2nd ref is Line, we use Line's endpoints?
-            rmid = resolve_ref(refs[0], entity_map, sketch_obj)
-            rline = resolve_ref(refs[1], entity_map, sketch_obj)
+        elif len(refs) == 3:
+            # 3-ref form: two endpoints + midpoint
+            res0 = primitive_geoID.get(refs[0])
+            res1 = primitive_geoID.get(refs[1])
+            res2 = primitive_geoID.get(refs[2])
+            if not res0 or not res1 or not res2:
+                return []
 
-            if rmid and rline and rline[1] == 0: # Line edge
-                # Constrain Mid to be Symmetric between Start and End of Line
-                # We need GID of line to get Start/End vertex IDs?
-                # Actually we can use (gid, 1) and (gid, 2) for start/end of line.
-                sketch_obj.addConstraint(Sketcher.Constraint('Symmetric', rline[0], 1, rline[0], 2, rmid[0], rmid[1]))
-                # But wait, Midpoint implies Point is ON the line too?
-                # Symmetric doesn't force OnObject.
-                # Midpoint = PointOnObject + Symmetric?
-                # SG Midpoint usually implies Coincident too?
-                # Let's add PointOnObject as well if needed?
-                # Actually usually Midpoint constraint implies it lies on the segment/line.
-                sketch_obj.addConstraint(Sketcher.Constraint('PointOnObject', rmid[0], rmid[1], rline[0]))
+            g0, p0 = res0
+            g1, p1 = res1
+            g2, p2 = res2
 
+            # Symmetric(endpoint1_g, endpoint1_p, endpoint2_g, endpoint2_p, mid_g, mid_p)
+            return [('Symmetric', [g0, p0, g1, p1, g2, p2], None)]
 
-    def from_freecad(self, fc_constraint, entity_map: dict[int, str]) -> datalib.Constraint:
-        # We map 'Symmetric' to 'Symmetric' handler usually.
-        # But if we want to detect Midpoint specifically from FC...
-        # 'Symmetric' with 3rd arg as Point is Midpoint.
-        # 'Symmetric' with 3rd arg as Line/Axis is Mirror.
-        # This handler checks if it validates as Midpoint?
-        # But `from_freecad` is called by type.
-        # If we rely on Symmetric handler to handle all 'Symmetric', return None here.
+        return []
+
+    def from_freecad(self, fc_constraint, geoID_to_primitive: dict[tuple[int, int], str]) -> datalib.Constraint | None:
+        # Midpoint comes in as Symmetric where First and Second are start/end of same line
+        if fc_constraint.Type != 'Symmetric':
+            raise ValueError(f"Invalid constraint type for {self.name}: {fc_constraint.Type}")
+
+        g1, p1 = fc_constraint.First, fc_constraint.FirstPos
+        g2, p2 = fc_constraint.Second, fc_constraint.SecondPos
+        g3, p3 = fc_constraint.Third, fc_constraint.ThirdPos
+
+        # Check if it's a midpoint: First and Second are endpoints of same line
+        if g1 == g2 and p1 == 1 and p2 == 2:
+            # This is Midpoint(point on line)
+            r_point = geoID_to_primitive.get((g3, p3))
+            r_line = geoID_to_primitive.get((g1, 0))
+            if r_point and r_line:
+                return self.create_constraint('Midpoint', (r_point, r_line))
+
         return None
 
-    def _get_sorted_ref_tokens(self, constraint: datalib.Constraint, primitive_tokenpos: dict[str, int], entities: dict[str, datalib.Entity]) -> tuple[int, ...]:
-        refs = self._parse_references(constraint, primitive_tokenpos)
-        refs = list(set(refs))
-
-        sorted_refs = []
-        # Special Midpoint Sorting
-        if len(refs) == 2:
-            # 2-ref: swap if first ref is a curve (Line/Arc/Circle), not a point/subnode
-            ent0 = entities.get(refs[0][0])
-            if ent0 and not isinstance(ent0, datalib.Point):
-                sorted_refs = list(reversed(refs))
-            else:
-                sorted_refs = refs
-        else:
-            # 3+ refs: determine midpoint geometrically
-            # For Midpoint(mid, p1, p2), mid.coords = (p1.coords + p2.coords) / 2
-
-            def get_point_coords(entity_idx: str, subnode_name: str | None):
-                """Get (x, y) coordinates for a reference."""
-                ent = entities.get(entity_idx)
-                if ent is None:
-                    return None
-                if isinstance(ent, datalib.Point):
-                    return (ent.x, ent.y)
-                elif isinstance(ent, datalib.Line):
-                    if subnode_name == 'start':
-                        sp = ent.start_point
-                        return (sp[0], sp[1])
-                    elif subnode_name == 'end':
-                        ep = ent.end_point
-                        return (ep[0], ep[1])
-                    else:
-                        # Edge reference - use midpoint of line
-                        sp = ent.start_point
-                        ep = ent.end_point
-                        return ((sp[0] + ep[0]) / 2, (sp[1] + ep[1]) / 2)
-                elif isinstance(ent, (datalib.Circle, datalib.Arc)):
-                    if subnode_name in ('start', 'end'):
-                         # For arc start/end, would need more complex calc but usually center is ref
-                         pass
-                    return (ent.xCenter, ent.yCenter)
-                return None
-
-            # Find which ref is the geometric midpoint
-            best_mid_idx = 0
-            best_err = float('inf')
-
-            for mid_idx in range(len(refs)):
-                mid_entity_idx, mid_subnode = refs[mid_idx]
-                mid_coords = get_point_coords(mid_entity_idx, mid_subnode)
-                if mid_coords is None:
-                    continue
-
-                # Get other refs
-                other_refs = [refs[i] for i in range(len(refs)) if i != mid_idx]
-                if len(other_refs) < 2:
-                    continue
-
-                # Check if mid is midpoint of first two others
-                # NOTE: Only checking first two of others.
-                # If there are >3 refs, this might be partial, but standard Midpoint is 3 refs.
-                p1_coords = get_point_coords(other_refs[0][0], other_refs[0][1])
-                p2_coords = get_point_coords(other_refs[1][0], other_refs[1][1])
-                if p1_coords is None or p2_coords is None:
-                    continue
-
-                calc_mid_x = (p1_coords[0] + p2_coords[0]) / 2
-                calc_mid_y = (p1_coords[1] + p2_coords[1]) / 2
-                err = ((mid_coords[0] - calc_mid_x)**2 + (mid_coords[1] - calc_mid_y)**2)**0.5
-
-                if err < best_err:
-                    best_err = err
-                    best_mid_idx = mid_idx
-
-            # Reorder: midpoint first, then others sorted by token position
-            mid_ref = refs[best_mid_idx]
-            other_refs = [refs[i] for i in range(len(refs)) if i != best_mid_idx]
-
-            def get_ref_pos(r):
-                key = f"{r[0]}.{r[1]}" if r[1] else r[0]
-                return primitive_tokenpos.get(key, 0)
-
-            sorted_others = sorted(other_refs, key=get_ref_pos)
-            sorted_refs = [mid_ref] + sorted_others
-
-        ref_tokens = []
-        for eid, sub in sorted_refs:
-            key = f"{eid}.{sub}" if sub else eid
-            ref_tokens.append(primitive_tokenpos[key])
-        return tuple(ref_tokens)
-
-    def validate_refs(self, ref_tokens: tuple[int, ...]) -> bool:
-        return len(ref_tokens) >= 2
+    def validate_refs(self, refs: tuple[int | str, ...]) -> bool:
+        return len(refs) >= 2

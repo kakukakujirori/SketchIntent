@@ -26,52 +26,22 @@ class LengthHandler(ConstraintHandler):
         val = float(params[0]) if len(params) > 0 else 0.0
         return self.create_constraint(self.name, refs, val)
 
-    def to_freecad(self, constraint: datalib.Constraint, sketch_obj, entity_map: dict[str, int]):
-        from .utils import resolve_ref
-        try:
-            import FreeCAD
-            import Sketcher
-        except ImportError:
-            pass
+    def to_freecad(self, constraint: datalib.Constraint, primitive_geoID: dict[str, tuple[int, int]]) -> list[tuple[str, list, float | None]]:
+        refs = self._get_ref_strings(constraint)
+        val = self.get_constraint_value(constraint)
 
-        refs = constraint.get_references()
-        val = None
-        for p in constraint.parameters:
-            if hasattr(p, 'expression'):
-                val = p.value
-                break
-
-        # Length is usually 1 ref (Line/Arc) -> Distance in FC
+        # Length is mapped to FreeCAD's Distance on a single edge
         if len(refs) == 1:
-            res1 = resolve_ref(refs[0], entity_map, sketch_obj)
+            res1 = primitive_geoID.get(refs[0])
             if res1:
-                # Distance on Line (Length) -> Distance(g1, 0)
-                # If val: Distance(g1, 0, val)? Or Distance(g1, val)?
-                # Distance(Point, Point) is 4 args + val = 5 args.
-                # Distance(Line) is 1 arg + val = 2 args? `Distance(g1, val)`
-                c_name = "Distance" # FreeCAD uses 'Distance' for Length
-                idx = -1
-                if len(refs) > 0 and val is not None:
-                    try:
-                        # Length(Edge, Value) -> Distance(Edge, Value)
-                        val = float(val)
-                        idx = sketch_obj.addConstraint(Sketcher.Constraint(c_name, res1[0], val))
-                        if idx == -1:
-                             # Fallback to no-val?
-                             idx = sketch_obj.addConstraint(Sketcher.Constraint(c_name, res1[0]))
-                    except Exception:
-                        pass
-                else:
-                    idx = sketch_obj.addConstraint(Sketcher.Constraint(c_name, res1[0]))
+                return [('Distance', [res1[0], float(val)], None)]
+        else:
+            raise ValueError(f"Invalid number of refs for {self.name}: {len(refs)}")
 
-                if idx == -1:
-                     print(f"Warning: Failed to add Length/Distance constraint on {res1[0]}")
-
-    def from_freecad(self, fc_constraint, entity_map: dict[int, str]) -> datalib.Constraint:
+    def from_freecad(self, fc_constraint, geoID_to_primitive: dict[tuple[int, int], str]) -> datalib.Constraint | None:
         # Length tokens don't come directly from a "Length" FC constraint type.
-        # They come from "Distance".
-        # So this might not be called directly if we key by FC Type.
-        return None
+        # They come from "Distance" on a single entity (handled by DistanceHandler).
+        raise ValueError(f"Invalid constraint type for {self.name}: {fc_constraint.Type}")
 
-    def validate_refs(self, ref_tokens: tuple[int, ...]) -> bool:
-        return len(ref_tokens) == 1
+    def validate_refs(self, refs: tuple[int | str, ...]) -> bool:
+        return len(refs) == 1

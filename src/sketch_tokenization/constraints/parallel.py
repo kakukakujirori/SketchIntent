@@ -24,40 +24,31 @@ class ParallelHandler(ConstraintHandler):
         refs = tuple(tokenpos_to_primitive[idx] for idx in ref_indices)
         return self.create_constraint(self.name, refs)
 
-    def to_freecad(self, constraint: datalib.Constraint, sketch_obj, entity_map: dict[str, int]):
-        from .utils import resolve_ref
-        try:
-            import FreeCAD
-            import Sketcher
-        except ImportError:
-            pass
+    def to_freecad(self, constraint: datalib.Constraint, primitive_geoID: dict[str, tuple[int, int]]) -> list[tuple[str, list, float | None]]:
+        refs = self._get_ref_strings(constraint)
+        if not self.validate_refs(refs):
+            raise ValueError(f"Invalid number of refs for {self.name}: {len(refs)}")
 
-        refs = []
-        for p in constraint.parameters:
-            if hasattr(p, 'value'):
-                 refs.append(p.value)
+        res1 = primitive_geoID.get(refs[0])
+        res2 = primitive_geoID.get(refs[1])
+        if not res1 or not res2:
+            raise ValueError(f"Invalid geometry IDs for {self.name}: {refs[0]}, {refs[1]}")
 
-        if len(refs) == 2:
-            res1 = resolve_ref(refs[0], entity_map, sketch_obj)
-            res2 = resolve_ref(refs[1], entity_map, sketch_obj)
-            if res1 and res2:
-                # Parallel(Line1, Line2)
-                sketch_obj.addConstraint(Sketcher.Constraint('Parallel', res1[0], res2[0]))
+        # Parallel(e1, e2) — edge-edge only
+        return [('Parallel', [res1[0], res2[0]], None)]
 
-    def from_freecad(self, fc_constraint, entity_map: dict[int, str]) -> datalib.Constraint:
-        from .utils import make_ref_str
-        if fc_constraint.Type != 'Parallel': return None
+    def from_freecad(self, fc_constraint, geoID_to_primitive: dict[tuple[int, int], str]) -> datalib.Constraint | None:
+        if fc_constraint.Type != 'Parallel':
+            raise ValueError(f"Invalid constraint type for {self.name}: {fc_constraint.Type}")
 
-        refs = []
         g1 = fc_constraint.First
-        r1 = make_ref_str(g1, 0, entity_map) # Always edge
-        if r1: refs.append(r1)
-
         g2 = fc_constraint.Second
-        r2 = make_ref_str(g2, 0, entity_map) # Always edge
-        if r2: refs.append(r2)
+        r1 = geoID_to_primitive.get((g1, 0))
+        r2 = geoID_to_primitive.get((g2, 0))
+        if not r1 or not r2:
+            raise ValueError(f"Invalid geometry IDs for {self.name}: {g1}, {g2}")
 
-        return self.create_constraint('Parallel', tuple(refs))
+        return self.create_constraint(self.name, (r1, r2))
 
-    def validate_refs(self, ref_tokens: tuple[int, ...]) -> bool:
-        return len(ref_tokens) >= 2
+    def validate_refs(self, refs: tuple[int | str, ...]) -> bool:
+        return len(refs) == 2

@@ -24,45 +24,35 @@ class PerpendicularHandler(ConstraintHandler):
         refs = tuple(tokenpos_to_primitive[idx] for idx in ref_indices)
         return self.create_constraint(self.name, refs)
 
-    def to_freecad(self, constraint: datalib.Constraint, sketch_obj, entity_map: dict[str, int]):
-        from .utils import resolve_ref
-        try:
-            import FreeCAD
-            import Sketcher
-        except ImportError:
-            pass
+    def to_freecad(self, constraint: datalib.Constraint, primitive_geoID: dict[str, tuple[int, int]]) -> list[tuple[str, list, float | None]]:
+        refs = self._get_ref_strings(constraint)
+        if not self.validate_refs(refs):
+            raise ValueError(f"Invalid number of refs for {self.name}: {len(refs)}")
 
-        refs = []
-        for p in constraint.parameters:
-            if hasattr(p, 'value'):
-                 refs.append(p.value)
+        res1 = primitive_geoID.get(refs[0])
+        res2 = primitive_geoID.get(refs[1])
+        if not res1 or not res2:
+            raise ValueError(f"Invalid geometry IDs for {self.name}: {refs[0]}, {refs[1]}")
 
-        if len(refs) == 2:
-            res1 = resolve_ref(refs[0], entity_map, sketch_obj)
-            res2 = resolve_ref(refs[1], entity_map, sketch_obj)
-            if res1 and res2:
-                # Perpendicular(Line1, Line2) or (Line1, Pt1, Line2, Pt2)
-                # But here refs usually imply (Line, Line) for simplicity unless we have subnodes
-                # If parsed as (gid, pid), we use it.
-                if res1[1] > 0 or res2[1] > 0:
-                     sketch_obj.addConstraint(Sketcher.Constraint('Perpendicular', res1[0], res1[1], res2[0], res2[1]))
-                else:
-                     sketch_obj.addConstraint(Sketcher.Constraint('Perpendicular', res1[0], res2[0]))
+        # Perpendicular(e1, e2) — edge-edge only
+        val = self.get_constraint_value(constraint)
+        if val is not None and val != 0.0:
+            return [('Perpendicular', [res1[0], res2[0]], val)]
+        return [('Perpendicular', [res1[0], res2[0]], None)]
 
-    def from_freecad(self, fc_constraint, entity_map: dict[int, str]) -> datalib.Constraint:
-        from .utils import make_ref_str
-        if fc_constraint.Type != 'Perpendicular': return None
+    def from_freecad(self, fc_constraint, geoID_to_primitive: dict[tuple[int, int], str]) -> datalib.Constraint | None:
+        if fc_constraint.Type != 'Perpendicular':
+            raise ValueError(f"Invalid constraint type for {self.name}: {fc_constraint.Type}")
 
-        refs = []
-        g1, p1 = fc_constraint.First, fc_constraint.FirstPos
-        r1 = make_ref_str(g1, p1, entity_map)
-        if r1: refs.append(r1)
+        g1 = fc_constraint.First
+        g2 = fc_constraint.Second
+        r1 = geoID_to_primitive.get((g1, 0))
+        r2 = geoID_to_primitive.get((g2, 0))
+        if not r1 or not r2:
+            raise ValueError(f"Invalid geometry IDs for {self.name}: {g1}, {g2}")
 
-        g2, p2 = fc_constraint.Second, fc_constraint.SecondPos
-        r2 = make_ref_str(g2, p2, entity_map)
-        if r2: refs.append(r2)
+        val = fc_constraint.Value
+        return self.create_constraint(self.name, (r1, r2), val if val != 0.0 else None)
 
-        return self.create_constraint('Perpendicular', tuple(refs))
-
-    def validate_refs(self, ref_tokens: tuple[int, ...]) -> bool:
-        return len(ref_tokens) == 2
+    def validate_refs(self, refs: tuple[int | str, ...]) -> bool:
+        return len(refs) == 2

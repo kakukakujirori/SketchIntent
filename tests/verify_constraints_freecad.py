@@ -1,9 +1,20 @@
-import importlib
+"""
+Constraint roundtrip verification test.
+
+Two modes:
+  1. Unit tests: hand-crafted sketches covering each constraint type (pytest)
+  2. Dataset test: load real .py sketch scripts and verify constraint roundtrip (CLI)
+
+Usage:
+  pytest tests/verify_constraints_freecad.py -v           # unit tests only
+  conda run -n freecad python tests/verify_constraints_freecad.py  # dataset test
+"""
+from typing import Any
+import glob
+import math
 import os
 import sys
 import unittest
-import numpy as np
-import math
 
 # Add project root to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -16,26 +27,281 @@ from src.sketch_tokenization.freecad_utils import ensure_freecad_imported
 
 FreeCAD, Part, Sketcher = ensure_freecad_imported()
 
-# Helpers from verify_primitives_freecad.py extended for constraints
 
-def freecad_to_sketchgraphs(sketch_obj, tokenizer: SketchTokenizer) -> datalib.Sketch:
+# ============================================================
+# Comparison Helpers
+# ============================================================
+
+def extract_constraints_from_sketch(fc_sketch: 'Sketcher.SketchObject') -> list[dict]:
     """
-    Extracts a datalib.Sketch object (Entities + Constraints) from a FreeCAD SketchObject using Converter.
+    Extract constraint info from a FreeCAD SketchObject as comparable dicts.
     """
-    converter = SketchFreecadConverter(tokenizer.context)
-    return converter.from_freecad(sketch_obj)
+    constraints = []
+    for c in fc_sketch.Constraints:
+        info = {
+            'type': c.Type,
+            'first': c.First,
+            'firstPos': c.FirstPos,
+            'second': c.Second,
+            'secondPos': c.SecondPos,
+            'third': c.Third,
+            'thirdPos': c.ThirdPos,
+            'value': c.Value,
+        }
+        constraints.append(info)
+    return constraints
 
 
-def sketchgraphs_to_freecad(sg_sketch: datalib.Sketch, tokenizer: SketchTokenizer, doc_name="ReconDoc"):
+def compare_constraints(
+    orig_constraints: list[dict[str, Any]],
+    recon_constraints: list[dict[str, Any]],
+    value_tolerance: float = 1e-6,
+) -> dict:
     """
-    Converts a datalib.Sketch back to a FreeCAD SketchObject using Converter.
+    Compare two lists of constraint dicts and return a summary.
+
+    Returns dict with keys:
+      - count_match: bool
+      - type_match: bool (sorted type lists match)
+      - type_count_match: bool (per-type counts match)
+      - value_mismatches: list of (index, orig_val, recon_val, delta)
+      - missing_types: set of types in orig but not recon
+      - extra_types: set of types in recon but not orig
+      - orig_types: Counter
+      - recon_types: Counter
     """
-    if doc_name in FreeCAD.listDocuments():
-        FreeCAD.closeDocument(doc_name)
+    from collections import Counter
 
-    converter = SketchFreecadConverter(tokenizer.context)
-    return converter.to_freecad(sg_sketch, doc_name=doc_name)
+    result = {}
 
+    # Count match
+    result['count_match'] = len(orig_constraints) == len(recon_constraints)
+    result['orig_count'] = len(orig_constraints)
+    result['recon_count'] = len(recon_constraints)
+
+    # Type counts
+    orig_type_counts = Counter(c['type'] for c in orig_constraints)
+    recon_type_counts = Counter(c['type'] for c in recon_constraints)
+    result['orig_types'] = dict(orig_type_counts)
+    result['recon_types'] = dict(recon_type_counts)
+
+    # Sorted type lists
+    orig_type_list = sorted(c['type'] for c in orig_constraints)
+    recon_type_list = sorted(c['type'] for c in recon_constraints)
+    result['type_match'] = orig_type_list == recon_type_list
+
+    # Per-type count match
+    result['type_count_match'] = orig_type_counts == recon_type_counts
+
+    # Missing / extra types
+    result['missing_types'] = set(orig_type_counts.keys()) - set(recon_type_counts.keys())
+    result['extra_types'] = set(recon_type_counts.keys()) - set(orig_type_counts.keys())
+
+    # Value comparison (only for constraints with the same type in order)
+    # Group by type, compare values within each group
+    value_mismatches = []
+
+    # Build per-type value lists
+    orig_values_by_type = {}
+    for c in orig_constraints:
+        orig_values_by_type.setdefault(c['type'], []).append(c['value'])
+
+    recon_values_by_type = {}
+    for c in recon_constraints:
+        recon_values_by_type.setdefault(c['type'], []).append(c['value'])
+
+    for ctype in orig_values_by_type:
+        if ctype not in recon_values_by_type:
+            continue
+        orig_vals = sorted(orig_values_by_type[ctype])
+        recon_vals = sorted(recon_values_by_type[ctype])
+        for i, (ov, rv) in enumerate(zip(orig_vals, recon_vals)):
+            delta = abs(ov - rv)
+            if delta > value_tolerance:
+                value_mismatches.append((ctype, i, ov, rv, delta))
+
+    result['value_mismatches'] = value_mismatches
+
+    return result
+
+
+# ============================================================
+# Dataset Verification (matches verify_primitives_freecad.py style)
+# ============================================================
+
+def verify_constraints_freecad(directory: str = 'gt_completed_prim5_py', limit: int = 10000):
+    """
+    Load real .py sketch scripts, do FC -> SG -> FC roundtrip,
+    and verify constraint preservation.
+    """
+    print(f"Scanning directory: {directory}...")
+    py_files = sorted(glob.glob(os.path.join(directory, "*.py")))
+
+    if not py_files:
+        print("No .py files found.")
+        return False
+
+    num_files = min(len(py_files), limit)
+    print(f"Found {len(py_files)} files. Testing {num_files}...")
+
+    context = SketchContext()
+    converter = SketchFreecadConverter(context)
+
+    passed_files = 0
+    failed_files = 0
+    error_files = 0
+    total_constraints_orig = 0
+    total_constraints_recon = 0
+
+    # Track per-type statistics
+    from collections import Counter
+    type_pass_counts = Counter()
+    type_fail_counts = Counter()
+    type_missing_counts = Counter()
+
+    for i in range(num_files):
+        py_file = py_files[i]
+        basename = os.path.basename(py_file)
+
+        doc_orig = None
+        doc_recon = None
+
+        try:
+            # ---------------------------------------------------------------
+            # 1. Load Original Script -> FreeCAD
+            # ---------------------------------------------------------------
+            initial_docs = set(FreeCAD.listDocuments().keys())
+
+            exec_globals = {
+                "FreeCAD": FreeCAD,
+                "Part": Part,
+                "Sketcher": Sketcher,
+                "Vector": FreeCAD.Vector,
+            }
+            with open(py_file, 'r') as f:
+                script_content = f.read()
+            exec(script_content, exec_globals)
+
+            current_docs = set(FreeCAD.listDocuments().keys())
+            new_docs = list(current_docs - initial_docs)
+
+            if not new_docs:
+                if FreeCAD.ActiveDocument:
+                    doc_orig = FreeCAD.ActiveDocument
+                else:
+                    error_files += 1
+                    continue
+            else:
+                doc_orig = FreeCAD.getDocument(new_docs[0])
+
+            sketches = doc_orig.findObjects(Type="Sketcher::SketchObject")
+            if not sketches:
+                error_files += 1
+                FreeCAD.closeDocument(doc_orig.Name)
+                continue
+
+            fc_sketch_orig = sketches[0]
+            orig_constraints = extract_constraints_from_sketch(fc_sketch_orig)
+            total_constraints_orig += len(orig_constraints)
+
+            # ---------------------------------------------------------------
+            # 2. FC -> SketchGraphs
+            # ---------------------------------------------------------------
+            sg_sketch = converter.from_freecad(fc_sketch_orig)
+
+            # ---------------------------------------------------------------
+            # 3. SketchGraphs -> FC
+            # ---------------------------------------------------------------
+            doc_recon, fc_sketch_recon = converter.to_freecad(sg_sketch, doc_name=f"ReconDoc_{i}")
+            recon_constraints = extract_constraints_from_sketch(fc_sketch_recon)
+            total_constraints_recon += len(recon_constraints)
+
+            # ---------------------------------------------------------------
+            # 4. Compare
+            # ---------------------------------------------------------------
+            cmp = compare_constraints(orig_constraints, recon_constraints)
+
+            # Count per-type pass/fail
+            for ctype, count in cmp['orig_types'].items():
+                recon_count = cmp['recon_types'].get(ctype, 0)
+                if recon_count >= count:
+                    type_pass_counts[ctype] += count
+                else:
+                    type_pass_counts[ctype] += recon_count
+                    type_fail_counts[ctype] += count - recon_count
+
+            for ctype in cmp['missing_types']:
+                type_missing_counts[ctype] += cmp['orig_types'][ctype]
+
+            if cmp['type_count_match'] and not cmp['value_mismatches']:
+                passed_files += 1
+            else:
+                failed_files += 1
+                if i < 20 or failed_files <= 10:  # Show first few failures
+                    print(f"[{i}] {basename}: FAIL")
+                    if not cmp['count_match']:
+                        print(f"  Count: {cmp['orig_count']} -> {cmp['recon_count']}")
+                    if not cmp['type_count_match']:
+                        print(f"  Orig types: {cmp['orig_types']}")
+                        print(f"  Recon types: {cmp['recon_types']}")
+                    if cmp['missing_types']:
+                        print(f"  Missing: {cmp['missing_types']}")
+                    if cmp['extra_types']:
+                        print(f"  Extra: {cmp['extra_types']}")
+                    if cmp['value_mismatches']:
+                        for vm in cmp['value_mismatches'][:5]:
+                            print(f"  Value mismatch: {vm[0]}[{vm[1]}] {vm[2]:.6f} -> {vm[3]:.6f} (Δ={vm[4]:.6f})")
+
+            # Cleanup
+            FreeCAD.closeDocument(doc_orig.Name)
+            doc_orig = None
+            FreeCAD.closeDocument(doc_recon.Name)
+            doc_recon = None
+
+        except Exception as e:
+            error_files += 1
+            if error_files <= 10:
+                print(f"[{i}] {basename}: ERROR — {e}")
+            try:
+                if doc_orig and doc_orig.Name in FreeCAD.listDocuments():
+                    FreeCAD.closeDocument(doc_orig.Name)
+                if doc_recon and doc_recon.Name in FreeCAD.listDocuments():
+                    FreeCAD.closeDocument(doc_recon.Name)
+            except:
+                pass
+
+    # ---------------------------------------------------------------
+    # Summary
+    # ---------------------------------------------------------------
+    print(f"\n{'='*60}")
+    print(f"Constraint Roundtrip Verification Complete")
+    print(f"{'='*60}")
+    print(f"Files Processed: {num_files}")
+    print(f"  Passed:  {passed_files}")
+    print(f"  Failed:  {failed_files}")
+    print(f"  Errors:  {error_files}")
+    pass_rate = (passed_files / max(num_files, 1)) * 100
+    print(f"  Pass Rate: {pass_rate:.1f}%")
+    print(f"\nTotal Constraints: {total_constraints_orig} orig, {total_constraints_recon} recon")
+
+    if type_pass_counts or type_fail_counts or type_missing_counts:
+        print(f"\nPer-Type Breakdown:")
+        all_types = sorted(set(type_pass_counts) | set(type_fail_counts) | set(type_missing_counts))
+        for ctype in all_types:
+            p = type_pass_counts.get(ctype, 0)
+            f = type_fail_counts.get(ctype, 0)
+            m = type_missing_counts.get(ctype, 0)
+            total = p + f + m
+            rate = (p / total * 100) if total > 0 else 0
+            status = "✓" if f == 0 and m == 0 else "✗"
+            print(f"  {status} {ctype:20s}: {p:4d}/{total:4d} ({rate:5.1f}%)")
+
+    return failed_files == 0 and error_files == 0
+
+
+# ============================================================
+# Unit Tests (pytest)
+# ============================================================
 
 class TestConstraintRoundTrip(unittest.TestCase):
     def setUp(self):
@@ -44,7 +310,7 @@ class TestConstraintRoundTrip(unittest.TestCase):
 
     def tearDown(self):
         # Clean up documents
-        for name in FreeCAD.listDocuments():
+        for name in list(FreeCAD.listDocuments().keys()):
             FreeCAD.closeDocument(name)
 
     def _roundtrip_check(self, setup_func):
@@ -57,20 +323,26 @@ class TestConstraintRoundTrip(unittest.TestCase):
         setup_func(sketch_orig)
         doc.recompute()
 
+        converter = SketchFreecadConverter(self.context)
+
         # 1. FC -> SG
-        sg_sketch = freecad_to_sketchgraphs(sketch_orig, self.tokenizer)
+        sg_sketch = converter.from_freecad(sketch_orig)
 
         # 2. SG -> FC
-        doc_recon, sketch_recon = sketchgraphs_to_freecad(sg_sketch, self.tokenizer, "ReconDoc")
+        doc_recon, sketch_recon = converter.to_freecad(sg_sketch, doc_name="ReconDoc")
 
-        # 3. Verify Constraints Count
-        self.assertEqual(len(sketch_orig.Constraints), len(sketch_recon.Constraints),
-                         f"Constraint count mismatch: Orig={len(sketch_orig.Constraints)}, Recon={len(sketch_recon.Constraints)}")
+        # 3. Compare
+        orig_constraints = extract_constraints_from_sketch(sketch_orig)
+        recon_constraints = extract_constraints_from_sketch(sketch_recon)
 
-        # 4. Verify Constraint Types (Basic check)
-        orig_types = sorted([c.Type for c in sketch_orig.Constraints])
-        recon_types = sorted([c.Type for c in sketch_recon.Constraints])
-        self.assertEqual(orig_types, recon_types, f"Constraint types mismatch: {orig_types} vs {recon_types}")
+        cmp = compare_constraints(orig_constraints, recon_constraints)
+
+        self.assertTrue(cmp['count_match'],
+                        f"Constraint count mismatch: {cmp['orig_count']} -> {cmp['recon_count']}")
+        self.assertTrue(cmp['type_match'],
+                        f"Constraint types mismatch: {cmp['orig_types']} vs {cmp['recon_types']}")
+        self.assertEqual(len(cmp['value_mismatches']), 0,
+                         f"Value mismatches: {cmp['value_mismatches']}")
 
         return sketch_orig, sketch_recon
 
@@ -129,20 +401,16 @@ class TestConstraintRoundTrip(unittest.TestCase):
 
     def test_midpoint_symmetric(self):
         def setup(sk):
-            # Midpoint (Symmetric)
-            sk.addGeometry(Part.LineSegment(FreeCAD.Vector(0,0,0), FreeCAD.Vector(10,0,0)), False) # 0
-            sk.addGeometry(Part.Point(FreeCAD.Vector(5,0,0))) # 1
-            # Symmetric(P_start, P_end, P_mid) -> Midpoint of Line
+            sk.addGeometry(Part.LineSegment(FreeCAD.Vector(0,0,0), FreeCAD.Vector(10,0,0)), False)
+            sk.addGeometry(Part.Point(FreeCAD.Vector(5,0,0)))
             sk.addConstraint(Sketcher.Constraint('Symmetric', 0, 1, 0, 2, 1, 1))
         self._roundtrip_check(setup)
 
     def test_mirror_symmetric(self):
         def setup(sk):
-            # Mirror (Symmetric with Axis)
-            sk.addGeometry(Part.Point(FreeCAD.Vector(0, 10, 0))) # 0
-            sk.addGeometry(Part.Point(FreeCAD.Vector(0, -10, 0))) # 1
-            sk.addGeometry(Part.LineSegment(FreeCAD.Vector(-5, 0, 0), FreeCAD.Vector(5, 0, 0))) # 2 (Axis)
-            # Symmetric(P1, P2, Axis)
+            sk.addGeometry(Part.Point(FreeCAD.Vector(0, 10, 0)))
+            sk.addGeometry(Part.Point(FreeCAD.Vector(0, -10, 0)))
+            sk.addGeometry(Part.LineSegment(FreeCAD.Vector(-5, 0, 0), FreeCAD.Vector(5, 0, 0)))
             sk.addConstraint(Sketcher.Constraint('Symmetric', 0, 1, 1, 1, 2))
         self._roundtrip_check(setup)
 
@@ -150,25 +418,22 @@ class TestConstraintRoundTrip(unittest.TestCase):
         def setup(sk):
             sk.addGeometry(Part.Circle(FreeCAD.Vector(0,0,0), FreeCAD.Vector(0,0,1), 10), False)
             sk.addGeometry(Part.Circle(FreeCAD.Vector(0,0,0), FreeCAD.Vector(0,0,1), 5), False)
-            # Try specific Concentric if avail, else Coincident on centers
-            try:
-                # Concentric(Circle1, Circle2)
-                # Note: FreeCAD API for Concentric might vary.
-                # If this fails, we catch it.
-                # However, if it fails, we won't have a constraint to verifying roundtrip against!
-                # So we should fallback to something we CAN create.
-                # If FC supports Concentric type, this should work.
-                sk.addConstraint(Sketcher.Constraint('Concentric', 0, 1))
-            except Exception as e:
-                print(f"Skipping Concentric test setup due to error: {e}")
-                # Fallback: Coincident on centers (which is effectively Concentric)
-                # But 'Concentric' handler checks for Type='Concentric'.
-                # So if we create 'Coincident', it will be roundtripped as 'Coincident' (if Coincident on centers maps to 'Coincident').
-                # If we want to test 'Concentric' handler, we need 'Concentric' type constraint.
-                pass
-
+            sk.addConstraint(Sketcher.Constraint('Coincident', 0, 3, 1, 3))
         self._roundtrip_check(setup)
 
 
 if __name__ == '__main__':
-    unittest.main()
+    import argparse
+    parser = argparse.ArgumentParser(description='Constraint roundtrip verification')
+    parser.add_argument('--dir', default='gt_completed_prim5_py', help='Directory with .py sketch scripts')
+    parser.add_argument('--limit', type=int, default=10000, help='Max files to test')
+    parser.add_argument('--unit', action='store_true', help='Run unit tests only')
+    args = parser.parse_args()
+
+    if args.unit:
+        # Run unit tests via unittest
+        sys.argv = sys.argv[:1]  # Strip custom args so unittest doesn't complain
+        unittest.main()
+    else:
+        success = verify_constraints_freecad(directory=args.dir, limit=args.limit)
+        sys.exit(0 if success else 1)

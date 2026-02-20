@@ -24,48 +24,51 @@ class VerticalHandler(ConstraintHandler):
         refs = tuple(tokenpos_to_primitive[idx] for idx in ref_indices)
         return self.create_constraint(self.name, refs)
 
-    def to_freecad(self, constraint: datalib.Constraint, sketch_obj, entity_map: dict[str, int]):
-        from .utils import resolve_ref
-        try:
-            import FreeCAD
-            import Sketcher
-        except ImportError:
-            pass
+    def to_freecad(self, constraint: datalib.Constraint, primitive_geoID: dict[str, tuple[int, int]]) -> list[tuple[str, list, float | None]]:
+        refs = self._get_ref_strings(constraint)
 
-        refs = []
-        for p in constraint.parameters:
-            if hasattr(p, 'value'):
-                 refs.append(p.value)
-
-        # Vertical/Horizontal can have 1 ref (Line) or 2 refs (Points)
         if len(refs) == 1:
-            res1 = resolve_ref(refs[0], entity_map, sketch_obj)
+            # Line constraint: Vertical(e1)
+            res1 = primitive_geoID.get(refs[0])
             if res1:
-                sketch_obj.addConstraint(Sketcher.Constraint('Vertical', res1[0]))
+                return [('Vertical', [res1[0]], None)]
         elif len(refs) == 2:
-            res1 = resolve_ref(refs[0], entity_map, sketch_obj)
-            res2 = resolve_ref(refs[1], entity_map, sketch_obj)
+            # Two-point constraint: Vertical(e1, s1, e2, s2)
+            res1 = primitive_geoID.get(refs[0])
+            res2 = primitive_geoID.get(refs[1])
             if res1 and res2:
-                sketch_obj.addConstraint(Sketcher.Constraint('Vertical', res1[0], res1[1], res2[0], res2[1]))
+                g1, p1 = res1
+                g2, p2 = res2
+                return [('Vertical', [g1, p1, g2, p2], None)]
+        else:
+            raise ValueError(f"Invalid number of refs for {self.name}: {len(refs)}")
 
-    def from_freecad(self, fc_constraint, entity_map: dict[int, str]) -> datalib.Constraint:
-        from .utils import make_ref_str
-        if fc_constraint.Type != 'Vertical': return None
+    def from_freecad(self, fc_constraint, geoID_to_primitive: dict[tuple[int, int], str]) -> datalib.Constraint | None:
+        if fc_constraint.Type != 'Vertical':
+            raise ValueError(f"Invalid constraint type for {self.name}: {fc_constraint.Type}")
 
-        refs = []
-        # Check args count via First/Second presence
-        # 1-arg: First
-        # 2-arg: First, Second
-        g1, p1 = fc_constraint.First, fc_constraint.FirstPos
-        r1 = make_ref_str(g1, p1, entity_map)
-        if r1: refs.append(r1)
+        refs = ()
+        g1 = fc_constraint.First
+        p1 = fc_constraint.FirstPos
 
-        if fc_constraint.Second != -1: # Second exists
-            g2, p2 = fc_constraint.Second, fc_constraint.SecondPos
-            r2 = make_ref_str(g2, p2, entity_map)
-            if r2: refs.append(r2)
+        g2 = fc_constraint.Second
+        p2 = fc_constraint.SecondPos
 
-        return self.create_constraint('Vertical', tuple(refs))
+        if g2 >= 0 and p1 > 0 and p2 > 0:
+            # Two-point form
+            r1 = geoID_to_primitive.get((g1, p1))
+            r2 = geoID_to_primitive.get((g2, p2))
+            if r1 and r2:
+                refs = (r1, r2)
+        else:
+            # Line form
+            r1 = geoID_to_primitive.get((g1, 0))
+            if r1:
+                refs = (r1,)
 
-    def validate_refs(self, ref_tokens: tuple[int, ...]) -> bool:
-        return len(ref_tokens) >= 1
+        assert self.validate_refs(refs)
+
+        return self.create_constraint(self.name, tuple(refs))
+
+    def validate_refs(self, refs: tuple[int | str, ...]) -> bool:
+        return len(refs) == 1 or len(refs) == 2
