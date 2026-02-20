@@ -191,13 +191,13 @@ class SketchFreecadConverter:
 
         Uses multi-handler dispatch for ambiguous FC types:
         - 'Coincident' -> try Concentric (center-center), then Coincident
-        - 'Symmetric'  -> try Midpoint (same-line start/end), then Symmetric
+        - 'Symmetric'  -> try Midpoint (same-line start/end), then Mirror
         - 'PointOnObject' -> Coincident handler
         """
         # Build handler candidate lists for ambiguous FC types
         _HANDLER_ORDER: dict[str, list[str]] = {
             'Coincident': ['Concentric', 'Coincident'],
-            'Symmetric': ['Midpoint', 'Symmetric'],
+            'Symmetric': ['Midpoint', 'Mirror'],
             'PointOnObject': ['Coincident'],
         }
 

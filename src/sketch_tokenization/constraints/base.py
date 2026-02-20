@@ -104,7 +104,6 @@ class ConstraintHandler(ABC):
     _SG_TYPE_MAP = {
         'DistanceX': 'Distance',
         'DistanceY': 'Distance',
-        'Symmetric': 'Mirror',
     }
 
     def create_constraint(self, constraint_type_name: str, refs: tuple[str, ...], value: float | None = None) -> datalib.Constraint:
