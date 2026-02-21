@@ -9,10 +9,10 @@ import numpy as np
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import sketchgraphs.data as datalib
-from src.sketch_tokenization.constants import PrimitiveToken
-from src.sketch_tokenization.context import SketchContext
-from src.sketch_tokenization.sketch_freecad_converter import SketchFreecadConverter
-from src.sketch_tokenization.freecad_utils import ensure_freecad_imported
+from src.sketch_handlers.constants import PrimitiveToken
+from src.sketch_handlers.context import SketchContext
+from src.sketch_handlers.sketch_freecad_converter import SketchFreecadConverter
+from src.sketch_handlers.freecad_utils import ensure_freecad_imported
 
 FreeCAD, Part, Sketcher = ensure_freecad_imported()
 

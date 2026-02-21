@@ -5,12 +5,12 @@ import numpy as np
 # Add project root to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.sketch_tokenization.sketch_utils import normalize_sketch
-from src.sketch_tokenization.context import SketchContext
-from src.sketch_tokenization.sketch_tokenizer import SketchTokenizer
+import sketchgraphs.data as datalib
+from src.sketch_handlers.sketch_utils import normalize_sketch
+from src.sketch_handlers.context import SketchContext
+from src.sketch_handlers.sketch_tokenizer import SketchTokenizer
 from sketchgraphs.data import flat_array
 from sketchgraphs.data.sequence import sketch_from_sequence, NodeOp, EdgeOp
-import sketchgraphs.data as datalib
 
 
 def check_entity_match(ent1: datalib.Entity, ent2: datalib.Entity) -> list[tuple[str, float]]:

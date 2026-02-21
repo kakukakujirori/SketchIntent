@@ -3,15 +3,15 @@
 This script processes the given sketches to render sketches.
 
 .. code-block:: bash
-    
-    # --- pralexa 
+
+    # --- pralexa
     python -m img2cad.pipeline.prerender_images sequence_file=/home/wenda/gencad/code/data/sg_filtered_unique.npy
 
-    # --- wash 
+    # --- wash
     python -m img2cad.pipeline.prerender_images sequence_file=/n/fs/sketchgraphs/unique/sg_filtered_unique.npy
 
-To render the sketches by deploying a slurm array job, provide the current 
-array task id and the task count, see `img2cad.pipeline.render_images.sh` for details. 
+To render the sketches by deploying a slurm array job, provide the current
+array task id and the task count, see `img2cad.pipeline.render_images.sh` for details.
 
 To obtain filtered sequences, see `img2cad.pipeline.filter_sequences`.
 
@@ -24,7 +24,7 @@ import multiprocessing
 import os
 from copy import deepcopy
 
-from typing import List, Optional, Tuple 
+from typing import List, Optional, Tuple
 
 import hydra
 import numpy as np
@@ -89,10 +89,10 @@ def render_sketch(sketch: datalib.Sketch, ax=None, pad: float=0.1, size_pixels: 
     curr_lim = sketch_extent / 2
     new_lim = curr_lim + pad
 
-    if ax is None: 
+    if ax is None:
         fig.axes[0].set_xlim(-new_lim, new_lim)
         fig.axes[0].set_ylim(-new_lim, new_lim)
-    else: 
+    else:
         ax.set_xlim(-new_lim, new_lim)
         ax.set_ylim(-new_lim, new_lim)
 
@@ -103,9 +103,9 @@ def render_sketch(sketch: datalib.Sketch, ax=None, pad: float=0.1, size_pixels: 
             if getattr(ent, 'radius') == 0:
                 return None
 
-    if ax is None: 
+    if ax is None:
         fig.set_size_inches(1, 1)
-        fig.tight_layout() 
+        fig.tight_layout()
 
     if return_fig is True:
         return fig
@@ -202,7 +202,7 @@ class ImageRenderingConfiguration:
     """
     sequence_file: str = omegaconf.MISSING
     slurm_array_task_id: Optional[int] = None
-    slurm_array_task_count: Optional[int] = None 
+    slurm_array_task_count: Optional[int] = None
     limit_sequences: Optional[int] = None
     output_file: str = 'images.npy'
     num_workers: Optional[int] = None
@@ -211,14 +211,14 @@ class ImageRenderingConfiguration:
 
 def get_shard_range(shard_id: int, n_sequences: int, n_shards: int) -> Tuple[int, int]:
     remainder = n_sequences % n_shards
-    shard_size = (n_sequences // n_shards) 
+    shard_size = (n_sequences // n_shards)
     shard_size_plus_one = shard_size + 1
 
-    if shard_id < remainder: 
+    if shard_id < remainder:
         i = shard_id * shard_size_plus_one
         j = i + shard_size_plus_one
-    else: 
-        i = remainder * shard_size_plus_one + (shard_id - remainder) * shard_size 
+    else:
+        i = remainder * shard_size_plus_one + (shard_id - remainder) * shard_size
         j = i + shard_size
     return (i, j)
 
@@ -228,17 +228,17 @@ def main(config: ImageRenderingConfiguration):
 
     sequence_array: flat_array.FlatSerializedArray = flat_array.load_dictionary_flat(sequence_path)['sequences']
     num_sequences = len(sequence_array)
-    shard_id = config.slurm_array_task_id 
+    shard_id = config.slurm_array_task_id
     num_shards = config.slurm_array_task_count
 
     if config.limit_sequences is not None:
         num_sequences = min(num_sequences, config.limit_sequences)
         image_indices = range(num_sequences)
-    elif config.slurm_array_task_id is not None: 
+    elif config.slurm_array_task_id is not None:
         i, j = get_shard_range(shard_id, num_sequences, num_shards)
         image_indices = range(i, j)
         num_sequences = min(num_sequences, j-i)
-    else: 
+    else:
         image_indices = range(num_sequences)
 
     sequence_bytes = (sequence_array.get_raw_bytes(i) for i in image_indices)

@@ -1,0 +1,53 @@
+from typing import Any
+import numpy as np
+import sketchgraphs.data as datalib
+from .base import ConstraintHandler
+from src.sketch_handlers.constants import ConstraintToken
+from src.sketch_handlers.registry import CONSTRAINT_HANDLERS
+
+@CONSTRAINT_HANDLERS.register_module()
+class EqualHandler(ConstraintHandler):
+    @property
+    def token_id(self) -> int:
+        return ConstraintToken.Equal
+
+    @property
+    def name(self) -> str:
+        return "Equal"
+
+    def encode(self, constraint: datalib.Constraint, primitive_tokenpos: dict[str, int], entities: dict[str, datalib.Entity]) -> tuple[int, tuple[int, ...], np.ndarray, tuple[int, ...]]:
+        ref_tokens = self._get_sorted_ref_tokens(constraint, primitive_tokenpos, entities)
+        return self.token_id, ref_tokens, np.array([]), ()
+
+    def decode(self, ref_indices: tuple[int, ...], params: np.ndarray, tokenpos_to_primitive: dict[int, str]) -> datalib.Constraint:
+        refs = tuple(tokenpos_to_primitive[idx] for idx in ref_indices)
+        return self.create_constraint(self.name, refs)
+
+    def to_freecad(self, constraint: datalib.Constraint, primitive_geoID: dict[str, tuple[int, int]]) -> list[tuple[str, list, float | None]]:
+        refs = self._get_ref_strings(constraint)
+        if len(refs) != 2:
+            return []
+
+        res1 = primitive_geoID.get(refs[0])
+        res2 = primitive_geoID.get(refs[1])
+        if not res1 or not res2:
+            return []
+
+        # Equal(e1, e2) — edge-edge only
+        return [('Equal', [res1[0], res2[0]], None)]
+
+    def from_freecad(self, fc_constraint, geoID_to_primitive: dict[tuple[int, int], str]) -> datalib.Constraint | None:
+        if fc_constraint.Type != 'Equal':
+            raise ValueError(f"Invalid constraint type for {self.name}: {fc_constraint.Type}")
+
+        g1 = fc_constraint.First
+        g2 = fc_constraint.Second
+        r1 = geoID_to_primitive.get((g1, 0))
+        r2 = geoID_to_primitive.get((g2, 0))
+        if not r1 or not r2:
+            return None
+
+        return self.create_constraint(self.name, (r1, r2))
+
+    def validate_refs(self, refs: tuple[int | str, ...]) -> bool:
+        return len(refs) == 2

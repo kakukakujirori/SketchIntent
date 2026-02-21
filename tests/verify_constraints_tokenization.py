@@ -6,13 +6,14 @@ import sys
 # Add project root to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.sketch_tokenization.sketch_utils import normalize_sketch
-from src.sketch_tokenization.context import SketchContext
-from src.sketch_tokenization.sketch_tokenizer import SketchTokenizer
-from src.sketch_tokenization.constants import ConstraintToken
+import sketchgraphs.data as datalib
+from src.sketch_handlers.sketch_utils import normalize_sketch
+from src.sketch_handlers.context import SketchContext
+from src.sketch_handlers.sketch_tokenizer import SketchTokenizer
+from src.sketch_handlers.constants import ConstraintToken
 from sketchgraphs.data import flat_array
 from sketchgraphs.data.sequence import sketch_from_sequence
-import sketchgraphs.data as datalib
+
 
 UNSUPPORTED_TYPES = set()
 
