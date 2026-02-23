@@ -130,7 +130,5 @@ dmypy.json
 
 
 # Downloaded data
-data/
-models/
 outputs/
 vitruvion.sif
