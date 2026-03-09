@@ -5,6 +5,7 @@ import lightning as L
 
 from src.data.components.constraint_dataset import ConstraintDataset
 from src.data.components.primitive_noise import PrimitiveNoise
+from src.sketch_handlers.context import SketchContext
 
 
 class ConstraintDataModule(L.LightningDataModule):
@@ -13,12 +14,8 @@ class ConstraintDataModule(L.LightningDataModule):
         train_sequence_file: str,
         val_sequence_file: str,
         test_sequence_file: str,
-        max_token_length: int,
-        num_quantization_bins: int,
-        primitive_noise: PrimitiveNoise = PrimitiveNoise(std=0, max_diff=0),
-        align_constraint_token_length_to: int | None = None,
-        use_stop_padding: bool = False,
-        constraint_order: Literal["sort_by_ref_id", "random_shuffle", "original"] = "sort_by_ref_id",
+        context: SketchContext,
+        primitive_noise: PrimitiveNoise,
         batch_size: int = 32,
         num_workers: int = 0,
     ):
@@ -32,35 +29,23 @@ class ConstraintDataModule(L.LightningDataModule):
     def setup(self, stage: str | None = None) -> None:
         self._train_dataset = ConstraintDataset(
             self.hparams.train_sequence_file,
-            self.hparams.max_token_length,
-            self.hparams.num_quantization_bins,
+            self.hparams.context,
             self.hparams.primitive_noise,
-            self.hparams.align_constraint_token_length,
-            self.hparams.use_stop_padding,
-            self.hparams.constraint_order,
         )
 
         self._val_dataset = ConstraintDataset(
             self.hparams.val_sequence_file,
-            self.hparams.max_token_length,
-            self.hparams.num_quantization_bins,
+            self.hparams.context,
             self.hparams.primitive_noise,
-            self.hparams.align_constraint_token_length,
-            self.hparams.use_stop_padding,
-            self.hparams.constraint_order,
         )
 
         self._test_dataset = ConstraintDataset(
             self.hparams.test_sequence_file,
-            self.hparams.max_token_length,
-            self.hparams.num_quantization_bins,
+            self.hparams.context,
             self.hparams.primitive_noise,
-            self.hparams.align_constraint_token_length,
-            self.hparams.use_stop_padding,
-            self.hparams.constraint_order,
         )
 
-    def _make_dataloader(self, dataset: torch.utils.data.Dataset, shuffle: bool) -> torch.utils.data.DataLoader[ConstraintTokenInput]:
+    def _make_dataloader(self, dataset: torch.utils.data.Dataset, shuffle: bool) -> torch.utils.data.DataLoader[dict[str, torch.Tensor]]:
         return torch.utils.data.DataLoader(
             dataset,
             batch_size=self.hparams.batch_size,

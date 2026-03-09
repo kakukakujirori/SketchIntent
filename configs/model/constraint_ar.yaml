@@ -1,0 +1,23 @@
+_target_: src.models.constraint_ar_module.ConstraintARModule
+
+context: ${data.context}
+
+model:
+  _target_: src.models.components.constraint_ar_model.ConstraintARModel
+  num_bins: ${data.context.num_quantization_bins}
+  max_token_length: ${data.context.max_token_length}
+  embed_dim: 256
+  feedforward_dim: 384
+  num_heads: 8
+  num_layers: 12
+  dropout: 0.0
+
+optimizer:
+  _target_: torch.optim.AdamW
+  _partial_: true
+  lr: 1e-4
+
+scheduler:
+  _target_: torch.optim.lr_scheduler.OneCycleLR
+  max_lr: ${..optimizer.lr}
+  _partial_: true

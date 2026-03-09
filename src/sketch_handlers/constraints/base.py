@@ -158,14 +158,13 @@ class ConstraintHandler(ABC):
         Helper to parse, sort, and convert references to tokens.
         """
         refs = self._parse_references(constraint, primitive_tokenpos)
-        refs = list(set(refs))
 
         # Sort references by token position
         def get_ref_pos(r):
             key = f"{r[0]}.{r[1]}" if r[1] else r[0]
             return primitive_tokenpos.get(key, 0)
 
-        sorted_refs = sorted(list(set(refs)), key=get_ref_pos)
+        sorted_refs = sorted(refs, key=get_ref_pos)
 
         ref_tokens = []
         for eid, sub in sorted_refs:

@@ -1,15 +1,21 @@
 _target_: src.data.constraint_datamodule.ConstraintDataModule
-sequence_path: ${paths.data}/constraint/train.jsonl
-max_token_length: 256
-num_quantization_bins: 1024
-align_constraint_token_length_to: 4
-use_stop_padding: false
-constraint_order: random_shuffle
+
+train_sequence_file: data_processed_ori/sg_filtered_unique.npy
+val_sequence_file: data_processed_ori/sg_filtered_unique.npy
+test_sequence_file: data_processed_ori/sg_filtered_unique.npy
+
+context:
+  _target_: src.sketch_handlers.context.SketchContext
+  max_token_length: 256
+  num_quantization_bins: 64
+  align_constraint_token_length_to: 4
+  use_stop_padding: False
+  constraint_order: random_shuffle
 
 primitive_noise:
   _target_: src.data.components.primitive_noise.PrimitiveNoise
   std: 0.15
-  max_difference: 0.15
+  max_diff: 0.15
 
 batch_size: 256
 num_workers: 8

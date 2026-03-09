@@ -211,8 +211,21 @@ class SketchTokenizer:
         """
         Tokenize a sketch into primitives and constraints.
         """
-        prim_tokens, primitive_tokenpos = self.tokenize_primitives(sketch)
-        constr_tokens = self.tokenize_constraints(sketch, primitive_tokenpos)
+        try:
+            prim_tokens, primitive_tokenpos = self.tokenize_primitives(sketch)
+            constr_tokens = self.tokenize_constraints(sketch, primitive_tokenpos)
+        except ValueError as e:
+            print(f"=== ERROR: Sketch Tokenization FAILED ===")
+            print(f"  {sketch}")
+            print(f"  Entities:")
+            for eid, ent in sketch.entities.items():
+                print(f"    {ent}")
+            print(f"  Constraints:")
+            for cid, constr in sketch.constraints.items():
+                params_str = ", ".join(f"{type(p).__name__}({p.parameterId}={getattr(p, 'value', '?')})" for p in constr.parameters)
+                print(f"    {constr.constraint_type.name} [{params_str}]")
+            print(f"  >>> FAILED: {e}")
+            raise e
         return prim_tokens | constr_tokens
 
     def detokenize_primitives(self, val_tokens: np.ndarray) -> tuple[dict[str, datalib.Entity], dict[int, str]]:

@@ -8,7 +8,7 @@ import numpy as np
 import sketchgraphs.data as datalib
 from sketchgraphs.data import EntityType
 from sketchgraphs.data import Arc, Circle, Line, Point
-
+from sketchgraphs.data._constraint import LocalReferenceParameter
 
 
 # Positional parameters
@@ -29,7 +29,7 @@ SCALE_PARAMS = {
 }
 
 
-from .registry import PRIMITIVE_HANDLERS
+from src.sketch_handlers.registry import PRIMITIVE_HANDLERS
 
 def _get_entity_bbox(ent):
     """Compute the bounding box for the given entity.
@@ -163,3 +163,61 @@ def normalize_sketch(sketch: datalib.Sketch) -> float:
     center_sketch(sketch)
     scale_factor = rescale_sketch(sketch)
     return scale_factor
+
+
+def cleanse_sketch(sketch: datalib.Sketch) -> int:
+    """Remove or fix degenerate constraints from the sketch in-place.
+
+    Currently handles:
+    - Duplicate references: deduplicate LocalReferenceParameters that share
+      the same value (e.g., Coincident(A, A, B, B) → Coincident(A, B)).
+    - Self-referential: remove constraints where all LocalReferenceParameters
+      point to the same entity/subnode after dedup (e.g., Coincident(A, A) → removed).
+
+    Parameters
+    ----------
+    sketch : datalib.Sketch
+        The sketch to cleanse. Modified in-place.
+
+    Returns
+    -------
+    int
+        Number of constraints modified or removed.
+    """
+    keys_to_remove = []
+    n_modified = 0
+
+    for cid, constr in sketch.constraints.items():
+        local_refs = [
+            p for p in constr.parameters
+            if isinstance(p, LocalReferenceParameter)
+        ]
+
+        # Skip constraints with 0 or 1 local ref (nothing to check)
+        if len(local_refs) <= 1:
+            continue
+
+        # Deduplicate LocalReferenceParameters by value
+        seen_values = set()
+        deduped_params = []
+        for p in constr.parameters:
+            if isinstance(p, LocalReferenceParameter):
+                if p.value in seen_values:
+                    continue  # skip duplicate
+                seen_values.add(p.value)
+            deduped_params.append(p)
+
+        # After dedup: if only 1 unique local ref remains, it's self-referential
+        if len(seen_values) <= 1:
+            keys_to_remove.append(cid)
+            continue
+
+        # If dedup changed anything, update the constraint
+        if len(deduped_params) < len(constr.parameters):
+            sketch.constraints[cid] = constr._replace(parameters=deduped_params)
+            n_modified += 1
+
+    for cid in keys_to_remove:
+        del sketch.constraints[cid]
+
+    return len(keys_to_remove) + n_modified
