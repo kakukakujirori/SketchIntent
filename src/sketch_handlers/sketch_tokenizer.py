@@ -286,62 +286,116 @@ class SketchTokenizer:
 
         return {e.entityId: e for e in entities}, tokenpos_to_primitive
 
-    def detokenize_constraints(self, val_tokens: np.ndarray, tokenpos_to_primitive: dict[int, str]) -> dict[str, datalib.Constraint]:
+    def parse_constraint_tokens(self, val_tokens: np.ndarray) -> list[tuple[int, tuple[int, ...]]]:
+        """Parse constraint token sequence into lightweight (type_id, ref_positions) tuples.
+
+        Handles both variable-length and fixed-block modes based on
+        ``self.align_constraint_token_length_to``. The block mode is more robust
+        to noisy/corrupted model output since it self-corrects at each block
+        boundary.
+
+        Args:
+            val_tokens: 1-D array of constraint value tokens (may start with
+                Start token, may end with Stop/Pad).
+
+        Returns:
+            List of ``(constraint_type_token_id, (sorted_ref_positions...))``.
         """
-        Detokenize constraints using the map from primitives.
+        val_offset = CONSTRAINT_VAL_OFFSET
+        tokens = val_tokens.tolist() if hasattr(val_tokens, 'tolist') else list(val_tokens)
+
+        # Skip Start token
+        idx = 1 if tokens and tokens[0] == SpecialToken.Start else 0
+        tokens = tokens[idx:]
+
+        parsed: list[tuple[int, tuple[int, ...]]] = []
+
+        if self.align_constraint_token_length_to is None or self.align_constraint_token_length_to <= 0:
+            # --- Variable-length mode ---
+            current_type = None
+            current_refs: list[int] = []
+
+            for tok in tokens:
+                tok = int(tok)
+
+                if tok == SpecialToken.Pad:
+                    continue
+                if tok == SpecialToken.Stop:
+                    break
+                if tok == ConstraintToken.InnerPad:
+                    continue
+
+                if tok < val_offset:
+                    # This is a type token (or other special) — save previous
+                    if current_type is not None:
+                        parsed.append((current_type, tuple(sorted(current_refs))))
+                    current_type = tok
+                    current_refs = []
+                else:
+                    # Reference token
+                    current_refs.append(tok - val_offset)
+
+            # Don't forget the last constraint
+            if current_type is not None:
+                parsed.append((current_type, tuple(sorted(current_refs))))
+
+        else:
+            # --- Fixed block mode ---
+            block_size = self.align_constraint_token_length_to
+            block_idx = 0
+
+            while block_idx + block_size <= len(tokens):
+                block = tokens[block_idx:block_idx + block_size]
+                block_idx += block_size
+
+                type_tok = int(block[0])
+
+                # Skip invalid blocks (Pad, Stop, Mask, InnerPad, or non-type token)
+                if type_tok in (SpecialToken.Pad, SpecialToken.Stop,
+                                SpecialToken.Mask, ConstraintToken.InnerPad):
+                    continue
+                if type_tok >= val_offset:
+                    continue
+
+                # Collect valid ref tokens (strip InnerPad from tail, then validate)
+                ref_block = list(block[1:])
+                while ref_block and int(ref_block[-1]) == ConstraintToken.InnerPad:
+                    ref_block.pop()
+
+                # All remaining tokens must be valid ref tokens (>= val_offset)
+                if not all(int(b) >= val_offset for b in ref_block):
+                    continue
+
+                refs = tuple(sorted(int(b) - val_offset for b in ref_block))
+                parsed.append((type_tok, refs))
+
+        return parsed
+
+    def detokenize_constraints(self, val_tokens: np.ndarray, tokenpos_to_primitive: dict[int, str]) -> dict[str, datalib.Constraint]:
+        """Detokenize constraints using the map from primitives.
+
+        Uses :meth:`parse_constraint_tokens` for robust token parsing, then
+        delegates to each constraint handler's ``decode`` method.
         """
         constraints = {}
-        val_offset = CONSTRAINT_VAL_OFFSET
-        num_bins = self.context.num_quantization_bins
+        parsed = self.parse_constraint_tokens(val_tokens)
 
-        # Skip Start
-        idx = 1 if val_tokens[0] == SpecialToken.Start else 0
-
-        while idx < len(val_tokens):
-            tid = val_tokens[idx]
-            if tid == SpecialToken.Stop or tid == SpecialToken.Pad:
-                break
-
-            # Check if tid is a known constraint type
-            c_name = ConstraintToken(tid).name
+        for type_id, ref_positions in parsed:
+            # Look up handler by constraint type name
+            try:
+                c_name = ConstraintToken(type_id).name
+            except ValueError:
+                continue
             handler = self.context.get_constraint_handler(c_name)
             if not handler:
-                raise ValueError(f"Invalid token id: {tid} ({c_name})")
-
-            ent_start_pos = idx + 0
-            ent_end_pos = idx + 1  # NOTE: Updated below
-
-            # Collect tokens for this constraint
-            tokens_for_this = []
-            while ent_end_pos < len(val_tokens):
-                next_t = val_tokens[ent_end_pos]
-                if next_t == ConstraintToken.InnerPad:  # NOTE: InnerPad < val_offset, so we need a special care
-                    ent_end_pos += 1
-                    continue
-                if next_t < val_offset:  # NOTE: It includes SpecialToken.Stop and SpecialToken.Pad
-                    break
-                tokens_for_this.append(next_t)
-                ent_end_pos += 1
-
-            # Decode References (Remove val_offset)
-            ref_indices = []
-            for t in tokens_for_this:
-                if t == ConstraintToken.InnerPad: continue
-                ref_pos = t - val_offset
-                if ref_pos >= 0:
-                    ref_indices.append(ref_pos)
+                continue
 
             # Pass empty array for params as they are not tokenized
-            constr = handler.decode(tuple(ref_indices), np.array([]), tokenpos_to_primitive)
+            constr = handler.decode(ref_positions, np.array([]), tokenpos_to_primitive)
             if constr:
-                # Ensure unique identifier to avoid collisions in dict
-                # handler.decode usually returns generic identifier like "Coincident"
                 unique_id = f"c_{len(constraints)}"
                 constr = constr._replace(identifier=unique_id)
                 constraints[unique_id] = constr
-
-            # Increment
-            idx = ent_end_pos
 
         return constraints
 

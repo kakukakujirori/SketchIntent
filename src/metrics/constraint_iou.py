@@ -1,8 +1,9 @@
 import torch
+import numpy as np
 import torchmetrics
 
-from src.sketch_handlers.constants import ConstraintToken
 from src.sketch_handlers.context import SketchContext
+from src.sketch_handlers.sketch_tokenizer import SketchTokenizer
 
 
 class ConstraintIoU(torchmetrics.Metric):
@@ -19,8 +20,8 @@ class ConstraintIoU(torchmetrics.Metric):
     def __init__(self, context: SketchContext, prefix_len: int = 0):
         super().__init__()
         self.context = context
-        self.block_size = context.align_constraint_token_length_to
         self.prefix_len = prefix_len
+        self.tokenizer = SketchTokenizer(context)
         self.add_state("total_intersection", default=torch.tensor(0.0), dist_reduce_fx="sum")
         self.add_state("total_pred", default=torch.tensor(0.0), dist_reduce_fx="sum")
         self.add_state("total_target", default=torch.tensor(0.0), dist_reduce_fx="sum")
@@ -64,8 +65,8 @@ class ConstraintIoU(torchmetrics.Metric):
     def _tokens_to_constraint_set(self, tokens: torch.Tensor) -> set:
         """Convert token sequence to set of constraint tuples.
 
-        If self.block_size = None, detects constraint boundaries by looking for constraint type tokens
-        (Coincident through Vertical), rather than assuming fixed block sizes.
+        Delegates to :meth:`SketchTokenizer.parse_constraint_tokens` for
+        parsing, then wraps the result as a set for IoU computation.
 
         Args:
             tokens: [L] token sequence (single example)
@@ -75,66 +76,7 @@ class ConstraintIoU(torchmetrics.Metric):
         """
         if len(tokens.shape) != 1:
             raise ValueError(f"Expected 1D tensor, got {tokens.shape}")
-        tokens = tokens.cpu().numpy().tolist()
-        constraints = set()
 
-        if self.block_size is None:
-            current_type = None
-            current_refs = []
-
-            for tok in tokens:
-                tok = int(tok)
-
-                if tok == ConstraintToken.Pad:
-                    continue
-                if tok == ConstraintToken.Mask:
-                    raise ValueError(f"Mask token found in the evaluation token.")
-                if tok == ConstraintToken.Stop:
-                    break
-                if tok == ConstraintToken.InnerPad:
-                    continue
-
-                if tok < len(ConstraintToken):
-                    assert tok != ConstraintToken.InnerPad
-                    # Save previous constraint if exists
-                    if current_type is not None:
-                        constraint_tuple = (current_type, tuple(sorted(current_refs)))
-                        constraints.add(constraint_tuple)
-                    # Start new constraint
-                    current_type = tok
-                    current_refs = []
-                else:
-                    # This is a reference token
-                    ref_idx = tok - len(ConstraintToken)
-                    current_refs.append(ref_idx)
-
-            # Don't forget the last constraint
-            if current_type is not None:
-                constraint_tuple = (current_type, tuple(sorted(current_refs)))
-                constraints.add(constraint_tuple)
-
-        else:
-            assert self.block_size > 0
-
-            idx = self.prefix_len
-            while idx < len(tokens):
-                block = tokens[idx:idx+self.block_size]
-                idx += self.block_size
-
-                # skip invalid constraints
-                if len(block) < self.block_size:
-                    break
-                if block[0] in [ConstraintToken.Pad, ConstraintToken.Stop, ConstraintToken.Mask, ConstraintToken.InnerPad]:
-                    continue
-                if block[0] >= len(ConstraintToken):
-                    continue
-                while block[-1] in [ConstraintToken.InnerPad]:
-                    block = block[:-1]
-                if not all(b >= len(ConstraintToken) for b in block[1:]):
-                    continue
-                # if len(block[1:]) not in CONSTRAINT_ACCEPTABLE_REF_COUNTS[ConstraintToken(block[0])]:
-                #     continue
-                block = block[:1] + sorted(block[1:])
-                constraints.add(tuple(block))
-
-        return constraints
+        val_tokens = tokens[self.prefix_len:].cpu().numpy()
+        parsed = self.tokenizer.parse_constraint_tokens(val_tokens)
+        return set(parsed)
