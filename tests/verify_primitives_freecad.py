@@ -236,7 +236,7 @@ def compute_centroid_aligned_deviation(
     return max_coord_deviation, max_length_deviation, max_deviation_primitive_idx, construction_mismatch_count
 
 
-def verify_primitives_freecad(directory: str = 'gt_completed_prim5_py', limit: int = 10000):
+def verify_primitives_freecad(directory: str, limit: int = 10000):
 
     print(f"Scanning directory: {directory}...")
     py_files = sorted(glob.glob(os.path.join(directory, "*.py")))
@@ -367,7 +367,8 @@ def verify_primitives_freecad(directory: str = 'gt_completed_prim5_py', limit: i
     return passed_files == num_files
 
 if __name__ == "__main__":
-    if verify_primitives_freecad():
+    test_directory = 'data_ryotaro_prim5'
+    if verify_primitives_freecad(test_directory):
         sys.exit(0)
     else:
         sys.exit(1)

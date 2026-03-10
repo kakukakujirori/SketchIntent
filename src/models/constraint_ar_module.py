@@ -163,8 +163,8 @@ class ConstraintARModule(L.LightningModule):
         loss, preds, target = self._compute_loss(batch)
         accuracy = self.accuracy_metric(preds, target)
 
-        self.log(f'validation/loss', loss, add_dataloader_idx=False, sync_dist=True)
-        self.log(f'validation/accuracy', accuracy, add_dataloader_idx=False, sync_dist=True)
+        self.log(f'validation/loss', loss, add_dataloader_idx=True, sync_dist=True)
+        self.log(f'validation/accuracy', accuracy, add_dataloader_idx=True, sync_dist=True)
 
     @torch.no_grad()
     def on_validation_epoch_end(self):
@@ -217,8 +217,8 @@ class ConstraintARModule(L.LightningModule):
         loss, preds, target = self._compute_loss(batch)
         accuracy = self.accuracy_metric(preds, target)
 
-        self.log(f'test/loss', loss, add_dataloader_idx=False, sync_dist=True)
-        self.log(f'test/accuracy', accuracy, add_dataloader_idx=False, sync_dist=True)
+        self.log(f'test/loss', loss, add_dataloader_idx=True, sync_dist=True)
+        self.log(f'test/accuracy', accuracy, add_dataloader_idx=True, sync_dist=True)
 
     @torch.no_grad()
     def on_test_epoch_end(self):
@@ -270,13 +270,15 @@ class ConstraintARModule(L.LightningModule):
 
             # Solver-based evaluation (rank 0 only)
             if self.global_rank == 0:
-                from .solver_feedback import evaluate_constraints_batch, HAS_FREECAD
-                if HAS_FREECAD:
-                    solver_results = evaluate_constraints_batch(
-                        batch['val'],
+                try:
+                    from src.models.components.solver_feedback import SolverFeedback
+                    solver_feedback = SolverFeedback(self.hparams.context)
+                    solver_results = solver_feedback.evaluate_constraints_batch(
+                        batch['p_val'],
                         generated,
-                        num_bins=self.hparams.data.num_position_bins,
                         fully_constrained_dof=2,
                     )
                     if solver_results:
-                        print(f"Solver Report (test{suffix}): {solver_results}")
+                        print(f"Solver Report: {solver_results}")
+                except ImportError as e:
+                    print(str(e))

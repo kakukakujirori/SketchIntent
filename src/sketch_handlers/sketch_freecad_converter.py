@@ -44,9 +44,9 @@ class SketchFreecadConverter:
     def to_freecad_primitives(self, sketch: datalib.Sketch, doc_name: str = "Sketch") -> tuple['FreeCAD.Document', 'Sketcher.SketchObject', dict[str, tuple[int, int]]]:
         """
         Converts primitives in datalib.Sketch to a FreeCAD SketchObject.
-        Returns (doc, sketch_obj, primitive_geoID).
+        Returns (doc, sketch_obj, primitive_freecad_mapping).
 
-        primitive_geoID maps reference strings to (GeoID, PointID):
+        primitive_freecad_mapping maps reference strings to (GeoID, PointID):
             "entityId" -> (geoID, default_pointID)
             "entityId.start" -> (geoID, 1)
             "entityId.end" -> (geoID, 2)
@@ -58,7 +58,7 @@ class SketchFreecadConverter:
         doc = FreeCAD.newDocument(doc_name)
         sketch_obj = doc.addObject("Sketcher::SketchObject", "Sketch")
 
-        primitive_geoID: dict[str, tuple[int, int]] = {}
+        primitive_freecad_mapping: dict[str, tuple[int, int]] = {}
 
         for entity in sketch.entities.values():
             entity_name = entity.__class__.__name__
@@ -76,31 +76,37 @@ class SketchFreecadConverter:
 
             # Entity-level reference
             default_pid = _ENTITY_POINT_ID.get(entity_name, 0)
-            primitive_geoID[eid] = (gid, default_pid)
+            primitive_freecad_mapping[eid] = (gid, default_pid)
 
             # Subnode references
             subnodes = _SUBNODE_MAP.get(entity_name, [])
             for suffix, pid in subnodes:
-                primitive_geoID[f"{eid}{suffix}"] = (gid, pid)
+                primitive_freecad_mapping[f"{eid}{suffix}"] = (gid, pid)
 
         # FreeCAD internal axes: GeoID -1 = X-axis (HAxis), -2 = Y-axis (VAxis)
         # These are used by constraints that reference the Origin or axes
-        primitive_geoID['xaxis'] = (-1, 0)       # X-axis edge
-        primitive_geoID['xaxis.start'] = (-1, 1) # Origin (start of X-axis)
-        primitive_geoID['xaxis.end'] = (-1, 2)   # end of X-axis
-        primitive_geoID['yaxis'] = (-2, 0)       # Y-axis edge
-        primitive_geoID['yaxis.start'] = (-2, 1) # Origin (start of Y-axis)
-        primitive_geoID['yaxis.end'] = (-2, 2)   # end of Y-axis
-        primitive_geoID['origin'] = (-1, 1)      # Origin point (same as xaxis.start)
+        primitive_freecad_mapping['xaxis'] = (-1, 0)       # X-axis edge
+        primitive_freecad_mapping['xaxis.start'] = (-1, 1) # Origin (start of X-axis)
+        primitive_freecad_mapping['xaxis.end'] = (-1, 2)   # end of X-axis
+        primitive_freecad_mapping['yaxis'] = (-2, 0)       # Y-axis edge
+        primitive_freecad_mapping['yaxis.start'] = (-2, 1) # Origin (start of Y-axis)
+        primitive_freecad_mapping['yaxis.end'] = (-2, 2)   # end of Y-axis
+        primitive_freecad_mapping['origin'] = (-1, 1)      # Origin point (same as xaxis.start)
 
         doc.recompute()
-        return doc, sketch_obj, primitive_geoID
+        return doc, sketch_obj, primitive_freecad_mapping
 
-    def to_freecad_constraints(self, sketch: datalib.Sketch, sketch_obj: 'Sketcher.SketchObject', primitive_geoID: dict[str, tuple[int, int]]) -> None:
+    def to_freecad_constraints(self, sketch: datalib.Sketch, sketch_obj: 'Sketcher.SketchObject', primitive_freecad_mapping: dict[str, tuple[int, int]]) -> dict[int, str]:
         """
         Adds constraints to the FreeCAD SketchObject.
+        Returns constraint_freecad_mapping.
+
+        constraint_freecad_mapping maps FreeCAD's internal 0-based constraint indices to original reference strings:
+            0 -> "c_0"
+            1 -> "c_1"
         """
         FreeCAD, Part, Sketcher = ensure_freecad_imported()
+        constraint_freecad_mapping: dict[int, str] = {}
 
         for c_id, constr in sketch.constraints.items():
             try:
@@ -112,10 +118,11 @@ class SketchFreecadConverter:
                 # Handler returns list of (type_name, args_list, datum_or_none)
                 # NOTE: Dimension constraints define values in datum, while
                 #       Geometric constraints can define them in args_list (Tangent, Perpendicular)
-                fc_constraints = handler.to_freecad(constr, primitive_geoID)
+                fc_constraints = handler.to_freecad(constr, primitive_freecad_mapping)
                 for fc_type, fc_args, fc_datum in fc_constraints:
                     try:
                         idx = sketch_obj.addConstraint(Sketcher.Constraint(fc_type, *fc_args))
+                        constraint_freecad_mapping[idx] = c_id
                         if fc_datum is not None:
                             sketch_obj.setDatum(idx, fc_datum)
                     except Exception as e:
@@ -124,14 +131,16 @@ class SketchFreecadConverter:
             except Exception as e:
                 print(f"Error creating FreeCAD constraint {c_id}: {e}")
 
-    def to_freecad(self, sketch: datalib.Sketch, doc_name: str = "Sketch") -> tuple['FreeCAD.Document', 'Sketcher.SketchObject']:
+        return constraint_freecad_mapping
+
+    def to_freecad(self, sketch: datalib.Sketch, doc_name: str = "Sketch") -> tuple['FreeCAD.Document', 'Sketcher.SketchObject', dict[str, tuple[int, int]], dict[int, str]]:
         """
         Full conversion: Primitives + Constraints.
         """
-        doc, sketch_obj, primitive_geoID = self.to_freecad_primitives(sketch, doc_name)
-        self.to_freecad_constraints(sketch, sketch_obj, primitive_geoID)
+        doc, sketch_obj, primitive_freecad_mapping = self.to_freecad_primitives(sketch, doc_name)
+        constraint_freecad_mapping = self.to_freecad_constraints(sketch, sketch_obj, primitive_freecad_mapping)
         doc.recompute()
-        return doc, sketch_obj
+        return doc, sketch_obj, primitive_freecad_mapping, constraint_freecad_mapping
 
     def from_freecad_primitives(self, sketch_obj: 'Sketcher.SketchObject') -> tuple[dict[str, datalib.Entity], dict[tuple[int, int], str]]:
         """

@@ -212,7 +212,7 @@ def verify_constraints_freecad(directory: str = 'gt_completed_prim5_py', limit: 
             # ---------------------------------------------------------------
             # 3. SketchGraphs -> FC
             # ---------------------------------------------------------------
-            doc_recon, fc_sketch_recon = converter.to_freecad(sg_sketch, doc_name=f"ReconDoc_{i}")
+            doc_recon, fc_sketch_recon, _, _ = converter.to_freecad(sg_sketch, doc_name=f"ReconDoc_{i}")
             recon_constraints = extract_constraints_from_sketch(fc_sketch_recon)
             total_constraints_recon += len(recon_constraints)
 
@@ -329,7 +329,7 @@ class TestConstraintRoundTrip(unittest.TestCase):
         sg_sketch = converter.from_freecad(sketch_orig)
 
         # 2. SG -> FC
-        doc_recon, sketch_recon = converter.to_freecad(sg_sketch, doc_name="ReconDoc")
+        doc_recon, sketch_recon, _, _ = converter.to_freecad(sg_sketch, doc_name="ReconDoc")
 
         # 3. Compare
         orig_constraints = extract_constraints_from_sketch(sketch_orig)
@@ -425,7 +425,7 @@ class TestConstraintRoundTrip(unittest.TestCase):
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser(description='Constraint roundtrip verification')
-    parser.add_argument('--dir', default='gt_completed_prim5_py', help='Directory with .py sketch scripts')
+    parser.add_argument('--dir', default='data_ryotaro_prim5', help='Directory with .py sketch scripts')
     parser.add_argument('--limit', type=int, default=10000, help='Max files to test')
     parser.add_argument('--unit', action='store_true', help='Run unit tests only')
     args = parser.parse_args()
