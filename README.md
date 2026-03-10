@@ -1,72 +1,36 @@
-# Vitruvion
+# My-Vitruvion
 
-This repository contains code and data in support of [Seff, A., Zhou, W., Richardson, N. and Adams, R.P. Vitruvion: A Generative Model of Parametric CAD Sketches. In International Conference on Learning Representations (ICLR) 2022](https://arxiv.org/abs/2109.14124).
+## Installation
 
-## Getting started
+```bash
+conda create -n vitruvion python=3.12
+conda activate vitruvion
 
-The code is contained in three main folders: `sketchgraphs` (containing the main module to interact with the data),
-`sketchgraphs_models` (a variety of graph-based models for the problem), and `img2cad` (containing the main transformer
-models discussed in the paper).
+# Install dependencies
+pip install -r requirements.txt
+```
+
+We also need our customized FreeCAD for inference-time solver feedback.
+
+[TODO: FreeCAD instrallation description.]
 
 ## Data
 
-The data source used for this project is the [`sketchgraphs`](https://github.com/PrincetonLIPS/SketchGraphs) dataset,
-with further processing as described in the paper.
-We provide the processing scripts in `img2cad/pipeline`, and for the user's convenience, we additionally provide
-downloads for the pre-processed datasets (as some of the pre-processing steps, such as sketch rendering, may be computationally expensive).
-The data is separated into two parts:
-- `sg_filtered_unique.npy` (1.8 GB): a data file containing filtered and uniqueified sequences from the sketchgraphs dataset.
-  This data file may alternatively be created from the publicly available sketchgraphs json files by using the
-  `img2cad.pipeline.filter_sequences_from_source` and `img2cad.pipeline.tokenize_sequences` scripts.
-- `render_p128_{}_of_{}.npy` (15 GB): a set of data files containing renders of the sketches in the dataset.
-  This data may alternatively be created from the `sg_filtered_unique.npy` file using the `img2cad.pipeline.prerender_images` script.
+- SketchGraphs Dataset
+  ```bash
+  bash scripts/download_shards.sh data_shards
+  python scripts/convert_sketchgraphs_to_seq.py input_folder=./data_shards output_folder=./data_processed
+  ```
 
-## Environment
-
-We recommend users run all training and evaluation with the provided [singularity](https://sylabs.io/singularity/) image, to ensure best reproducibility with the results obtained in our paper.
-If you wish to run training and evaluation within your own environments, we recommend examining [docker/requirements.txt](docker/requirements.txt) to install the main dependencies for training.
-
-## Trained model weights
-
-The user may choose to download the trained model weights in order to reproduce the tables produced in our paper.
-We have listed the corresponding calling sequences for the evaluation below.
-
-Image to primitive model evaluation (table 2)
-```bash
-./start_singularity.sh python -m img2cad.evaluation.evaluate_image_to_primitive checkpoint_path=models/image_to_primitive.ckpt sequence_path=data/sg_filtered_unique.npy
-```
-
-Constraint model (table 4)
-```bash
-./start_singularity.sh python -m img2cad.evaluation.evaluate_constraints checkpoint_path=models/constraints.ckpt sequence_path=data/sg_filtered_unique.npy
-```
-
-Raw primitives model (table 2)
-```bash
-# To evaluate log-likelihood
-./start_singularity.sh python -m img2cad.evaluation.evaluate_raw_primitives checkpoint_path=models/primitives_raw.ckpt sequence_path=data/sg_filtered_unique.npy
-
-# To sample (potentially primed by prefix of sequence)
-./start_singularity.sh python -m img2cad.evaluation.sample_primitives_primed checkpoint_path=models/primitives_raw.ckpt sequence_path=data/sg_filtered_unique.npy prefix_fraction=0
-```
+- Qwen3 Augmented Dataset
+  ```bash
+  python scripts/qwen3_refine_data_with_solver.py
+  mkdir data_qwen && cp qwen3_refined_data_with_solver/*_refined.py data_qwen/
+  python scripts/convert_freecad_to_seq.py ./data_qwen3
+  ```
 
 ## Training
 
-The two main models (image to primitive, and primitive to constraints) may be trained (after downloading all data files) in the following fashion:
 ```bash
-python -m img2cad.train_image_to_primitive
-python -m img2cad.train_constraints
+python src/train.py
 ```
-or if using the singularity containers (preferred),
-```bash
-./start_singularity.sh python -m img2cad.train_image_to_primitive
-./start_singularity.sh python -m img2cad.train_constraints
-```
-Note that training will be exceedingly slow with the default configuration.
-If you have a modern GPU, we recommend using `+compute=one_gpu` in order to enable a more
-appropriate batch size, and mixed precision training.
-The reference models were trained using the configuration `+compute=4xv100`, which is tuned
-for training on 4 Nvidia V100 GPUs.
-
-In addition, we have provided the `slurm` scripts used to train the published models for reference in the [`slurm/`](slurm/) folder
-(note that due to the specifity of each cluster, they should be adapted before use).
