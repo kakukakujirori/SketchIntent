@@ -1,0 +1,18 @@
+# @package _global_
+
+# to execute this experiment run:
+# python train.py experiment=sft
+
+defaults:
+  - override /data: constraint_sft.yaml
+  - override /model: constraint_ar.yaml
+  - override /trainer: default
+
+model:
+  optimizer:
+    lr: 3e-6
+
+trainer:
+  max_epochs: 30
+
+pretrained_ckpt_path: null

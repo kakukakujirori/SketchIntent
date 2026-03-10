@@ -62,10 +62,12 @@ class ConstraintDataModule(L.LightningDataModule):
     def __init__(
         self,
         train_sequence_file: str,
+        val_sequence_file: str,
+        test_sequence_file: str,
         context: SketchContext,
         primitive_noise: PrimitiveNoise,
-        validation_fraction: float = 0.025,
-        test_fraction: float = 0.05,
+        # validation_fraction: float = 0.025,
+        # test_fraction: float = 0.05,
         batch_size: int = 32,
         num_workers: int = 0,
     ):
@@ -83,20 +85,20 @@ class ConstraintDataModule(L.LightningDataModule):
             self.hparams.primitive_noise,
         )
 
-        # self._val_dataset = ConstraintDataset(
-        #     self.hparams.val_sequence_file,
-        #     self.hparams.context,
-        #     self.hparams.primitive_noise,
-        # )
+        self._val_dataset = ConstraintDataset(
+            self.hparams.val_sequence_file,
+            self.hparams.context,
+            self.hparams.primitive_noise,
+        )
 
-        # self._test_dataset = ConstraintDataset(
-        #     self.hparams.test_sequence_file,
-        #     self.hparams.context,
-        #     self.hparams.primitive_noise,
-        # )
+        self._test_dataset = ConstraintDataset(
+            self.hparams.test_sequence_file,
+            self.hparams.context,
+            self.hparams.primitive_noise,
+        )
 
-        self._train_dataset, self._val_dataset, self._test_dataset = split_dataset(
-            self._train_dataset, self.hparams.validation_fraction, self.hparams.test_fraction)
+        # self._train_dataset, self._val_dataset, self._test_dataset = split_dataset(
+        #     self._train_dataset, self.hparams.validation_fraction, self.hparams.test_fraction)
 
     def _make_dataloader(self, dataset: torch.utils.data.Dataset, shuffle: bool) -> torch.utils.data.DataLoader[dict[str, torch.Tensor]]:
         return torch.utils.data.DataLoader(

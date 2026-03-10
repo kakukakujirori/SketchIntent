@@ -4,7 +4,7 @@
 # order of defaults determines the order in which configs override each other
 defaults:
   - _self_
-  - data: constraint.yaml
+  - data: constraint_pretrain.yaml
   - model: constraint_ar.yaml
   - sampling: default
   - callbacks: default
@@ -44,7 +44,10 @@ train: True
 test: True
 
 # simply provide checkpoint path to resume training
-ckpt_path: null
+resume_ckpt_path: null
+
+# set this if you only load weights but run the training from scratch
+pretrained_ckpt_path: null
 
 # seed for random number generators in pytorch, numpy and python.random
 seed: 42

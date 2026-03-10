@@ -20,7 +20,7 @@ class ConstraintARModule(L.LightningModule):
         scheduler: torch.optim.lr_scheduler._LRScheduler | None,
     ):
         super().__init__()
-        self.save_hyperparameters(logger=False)
+        self.save_hyperparameters(ignore=['model'], logger=False)
 
         self.model = model
         self.criterion = torch.nn.CrossEntropyLoss(ignore_index=ConstraintToken.Pad)

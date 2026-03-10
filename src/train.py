@@ -59,6 +59,16 @@ def train(cfg: DictConfig) -> tuple[dict[str, Any], dict[str, Any]]:
 
     log.info(f"Instantiating model <{cfg.model._target_}>")
     model: LightningModule = hydra.utils.instantiate(cfg.model)
+    pretrained_ckpt_path = cfg.get("pretrained_ckpt_path")
+    if pretrained_ckpt_path:
+        log.info(f"Loading pretrained weights from {pretrained_ckpt_path}")
+        ckpt = torch.load(pretrained_ckpt_path, map_location="cpu", weights_only=False)
+        state_dict = ckpt.get("state_dict", ckpt)
+        missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=True)
+        if missing_keys:
+            log.warning(f"Missing keys in model state_dict: {missing_keys}")
+        if unexpected_keys:
+            log.warning(f"Unexpected keys in checkpoint state_dict: {unexpected_keys}")
 
     log.info("Instantiating callbacks...")
     callbacks: list[Callback] = instantiate_callbacks(cfg.get("callbacks"))
@@ -84,7 +94,7 @@ def train(cfg: DictConfig) -> tuple[dict[str, Any], dict[str, Any]]:
 
     if cfg.get("train"):
         log.info("Starting training!")
-        trainer.fit(model=model, datamodule=datamodule, ckpt_path=cfg.get("ckpt_path"), weights_only=False)
+        trainer.fit(model=model, datamodule=datamodule, ckpt_path=cfg.get("resume_ckpt_path"), weights_only=False)
 
     train_metrics = trainer.callback_metrics
 
