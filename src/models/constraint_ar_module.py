@@ -26,7 +26,7 @@ class ConstraintARModule(L.LightningModule):
         self.criterion = torch.nn.CrossEntropyLoss(ignore_index=ConstraintToken.Pad)
 
         self.accuracy_metric = TokenAccuracy(ignore_index=ConstraintToken.Pad)
-        self.set_metrics = ConstraintIoU(context)
+        self.iou_metrics = ConstraintIoU(context)
         self.token_reordering = TokenReordering(context=context)
 
     @staticmethod
@@ -57,7 +57,7 @@ class ConstraintARModule(L.LightningModule):
     def _reset_metrics(self):
         """Reset all metrics to prevent accumulation across epochs."""
         self.accuracy_metric.reset()
-        self.set_metrics.reset()
+        self.iou_metrics.reset()
 
     def on_train_epoch_start(self):
         self._reset_metrics()
@@ -111,38 +111,6 @@ class ConstraintARModule(L.LightningModule):
 
         return loss, preds, target
 
-    def _compute_metrics(
-        self,
-        preds: torch.Tensor,
-        target: torch.Tensor,
-    ) -> tuple[dict[str, torch.Tensor], torch.Tensor, torch.Tensor]:
-        """Compute metrics for the given dataloader.
-
-        Args:
-            preds: Predicted tokens [B, L] (should NOT have START token prefix)
-            target: Ground truth tokens [B, L] (should NOT have START token prefix)
-
-        Returns:
-            Tuple of:
-                - Dict with 'accuracy', 'iou', 'precision', 'recall'
-                - preds_sorted: Canonically sorted predictions
-                - target_sorted: Canonically sorted targets
-        """
-        # Kappa/accuracy on non-pad tokens
-        accuracy_val = self.accuracy_metric(preds, target)
-
-        # IoU on full sequences (ConstraintIoU uses prefix_len=0, no START expected)
-        preds_sorted, _ = self.token_reordering(preds, None, None, "canonical_with_tail_strip")
-        target_sorted, _ = self.token_reordering(target, None, None, "canonical_with_tail_strip")
-        set_metrics_val = self.set_metrics(preds_sorted, target_sorted)
-
-        metrics = {
-            "accuracy": accuracy_val,
-            **set_metrics_val,  # iou, precision, recall
-        }
-
-        return metrics, preds_sorted, target_sorted
-
     def generate_sample(
         self,
         batch: dict[str, torch.Tensor],
@@ -182,24 +150,21 @@ class ConstraintARModule(L.LightningModule):
 
         return generated
 
-
     def training_step(self, batch: dict[str, torch.Tensor], batch_idx: int):
         loss, preds, target = self._compute_loss(batch)
-        metrics, preds_sorted, target_sorted = self._compute_metrics(preds, target)
+        accuracy = self.accuracy_metric(preds, target)
 
         self.log('train/loss', loss)
-        for metric_key, metric_value in metrics.items():
-            self.log(f'train/{metric_key}', metric_value, prog_bar=True)
+        self.log(f'train/accuracy', accuracy, prog_bar=True)
 
         return loss
 
     def validation_step(self, batch: dict[str, torch.Tensor], batch_idx: int, dataloader_idx: int = 0):
         loss, preds, target = self._compute_loss(batch)
-        metrics, preds_sorted, target_sorted = self._compute_metrics(preds, target)
+        accuracy = self.accuracy_metric(preds, target)
 
         self.log(f'validation/loss', loss, add_dataloader_idx=False, sync_dist=True)
-        for metric_key, metric_value in metrics.items():
-            self.log(f'validation/{metric_key}', metric_value, add_dataloader_idx=False, sync_dist=True)
+        self.log(f'validation/accuracy', accuracy, add_dataloader_idx=False, sync_dist=True)
 
     @torch.no_grad()
     def on_validation_epoch_end(self):
@@ -228,10 +193,11 @@ class ConstraintARModule(L.LightningModule):
             _, max_len = target.shape
             generated = self.generate_sample(batch, max_len, dtype=target.dtype)
 
-            # Compute metrics for validation (skip START token at index 0)
-            metrics, generated_sorted, target_sorted = self._compute_metrics(generated[:, 1:], target[:, 1:])
-
-            for metric_name, metric_value in metrics.items():
+            # Compute constraint-level metrics
+            generated_sorted, _ = self.token_reordering(generated, None, None, "canonical_with_tail_strip")
+            target_sorted, _ = self.token_reordering(target, None, None, "canonical_with_tail_strip")
+            iou_metrics = self.iou_metrics(generated_sorted, target_sorted)
+            for metric_name, metric_value in iou_metrics.items():
                 self.log(f'validation_gen/{metric_name}', metric_value, add_dataloader_idx=False, sync_dist=True)
 
             # Print comparison on rank 0
@@ -249,11 +215,10 @@ class ConstraintARModule(L.LightningModule):
 
     def test_step(self, batch: dict[str, torch.Tensor], batch_idx: int, dataloader_idx: int = 0):
         loss, preds, target = self._compute_loss(batch)
-        metrics, preds_sorted, target_sorted = self._compute_metrics(preds, target)
+        accuracy = self.accuracy_metric(preds, target)
 
         self.log(f'test/loss', loss, add_dataloader_idx=False, sync_dist=True)
-        for metric_key, metric_value in metrics.items():
-            self.log(f'test/{metric_key}', metric_value, add_dataloader_idx=False, sync_dist=True)
+        self.log(f'test/accuracy', accuracy, add_dataloader_idx=False, sync_dist=True)
 
     @torch.no_grad()
     def on_test_epoch_end(self):
@@ -283,11 +248,11 @@ class ConstraintARModule(L.LightningModule):
             batch_size, max_len = target.shape
             generated = self.generate_sample(batch, max_len, dtype=target.dtype)
 
-            # Compute metrics (skip START token at index 0)
-            metrics, generated_sorted, target_sorted = self._compute_metrics(generated[:, 1:], target[:, 1:])
-
-            # Use different names for each loader since on_test_epoch_end is called once
-            for metric_name, metric_value in metrics.items():
+            # Compute constraint-level metrics
+            generated_sorted, _ = self.token_reordering(generated, None, None, "canonical_with_tail_strip")
+            target_sorted, _ = self.token_reordering(target, None, None, "canonical_with_tail_strip")
+            iou_metrics = self.iou_metrics(generated_sorted, target_sorted)
+            for metric_name, metric_value in iou_metrics.items():
                 self.log(f'test_gen/{metric_name}', metric_value, add_dataloader_idx=False, sync_dist=True)
 
             # Print samples on rank 0
