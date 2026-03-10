@@ -15,7 +15,7 @@ model:
 optimizer:
   _target_: torch.optim.AdamW
   _partial_: true
-  lr: 1e-4
+  lr: 3e-4
 
 scheduler:
   _target_: torch.optim.lr_scheduler.OneCycleLR

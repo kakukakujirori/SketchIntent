@@ -8,7 +8,7 @@ defaults:
   - model: constraint_ar.yaml
   - sampling: default
   - callbacks: default
-  - logger: tensorboard
+  - logger: wandb
   - trainer: default
   - paths: default
   - extras: default

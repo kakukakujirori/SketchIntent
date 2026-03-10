@@ -1,7 +1,0 @@
-# @package _global_
-
-# Config for training on 8x RTX2080 TI (LIPS servers)
-
-mixed_precision: True
-batch_size: 1024
-num_gpus: 8

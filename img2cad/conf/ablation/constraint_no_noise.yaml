@@ -1,7 +1,0 @@
-# @package _global_
-
-# disable use of entity noise in constraint model
-
-data:
-  primitive_noise:
-    enabled: False

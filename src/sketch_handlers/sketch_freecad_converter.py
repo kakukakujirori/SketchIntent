@@ -27,7 +27,7 @@ _ENTITY_POINT_ID = {
 
 class SketchFreecadConverter:
     """
-    Tokenizer/Detokenizer for SketchGraphs data.
+    Data converter between FreeCAD and SketchGraphs.
     """
     def __init__(self, context: SketchContext):
         # Lazy import

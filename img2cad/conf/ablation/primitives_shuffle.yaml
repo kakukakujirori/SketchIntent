@@ -1,6 +1,0 @@
-# @package _global_
-
-# Configuration to enable entity permutation in raw generative model.
-
-data:
-  permute_entities: True
