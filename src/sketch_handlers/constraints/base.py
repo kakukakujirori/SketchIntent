@@ -2,7 +2,15 @@ from abc import ABC, abstractmethod
 from typing import Any, TYPE_CHECKING
 import numpy as np
 import sketchgraphs.data as datalib
-from sketchgraphs.data._constraint import ConstraintParameterType, QuantityParameter
+from sketchgraphs.data._constraint import (
+    Constraint,
+    ConstraintType,
+    ConstraintParameterType,
+    DirectionValue,
+    LocalReferenceParameter,
+    QuantityParameter,
+    EnumParameter,
+)
 from src.sketch_handlers.freecad_utils import ensure_freecad_imported
 
 if TYPE_CHECKING:
@@ -100,18 +108,17 @@ class ConstraintHandler(ABC):
                         return 0.0
         return 0.0
 
-    # Types that don't exist in SketchGraphs ConstraintType -> map to nearest equivalent
+    # Types that don't exist in SketchGraphs ConstraintType -> map to nearest equivalent with params
     _SG_TYPE_MAP = {
-        'DistanceX': 'Distance',
-        'DistanceY': 'Distance',
+        'DistanceX': ('Distance', EnumParameter(parameterId='direction', value=DirectionValue.HORIZONTAL)),
+        'DistanceY': ('Distance', EnumParameter(parameterId='direction', value=DirectionValue.VERTICAL)),
     }
 
     def create_constraint(self, constraint_type_name: str, refs: tuple[str, ...], value: float | None = None) -> datalib.Constraint:
         """Helper to create a sketchgraphs.data.Constraint object."""
-        from sketchgraphs.data._constraint import Constraint, ConstraintType, LocalReferenceParameter, QuantityParameter
 
         # Map to valid SketchGraphs enum; keep original name as identifier
-        sg_type_name = self._SG_TYPE_MAP.get(constraint_type_name, constraint_type_name)
+        sg_type_name, sg_additional_param = self._SG_TYPE_MAP.get(constraint_type_name, (constraint_type_name, None))
         ctype = getattr(ConstraintType, sg_type_name)
         params = []
         for i, ref in enumerate(refs):
@@ -121,6 +128,10 @@ class ConstraintHandler(ABC):
             pid = 'angle' if constraint_type_name == 'Angle' else 'length'
             params.append(QuantityParameter(parameterId=pid, value=value, expression=str(value)))
 
+        if sg_additional_param:
+            params.append(sg_additional_param)
+
+        # NOTE: identifier=constraint_type_name is tentative. It's expected to be overwritten to represent a real UID.
         return Constraint(identifier=constraint_type_name, constraint_type=ctype, parameters=params)
 
     def _parse_references(self, constraint: Any, primitive_tokenpos: dict[str, int]) -> list[tuple[str, str | None]]:

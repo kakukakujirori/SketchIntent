@@ -1,6 +1,7 @@
 from typing import Any, TYPE_CHECKING
 
 import sketchgraphs.data as datalib
+from sketchgraphs.data._constraint import DirectionValue
 from .context import SketchContext
 from .freecad_utils import ensure_freecad_imported
 
@@ -29,6 +30,23 @@ class SketchFreecadConverter:
     """
     Data converter between FreeCAD and SketchGraphs.
     """
+    def _get_handler_name(self, constr: datalib.Constraint) -> str:
+        """
+        Helper method to correctly identify the required handler.
+        Certain constraint types (like Distance) use parameters to differentiate
+        between variants (DistanceX vs DistanceY).
+        """
+        c_name = constr.constraint_type.name
+        if c_name == 'Distance':
+            for p in constr.parameters:
+                if getattr(p, 'parameterId', None) == 'direction':
+                    val = getattr(p, 'value', None)
+                    if val == DirectionValue.HORIZONTAL:
+                        return 'DistanceX'
+                    elif val == DirectionValue.VERTICAL:
+                        return 'DistanceY'
+        return c_name
+
     def __init__(self, context: SketchContext):
         # Lazy import
         FreeCAD, Part, Sketcher = ensure_freecad_imported()
@@ -110,9 +128,10 @@ class SketchFreecadConverter:
 
         for c_id, constr in sketch.constraints.items():
             try:
-                handler = self.context.get_constraint_handler(constr.identifier)
+                handler_name = self._get_handler_name(constr)
+                handler = self.context.get_constraint_handler(handler_name)
                 if not handler:
-                    print(f"Warning: No handler for constraint {constr.constraint_type}")
+                    print(f"Warning: No handler for constraint {handler_name}")
                     continue
 
                 # Handler returns list of (type_name, args_list, datum_or_none)
@@ -252,6 +271,8 @@ class SketchFreecadConverter:
 
             if sg_constr:
                 c_id = f"c_{i}"
+                # Make identifier a real UID
+                sg_constr = sg_constr._replace(identifier=c_id)
                 constraints[c_id] = sg_constr
 
         return constraints
