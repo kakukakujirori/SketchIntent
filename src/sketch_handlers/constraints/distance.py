@@ -1,6 +1,7 @@
 from typing import Any
 import numpy as np
 import sketchgraphs.data as datalib
+from sketchgraphs.data._constraint import DirectionValue
 from .base import ConstraintHandler
 from src.sketch_handlers.constants import ConstraintToken
 from src.sketch_handlers.registry import CONSTRAINT_HANDLERS
@@ -18,7 +19,18 @@ class DistanceHandler(ConstraintHandler):
     def encode(self, constraint: datalib.Constraint, primitive_tokenpos: dict[str, int], entities: dict[str, datalib.Entity]) -> tuple[int, tuple[int, ...], np.ndarray, tuple[int, ...]]:
         ref_tokens = self._get_sorted_ref_tokens(constraint, primitive_tokenpos, entities)
         val = self.get_constraint_value(constraint)
-        return self.token_id, ref_tokens, np.array([val]), ()
+
+        # Potentially changes to DistanceX or DistanceY
+        token_id = self.token_id
+        for param in constraint.parameters:
+            if getattr(param, 'parameterId', None) == 'direction':
+                dir_val = getattr(param, 'value', None)
+                if dir_val in ('HORIZONTAL', DirectionValue.HORIZONTAL):
+                    token_id = ConstraintToken.DistanceX
+                elif dir_val in ('VERTICAL', DirectionValue.VERTICAL):
+                    token_id = ConstraintToken.DistanceY
+
+        return token_id, ref_tokens, np.array([val]), ()
 
     def decode(self, ref_indices: tuple[int, ...], params: np.ndarray, tokenpos_to_primitive: dict[int, str]) -> datalib.Constraint:
         refs = tuple(tokenpos_to_primitive[idx] for idx in ref_indices)

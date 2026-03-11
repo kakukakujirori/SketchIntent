@@ -41,9 +41,9 @@ class SketchFreecadConverter:
             for p in constr.parameters:
                 if getattr(p, 'parameterId', None) == 'direction':
                     val = getattr(p, 'value', None)
-                    if val == DirectionValue.HORIZONTAL:
+                    if val == DirectionValue.HORIZONTAL or val == 'HORIZONTAL':
                         return 'DistanceX'
-                    elif val == DirectionValue.VERTICAL:
+                    elif val == DirectionValue.VERTICAL or val == 'VERTICAL':
                         return 'DistanceY'
         return c_name
 

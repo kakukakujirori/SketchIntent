@@ -110,8 +110,8 @@ class ConstraintHandler(ABC):
 
     # Types that don't exist in SketchGraphs ConstraintType -> map to nearest equivalent with params
     _SG_TYPE_MAP = {
-        'DistanceX': ('Distance', EnumParameter(parameterId='direction', value=DirectionValue.HORIZONTAL)),
-        'DistanceY': ('Distance', EnumParameter(parameterId='direction', value=DirectionValue.VERTICAL)),
+        'DistanceX': ('Distance', EnumParameter(parameterId='direction', value='HORIZONTAL')),
+        'DistanceY': ('Distance', EnumParameter(parameterId='direction', value='VERTICAL')),
     }
 
     def create_constraint(self, constraint_type_name: str, refs: tuple[str, ...], value: float | None = None) -> datalib.Constraint:
