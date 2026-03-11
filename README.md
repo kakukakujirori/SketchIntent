@@ -8,6 +8,7 @@ conda activate vitruvion
 
 # Install dependencies
 pip install -r requirements.txt
+CMAKE_ARGS="-DGGML_CUDA=on" pip install "llama-cpp-python @ git+https://github.com/JamePeng/llama-cpp-python.git"
 ```
 
 We also need our customized FreeCAD for inference-time solver feedback.

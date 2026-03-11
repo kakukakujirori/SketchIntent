@@ -30,6 +30,20 @@ class SketchFreecadConverter:
     """
     Data converter between FreeCAD and SketchGraphs.
     """
+    def __init__(self, context: SketchContext, verbose: bool = True):
+        # Lazy import
+        FreeCAD, Part, Sketcher = ensure_freecad_imported()
+
+        self.context = context
+        self.verbose = verbose
+        self.dprint = lambda msg: print(msg) if self.verbose else None
+        self.freecad_to_sketch_type_mapping = {
+            Part.LineSegment: 'Line',
+            Part.Circle: 'Circle',
+            Part.ArcOfCircle: 'Arc',
+            Part.Point: 'Point'
+        }
+
     def _get_handler_name(self, constr: datalib.Constraint) -> str:
         """
         Helper method to correctly identify the required handler.
@@ -46,18 +60,6 @@ class SketchFreecadConverter:
                     elif val == DirectionValue.VERTICAL or val == 'VERTICAL':
                         return 'DistanceY'
         return c_name
-
-    def __init__(self, context: SketchContext):
-        # Lazy import
-        FreeCAD, Part, Sketcher = ensure_freecad_imported()
-
-        self.context = context
-        self.freecad_to_sketch_type_mapping = {
-            Part.LineSegment: 'Line',
-            Part.Circle: 'Circle',
-            Part.ArcOfCircle: 'Arc',
-            Part.Point: 'Point'
-        }
 
     def to_freecad_primitives(self, sketch: datalib.Sketch, doc_name: str = "Sketch") -> tuple['FreeCAD.Document', 'Sketcher.SketchObject', dict[str, tuple[int, int]]]:
         """
@@ -83,7 +85,7 @@ class SketchFreecadConverter:
             handler = self.context.get_primitive_handler(entity_name)
 
             if handler is None:
-                print(f"Warning: No handler for entity {entity}")
+                self.dprint(f"Warning: No handler for entity {entity}")
                 continue
 
             # Register to FreeCAD
@@ -131,7 +133,7 @@ class SketchFreecadConverter:
                 handler_name = self._get_handler_name(constr)
                 handler = self.context.get_constraint_handler(handler_name)
                 if not handler:
-                    print(f"Warning: No handler for constraint {handler_name}")
+                    self.dprint(f"Warning: No handler for constraint {handler_name}")
                     continue
 
                 # Handler returns list of (type_name, args_list, datum_or_none)
@@ -145,10 +147,10 @@ class SketchFreecadConverter:
                         if fc_datum is not None:
                             sketch_obj.setDatum(idx, fc_datum)
                     except Exception as e:
-                        print(f"Error adding FreeCAD constraint {fc_type}({fc_args}): {e}")
+                        self.dprint(f"Error adding FreeCAD constraint {fc_type}({fc_args}): {e}")
 
             except Exception as e:
-                print(f"Error creating FreeCAD constraint {c_id}: {e}")
+                self.dprint(f"Error creating FreeCAD constraint {c_id}: {e}")
 
         return constraint_freecad_mapping
 
@@ -179,7 +181,7 @@ class SketchFreecadConverter:
             freecad_geo_type = type(geo)
             p_name = self.freecad_to_sketch_type_mapping.get(freecad_geo_type)
             if not p_name:
-                print(f"Warning: No handler for geometry type {freecad_geo_type}")
+                self.dprint(f"Warning: No handler for geometry type {freecad_geo_type}")
                 continue
 
             handler = self.context.get_primitive_handler(p_name)
@@ -201,7 +203,7 @@ class SketchFreecadConverter:
                             geoID_to_primitive[(i, pid)] = f"{eid}{suffix}"
 
                 except Exception as e:
-                    print(f"Error converting geometry {i} ({freecad_geo_type}): {e}")
+                    self.dprint(f"Error converting geometry {i} ({freecad_geo_type}): {e}")
 
         # FreeCAD internal axes: GeoID -1 = X-axis (HAxis), -2 = Y-axis (VAxis)
         geoID_to_primitive[(-1, 0)] = 'xaxis'        # X-axis edge
@@ -249,7 +251,7 @@ class SketchFreecadConverter:
                         if sg_constr:
                             break
                     except Exception as e:
-                        print(f"Error in {handler_name}.from_freecad for constraint {i} ({c_type}): {e}")
+                        self.dprint(f"Error in {handler_name}.from_freecad for constraint {i} ({c_type}): {e}")
 
             # Fallback: type name mapping
             if not sg_constr:
@@ -267,7 +269,7 @@ class SketchFreecadConverter:
                         try:
                             sg_constr = handler.from_freecad(fc_constr, geoID_to_primitive)
                         except Exception as e:
-                            print(f"Error converting constraint {i} ({c_type}): {e}")
+                            self.dprint(f"Error converting constraint {i} ({c_type}): {e}")
 
             if sg_constr:
                 c_id = f"c_{i}"

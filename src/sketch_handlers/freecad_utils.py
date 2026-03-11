@@ -1,6 +1,8 @@
+from typing import TYPE_CHECKING
 import sys
 import os
 import typing
+
 
 def ensure_freecad_imported(libpath: str = "~/github/FreeCAD/build/lib") -> typing.Tuple[typing.Any, typing.Any, typing.Any]:
     """
@@ -28,3 +30,113 @@ def ensure_freecad_imported(libpath: str = "~/github/FreeCAD/build/lib") -> typi
         raise ImportError(f"Failed to import FreeCAD modules: {e}. "
                           "Ensure you are running in an environment with FreeCAD available "
                           "or that the path is configured correctly.") from e
+
+
+if TYPE_CHECKING:
+    FreeCAD, Part, Sketcher = ensure_freecad_imported()
+
+
+def dump_freecad_commands(fc_sketch: 'Sketcher.SketchObject', doc_name: str = "MySketch") -> list[str]:
+    """
+    Dump the freecad commands to reconstruct the sketch.
+
+    Args:
+        fc_sketch: The FreeCAD sketch object.
+        doc_name: Document name for the FreeCAD project.
+
+    Returns:
+        A list of strings representing the history commands.
+    """
+    commands = []
+    commands.append("import FreeCAD")
+    commands.append("import Part")
+    commands.append("import Sketcher")
+    commands.append("from FreeCAD import Vector")
+    commands.append(f"doc = FreeCAD.newDocument('{doc_name}')")
+    commands.append("body = doc.addObject('PartDesign::Body', 'Body')")
+    commands.append("fc_sketch = body.newObject('Sketcher::SketchObject', 'Sketch')")
+    commands.append("xy_plane = body.Origin.OriginFeatures[3]")
+    commands.append("fc_sketch.AttachmentSupport = xy_plane")
+    commands.append("fc_sketch.MapMode = 'FlatFace'")
+
+    # 1. Dump Geometry
+    for i, geo in enumerate(fc_sketch.Geometry):
+        geo_type = type(geo).__name__
+        is_const = fc_sketch.getConstruction(i)
+
+        if geo_type == "LineSegment":
+            p1 = geo.StartPoint
+            p2 = geo.EndPoint
+            cmd = f"fc_sketch.addGeometry(Part.LineSegment(FreeCAD.Vector({p1.x}, {p1.y}, 0), FreeCAD.Vector({p2.x}, {p2.y}, 0)), {is_const})"
+            commands.append(cmd)
+
+        elif geo_type == "Circle":
+            c = geo.Center
+            r = geo.Radius
+            cmd = f"fc_sketch.addGeometry(Part.Circle(FreeCAD.Vector({c.x}, {c.y}, 0), FreeCAD.Vector(0, 0, 1), {r}), {is_const})"
+            commands.append(cmd)
+
+        elif geo_type == "ArcOfCircle":
+            p_start = geo.StartPoint
+            # FreeCAD ArcOfCircle uses 3 points or Center/Radius/Start/End, we'll use 3 points (Start, Mid, End)
+            import math
+            sp = geo.FirstParameter
+            ep = geo.LastParameter
+            # Handle modulus math carefully
+            mid_param = (sp + ep) / 2.0
+            p_mid = geo.value(mid_param)
+            p_end = geo.EndPoint
+            cmd = f"fc_sketch.addGeometry(Part.ArcOfCircle(FreeCAD.Vector({p_start.x}, {p_start.y}, 0), FreeCAD.Vector({p_mid.x}, {p_mid.y}, 0), FreeCAD.Vector({p_end.x}, {p_end.y}, 0)), {is_const})"
+            commands.append(cmd)
+
+        elif geo_type == "Point":
+            cmd = f"fc_sketch.addGeometry(Part.Point(FreeCAD.Vector({geo.X}, {geo.Y}, 0)), {is_const})"
+            commands.append(cmd)
+
+        else:
+            raise ValueError(f"Unsupported geometry type: {geo_type} for index {i}")
+
+    # 2. Dump Constraints
+    for i, c in enumerate(fc_sketch.Constraints):
+        t = c.Type
+        args = [f"'{t}'"]
+
+        if t in ['Radius', 'Diameter']:
+            args.extend([str(c.First), f"{c.Value}"])
+        elif t in ['Horizontal', 'Vertical']:
+            if c.FirstPos == 0 and c.Second <= 0: # single line
+                args.extend([str(c.First)])
+            else: # two points
+                args.extend([str(c.First), str(c.FirstPos), str(c.Second), str(c.SecondPos)])
+        elif t in ['Parallel', 'Perpendicular', 'Equal', 'Concentric']:
+            args.extend([str(c.First), str(c.Second)])
+        elif t == 'PointOnObject':
+            args.extend([str(c.First), str(c.FirstPos), str(c.Second)])
+        elif t == 'Tangent':
+            if c.FirstPos == 0 and c.SecondPos == 0:
+                args.extend([str(c.First), str(c.Second)])
+            else:
+                args.extend([str(c.First), str(c.FirstPos), str(c.Second), str(c.SecondPos)])
+        elif t == 'Symmetric':
+            args.extend([str(c.First), str(c.FirstPos), str(c.Second), str(c.SecondPos), str(c.Third), str(c.ThirdPos)])
+        elif t in ['Distance', 'DistanceX', 'DistanceY', 'Angle']:
+            if c.FirstPos == 0 and c.SecondPos == 0:
+                if c.Second >= 0:
+                    args.extend([str(c.First), str(c.Second), f"{c.Value}"])
+                else:
+                    args.extend([str(c.First), f"{c.Value}"])
+            elif c.FirstPos != 0 and c.SecondPos == 0:
+                args.extend([str(c.First), str(c.FirstPos), str(c.Second), f"{c.Value}"])
+            else:
+                args.extend([str(c.First), str(c.FirstPos), str(c.Second), str(c.SecondPos), f"{c.Value}"])
+        elif t == 'Block':
+            args.extend([str(c.First)])
+        else:
+            # Coincident / Fallback
+            args.extend([str(c.First), str(c.FirstPos), str(c.Second), str(c.SecondPos)])
+
+        cmd = f"fc_sketch.addConstraint(Sketcher.Constraint({', '.join(args)}))"
+        commands.append(cmd)
+
+    commands.append("doc.recompute()")
+    return commands

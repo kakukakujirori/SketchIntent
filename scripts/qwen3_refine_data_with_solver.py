@@ -1,6 +1,3 @@
-"""
-Treat solver_output as user prompts
-"""
 from typing import Any
 import argparse
 import base64
@@ -14,28 +11,23 @@ from dataclasses import dataclass, field
 from io import BytesIO
 
 import cairosvg
+import rootutils
 import traceback
 import PIL.Image
 from llama_cpp import Llama
-from llama_cpp.llama_chat_format import Qwen3VLChatHandler
+from llama_cpp.llama_chat_format import Qwen3VLChatHandler, Qwen35ChatHandler
 
-# Add FreeCAD Libs (conditionally)
-freecad_lib = "/data/ryotaro/github/FreeCAD/build/lib"
-if freecad_lib not in sys.path:
-    sys.path.insert(0, freecad_lib)
+rootutils.setup_root(__file__, indicator=".project-root", pythonpath=True)
 
-import FreeCAD
-import Part
-import Sketcher
-
-# Add parent directory to path for imports
-sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 import sketchgraphs.data as datalib
 from sketchgraphs.data import flat_array
+from src.sketch_handlers.context import SketchContext
+from src.sketch_handlers.freecad_utils import dump_freecad_commands, ensure_freecad_imported
+from src.sketch_handlers.sketch_freecad_converter import SketchFreecadConverter
+from scripts.draw_constraints import visualize_sketch_for_vlm, load_and_extract_from_file, export_sketch_to_dict
 
 
-from img2cad_diffusion.convert_sketch_to_freecad import convert_sketch_to_freecad, draw_svg
-from v20260116_draw_constraints import visualize_sketch_for_vlm, load_and_extract_from_file, export_sketch_to_dict
+FreeCAD, Part, Sketcher = ensure_freecad_imported()
 
 
 # ============================================================
@@ -183,6 +175,54 @@ def compute_constraint_value(ctype: str, primitives: list, e1: int, s1: int | No
                 closest_y = ly1 + t * dy
                 return math.sqrt((p1[0] - closest_x)**2 + (p1[1] - closest_y)**2)
 
+    elif ctype == "DistanceX":
+        # Case 1: Single entity (horizontal span of a line)
+        if e2 is None:
+            if prim1["type"] == "LineSegment":
+                sx, sy = prim1["start"]
+                ex, ey = prim1["end"]
+                return abs(ex - sx)
+            return None
+
+        # Case 2: Two points
+        if e2 >= len(primitives):
+            return None
+        if s1 is None:
+            return None
+
+        p1 = get_point_from_primitive(primitives, e1, s1)
+        if p1 is None:
+            return None
+
+        sub2 = s2 if s2 is not None else 0
+        p2 = get_point_from_primitive(primitives, e2, sub2)
+        if p2 is not None:
+            return p2[0] - p1[0]
+
+    elif ctype == "DistanceY":
+        # Case 1: Single entity (vertical span of a line)
+        if e2 is None:
+            if prim1["type"] == "LineSegment":
+                sx, sy = prim1["start"]
+                ex, ey = prim1["end"]
+                return abs(ey - sy)
+            return None
+
+        # Case 2: Two points
+        if e2 >= len(primitives):
+            return None
+        if s1 is None:
+            return None
+
+        p1 = get_point_from_primitive(primitives, e1, s1)
+        if p1 is None:
+            return None
+
+        sub2 = s2 if s2 is not None else 0
+        p2 = get_point_from_primitive(primitives, e2, sub2)
+        if p2 is not None:
+            return p2[1] - p1[1]
+
     elif ctype == "Radius":
         if prim1["type"] == "Circle":
             return prim1.get("radius")
@@ -226,7 +266,7 @@ def compute_constraint_value(ctype: str, primitives: list, e1: int, s1: int | No
 # Two-Pass Constraint Helpers
 # ============================================================
 
-DIMENSIONAL_CONSTRAINT_TYPES = {"Distance", "Angle", "Radius", "Diameter"}
+DIMENSIONAL_CONSTRAINT_TYPES = {"Distance", "DistanceX", "DistanceY", "Angle", "Radius", "Diameter"}
 
 
 def classify_constraints(constraints: list) -> tuple[list, list]:
@@ -545,10 +585,11 @@ def format_constraint_to_json(ctype: str, args: list) -> dict:
         c_out["entity3"] = get_arg(4)
         c_out["subnode3"] = get_arg(5)
 
-    elif ctype == "Distance":
-        # Distance(e1, value) - 2 args (line length) -- e.g. Distance(Line, Value)
-        # Distance(e1, s1, e2, value) - 4 args (point-line distance) -- e.g. Distance(Point, Sub, Line, Value)
-        # Distance(e1, s1, e2, s2, value) - 5 args (point-point distance) -- e.g. Distance(Point, Sub, Point, Sub, Value)
+    elif ctype in ["Distance", "DistanceX", "DistanceY"]:
+        # Distance/DistanceX/DistanceY share the same argument signatures:
+        # (e1, value) - 2 args (line length / horizontal or vertical span)
+        # (e1, s1, e2, value) - 4 args (point-line distance)
+        # (e1, s1, e2, s2, value) - 5 args (point-point distance)
         if len(args) == 2:
             c_out["entity1"] = get_arg(0)
             c_out["value"] = get_arg(1)
@@ -828,7 +869,7 @@ def generate_freecad_constraints(primitives: list, constraints: list):
 
             # --- Value Recomputation for Dimensional Constraints ---
             value = None
-            if ctype in ["Distance", "Angle", "Radius", "Diameter"]:
+            if ctype in ["Distance", "DistanceX", "DistanceY", "Angle", "Radius", "Diameter"]:
                 # ALWAYS recompute value
                 value = compute_constraint_value(ctype, primitives, e1, s1, e2, s2)
                 if value is None:
@@ -898,7 +939,7 @@ def generate_freecad_constraints(primitives: list, constraints: list):
                     yield idx, ctype, None, "Missing args for Symmetric"
                     continue
 
-            elif ctype == "Distance":
+            elif ctype in ["Distance", "DistanceX", "DistanceY"]:
                 if e2 is not None and s1 is not None and s2 is not None:
                     # Point-Point
                     final_args = [int(e1), int(s1), int(e2), int(s2), float(value)]
@@ -906,10 +947,10 @@ def generate_freecad_constraints(primitives: list, constraints: list):
                     # Point-Line (s2 implicit 0)
                     final_args = [int(e1), int(s1), int(e2), 0, float(value)]
                 elif e1 is not None:
-                    # Line Length
-                        final_args = [int(e1), float(value)]
+                    # Line span (e1, value)
+                    final_args = [int(e1), float(value)]
                 else:
-                    yield idx, ctype, None, "Missing args for Distance"
+                    yield idx, ctype, None, f"Missing args for {ctype}"
                     continue
 
             elif ctype == "Angle":
@@ -1073,7 +1114,7 @@ def add_constraints_to_sketch(
     return constraint_mapping, failed_indices, final_primitives
 
 
-def export_to_freecad_script(primitives: list, constraints: list, output_path: str):
+def export_to_freecad_script(primitives: list, constraints: list, output_path: str, keep_primitives: bool = False):
     """
     Generates a FreeCAD Python script to create a sketch with given primitives and constraints.
 
@@ -1082,6 +1123,9 @@ def export_to_freecad_script(primitives: list, constraints: list, output_path: s
     2. Use updated primitives for dimensional constraint values
     3. Export script with updated primitive coordinates
     """
+    if keep_primitives:
+        raise NotImplementedError
+
     # First, apply constraints to get updated primitives and correct dimensional values
     doc = None
     updated_primitives = primitives
@@ -1295,7 +1339,7 @@ def validate_geometry_preservation(
         # Note: We process Relational then Dimensional, but must track original indices
         indexed_constraints = list(enumerate(constraints))
 
-        dim_types = {"Distance", "Angle", "Radius", "Diameter"}
+        dim_types = {"Distance", "DistanceX", "DistanceY", "Angle", "Radius", "Diameter"}
         rel_indexed = [(i, c) for i, c in indexed_constraints if c.get("type") not in dim_types]
         dim_indexed = [(i, c) for i, c in indexed_constraints if c.get("type") in dim_types]
 
@@ -1543,17 +1587,20 @@ def static_constraints_diagnosis(
                 warnings.append(f"Constraint {i} ({constraint_name}) is malformed: subnode1 and subnode2 must be >= 1.")
 
         # Check for malformed/diagonal Distance constraints
-        if c["type"] == "Distance":
+        if c["type"] in ["Distance", "DistanceX", "DistanceY"]:
             if (e1 is not None and p1 is None) and (e2 is not None and p2 is None):
                 warnings.append(f"Constraint {i} ({constraint_name}) is malformed: You cannot define a distance between lines. Either Subnode1 or Subnode2 must be >= 1.")
-            elif p1 and p2:
+            elif c["type"] in ["DistanceX", "DistanceY"] and (e1 != e2) and (p1 is None or p2 is None):
+                warnings.append(f"Constraint {i} ({constraint_name}) is malformed: You cannot define a horizontal/vertical distance between a point and a line. Both Subnode1 and Subnode2 must be >= 1.")
+            elif c["type"] == "Distance" and p1 and p2:
+                # Diagonal check only applies to Distance, not DistanceX/Y (which are axis-aligned by definition)
                 # p1, p2 are [x, y] lists
                 dx = abs(p1[0] - p2[0])
                 dy = abs(p1[1] - p2[1])
 
                 # Threshold for "Diagonal": neither H nor V (e.g. > 0.1mm deviation in both axes)
                 if dx > 0.1 and dy > 0.1:
-                    warnings.append(f"Constraint {i} ({constraint_name}) is diagonally placed. Replace it with another constraint if possible, such as horizontal/vertical point-to-line distance or radius constraint.")
+                    warnings.append(f"Constraint {i} ({constraint_name}) is diagonally placed. Consider using DistanceX (horizontal) or DistanceY (vertical) constraint instead.")
 
     # # DEBUG
     # if warnings:
@@ -1624,6 +1671,14 @@ def run_solver_tool(
             'ConflictGroups': convert_groups(status.get('ConflictGroups', [])),
             'MalformedConstraints': all_malformed
         }
+
+        # safety net (critical level: high to low)
+        if response['Status'] == 'Converged' and response['MalformedConstraints']:
+            response['Status'] = 'Malformed'
+        elif response['Status'] == 'Converged' and response['ConflictingConstraints']:
+            response['Status'] = 'Conflicting'
+        elif response['Status'] == 'Converged' and response['RedundantConstraints']:
+            response['Status'] = 'Redundant'
 
         # --- Geometry Validation ---
         distorting_indices, geo_error = validate_geometry_preservation(
@@ -1978,6 +2033,20 @@ Even though you infer the parameter `Value`, we discard them and instead calcula
         - Fixes distance between a point and a line (you can omit Subnode2 = 0 in this case): Distance(Entity1, Subnode1, Line2, Value)
         - Fixes length of a line: Distance(Line, 1, Line, 2, Value), or Distance(Line, Value) for shorthand notation.
     * NOTE: You CANNOT define the distance between two lines: Distance(Line1, 0, Line2, 0, Value) is judged as malformed.
+- DistanceX(Entity1, Subnode1, Entity2, Subnode2, Value)
+    * Fixes the HORIZONTAL (X-axis) distance between two points. This constrains only the X-component of the displacement.
+    * Examples:
+        - Horizontal distance between two points: DistanceX(Entity1, Subnode1, Entity2, Subnode2, Value)
+        - Horizontal span of a line: DistanceX(Line, 1, Line, 2, Value), or DistanceX(Line, Value) for shorthand.
+    * PREFERRED over diagonal Distance constraints when constraining horizontal positioning.
+    * NOTE: You CANNOT define the horizontal distance between a point and a line: Either Subnode1=0 or Subnode2=0 is judged as malformed.
+- DistanceY(Entity1, Subnode1, Entity2, Subnode2, Value)
+    * Fixes the VERTICAL (Y-axis) distance between two points. This constrains only the Y-component of the displacement.
+    * Examples:
+        - Vertical distance between two points: DistanceY(Entity1, Subnode1, Entity2, Subnode2, Value)
+        - Vertical span of a line: DistanceY(Line, 1, Line, 2, Value), or DistanceY(Line, Value) for shorthand.
+    * PREFERRED over diagonal Distance constraints when constraining vertical positioning.
+    * NOTE: You CANNOT define the vertical distance between a point and a line: Either Subnode1=0 or Subnode2=0 is judged as malformed.
 - Diameter(Entity1, Value)
     * Fixes diameter of Circle or Arc.
 - Radius(Entity1, Value)
@@ -2275,37 +2344,37 @@ Use the 2D sketch image as your visual reference.
 # Main Execution
 # ============================================================
 
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description="Save FC GT and predictions that pass all validation criteria")
-    parser.add_argument('--geo_threshold', type=float, default=50.0, help="Geometry validation threshold in mm")
-    parser.add_argument('--output_dir', type=str, default='qwen3_refined_data_with_solver', help="Output directory")
-    parser.add_argument('--start_idx', type=int, default=0, help="Start index of sequences to process")
-    parser.add_argument('--process_num', type=int, default=1000, help="Number of sequences to process")
-    parser.add_argument('--max_turns', type=int, default=10, help="Maximum solver calls before accepting answer")
-    parser.add_argument('--skip_viz_comparison', action='store_true', help="Skip visual comparison before and after refinement")
-    args = parser.parse_args()
-
-    # --- Model Configuration ---
-    # MODEL_PATH = "/home/ryotaro/github/llama.cpp/models/Qwen3VL-235B-A22B-Thinking-Q4_K_M-split-00001-of-00003.gguf"
-    # MMPROJ_PATH = "/home/ryotaro/github/llama.cpp/models/mmproj-Qwen3VL-235B-A22B-Thinking-F16.gguf"
-
-    MODEL_PATH = "/data/ryotaro/github/llama.cpp/models/Qwen3VL-30B-A3B-Thinking-Q8_0.gguf"
-    MMPROJ_PATH = "/data/ryotaro/github/llama.cpp/models/mmproj-Qwen3VL-30B-A3B-Thinking-F16.gguf"
-
+def main(args):
     # Initialize LLM
-    llm = Llama(
-        model_path=MODEL_PATH,
-        chat_handler=Qwen3VLChatHandler(
-            clip_model_path=MMPROJ_PATH,
-            force_reasoning=True,
-            image_min_tokens=1024,
+    if "Qwen3VL" in os.path.basename(args.qwen_model_path):
+        llm = Llama(
+            model_path=args.qwen_model_path,
+            chat_handler=Qwen3VLChatHandler(
+                clip_model_path=args.qwen_mmproj_path,
+                force_reasoning=True,
+                image_min_tokens=1024,
+                verbose=False,
+            ),
+            n_gpu_layers=-1,
+            n_ctx=81920, #65536,
+            swa_full=True,
             verbose=False,
-        ),
-        n_gpu_layers=-1,
-        n_ctx=81920, #65536,
-        swa_full=True,
-        verbose=False,
-    )
+        )
+    elif "Qwen3.5" in os.path.basename(args.qwen_model_path):
+        llm = Llama(
+            model_path=args.qwen_model_path,
+            chat_handler=Qwen35ChatHandler(
+                clip_model_path=args.qwen_mmproj_path,
+                image_min_tokens=1024,
+                verbose=False,
+            ),
+            n_gpu_layers=-1,
+            n_ctx=81920, #65536,
+            swa_full=True,
+            verbose=False,
+        )
+    else:
+        raise NotImplementedError(f"Unhandled model: {args.model_path}")
     llm.reset()
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -2314,9 +2383,12 @@ if __name__ == '__main__':
 
     error_log = os.path.join(args.output_dir, "error_log.txt")
 
+    # initialize a converter
+    context = SketchContext()  # NOTE: No context attributes are used, so arguments can be blank
+    converter = SketchFreecadConverter(context)
+
     # load data
-    sequence_path = "/data/ryotaro/my_works/My-Vitruvion/data_processed/sg_filtered_unique.npy"
-    seq_data = flat_array.load_dictionary_flat(sequence_path)
+    seq_data = flat_array.load_dictionary_flat(args.sequence_path)
     sequences = seq_data['sequences']
 
     for i in range(args.start_idx, args.start_idx + args.process_num):
@@ -2337,7 +2409,8 @@ if __name__ == '__main__':
         sketch = datalib.sketch_from_sequence(seq)
         doc = None
         try:
-            doc, fc_sketch, history_commands, entity_to_geoid, mapping = convert_sketch_to_freecad(sketch)
+            doc, fc_sketch, _, _ = converter.to_freecad(sketch)
+            history_commands = dump_freecad_commands(fc_sketch)
             sample_primitives, sample_constraints = parse_freecad_script(history_commands)
         except Exception as e:
             print(f"Error processing sequence {i}: {e}")
@@ -2407,7 +2480,7 @@ if __name__ == '__main__':
         for solver_call_count in range(args.max_turns):
 
             # Notify remaining turns
-            remaining_times_notification = f"Turn {solver_call_count + 1}: You can attempt submission up to {args.max_turns - solver_call_count} more times."
+            remaining_times_notification = f"Turn {solver_call_count}: You can attempt submission up to {args.max_turns - solver_call_count} more times."
             messages.append({"role": "user", "content": remaining_times_notification})
             print("User: " + remaining_times_notification + "\n")
 
@@ -2465,6 +2538,14 @@ if __name__ == '__main__':
             if json_match:
                 predicted_constraints, parse_error = parse_qwen_output_json(json_match.group(0))
                 predicted_constraints_list.append(predicted_constraints)
+
+
+
+                # Dump intermediate results
+                output_history_intermediate = f"{args.output_dir}/commands/{i:07d}_round{solver_call_count}.py"
+                export_to_freecad_script(sample_primitives, predicted_constraints, output_history_intermediate)
+
+
 
                 if parse_error:
                     solver_output = json.dumps({"DoF": "null", "Error": parse_error}, indent=2)
@@ -2525,7 +2606,7 @@ if __name__ == '__main__':
 
         # Iterate through all predictions
         for pred_validation_version_id, predicted_constraints in enumerate(predicted_constraints_list):
-            print(f"\n~~~~~~~~ Qwen3 Output Version {pred_validation_version_id + 1} ~~~~~~~~")
+            print(f"\n~~~~~~~~ Qwen3 Output Version {pred_validation_version_id} ~~~~~~~~")
 
             # Cleanup the final result
             print("\n--- Qwen3 Output Cleanup ---")
@@ -2583,23 +2664,11 @@ if __name__ == '__main__':
                 if predicted_verification.error:
                     print(f"  Error: {predicted_verification.error}")
 
-
-
-
-        # DEBUG
-        for round_id, predicted_constraints in enumerate(predicted_constraints_list):
-            predicted_constraints_cleaned, _ = cleanup_constraints_from_lists(sample_primitives, predicted_constraints)
-            output_history_intermediate = f"{args.output_dir}/commands/{i:07d}_round{round_id}.py"
-            export_to_freecad_script(sample_primitives, predicted_constraints_cleaned, output_history_intermediate)
-
-
-
-
         if valid_candidates:
             # Sort by DoF (ascending), then by version (descending) to prefer later refined versions if DoF is same
             valid_candidates.sort(key=lambda x: (x['dof'], -x['version']))
             best_candidate = valid_candidates[0]
-            print(f"\n★ SELECTED BEST CANDIDATE: Version {best_candidate['version'] + 1} with DoF={best_candidate['dof']}")
+            print(f"\n★ SELECTED BEST CANDIDATE: Version {best_candidate['version']} with DoF={best_candidate['dof']}")
             export_to_freecad_script(sample_primitives, best_candidate['constraints'], output_history_refined)
 
             # Update variables for logging
@@ -2646,3 +2715,35 @@ if __name__ == '__main__':
                 combined_image.paste(refined_image, (original_image.width, 0))
                 combined_image.save(output_image_path_refined)
                 os.remove(output_image_path_original)
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description="Save FC GT and predictions that pass all validation criteria")
+    parser.add_argument('--geo_threshold', type=float, default=1.0, help="Geometry validation threshold in mm")
+    parser.add_argument('--output_dir', type=str, default='data_qwen3_refined_with_solver', help="Output directory")
+    parser.add_argument('--start_idx', type=int, default=0, help="Start index of sequences to process")
+    parser.add_argument('--process_num', type=int, default=1000, help="Number of sequences to process")
+    parser.add_argument('--max_turns', type=int, default=10, help="Maximum solver calls before accepting answer")
+    parser.add_argument('--skip_viz_comparison', action='store_true', help="Skip visual comparison before and after refinement")
+    parser.add_argument(
+        '--sequence_path',
+        type=str,
+        default="/home/ryotaro/my_works/My-Vitruvion/data_processed/sg_filtered_unique.npy",
+        help="Path to the sequence data",
+    )
+    parser.add_argument(
+        '--qwen_model_path',
+        type=str,
+        # default="/home/ryotaro/github/llama.cpp/models/Qwen3VL-30B-A3B-Thinking-Q8_0.gguf",
+        default="/home/ryotaro/github/llama.cpp/models/Qwen3.5-35B-A3B-UD-Q6_K_XL.gguf",
+        help="Path to the Qwen3VL or Qwen3.5 model weight",
+    )
+    parser.add_argument(
+        '--qwen_mmproj_path',
+        type=str,
+        # default="/home/ryotaro/github/llama.cpp/models/mmproj-Qwen3VL-30B-A3B-Thinking-F16.gguf",
+        default="/home/ryotaro/github/llama.cpp/models/mmproj-Qwen3.5-35B-A3B-F32.gguf",
+        help="Path to the Qwen3VL or Qwen3.5 projection module weight",
+    )
+    args = parser.parse_args()
+    main(args)
