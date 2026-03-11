@@ -26,8 +26,8 @@ class ConstraintARModule(L.LightningModule):
         self.criterion = torch.nn.CrossEntropyLoss(ignore_index=ConstraintToken.Pad)
 
         self.accuracy_metric = TokenAccuracy(ignore_index=ConstraintToken.Pad)
-        self.iou_metrics = ConstraintIoU(context)
-        self.token_reordering = TokenReordering(context=context)
+        self.iou_metrics = ConstraintIoU(context, prefix_len=1)  # NOTE: prefix_len is important
+        self.token_reordering = TokenReordering(context=context, prefix_len=1)  # NOTE: prefix_len is important
 
     @staticmethod
     def _format_constraint_sequence(tokens, max_show: int | None = None) -> list[str]:
