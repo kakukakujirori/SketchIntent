@@ -1,19 +1,48 @@
 # My-Vitruvion
 
-## Installation
+## Install FreeCAD
+
+We first need to build our custom FreeCAD for inference-time solver feedback:
 
 ```bash
-conda create -n vitruvion python=3.12
-conda activate vitruvion
+git clone https://github.com/kakukakujirori/FreeCAD.git
+cd FreeCAD
+git checkout -b solver-api origin/solver-api
+git submodule update --init --recursive
+```
 
-# Install dependencies
+We use a mamba environment, following the instruction of FreeCAD:
+
+```bash
+mamba env create -f conda/environment.devenv.yml
+mamba activate freecad
+
+# Remove non-existent HDF5 paths from the environment's compiler wrappers
+sed -i 's|-I/home/conda/[^ ]*H5FDsubfiling||g' $CONDA_PREFIX/bin/h5cc $CONDA_PREFIX/bin/h5c++ $CONDA_PREFIX/lib/libhdf5.settings
+
+cmake --preset conda-linux-release -DBUILD_FEM_NETGEN=OFF
+cmake --build build/release -j $(nproc)
+```
+
+After the build completes, modify the default argument of `ensure_freecad_imported` in [`src/sketch_handlers/freecad_utils.py`](src/sketch_handlers/freecad_utils.py) to your FreeCAD binary path.
+
+## Install Dependencies
+
+```bash
+git clone https://github.com/kakukakujirori/My-Vitruvion.git
+cd My-Vitruvion
+mamba activate freecad
 pip install -r requirements.txt
 CMAKE_ARGS="-DGGML_CUDA=on" pip install "llama-cpp-python @ git+https://github.com/JamePeng/llama-cpp-python.git"
 ```
 
-We also need our customized FreeCAD for inference-time solver feedback.
+## Qwen3-VL Weight Download
 
-[TODO: FreeCAD instrallation description.]
+```bash
+mkdir -p qwen_weights
+wget "https://huggingface.co/Qwen/Qwen3-VL-30B-A3B-Thinking-GGUF/resolve/main/Qwen3VL-30B-A3B-Thinking-Q8_0.gguf?download=true" -O qwen_weights/Qwen3VL-30B-A3B-Thinking-Q8_0.gguf
+wget "https://huggingface.co/Qwen/Qwen3-VL-30B-A3B-Thinking-GGUF/resolve/main/mmproj-Qwen3VL-30B-A3B-Thinking-F16.gguf?download=true" -O qwen_weights/mmproj-Qwen3VL-30B-A3B-Thinking-F16.gguf
+```
 
 ## Data
 

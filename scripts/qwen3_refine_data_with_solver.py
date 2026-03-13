@@ -2734,15 +2734,13 @@ if __name__ == '__main__':
     parser.add_argument(
         '--qwen_model_path',
         type=str,
-        default="/data/ryotaro/github/llama.cpp/models/Qwen3VL-30B-A3B-Thinking-Q8_0.gguf",
-        # default="/data/ryotaro/github/llama.cpp/models/Qwen3.5-35B-A3B-UD-Q6_K_XL.gguf",
+        default="qwen_weights/Qwen3VL-30B-A3B-Thinking-Q8_0.gguf",
         help="Path to the Qwen3VL or Qwen3.5 model weight",
     )
     parser.add_argument(
         '--qwen_mmproj_path',
         type=str,
-        default="/data/ryotaro/github/llama.cpp/models/mmproj-Qwen3VL-30B-A3B-Thinking-F16.gguf",
-        # default="/data/ryotaro/github/llama.cpp/models/mmproj-Qwen3.5-35B-A3B-F32.gguf",
+        default="qwen_weights/mmproj-Qwen3VL-30B-A3B-Thinking-F16.gguf",
         help="Path to the Qwen3VL or Qwen3.5 projection module weight",
     )
     args = parser.parse_args()
