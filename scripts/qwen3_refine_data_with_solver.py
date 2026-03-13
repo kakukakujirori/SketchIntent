@@ -2686,7 +2686,7 @@ def main(args):
             predicted_summary = predicted_verification.summary()
 
         # Log verification result (GT vs Qwen3 comparison)
-        with open(os.path.join(args.output_dir, "verification_log.txt"), "a") as f:
+        with open(os.path.join(args.output_dir, f"verification_log_{args.start_idx}_{args.start_idx + args.process_num}.txt"), "a") as f:
             valid_str = "PASS" if predicted_verification.is_valid() else "FAIL"
             f.write(f"{i:07d}: [GT] {sample_summary} | [Qwen3] {predicted_summary} | solver_calls={solver_call_count} [{valid_str}]\n")
 
@@ -2728,21 +2728,21 @@ if __name__ == '__main__':
     parser.add_argument(
         '--sequence_path',
         type=str,
-        default="/home/ryotaro/my_works/My-Vitruvion/data_processed/sg_filtered_unique.npy",
+        default="/data/ryotaro/my_works/My-Vitruvion/data_processed/sg_filtered_unique.npy",
         help="Path to the sequence data",
     )
     parser.add_argument(
         '--qwen_model_path',
         type=str,
-        # default="/home/ryotaro/github/llama.cpp/models/Qwen3VL-30B-A3B-Thinking-Q8_0.gguf",
-        default="/home/ryotaro/github/llama.cpp/models/Qwen3.5-35B-A3B-UD-Q6_K_XL.gguf",
+        default="/data/ryotaro/github/llama.cpp/models/Qwen3VL-30B-A3B-Thinking-Q8_0.gguf",
+        # default="/data/ryotaro/github/llama.cpp/models/Qwen3.5-35B-A3B-UD-Q6_K_XL.gguf",
         help="Path to the Qwen3VL or Qwen3.5 model weight",
     )
     parser.add_argument(
         '--qwen_mmproj_path',
         type=str,
-        # default="/home/ryotaro/github/llama.cpp/models/mmproj-Qwen3VL-30B-A3B-Thinking-F16.gguf",
-        default="/home/ryotaro/github/llama.cpp/models/mmproj-Qwen3.5-35B-A3B-F32.gguf",
+        default="/data/ryotaro/github/llama.cpp/models/mmproj-Qwen3VL-30B-A3B-Thinking-F16.gguf",
+        # default="/data/ryotaro/github/llama.cpp/models/mmproj-Qwen3.5-35B-A3B-F32.gguf",
         help="Path to the Qwen3VL or Qwen3.5 projection module weight",
     )
     args = parser.parse_args()
