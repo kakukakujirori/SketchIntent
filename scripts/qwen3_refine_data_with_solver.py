@@ -1,3 +1,4 @@
+from llama_cpp.server.cli import add_args_from_model
 from typing import Any
 import argparse
 import base64
@@ -5,6 +6,7 @@ import glob
 import json
 import math
 import os
+import random
 import re
 import sys
 from dataclasses import dataclass, field
@@ -34,7 +36,7 @@ FreeCAD, Part, Sketcher = ensure_freecad_imported()
 # Geometry & Math Utils
 # ============================================================
 
-def parse_vector(vec_str):
+def parse_vector(vec_str: str) -> list[float]:
     # Extracts numbers from "Vector(x, y, z)"
     # Pattern supports scientific notation like 8.326e-14, 1.5E+10
     nums = re.findall(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?", vec_str)
@@ -112,6 +114,29 @@ def get_point_from_primitive(primitives: list, entity_idx: int, subnode: int | N
                 return [result[0], result[1]]
 
     return None
+
+
+def oscillate_primitives(primitives: list[dict[str, Any]], noise_std: float = 0.01) -> list[dict[str, Any]]:
+    assert noise_std >= 0, f"{noise_std=}"
+
+    oscillated_primitives = []
+    for prim in primitives:
+        prim_oscillated = prim.copy()
+
+        for key, val in prim.items():
+            if key in ["id", "type", "is_construction"]:
+                continue
+            if isinstance(val, bool):
+                continue  # Just in case, because isinstance(True/False, bool) = True
+
+            if isinstance(val, float):
+                prim_oscillated[key] = val + random.random() * noise_std
+            elif isinstance(val, (list, tuple)) and all(isinstance(x, float) for x in val):
+                prim_oscillated[key] = [x + random.random() * noise_std for x in val]
+
+        oscillated_primitives.append(prim_oscillated)
+
+    return oscillated_primitives
 
 
 def compute_constraint_value(ctype: str, primitives: list, e1: int, s1: int | None = None,
@@ -325,7 +350,7 @@ def extract_primitives_from_sketch(fc_sketch: "Sketcher.SketchObject") -> list:
         try:
             is_construction = fc_sketch.getConstruction(geo_id)
             if is_construction:
-                new_prim["construction"] = True
+                new_prim["is_construction"] = True
         except Exception:
             pass  # Not a construction line
 
@@ -1754,6 +1779,42 @@ def run_solver_tool(
     return json.dumps(response, indent=2)
 
 
+def oscillate_sketch(primitives: list[dict[str, Any]], constraints_json_list: list, noise_std: float = 1.0) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    doc = None
+    oscillated_primitives_final = []
+    try:
+        # Create temporary document
+        doc = FreeCAD.newDocument("SolverToolDoc")
+        body = doc.addObject('PartDesign::Body', 'Body')
+        fc_sketch = body.newObject('Sketcher::SketchObject', 'Sketch')
+        xy_plane = body.Origin.OriginFeatures[3]
+        fc_sketch.AttachmentSupport = xy_plane
+        fc_sketch.MapMode = 'FlatFace'
+
+        # Add primitives and constraints
+        oscillated_primitives = oscillate_primitives(primitives, noise_std=noise_std)
+        add_primitives_to_sketch(oscillated_primitives, fc_sketch)
+        constraint_mapping, failed_indices, _ = add_constraints_to_sketch(oscillated_primitives, constraints_json_list, fc_sketch)
+        doc.recompute()
+        status = fc_sketch.getSolverStatus()
+
+        # extract primitives from the oscillated sketch
+        history_commands = dump_freecad_commands(fc_sketch)
+        oscillated_primitives_final, _ = parse_freecad_script(history_commands)
+
+    except Exception:
+        status = {'Status': 'Error', 'Error': traceback.format_exc()}
+
+    finally:
+        if doc:
+            try:
+                FreeCAD.closeDocument(doc.Name)
+            except:
+                pass
+
+    return oscillated_primitives_final, status
+
+
 def cleanup_constraints_from_lists(
     primitives: list[dict[str, Any]],
     constraints: list[dict[str, Any]],
@@ -2339,7 +2400,6 @@ Use the 2D sketch image as your visual reference.
     return messages
 
 
-
 # ============================================================
 # Main Execution
 # ============================================================
@@ -2587,6 +2647,16 @@ def main(args):
                     solver_output += "\n\nAttached is a sketch with your constraints applied. Identify and fix any invalid constraints from it if any, then find missing constraints."
                 except Exception as e:
                     print(f"Error encoding feedback image: {e}")
+
+            # # Show an oscillation result to help the model find missing constraints easily
+            # if solver_resp.get("Status", "") in ["Converged"]:
+            #     oscillated_primitives, oscillated_status = oscillate_sketch(sample_primitives, predicted_constraints, noise_std=1.0)
+            #     if oscillated_status.get("Status", "") in ["Converged"]:
+            #         solver_output += "\n\n[HINT] Below are the before-and-after results obtained by slightly perturbing the primitive coordinates and applying the predicted constraints. Regions where the original geometric relations are broken indicate missing constraints."
+            #         solver_output += "\nBefore:\n"
+            #         solver_output += json.dumps(sample_primitives, indent=2)
+            #         solver_output += "\nAfter:\n"
+            #         solver_output += json.dumps(oscillated_primitives, indent=2)
 
             user_content.append({"type": "text", "text": solver_output})
             messages.append({"role": "user", "content": user_content})

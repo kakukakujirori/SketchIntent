@@ -24,7 +24,7 @@ cmake --preset conda-linux-release -DBUILD_FEM_NETGEN=OFF
 cmake --build build/release -j $(nproc)
 ```
 
-After the build completes, modify the default argument of `ensure_freecad_imported` in [`src/sketch_handlers/freecad_utils.py`](src/sketch_handlers/freecad_utils.py) to your FreeCAD binary path.
+After the build completes, modify the default argument of `ensure_freecad_imported` in [`src/sketch_handlers/freecad_utils.py`](src/sketch_handlers/freecad_utils.py) to your FreeCAD library directory path.
 
 ## Install Dependencies
 

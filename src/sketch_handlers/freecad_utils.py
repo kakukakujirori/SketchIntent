@@ -1,10 +1,10 @@
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 import sys
 import os
 import typing
 
 
-def ensure_freecad_imported(libpath: str = "~/github/FreeCAD/build/lib") -> typing.Tuple[typing.Any, typing.Any, typing.Any]:
+def ensure_freecad_imported(libpath: str = "~/github/FreeCAD/build/release/lib") -> tuple[Any, Any, Any]:
     """
     Safely imports and returns FreeCAD modules (FreeCAD, Part, Sketcher).
     Ensures the path is set up correctly before importing.

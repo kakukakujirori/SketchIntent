@@ -1,3 +1,4 @@
+cairosvg
 hydra-core
 huggingface_hub
 lightning
