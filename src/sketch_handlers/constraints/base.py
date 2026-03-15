@@ -36,14 +36,13 @@ class ConstraintHandler(ABC):
         pass
 
     @abstractmethod
-    def encode(self, constraint: Any, primitive_tokenpos: dict[str, int], entities: dict[str, datalib.Entity]) -> tuple[int, tuple[int, ...], np.ndarray, tuple[int, ...]]:
+    def encode(self, constraint: Any, primitive_tokenpos: dict[str, int]) -> tuple[int, tuple[int, ...], np.ndarray, tuple[int, ...]]:
         """
         Encode a constraint into token ID, reference tokens, and parameter values.
 
         Args:
             constraint: The constraint object.
             primitive_tokenpos: A dictionary mapping Entity ID (str) -> Start Token Index (int).
-            entities: A dictionary mapping Entity ID (str) -> Entity object (datalib.Entity).
 
         Returns:
             token_id: The constraint type token ID.
@@ -153,35 +152,38 @@ class ConstraintHandler(ABC):
             else:
                 refs.append((value, None))
 
-        # Filter external refs
+        # Filter external or truncated refs
         filtered_refs = []
         for eid, sub in refs:
             key = f"{eid}.{sub}" if sub else eid
-            if key in primitive_tokenpos:
+            tokenpos = primitive_tokenpos.get(key)
+            if tokenpos and tokenpos >= 0:
                 filtered_refs.append((eid, sub))
             else:
-                return [] # Invalidate if any ref is missing
+                # If a referred primitive is truncated, then tokenpos = -1.
+                assert tokenpos is None or tokenpos == -1, f"{tokenpos=}"
+                if tokenpos is None:
+                    msg = f"[ConstraintHandler._parse_reference] WARNING: didn't find {key=} in {primitive_tokenpos=}."
+                    msg += "Does the key refer to an external object? Worth debugging. This is unlikely to happen."
+                    print(msg, flush=True)
+                filtered_refs = []
+                break
 
         return filtered_refs
 
-    def _get_sorted_ref_tokens(self, constraint: Any, primitive_tokenpos: dict[str, int], entities: dict[str, datalib.Entity]) -> tuple[int, ...]:
+    def _get_sorted_ref_tokens(self, constraint: Any, primitive_tokenpos: dict[str, int]) -> tuple[int, ...]:
         """
         Helper to parse, sort, and convert references to tokens.
         """
         refs = self._parse_references(constraint, primitive_tokenpos)
+        ref_tokens = tuple(primitive_tokenpos[f"{eid}.{sub}" if sub else eid] for eid, sub in refs)
+        return self._sort_ref_tokens(ref_tokens)
 
-        # Sort references by token position
-        def get_ref_pos(r):
-            key = f"{r[0]}.{r[1]}" if r[1] else r[0]
-            return primitive_tokenpos.get(key, 0)
-
-        sorted_refs = sorted(refs, key=get_ref_pos)
-
-        ref_tokens = []
-        for eid, sub in sorted_refs:
-            key = f"{eid}.{sub}" if sub else eid
-            ref_tokens.append(primitive_tokenpos[key])
-        return tuple(ref_tokens)
+    def _sort_ref_tokens(self, ref_tokens: tuple[int, ...]) -> tuple[int, ...]:
+        """
+        Sort reference tokens in ascending order.
+        """
+        return tuple(sorted(ref_tokens))
 
     def _get_ref_strings(self, constraint: datalib.Constraint) -> tuple[str, ...]:
         """

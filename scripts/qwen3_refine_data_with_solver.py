@@ -1139,7 +1139,7 @@ def add_constraints_to_sketch(
     return constraint_mapping, failed_indices, final_primitives
 
 
-def export_to_freecad_script(primitives: list, constraints: list, output_path: str, keep_primitives: bool = False):
+def export_to_freecad_script(primitives: list, constraints: list, output_path: str, keep_primitives: bool = False) -> str | None:
     """
     Generates a FreeCAD Python script to create a sketch with given primitives and constraints.
 
@@ -1173,10 +1173,7 @@ def export_to_freecad_script(primitives: list, constraints: list, output_path: s
         for _idx, ctype, args, error_msg in generate_freecad_constraints(primitives, relational_constraints):
             if error_msg or args is None:
                 continue
-            try:
-                fc_sketch.addConstraint(Sketcher.Constraint(ctype, *args))
-            except Exception:
-                pass
+            fc_sketch.addConstraint(Sketcher.Constraint(ctype, *args))
 
         fc_sketch.solve()
         doc.recompute()
@@ -1188,10 +1185,7 @@ def export_to_freecad_script(primitives: list, constraints: list, output_path: s
         for _idx, ctype, args, error_msg in generate_freecad_constraints(updated_primitives, dimensional_constraints):
             if error_msg or args is None:
                 continue
-            try:
-                fc_sketch.addConstraint(Sketcher.Constraint(ctype, *args))
-            except Exception:
-                pass
+            fc_sketch.addConstraint(Sketcher.Constraint(ctype, *args))
 
         fc_sketch.solve()
         doc.recompute()
@@ -1201,14 +1195,10 @@ def export_to_freecad_script(primitives: list, constraints: list, output_path: s
 
     except Exception as e:
         print(f"Warning: Failed to compute updated primitives for export: {e}")
-        # Fall back to original primitives
+        return str(e)
 
     finally:
-        if doc is not None:
-            try:
-                FreeCAD.closeDocument(doc.Name)
-            except:
-                pass
+        FreeCAD.closeDocument(doc.Name) if doc else None
 
     # Now generate the script with updated primitives
     lines = []
@@ -1280,6 +1270,7 @@ def export_to_freecad_script(primitives: list, constraints: list, output_path: s
         f.write("\n".join(lines))
 
     print(f"Exported to {output_path}")
+    return None
 
 
 # ============================================================
@@ -2505,10 +2496,20 @@ def main(args):
                 sample_constraints_cleaned_json.append(c)
 
         # Export GT commands with cleaned constraints
-        export_to_freecad_script(sample_primitives, sample_constraints_cleaned_json, output_history_original)
+        error = export_to_freecad_script(sample_primitives, sample_constraints_cleaned_json, output_history_original)
+        if error:
+            print(f"Error exporting GT commands: {error}")
+            with open(error_log, "a") as f:
+                f.write(f"Error exporting GT commands for sample {i}:\n{error}\n")
+            continue
 
         # Export GT sketch image with cleaned constraints
         sketch_data = load_and_extract_from_file(output_history_original)
+        if sketch_data is None:
+            print(f"Error loading GT sketch for sample {i}")
+            with open(error_log, "a") as f:
+                f.write(f"Error loading GT sketch for sample {i}\n")
+            continue
         visualize_sketch_for_vlm(
             sketch_data,
             save_path=output_image_path_original,
@@ -2603,8 +2604,11 @@ def main(args):
 
                 # Dump intermediate results
                 output_history_intermediate = f"{args.output_dir}/commands/{i:07d}_round{solver_call_count}.py"
-                export_to_freecad_script(sample_primitives, predicted_constraints, output_history_intermediate)
-
+                error = export_to_freecad_script(sample_primitives, predicted_constraints, output_history_intermediate)
+                if error:
+                    print(f"Error exporting intermediate results: {error}")
+                    with open(error_log, "a") as f:
+                        f.write(f"Error exporting intermediate results for sample {i} turn {solver_call_count}:\n{error}\n")
 
 
                 if parse_error:
@@ -2739,7 +2743,12 @@ def main(args):
             valid_candidates.sort(key=lambda x: (x['dof'], -x['version']))
             best_candidate = valid_candidates[0]
             print(f"\n★ SELECTED BEST CANDIDATE: Version {best_candidate['version']} with DoF={best_candidate['dof']}")
-            export_to_freecad_script(sample_primitives, best_candidate['constraints'], output_history_refined)
+            error = export_to_freecad_script(sample_primitives, best_candidate['constraints'], output_history_refined)
+            if error:
+                print(f"Error exporting refined sketch data: {error}")
+                with open(error_log, "a") as f:
+                    f.write(f"Error exporting refined sketch data for sample {i}:\n{error}\n")
+                continue
 
             # Update variables for logging
             predicted_verification = best_candidate['verification']
@@ -2749,7 +2758,12 @@ def main(args):
             # Take the last prediction, and comment out the output file
             predicted_constraints = predicted_constraints_list[-1]
             predicted_constraints_cleaned, _ = cleanup_constraints_from_lists(sample_primitives, predicted_constraints)
-            export_to_freecad_script(sample_primitives, predicted_constraints_cleaned, output_history_refined)
+            error = export_to_freecad_script(sample_primitives, predicted_constraints_cleaned, output_history_refined)
+            if error:
+                print(f"Error exporting refined sketch data: {error}")
+                with open(error_log, "a") as f:
+                    f.write(f"Error exporting refined sketch data for sample {i}:\n{error}\n")
+                continue
             comment_out_file(output_history_refined)
             predicted_verification = verify_constraints(sample_primitives, predicted_constraints_cleaned, args.geo_threshold)
             predicted_verification.dof_decreased = predicted_verification.dof <= sample_verification.dof

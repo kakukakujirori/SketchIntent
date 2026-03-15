@@ -16,8 +16,8 @@ class DistanceHandler(ConstraintHandler):
     def name(self) -> str:
         return "Distance"
 
-    def encode(self, constraint: datalib.Constraint, primitive_tokenpos: dict[str, int], entities: dict[str, datalib.Entity]) -> tuple[int, tuple[int, ...], np.ndarray, tuple[int, ...]]:
-        ref_tokens = self._get_sorted_ref_tokens(constraint, primitive_tokenpos, entities)
+    def encode(self, constraint: datalib.Constraint, primitive_tokenpos: dict[str, int]) -> tuple[int, tuple[int, ...], np.ndarray, tuple[int, ...]]:
+        ref_tokens = self._get_sorted_ref_tokens(constraint, primitive_tokenpos)
         val = self.get_constraint_value(constraint)
 
         # Potentially changes to DistanceX or DistanceY
@@ -54,8 +54,10 @@ class DistanceHandler(ConstraintHandler):
                 g2, p2 = res2
                 # Point-Point or Point-Line distance
                 return [('Distance', [g1, p1, g2, p2, float(val)], None)]
-        else:
-            raise ValueError(f"Invalid number of references for {self.name}: {len(refs)}")
+
+        res1 = primitive_geoID.get(refs[0])
+        res2 = primitive_geoID.get(refs[1])
+        raise ValueError(f"Invalid references or value for {self.name}: {refs=} ({res1=}, {res2=}), {val=}")
 
     def from_freecad(self, fc_constraint, geoID_to_primitive: dict[tuple[int, int], str]) -> datalib.Constraint | None:
         if fc_constraint.Type != self.name:
@@ -82,8 +84,8 @@ class DistanceHandler(ConstraintHandler):
             return self.create_constraint("Length", tuple(refs), val)
         elif len(refs) == 2:
             return self.create_constraint(self.name, tuple(refs), val)
-        else:
-            raise ValueError(f"Invalid number of references for {self.name}: {len(refs)}")
+
+        raise ValueError(f"Invalid references or value for {self.name}: {refs=}, {val=}")
 
     def validate_refs(self, refs: tuple[int | str, ...]) -> bool:
         return len(refs) == 1 or len(refs) == 2

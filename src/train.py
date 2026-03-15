@@ -64,7 +64,7 @@ def train(cfg: DictConfig) -> tuple[dict[str, Any], dict[str, Any]]:
         log.info(f"Loading pretrained weights from {pretrained_ckpt_path}")
         ckpt = torch.load(pretrained_ckpt_path, map_location="cpu", weights_only=False)
         state_dict = ckpt.get("state_dict", ckpt)
-        missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=True)
+        missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
         if missing_keys:
             log.warning(f"Missing keys in model state_dict: {missing_keys}")
         if unexpected_keys:

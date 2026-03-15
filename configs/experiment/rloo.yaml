@@ -1,0 +1,27 @@
+# @package _global_
+
+# to execute this experiment run:
+# python train.py experiment=rloo
+
+defaults:
+  - override /data: constraint_rloo.yaml
+  - override /model: constraint_ar_rloo.yaml
+  - override /trainer: default
+  # - override /logger: tensorboard  # COMMENT OUT!!!
+
+tags: ["rloo"]
+
+model:
+  optimizer:
+    lr: 1e-5
+
+pretrained_ckpt_path: logs/train/runs/2026-03-11_13-45-14/checkpoints/epoch_29.ckpt
+
+
+# # COMMENT OUT BELOW!!!
+# data:
+#   batch_size: 32
+#   num_workers: 1
+
+# trainer:
+#   devices: 1

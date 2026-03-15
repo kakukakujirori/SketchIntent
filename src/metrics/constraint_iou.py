@@ -17,7 +17,7 @@ class ConstraintIoU(torchmetrics.Metric):
     - Number of samples (for averaging precision/recall per sample)
     """
 
-    def __init__(self, context: SketchContext, prefix_len: int = 0):
+    def __init__(self, context: SketchContext, prefix_len: int = 1):
         super().__init__()
         self.context = context
         self.prefix_len = prefix_len
@@ -78,5 +78,6 @@ class ConstraintIoU(torchmetrics.Metric):
             raise ValueError(f"Expected 1D tensor, got {tokens.shape}")
 
         val_tokens = tokens[self.prefix_len:].cpu().numpy()
-        parsed = self.tokenizer.parse_constraint_tokens(val_tokens)
-        return set(parsed)
+        type_refs_block = self.tokenizer.parse_constraint_tokens(val_tokens)
+        type_refs = [(typ, refs) for typ, refs, block in type_refs_block]
+        return set(type_refs)

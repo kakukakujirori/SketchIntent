@@ -61,7 +61,11 @@ class SketchFreecadConverter:
                         return 'DistanceY'
         return c_name
 
-    def to_freecad_primitives(self, sketch: datalib.Sketch, doc_name: str = "Sketch") -> tuple['FreeCAD.Document', 'Sketcher.SketchObject', dict[str, tuple[int, int]]]:
+    def to_freecad_primitives(
+        self,
+        sketch: datalib.Sketch,
+        doc_name: str = "Sketch",
+    ) -> tuple['FreeCAD.Document', 'Sketcher.SketchObject', dict[str, tuple[int, int]]]:
         """
         Converts primitives in datalib.Sketch to a FreeCAD SketchObject.
         Returns (doc, sketch_obj, primitive_freecad_mapping).
@@ -75,48 +79,61 @@ class SketchFreecadConverter:
         # Lazy import
         FreeCAD, Part, Sketcher = ensure_freecad_imported()
 
-        doc = FreeCAD.newDocument(doc_name)
-        sketch_obj = doc.addObject("Sketcher::SketchObject", "Sketch")
-
+        doc = None
         primitive_freecad_mapping: dict[str, tuple[int, int]] = {}
 
-        for entity in sketch.entities.values():
-            entity_name = entity.__class__.__name__
-            handler = self.context.get_primitive_handler(entity_name)
+        try:
+            doc = FreeCAD.newDocument(doc_name)
+            fc_sketch = doc.addObject("Sketcher::SketchObject", "Sketch")
 
-            if handler is None:
-                self.dprint(f"Warning: No handler for entity {entity}")
-                continue
+            for entity in sketch.entities.values():
+                entity_name = entity.__class__.__name__
+                handler = self.context.get_primitive_handler(entity_name)
 
-            # Register to FreeCAD
-            geo, is_construction = handler.to_freecad(entity)
-            gid = sketch_obj.addGeometry(geo, is_construction)
+                if handler is None:
+                    self.dprint(f"Warning: No handler for entity {entity}")
+                    continue
 
-            eid = entity.entityId
+                # Register to FreeCAD
+                geo, is_construction = handler.to_freecad(entity)
+                gid = fc_sketch.addGeometry(geo, is_construction)
 
-            # Entity-level reference
-            default_pid = _ENTITY_POINT_ID.get(entity_name, 0)
-            primitive_freecad_mapping[eid] = (gid, default_pid)
+                eid = entity.entityId
 
-            # Subnode references
-            subnodes = _SUBNODE_MAP.get(entity_name, [])
-            for suffix, pid in subnodes:
-                primitive_freecad_mapping[f"{eid}{suffix}"] = (gid, pid)
+                # Entity-level reference
+                default_pid = _ENTITY_POINT_ID.get(entity_name, 0)
+                primitive_freecad_mapping[eid] = (gid, default_pid)
 
-        # FreeCAD internal axes: GeoID -1 = X-axis (HAxis), -2 = Y-axis (VAxis)
-        # These are used by constraints that reference the Origin or axes
-        primitive_freecad_mapping['xaxis'] = (-1, 0)       # X-axis edge
-        primitive_freecad_mapping['xaxis.start'] = (-1, 1) # Origin (start of X-axis)
-        primitive_freecad_mapping['xaxis.end'] = (-1, 2)   # end of X-axis
-        primitive_freecad_mapping['yaxis'] = (-2, 0)       # Y-axis edge
-        primitive_freecad_mapping['yaxis.start'] = (-2, 1) # Origin (start of Y-axis)
-        primitive_freecad_mapping['yaxis.end'] = (-2, 2)   # end of Y-axis
-        primitive_freecad_mapping['origin'] = (-1, 1)      # Origin point (same as xaxis.start)
+                # Subnode references
+                subnodes = _SUBNODE_MAP.get(entity_name, [])
+                for suffix, pid in subnodes:
+                    primitive_freecad_mapping[f"{eid}{suffix}"] = (gid, pid)
 
-        doc.recompute()
-        return doc, sketch_obj, primitive_freecad_mapping
+            # FreeCAD internal axes: GeoID -1 = X-axis (HAxis), -2 = Y-axis (VAxis)
+            # These are used by constraints that reference the Origin or axes
+            primitive_freecad_mapping['xaxis'] = (-1, 0)       # X-axis edge
+            primitive_freecad_mapping['xaxis.start'] = (-1, 1) # Origin (start of X-axis)
+            primitive_freecad_mapping['xaxis.end'] = (-1, 2)   # end of X-axis
+            primitive_freecad_mapping['yaxis'] = (-2, 0)       # Y-axis edge
+            primitive_freecad_mapping['yaxis.start'] = (-2, 1) # Origin (start of Y-axis)
+            primitive_freecad_mapping['yaxis.end'] = (-2, 2)   # end of Y-axis
+            primitive_freecad_mapping['origin'] = (-1, 1)      # Origin point (same as xaxis.start)
 
-    def to_freecad_constraints(self, sketch: datalib.Sketch, sketch_obj: 'Sketcher.SketchObject', primitive_freecad_mapping: dict[str, tuple[int, int]]) -> dict[int, str]:
+            doc.recompute()
+
+        except Exception as e:
+            self.dprint(f"Error adding FreeCAD primitive {entity}: {e}")
+            FreeCAD.closeDocument(doc.Name) if doc else None
+            raise e
+
+        return doc, fc_sketch, primitive_freecad_mapping
+
+    def to_freecad_constraints(
+        self,
+        sketch: datalib.Sketch,
+        fc_sketch: 'Sketcher.SketchObject',
+        primitive_freecad_mapping: dict[str, tuple[int, int]],
+    ) -> dict[int, str]:
         """
         Adds constraints to the FreeCAD SketchObject.
         Returns constraint_freecad_mapping.
@@ -142,26 +159,31 @@ class SketchFreecadConverter:
                 fc_constraints = handler.to_freecad(constr, primitive_freecad_mapping)
                 for fc_type, fc_args, fc_datum in fc_constraints:
                     try:
-                        idx = sketch_obj.addConstraint(Sketcher.Constraint(fc_type, *fc_args))
+                        idx = fc_sketch.addConstraint(Sketcher.Constraint(fc_type, *fc_args))
                         constraint_freecad_mapping[idx] = c_id
                         if fc_datum is not None:
-                            sketch_obj.setDatum(idx, fc_datum)
+                            fc_sketch.setDatum(idx, fc_datum)
                     except Exception as e:
                         self.dprint(f"Error adding FreeCAD constraint {fc_type}({fc_args}): {e}")
 
             except Exception as e:
                 self.dprint(f"Error creating FreeCAD constraint {c_id}: {e}")
+                raise e
 
         return constraint_freecad_mapping
 
-    def to_freecad(self, sketch: datalib.Sketch, doc_name: str = "Sketch") -> tuple['FreeCAD.Document', 'Sketcher.SketchObject', dict[str, tuple[int, int]], dict[int, str]]:
+    def to_freecad(
+        self,
+        sketch: datalib.Sketch,
+        doc_name: str = "Sketch",
+    ) -> tuple['FreeCAD.Document', 'Sketcher.SketchObject', dict[str, tuple[int, int]], dict[int, str]]:
         """
         Full conversion: Primitives + Constraints.
         """
-        doc, sketch_obj, primitive_freecad_mapping = self.to_freecad_primitives(sketch, doc_name)
-        constraint_freecad_mapping = self.to_freecad_constraints(sketch, sketch_obj, primitive_freecad_mapping)
+        doc, fc_sketch, primitive_freecad_mapping = self.to_freecad_primitives(sketch, doc_name)
+        constraint_freecad_mapping = self.to_freecad_constraints(sketch, fc_sketch, primitive_freecad_mapping)
         doc.recompute()
-        return doc, sketch_obj, primitive_freecad_mapping, constraint_freecad_mapping
+        return doc, fc_sketch, primitive_freecad_mapping, constraint_freecad_mapping
 
     def from_freecad_primitives(self, sketch_obj: 'Sketcher.SketchObject') -> tuple[dict[str, datalib.Entity], dict[tuple[int, int], str]]:
         """

@@ -26,8 +26,19 @@ class MirrorHandler(ConstraintHandler):
     def name(self) -> str:
         return "Mirror"
 
-    def encode(self, constraint: datalib.Constraint, primitive_tokenpos: dict[str, int], entities: dict[str, datalib.Entity]) -> tuple[int, tuple[int, ...], np.ndarray, tuple[int, ...]]:
-        ref_tokens = self._get_sorted_ref_tokens(constraint, primitive_tokenpos, entities)
+    def _sort_ref_tokens(self, ref_tokens: tuple[int, ...]) -> tuple[int, ...]:
+        """
+        NOTE: This function isused in _get_sorted_ref_tokens.
+        """
+        if len(ref_tokens) == 3:
+            sorted_refs = sorted(ref_tokens[:2]) + [ref_tokens[2]]
+            return tuple(sorted_refs)
+
+        # NOTE: We don't emit an error here to ease error handling in the solver reward calculation.
+        return tuple(sorted(ref_tokens))
+
+    def encode(self, constraint: datalib.Constraint, primitive_tokenpos: dict[str, int]) -> tuple[int, tuple[int, ...], np.ndarray, tuple[int, ...]]:
+        ref_tokens = self._get_sorted_ref_tokens(constraint, primitive_tokenpos)
         return self.token_id, ref_tokens, np.array([]), ()
 
     def decode(self, ref_indices: tuple[int, ...], params: np.ndarray, tokenpos_to_primitive: dict[int, str]) -> datalib.Constraint:

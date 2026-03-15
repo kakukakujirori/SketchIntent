@@ -118,7 +118,7 @@ def verify_constraints_tokenization(data_npy: str, limit: int = 1000):
 
                 # 2. Tokenize / Detokenize
                 token_data = tokenizer.tokenize(sketch_orig)
-                sketch_recon = tokenizer.detokenize(token_data)
+                sketch_recon, _ = tokenizer.detokenize(token_data)
 
                 # 3. Compare Constraints
                 orig_constrs = list(sketch_orig.constraints.values())

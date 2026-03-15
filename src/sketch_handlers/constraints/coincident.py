@@ -15,16 +15,12 @@ class CoincidentHandler(ConstraintHandler):
     def name(self) -> str:
         return "Coincident"
 
-    def encode(self, constraint: datalib.Constraint, primitive_tokenpos: dict[str, int], entities: dict[str, datalib.Entity]) -> tuple[int, tuple[int, ...], np.ndarray, tuple[int, ...]]:
-        ref_tokens = self._get_sorted_ref_tokens(constraint, primitive_tokenpos, entities)
-        if not self.validate_refs(ref_tokens):
-            raise ValueError(f"Invalid references for {self.name}: {ref_tokens}")
+    def encode(self, constraint: datalib.Constraint, primitive_tokenpos: dict[str, int]) -> tuple[int, tuple[int, ...], np.ndarray, tuple[int, ...]]:
+        ref_tokens = self._get_sorted_ref_tokens(constraint, primitive_tokenpos)
         return self.token_id, ref_tokens, np.array([]), ()
 
     def decode(self, ref_indices: tuple[int, ...], params: np.ndarray, tokenpos_to_primitive: dict[int, str]) -> datalib.Constraint:
         refs = tuple(tokenpos_to_primitive[idx] for idx in ref_indices)
-        if not self.validate_refs(refs):
-            raise ValueError(f"Invalid references for {self.name}: {refs}")
         return self.create_constraint(self.name, refs)
 
     def to_freecad(self, constraint: datalib.Constraint, primitive_geoID: dict[str, tuple[int, int]]) -> list[tuple[str, list, float | None]]:
@@ -42,7 +38,7 @@ class CoincidentHandler(ConstraintHandler):
 
         if p1 == 0 and p2 == 0:
             # Edge-Edge: not valid for Coincident
-            raise ValueError(f"Edge-Edge is not valid for {self.name}: {refs}")
+            raise ValueError(f"Edge-Edge is not valid for {self.name}: {refs} ({res1=}, {res2=})")
         elif p1 == 0:
             # PointOnObject: point (g2,p2) on edge g1
             return [('PointOnObject', [g2, p2, g1], None)]

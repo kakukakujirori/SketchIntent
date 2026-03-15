@@ -1,9 +1,10 @@
-from collections import defaultdict
 import glob
 import json
 import os
 import math
 import sys
+from collections import defaultdict
+from typing import Any
 
 import io
 import matplotlib.pyplot as plt
@@ -24,7 +25,7 @@ from FreeCAD import Vector
 # 1. データ抽出ロジック (Extraction)
 # ==========================================
 
-def export_sketch_to_dict(sketch_obj):
+def export_sketch_to_dict(sketch_obj: 'Sketcher.SketchObject') -> dict[str, dict[str, Any]]:
     drawing_data = {
         "primitives": [],
         "constraints": []
@@ -33,7 +34,7 @@ def export_sketch_to_dict(sketch_obj):
     # --- A. Primitives ---
     for i, geom in enumerate(sketch_obj.Geometry):
         p_id = str(i)
-        prim_data = {"id": p_id}
+        prim_data: dict[str, Any] = {"id": p_id}
 
         if isinstance(geom, Part.LineSegment):
             prim_data["type"] = "Line"
@@ -99,7 +100,7 @@ def export_sketch_to_dict(sketch_obj):
 # 2. ファイルロード & 実行ロジック (Loading)
 # ==========================================
 
-def load_and_extract_from_file(file_path: str):
+def load_and_extract_from_file(file_path: str) -> dict[str, dict[str, Any]] | None:
     """
     指定されたPythonファイルを実行し、生成されたSketchからデータを抽出し、ドキュメントを閉じる
     """
@@ -119,44 +120,46 @@ def load_and_extract_from_file(file_path: str):
     with open(file_path, 'r') as f:
         script_content = f.read()
 
-    # --- スクリプト実行 ---
     try:
+        # --- スクリプト実行 ---
         exec(script_content, exec_globals)
+
+        # --- Sketchオブジェクトの探索 ---
+        target_sketch = None
+
+        # 1. exec_globals の変数から探す
+        for key, val in exec_globals.items():
+            if hasattr(val, "TypeId") and val.TypeId == "Sketcher::SketchObject":
+                target_sketch = val
+                break
+
+        # 2. 見つからない場合、ActiveDocumentから探す
+        if target_sketch is None and FreeCAD.ActiveDocument:
+            for obj in FreeCAD.ActiveDocument.Objects:
+                if obj.TypeId == "Sketcher::SketchObject":
+                    target_sketch = obj
+                    break
+
+        if target_sketch is None:
+            print("Error: No Sketch object found after script execution.")
+            # ドキュメントが生成されている可能性があるので念のため閉じる処理を試みる
+            if FreeCAD.ActiveDocument:
+                FreeCAD.closeDocument(FreeCAD.ActiveDocument.Name)
+            return None
+
+        # --- データ抽出 ---
+        extracted_data = export_sketch_to_dict(target_sketch)
+        return extracted_data
+
     except Exception as e:
         print(f"[load_and_extract_from_file] Error executing script: {e}")
         return None
 
-    # --- Sketchオブジェクトの探索 ---
-    target_sketch = None
-
-    # 1. exec_globals の変数から探す
-    for key, val in exec_globals.items():
-        if hasattr(val, "TypeId") and val.TypeId == "Sketcher::SketchObject":
-            target_sketch = val
-            break
-
-    # 2. 見つからない場合、ActiveDocumentから探す
-    if target_sketch is None and FreeCAD.ActiveDocument:
-        for obj in FreeCAD.ActiveDocument.Objects:
-            if obj.TypeId == "Sketcher::SketchObject":
-                target_sketch = obj
-                break
-
-    if target_sketch is None:
-        print("Error: No Sketch object found after script execution.")
-        # ドキュメントが生成されている可能性があるので念のため閉じる処理を試みる
-        if FreeCAD.ActiveDocument:
-            FreeCAD.closeDocument(FreeCAD.ActiveDocument.Name)
-        return None
-
-    # --- データ抽出 ---
-    extracted_data = export_sketch_to_dict(target_sketch)
-
-    # --- メモリ解放 (closeDocument) ---
-    doc_name = target_sketch.Document.Name
-    FreeCAD.closeDocument(doc_name)
-
-    return extracted_data
+    finally:
+        # --- メモリ解放 (closeDocument) ---
+        if target_sketch is not None:
+            doc_name = target_sketch.Document.Name
+            FreeCAD.closeDocument(doc_name)
 
 
 # ==========================================

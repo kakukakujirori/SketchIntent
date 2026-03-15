@@ -31,8 +31,20 @@ class MidpointHandler(ConstraintHandler):
     def name(self) -> str:
         return "Midpoint"
 
-    def encode(self, constraint: datalib.Constraint, primitive_tokenpos: dict[str, int], entities: dict[str, datalib.Entity]) -> tuple[int, tuple[int, ...], np.ndarray, tuple[int, ...]]:
-        ref_tokens = self._get_sorted_ref_tokens(constraint, primitive_tokenpos, entities)
+    def _sort_ref_tokens(self, ref_tokens: tuple[int, ...]) -> tuple[int, ...]:
+        """
+        NOTE: This function isused in _get_sorted_ref_tokens.
+        """
+        if len(ref_tokens) == 2:
+            return ref_tokens  # NOTE: DO NOT SORT
+        elif len(ref_tokens) == 3:
+            return tuple(sorted(ref_tokens[:2])) + (ref_tokens[2],)
+        else:
+            # NOTE: We don't emit an error here to ease error handling in the solver reward calculation.
+            return ref_tokens
+
+    def encode(self, constraint: datalib.Constraint, primitive_tokenpos: dict[str, int]) -> tuple[int, tuple[int, ...], np.ndarray, tuple[int, ...]]:
+        ref_tokens = self._get_sorted_ref_tokens(constraint, primitive_tokenpos)
         return self.token_id, ref_tokens, np.array([]), ()
 
     def decode(self, ref_indices: tuple[int, ...], params: np.ndarray, tokenpos_to_primitive: dict[int, str]) -> datalib.Constraint:
@@ -47,8 +59,7 @@ class MidpointHandler(ConstraintHandler):
             # Determine which is the point and which is the line
             res0 = primitive_geoID.get(refs[0])
             res1 = primitive_geoID.get(refs[1])
-            if not res0 or not res1:
-                return []
+            assert res0 and res1, f"Invalid references for {self.name}: {refs=} ({res0=}, {res1=})"
 
             g0, p0 = res0
             g1, p1 = res1
@@ -61,7 +72,7 @@ class MidpointHandler(ConstraintHandler):
                 mid_g, mid_p = g1, p1
                 line_g = g0
             else:
-                return []
+                raise ValueError(f"Invalid references for {self.name}: {refs=} ({res0=}, {res1=})")
 
             # Symmetric: line's start and end are symmetric about the midpoint
             # Symmetric(line_g, 1, line_g, 2, mid_g, mid_p) — 6 args
@@ -82,7 +93,7 @@ class MidpointHandler(ConstraintHandler):
             # Symmetric(endpoint1_g, endpoint1_p, endpoint2_g, endpoint2_p, mid_g, mid_p)
             return [('Symmetric', [g0, p0, g1, p1, g2, p2], None)]
 
-        return []
+        raise ValueError(f"Invalid references for {self.name}: {refs=}")
 
     def from_freecad(self, fc_constraint, geoID_to_primitive: dict[tuple[int, int], str]) -> datalib.Constraint | None:
         # Midpoint comes in as Symmetric where First and Second are start/end of same line
@@ -98,10 +109,10 @@ class MidpointHandler(ConstraintHandler):
             # This is Midpoint(point on line)
             r_point = geoID_to_primitive.get((g3, p3))
             r_line = geoID_to_primitive.get((g1, 0))
-            if r_point and r_line:
-                return self.create_constraint('Midpoint', (r_point, r_line))
+            assert r_point and r_line
+            return self.create_constraint('Midpoint', (r_point, r_line))
 
-        return None
+        raise ValueError(f"Invalid constraint for {self.name}: {fc_constraint}")
 
     def validate_refs(self, refs: tuple[int | str, ...]) -> bool:
         return len(refs) >= 2

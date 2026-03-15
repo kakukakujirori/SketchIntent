@@ -26,6 +26,29 @@ cmake --build build/release -j $(nproc)
 
 After the build completes, modify the default argument of `ensure_freecad_imported` in [`src/sketch_handlers/freecad_utils.py`](src/sketch_handlers/freecad_utils.py) to your FreeCAD library directory path.
 
+### Usage
+
+This custom version exposes the `getSolverStatus()` API, which returns the CAD solver's diagnosis results:
+```python
+doc = FreeCAD.newDocument(doc_name)
+fc_sketch = doc.addObject("Sketcher::SketchObject", "Sketch")
+
+fc_sketch.addGeometry(...)
+fc_sketch.addConstraint(...)
+
+doc.recompute()
+fc_sketch.getSolverStatus()
+# {
+#   'DoF': xxx,
+#   'Status': 'Converged', 'Redundant', 'Conflicting', 'Malformed', or 'Failed'
+#   'RedundantConstraints': [c_id1, c_id2, ...],
+#   'ConflictingConstraints': [c_id1, c_id2, ...],
+#   'MalformedConstraints': [c_id1, c_id2, ...],
+#   'ConflictGroups': [[c_id1, c_id2, ...], [c_id3, c_id4, ...], ...]
+# }
+```
+This functionality is extensively used in [src/models/components/solver_feedback.py](src/models/components/solver_feedback.py).
+
 ## Install Dependencies
 
 ```bash

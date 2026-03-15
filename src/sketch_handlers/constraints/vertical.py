@@ -15,8 +15,8 @@ class VerticalHandler(ConstraintHandler):
     def name(self) -> str:
         return "Vertical"
 
-    def encode(self, constraint: datalib.Constraint, primitive_tokenpos: dict[str, int], entities: dict[str, datalib.Entity]) -> tuple[int, tuple[int, ...], np.ndarray, tuple[int, ...]]:
-        ref_tokens = self._get_sorted_ref_tokens(constraint, primitive_tokenpos, entities)
+    def encode(self, constraint: datalib.Constraint, primitive_tokenpos: dict[str, int]) -> tuple[int, tuple[int, ...], np.ndarray, tuple[int, ...]]:
+        ref_tokens = self._get_sorted_ref_tokens(constraint, primitive_tokenpos)
         return self.token_id, ref_tokens, np.array([]), ()
 
     def decode(self, ref_indices: tuple[int, ...], params: np.ndarray, tokenpos_to_primitive: dict[int, str]) -> datalib.Constraint:

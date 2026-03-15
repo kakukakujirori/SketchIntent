@@ -15,8 +15,8 @@ class DiameterHandler(ConstraintHandler):
     def name(self) -> str:
         return "Diameter"
 
-    def encode(self, constraint: datalib.Constraint, primitive_tokenpos: dict[str, int], entities: dict[str, datalib.Entity]) -> tuple[int, tuple[int, ...], np.ndarray, tuple[int, ...]]:
-        ref_tokens = self._get_sorted_ref_tokens(constraint, primitive_tokenpos, entities)
+    def encode(self, constraint: datalib.Constraint, primitive_tokenpos: dict[str, int]) -> tuple[int, tuple[int, ...], np.ndarray, tuple[int, ...]]:
+        ref_tokens = self._get_sorted_ref_tokens(constraint, primitive_tokenpos)
         val = self.get_constraint_value(constraint)
         return self.token_id, ref_tokens, np.array([val]), ()
 
@@ -37,7 +37,7 @@ class DiameterHandler(ConstraintHandler):
             # Diameter(Circle/Arc, value)
             return [('Diameter', [res1[0], float(val)], None)]
 
-        return []
+        raise ValueError(f"Invalid references or value for {self.name}: {refs=}, {val=}")
 
     def from_freecad(self, fc_constraint, geoID_to_primitive: dict[tuple[int, int], str]) -> datalib.Constraint | None:
         if fc_constraint.Type != 'Diameter':

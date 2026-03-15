@@ -8,6 +8,8 @@ defaults:
   - override /model: constraint_ar.yaml
   - override /trainer: default
 
+tags: ["sft"]
+
 model:
   optimizer:
     lr: 3e-6

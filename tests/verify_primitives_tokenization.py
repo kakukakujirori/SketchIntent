@@ -78,7 +78,7 @@ def verify_primitives_tokenization(data_npy: str, limit: int = 1000):
 
             # 2. Tokenize / Detokenize
             token_data = tokenizer.tokenize(sketch_orig)
-            sketch_recon = tokenizer.detokenize(token_data)
+            sketch_recon, _ = tokenizer.detokenize(token_data)
 
             # 3. Compare Entities
             orig_entities = list(sketch_orig.entities.values())

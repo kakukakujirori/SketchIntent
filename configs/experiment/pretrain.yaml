@@ -7,3 +7,5 @@ defaults:
   - override /data: constraint_pretrain.yaml
   - override /model: constraint_ar.yaml
   - override /trainer: default
+
+tags: ["pretrain"]

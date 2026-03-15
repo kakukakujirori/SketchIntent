@@ -9,7 +9,7 @@ from src.sketch_handlers.context import SketchContext
 
 
 class TokenReordering:
-    def __init__(self, context: SketchContext, prefix_len: int = 0):
+    def __init__(self, context: SketchContext, prefix_len: int = 1):
         self.pad_token = ConstraintToken.Pad
         self.stop_token = ConstraintToken.Stop
         self.block_size = context.align_constraint_token_length_to

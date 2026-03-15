@@ -1,0 +1,21 @@
+_target_: src.data.constraint_datamodule.ConstraintDataModule
+
+train_sequence_file: data_processed/sg_filtered_unique_valid.npy
+val_sequence_file: data_ryotaro_prim5.npy
+test_sequence_file: data_ryotaro_prim5.npy
+
+context:
+  _target_: src.sketch_handlers.context.SketchContext
+  max_token_length: 130
+  num_quantization_bins: 64
+  align_constraint_token_length_to: 4
+  use_stop_padding: False
+  constraint_order: random_shuffle
+
+primitive_noise:
+  _target_: src.data.components.primitive_noise.PrimitiveNoise
+  std: 0.15
+  max_diff: 0.15
+
+batch_size: 32
+num_workers: 32

@@ -15,8 +15,8 @@ class DistanceXHandler(ConstraintHandler):
     def name(self) -> str:
         return "DistanceX"
 
-    def encode(self, constraint: datalib.Constraint, primitive_tokenpos: dict[str, int], entities: dict[str, datalib.Entity]) -> tuple[int, tuple[int, ...], np.ndarray, tuple[int, ...]]:
-        ref_tokens = self._get_sorted_ref_tokens(constraint, primitive_tokenpos, entities)
+    def encode(self, constraint: datalib.Constraint, primitive_tokenpos: dict[str, int]) -> tuple[int, tuple[int, ...], np.ndarray, tuple[int, ...]]:
+        ref_tokens = self._get_sorted_ref_tokens(constraint, primitive_tokenpos)
         val = self.get_constraint_value(constraint)
         return self.token_id, ref_tokens, np.array([val]), ()
 
@@ -41,10 +41,10 @@ class DistanceXHandler(ConstraintHandler):
             if res1:
                 g1, p1 = res1
                 return [('DistanceX', [g1, p1, float(val)], None)]
-        else:
-            raise ValueError(f"Invalid number of references for {self.name}: {len(refs)}")
 
-        return []
+        res1 = primitive_geoID.get(refs[0])
+        res2 = primitive_geoID.get(refs[1])
+        raise ValueError(f"Invalid references or value for {self.name}: {refs=} ({res1=}, {res2=}), {val=}")
 
     def from_freecad(self, fc_constraint, geoID_to_primitive: dict[tuple[int, int], str]) -> datalib.Constraint | None:
         if fc_constraint.Type != 'DistanceX':
@@ -83,8 +83,8 @@ class DistanceYHandler(ConstraintHandler):
     def name(self) -> str:
         return "DistanceY"
 
-    def encode(self, constraint: datalib.Constraint, primitive_tokenpos: dict[str, int], entities: dict[str, datalib.Entity]) -> tuple[int, tuple[int, ...], np.ndarray, tuple[int, ...]]:
-        ref_tokens = self._get_sorted_ref_tokens(constraint, primitive_tokenpos, entities)
+    def encode(self, constraint: datalib.Constraint, primitive_tokenpos: dict[str, int]) -> tuple[int, tuple[int, ...], np.ndarray, tuple[int, ...]]:
+        ref_tokens = self._get_sorted_ref_tokens(constraint, primitive_tokenpos)
         val = self.get_constraint_value(constraint)
         return self.token_id, ref_tokens, np.array([val]), ()
 
@@ -109,8 +109,10 @@ class DistanceYHandler(ConstraintHandler):
             if res1:
                 g1, p1 = res1
                 return [('DistanceY', [g1, p1, float(val)], None)]
-        else:
-            raise ValueError(f"Invalid number of references for {self.name}: {len(refs)}")
+
+        res1 = primitive_geoID.get(refs[0])
+        res2 = primitive_geoID.get(refs[1])
+        raise ValueError(f"Invalid references or value for {self.name}: {refs=} ({res1=}, {res2=}), {val=}")
 
     def from_freecad(self, fc_constraint, geoID_to_primitive: dict[tuple[int, int], str]) -> datalib.Constraint | None:
         if fc_constraint.Type != 'DistanceY':

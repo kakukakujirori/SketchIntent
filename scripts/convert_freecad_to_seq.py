@@ -17,7 +17,10 @@ from src.sketch_handlers.sketch_freecad_converter import SketchFreecadConverter
 FreeCAD, Part, Sketcher = ensure_freecad_imported()
 
 
-def exec_freecad(freecad_python_file: str) -> Sketcher.Sketch:
+def exec_freecad(freecad_python_file: str) -> tuple['FreeCAD.Document', 'Sketcher.SketchObject']:
+    doc = None
+    fc_sketch = None
+
     try:
         initial_docs = set(FreeCAD.listDocuments().keys())
 
@@ -47,22 +50,26 @@ def exec_freecad(freecad_python_file: str) -> Sketcher.Sketch:
             raise ValueError(f"No sketches found in {freecad_python_file}")
 
         fc_sketch = sketches[0]
-        return fc_sketch
-    finally:
-        if 'doc_orig' in locals() and doc_orig:
-            FreeCAD.closeDocument(doc_orig.Name)
+
+    except Exception as e:
+        FreeCAD.closeDocument(doc.Name) if doc else None
+        raise e
+
+    return doc, fc_sketch
 
 
-def process(freecad_python_file: str) -> datalib.Sketch | str:
+def freecad_to_sketchgraphs(freecad_python_file: str) -> datalib.Sketch | str:
     context = SketchContext()  # NOTE: It's configuration doesn't affect the freecad <--> sketchgraphs conversion
     converter = SketchFreecadConverter(context)
-
+    doc = None
     try:
-        fc_sketch = exec_freecad(freecad_python_file)
+        doc, fc_sketch = exec_freecad(freecad_python_file)
         sg_sketch = converter.from_freecad(fc_sketch)
         return sg_sketch
     except Exception:
         return traceback.format_exc()
+    finally:
+        FreeCAD.closeDocument(doc.Name) if doc else None
 
 
 if __name__ == '__main__':
@@ -86,7 +93,7 @@ if __name__ == '__main__':
     error_list = []
 
     for f in files:
-        sketch_or_error = process(f)
+        sketch_or_error = freecad_to_sketchgraphs(f)
         if isinstance(sketch_or_error, str):
             print(f"Error processing {f}:")
             print(sketch_or_error)

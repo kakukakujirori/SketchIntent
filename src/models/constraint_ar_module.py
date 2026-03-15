@@ -1,3 +1,5 @@
+from typing import Any
+
 import lightning as L
 import torch
 import torchmetrics
@@ -5,6 +7,7 @@ from tqdm import tqdm
 
 from src.metrics import ConstraintIoU, TokenAccuracy
 from src.models.components.token_reordering import TokenReordering
+from src.models.components.token_visualizer import visualize_constraint_sequence
 from src.sketch_handlers.constants import ConstraintToken
 from src.sketch_handlers.context import SketchContext
 
@@ -28,31 +31,6 @@ class ConstraintARModule(L.LightningModule):
         self.accuracy_metric = TokenAccuracy(ignore_index=ConstraintToken.Pad)
         self.iou_metrics = ConstraintIoU(context, prefix_len=1)  # NOTE: prefix_len is important
         self.token_reordering = TokenReordering(context=context, prefix_len=1)  # NOTE: prefix_len is important
-
-    @staticmethod
-    def _format_constraint_sequence(tokens, max_show: int | None = None) -> list[str]:
-        """Format constraint tokens for display."""
-        result = []
-        for tok in tokens:
-            tok_val = int(tok)
-            if tok_val == ConstraintToken.Mask:  # NOTE: Unused
-                result.append("[MASK]")
-            elif tok_val == ConstraintToken.Pad:
-                break
-            elif tok_val == ConstraintToken.Start:
-                result.append("[START]")
-            elif tok_val == ConstraintToken.Stop:
-                result.append("[STOP]")
-                break
-            elif tok_val == ConstraintToken.InnerPad:
-                result.append("[PAD]")
-            elif tok_val < len(ConstraintToken):
-                result.append(ConstraintToken(tok_val).name)
-            else:
-                result.append(f"R{tok_val - len(ConstraintToken)}")
-        if max_show and len(result) > max_show:
-            return result[:max_show] + [f"... (+{len(result) - max_show} more)"]
-        return result
 
     def _reset_metrics(self):
         """Reset all metrics to prevent accumulation across epochs."""
@@ -85,10 +63,10 @@ class ConstraintARModule(L.LightningModule):
             }
         return {"optimizer": optimizer}
 
-    def forward(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
+    def forward(self, batch: dict[str, Any]) -> torch.Tensor:
         return self.model(batch)
 
-    def _compute_loss(self, batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def _compute_loss(self, batch: dict[str, Any]) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Compute loss and return preds/target for metrics.
 
         Returns:
@@ -113,7 +91,7 @@ class ConstraintARModule(L.LightningModule):
 
     def generate_sample(
         self,
-        batch: dict[str, torch.Tensor],
+        batch: dict[str, Any],
         max_len: int,
         dtype: torch.dtype = torch.long,
     ) -> torch.Tensor:
@@ -150,7 +128,7 @@ class ConstraintARModule(L.LightningModule):
 
         return generated
 
-    def training_step(self, batch: dict[str, torch.Tensor], batch_idx: int):
+    def training_step(self, batch: dict[str, Any], batch_idx: int):
         loss, preds, target = self._compute_loss(batch)
         accuracy = self.accuracy_metric(preds, target)
 
@@ -159,7 +137,7 @@ class ConstraintARModule(L.LightningModule):
 
         return loss
 
-    def validation_step(self, batch: dict[str, torch.Tensor], batch_idx: int, dataloader_idx: int = 0):
+    def validation_step(self, batch: dict[str, Any], batch_idx: int, dataloader_idx: int = 0):
         loss, preds, target = self._compute_loss(batch)
         accuracy = self.accuracy_metric(preds, target)
 
@@ -186,7 +164,7 @@ class ConstraintARModule(L.LightningModule):
                 continue
 
             # Move batch to device
-            batch = {k: v.to(self.device) for k, v in val_iter.items()}
+            batch = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v for k, v in val_iter.items()}
 
             # Get target and sequence length
             target = batch['c_val']
@@ -208,12 +186,12 @@ class ConstraintARModule(L.LightningModule):
 
                 for i in range(min(5, generated.size(0))):
                     print(f"\n[Sample {i}]:")
-                    print(f"  GT  : {self._format_constraint_sequence(target_sorted[i].cpu().numpy())}")
-                    print(f"  Gen : {self._format_constraint_sequence(generated_sorted[i].cpu().numpy())}")
+                    print(f"  GT  : {visualize_constraint_sequence(target_sorted[i].cpu().numpy())}")
+                    print(f"  Gen : {visualize_constraint_sequence(generated_sorted[i].cpu().numpy())}")
 
                 print("="*80 + "\n")
 
-    def test_step(self, batch: dict[str, torch.Tensor], batch_idx: int, dataloader_idx: int = 0):
+    def test_step(self, batch: dict[str, Any], batch_idx: int, dataloader_idx: int = 0):
         loss, preds, target = self._compute_loss(batch)
         accuracy = self.accuracy_metric(preds, target)
 
@@ -241,7 +219,7 @@ class ConstraintARModule(L.LightningModule):
                 continue
 
             # Move batch to device
-            batch = {k: v.to(self.device) for k, v in test_iter.items()}
+            batch = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v for k, v in test_iter.items()}
 
             # Get target and sequence length
             target = batch['c_val']
@@ -263,8 +241,8 @@ class ConstraintARModule(L.LightningModule):
 
                 for i in range(min(5, generated.size(0))):
                     print(f"\n[Sample {i}]:")
-                    print(f"  GT  : {self._format_constraint_sequence(target_sorted[i].cpu().numpy())}")
-                    print(f"  Gen : {self._format_constraint_sequence(generated_sorted[i].cpu().numpy())}")
+                    print(f"  GT  : {visualize_constraint_sequence(target_sorted[i].cpu().numpy())}")
+                    print(f"  Gen : {visualize_constraint_sequence(generated_sorted[i].cpu().numpy())}")
 
                 print("="*80 + "\n")
 
@@ -276,6 +254,7 @@ class ConstraintARModule(L.LightningModule):
                     solver_results = solver_feedback.evaluate_constraints_batch(
                         batch['p_val'],
                         generated,
+                        batch['sketch'],
                         fully_constrained_dof=2,
                     )
                     if solver_results:

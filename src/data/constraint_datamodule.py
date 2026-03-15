@@ -1,11 +1,25 @@
 import math
+from typing import Any
 
 import torch
 import lightning as L
+from torch.utils.data.dataloader import default_collate
 
+import sketchgraphs.data as datalib
 from src.data.components.constraint_dataset import ConstraintDataset
 from src.data.components.primitive_noise import PrimitiveNoise
 from src.sketch_handlers.context import SketchContext
+
+
+def sketch_collate_fn(batch: list[Any]):
+    if isinstance(batch[0], datalib.Sketch):
+        return batch
+
+    if isinstance(batch[0], dict):
+        return {key: sketch_collate_fn([item[key] for item in batch]) for key in batch[0]}
+    if isinstance(batch[0], (tuple, list)):
+        return type(batch[0])(sketch_collate_fn(samples) for samples in zip(*batch))
+    return default_collate(batch)
 
 
 def split_dataset(
@@ -107,7 +121,9 @@ class ConstraintDataModule(L.LightningDataModule):
             shuffle=shuffle,
             num_workers=self.hparams.num_workers,
             pin_memory=True,
-            persistent_workers=self.hparams.num_workers > 0)
+            persistent_workers=self.hparams.num_workers > 0,
+            collate_fn=sketch_collate_fn,
+        )
 
     def train_dataloader(self) -> torch.utils.data.DataLoader[dict[str, torch.Tensor]]:
         assert self._train_dataset is not None

@@ -61,7 +61,7 @@ class SketchTokenizer:
         attr_tokens = [PrimitiveAttrToken.Type]
         pos_tokens = [PrimitiveToken.Start]
 
-        primitive_tokenpos = {} # Entity ID -> Token Index (or Subnode -> Index)
+        primitive_tokenpos: dict[str, int] = {} # Entity ID -> Token Index (or Subnode -> Index)
 
         entities = list(sketch.entities.values())
         val_offset = PRIMITIVE_VAL_OFFSET
@@ -97,9 +97,15 @@ class SketchTokenizer:
             # 4. Register in primitive_tokenpos
             ent_id = ent.entityId
             subnode_offsets = handler.get_subnode_offset()
-            primitive_tokenpos[ent_id] = ent_start_pos
-            for sub_name, sub_offset in subnode_offsets.items():
-                primitive_tokenpos[f"{ent_id}.{sub_name}"] = ent_start_pos + sub_offset
+            if len(val_tokens) <= self.max_token_length:
+                primitive_tokenpos[ent_id] = ent_start_pos
+                for sub_name, sub_offset in subnode_offsets.items():
+                    primitive_tokenpos[f"{ent_id}.{sub_name}"] = ent_start_pos + sub_offset
+            else:
+                # Truncated primitives are assigned -1 in primitive_tokenpos
+                primitive_tokenpos[ent_id] = -1
+                for sub_name, sub_offset in subnode_offsets.items():
+                    primitive_tokenpos[f"{ent_id}.{sub_name}"] = -1
 
         # Stop Token
         val_tokens.append(PrimitiveToken.Stop)
@@ -114,7 +120,12 @@ class SketchTokenizer:
         }
         return tokens, primitive_tokenpos
 
-    def tokenize_constraints(self, sketch: datalib.Sketch, primitive_tokenpos: dict[str, int]) -> dict[str, np.ndarray]:
+    def tokenize_constraints(
+        self,
+        sketch: datalib.Sketch,
+        primitive_tokenpos: dict[str, int],
+        allow_invalid_constraints: bool = False,
+    ) -> dict[str, np.ndarray]:
         """
         Tokenize constraints into separate 'val', 'coord', 'pos' arrays.
         Uses primitive_tokenpos from primitives to resolve references.
@@ -122,6 +133,7 @@ class SketchTokenizer:
         Args:
             sketch: The sketch object.
             primitive_tokenpos: dict mapping entity ID -> token position.
+            allow_invalid_constraints: If True, constraints with invalid references are skipped.
         """
         # Phase 1: Parse and Filter
         parsed_constraints = []
@@ -135,22 +147,19 @@ class SketchTokenizer:
 
             # 1. Delegate to handler.encode
             # This handles type refinement (Distance->DistanceX), ref parsing, filtering, and sorting
-            try:
-                constr_id, ref_tokens, params, p_tokens = handler.encode(constr, primitive_tokenpos, sketch.entities)
-            except NotImplementedError:
-                # Unhandled constraints, such as Offset
-                continue
-
-            # Validation check (handler should have done most, but double check refs)
-            if not handler.validate_refs(tuple(ref_tokens)):
-                raise ValueError(f"Invalid refs in constraint: {constr}")
+            constr_id, ref_tokens, params, p_tokens = handler.encode(constr, primitive_tokenpos)
 
             # Constraints exceeding max_token_length are discarded
             if self.max_token_length is not None:
                 if any(t_pos >= self.max_token_length for t_pos in ref_tokens):
                     continue
 
-            parsed_constraints.append((constr_id, ref_tokens, params, p_tokens))
+            if handler.validate_refs(tuple(ref_tokens)):
+                parsed_constraints.append((constr_id, ref_tokens, params, p_tokens))
+            elif len(ref_tokens) > 0 and not allow_invalid_constraints:
+                # NOTE: Handlers don't check refs in encode to allow invalid constraints
+                # NOTE: If ref_tokens=[], it may be because the referring primitives are external or truncated.
+                raise ValueError(f"Invalid refs in constraint: {constr}")
 
         # Sort constraints based on constraint_order
         if self.constraint_order == "sort_by_ref_id":
@@ -207,13 +216,13 @@ class SketchTokenizer:
             'c_cnt': np.array([pos_tokens[-1] - pos_tokens[0] - 1], dtype=np.int64),
         }
 
-    def tokenize(self, sketch: datalib.Sketch) -> dict[str, np.ndarray]:
+    def tokenize(self, sketch: datalib.Sketch, allow_invalid_constraints: bool = False) -> dict[str, np.ndarray]:
         """
         Tokenize a sketch into primitives and constraints.
         """
         try:
             prim_tokens, primitive_tokenpos = self.tokenize_primitives(sketch)
-            constr_tokens = self.tokenize_constraints(sketch, primitive_tokenpos)
+            constr_tokens = self.tokenize_constraints(sketch, primitive_tokenpos, allow_invalid_constraints)
         except ValueError as e:
             print(f"=== ERROR: Sketch Tokenization FAILED ===")
             print(f"  {sketch}")
@@ -286,7 +295,7 @@ class SketchTokenizer:
 
         return {e.entityId: e for e in entities}, tokenpos_to_primitive
 
-    def parse_constraint_tokens(self, val_tokens: np.ndarray) -> list[tuple[int, tuple[int, ...]]]:
+    def parse_constraint_tokens(self, val_tokens: np.ndarray) -> list[tuple[int, tuple[int, ...], tuple[int, ...]]]:
         """Parse constraint token sequence into lightweight (type_id, ref_positions) tuples.
 
         Handles both variable-length and fixed-block modes based on
@@ -299,7 +308,7 @@ class SketchTokenizer:
                 Start token, may end with Stop/Pad).
 
         Returns:
-            List of ``(constraint_type_token_id, (sorted_ref_positions...))``.
+            List of ``(constraint_type_token_id, (sorted_ref_positions...), corresponding original token sequence)``.
         """
         val_offset = CONSTRAINT_VAL_OFFSET
         tokens = val_tokens.tolist() if hasattr(val_tokens, 'tolist') else list(val_tokens)
@@ -308,12 +317,11 @@ class SketchTokenizer:
         idx = 1 if tokens and tokens[0] == SpecialToken.Start else 0
         tokens = tokens[idx:]
 
-        parsed: list[tuple[int, tuple[int, ...]]] = []
+        parsed: list[tuple[int, tuple[int, ...], tuple[int, ...]]] = []
 
         if self.align_constraint_token_length_to is None or self.align_constraint_token_length_to <= 0:
             # --- Variable-length mode ---
-            current_type = None
-            current_refs: list[int] = []
+            block = []
 
             for tok in tokens:
                 tok = int(tok)
@@ -327,17 +335,20 @@ class SketchTokenizer:
 
                 if tok < val_offset:
                     # This is a type token (or other special) — save previous
-                    if current_type is not None:
-                        parsed.append((current_type, tuple(sorted(current_refs))))
-                    current_type = tok
-                    current_refs = []
+                    if block is not None:
+                        current_type = block[0]
+                        current_refs = tuple(sorted([x - val_offset for x in block[1:]]))
+                        parsed.append((current_type, current_refs, tuple(block)))
+                    block = [tok]
                 else:
                     # Reference token
-                    current_refs.append(tok - val_offset)
+                    block.append(tok - val_offset)
 
             # Don't forget the last constraint
-            if current_type is not None:
-                parsed.append((current_type, tuple(sorted(current_refs))))
+            if block:
+                current_type = block[0]
+                current_refs = tuple(int(b) - val_offset for b in block[1:])
+                parsed.append((current_type, current_refs, tuple(block)))
 
         else:
             # --- Fixed block mode ---
@@ -350,9 +361,11 @@ class SketchTokenizer:
 
                 type_tok = int(block[0])
 
+                if type_tok == SpecialToken.Stop:
+                    break
+
                 # Skip invalid blocks (Pad, Stop, Mask, InnerPad, or non-type token)
-                if type_tok in (SpecialToken.Pad, SpecialToken.Stop,
-                                SpecialToken.Mask, ConstraintToken.InnerPad):
+                if type_tok in (SpecialToken.Pad, SpecialToken.Mask, ConstraintToken.InnerPad):
                     continue
                 if type_tok >= val_offset:
                     continue
@@ -366,44 +379,57 @@ class SketchTokenizer:
                 if not all(int(b) >= val_offset for b in ref_block):
                     continue
 
-                refs = tuple(sorted(int(b) - val_offset for b in ref_block))
-                parsed.append((type_tok, refs))
+                refs = tuple(int(b) - val_offset for b in ref_block)
+                parsed.append((type_tok, refs, tuple(block)))
 
         return parsed
 
-    def detokenize_constraints(self, val_tokens: np.ndarray, tokenpos_to_primitive: dict[int, str]) -> dict[str, datalib.Constraint]:
+    def detokenize_constraints(
+        self,
+        val_tokens: np.ndarray,
+        tokenpos_to_primitive: dict[int, str],
+        allow_invalid_constraints: bool = False
+    ) -> tuple[dict[str, datalib.Constraint], list[tuple[int, ...]]]:
         """Detokenize constraints using the map from primitives.
 
         Uses :meth:`parse_constraint_tokens` for robust token parsing, then
         delegates to each constraint handler's ``decode`` method.
         """
         constraints = {}
+        invalid_token_blocks = []
         parsed = self.parse_constraint_tokens(val_tokens)
 
-        for type_id, ref_positions in parsed:
-            # Look up handler by constraint type name
+        for type_id, ref_positions, token_block in parsed:
             try:
+                # Look up handler by constraint type name
                 c_name = ConstraintToken(type_id).name
-            except ValueError:
-                continue
-            handler = self.context.get_constraint_handler(c_name)
-            if not handler:
-                continue
+                handler = self.context.get_constraint_handler(c_name)
+                assert handler is not None
 
-            # Pass empty array for params as they are not tokenized
-            constr = handler.decode(ref_positions, np.array([]), tokenpos_to_primitive)
-            if constr:
+                # Validation check (NOTE: handlers don't check refs in decode to allow invalid constraints)
+                if not allow_invalid_constraints and handler.validate_refs(ref_positions):
+                    raise ValueError(f"Invalid refs for constraint {c_name}: {ref_positions}")
+
+                # Pass empty array for params as they are not tokenized
+                constr = handler.decode(ref_positions, np.array([]), tokenpos_to_primitive)
+                assert constr is not None
                 unique_id = f"c_{len(constraints)}"
                 constr = constr._replace(identifier=unique_id)
                 constraints[unique_id] = constr
+            except Exception as e:
+                if allow_invalid_constraints:
+                    invalid_token_blocks.append(token_block)
+                    continue
+                else:
+                    raise e
 
-        return constraints
+        return constraints, invalid_token_blocks
 
-    def detokenize(self, tokens: dict[str, np.ndarray]) -> datalib.Sketch:
+    def detokenize(self, tokens: dict[str, np.ndarray], allow_invalid_constraints: bool = False) -> tuple[datalib.Sketch, list[tuple[int, ...]]]:
         """
         Detokenize separate primitive and constraint streams into a Sketch object.
         """
         entities, tokenpos_to_primitive = self.detokenize_primitives(tokens['p_val'])
-        constraints = self.detokenize_constraints(tokens['c_val'], tokenpos_to_primitive)
+        constraints, invalid_token_blocks = self.detokenize_constraints(tokens['c_val'], tokenpos_to_primitive, allow_invalid_constraints)
 
-        return datalib.Sketch(entities=entities, constraints=constraints)
+        return datalib.Sketch(entities=entities, constraints=constraints), invalid_token_blocks

@@ -8,7 +8,7 @@ from sketchgraphs.data import flat_array, Arc, Circle, Line, Point
 from src.data.components.primitive_noise import PrimitiveNoise
 from src.sketch_handlers.context import SketchContext
 from src.sketch_handlers.sketch_tokenizer import SketchTokenizer
-from src.sketch_handlers.sketch_utils import normalize_sketch, cleanse_sketch
+from src.sketch_handlers.sketch_utils import normalize_sketch, cleanse_sketch_constraints
 
 
 class ConstraintDataset(torch.utils.data.Dataset):
@@ -38,23 +38,29 @@ class ConstraintDataset(torch.utils.data.Dataset):
         sequence_array = flat_array.load_dictionary_flat(sequence_file)
         self.sequences = sequence_array['sequences']
 
-    def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
+    def __getitem__(self, index: int) -> dict[str, int | datalib.Sketch | torch.Tensor]:
         seq = self.sequences[index]
 
         sketch = datalib.sketch_from_sequence(seq)
 
         # Apply noise first (if enabled), then normalize
         # This ensures noisy values stay within [-0.5, 0.5] range
-        sketch = self.primitive_noise.apply_primitive_noise(sketch)
+        sketch_noisy = self.primitive_noise.apply_primitive_noise(sketch)
 
         normalize_sketch(sketch)
+        normalize_sketch(sketch_noisy)
 
         # Remove degenerate constraints before tokenization
-        cleanse_sketch(sketch)
+        cleanse_sketch_constraints(sketch)
+        cleanse_sketch_constraints(sketch_noisy)
 
-        result = self.tokenizer.tokenize(sketch)
+        result_tokens = self.tokenizer.tokenize(sketch_noisy)
 
-        return {key: torch.from_numpy(val) for key, val in result.items()}
+        result: dict[str, int | datalib.Sketch | torch.Tensor] = {"sketch_index": index, "sketch": sketch}
+        for key, val in result_tokens.items():
+            result[key] = torch.from_numpy(val)
+
+        return result
 
     def __len__(self) -> int:
         return len(self.sequences)
