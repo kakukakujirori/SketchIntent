@@ -34,7 +34,11 @@ class PerpendicularHandler(ConstraintHandler):
             raise ValueError(f"Invalid geometry IDs for {self.name}: {refs[0]}, {refs[1]}")
 
         # Perpendicular(e1, e2) — edge-edge only
-        val = self.get_constraint_value(constraint)
+        try:
+            props = self.get_constraint_props(constraint)
+            val = props["value"]
+        except ValueError:
+            val = None
         if val is not None and val != 0.0:
             return [('Perpendicular', [res1[0], res2[0]], val)]
         return [('Perpendicular', [res1[0], res2[0]], None)]

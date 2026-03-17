@@ -18,7 +18,7 @@ class DistanceHandler(ConstraintHandler):
 
     def encode(self, constraint: datalib.Constraint, primitive_tokenpos: dict[str, int]) -> tuple[int, tuple[int, ...], np.ndarray, tuple[int, ...]]:
         ref_tokens = self._get_sorted_ref_tokens(constraint, primitive_tokenpos)
-        val = self.get_constraint_value(constraint)
+        props = self.get_constraint_props(constraint)
 
         # Potentially changes to DistanceX or DistanceY
         token_id = self.token_id
@@ -30,7 +30,7 @@ class DistanceHandler(ConstraintHandler):
                 elif dir_val in ('VERTICAL', DirectionValue.VERTICAL):
                     token_id = ConstraintToken.DistanceY
 
-        return token_id, ref_tokens, np.array([val]), ()
+        return token_id, ref_tokens, np.array([props["value"]]), ()
 
     def decode(self, ref_indices: tuple[int, ...], params: np.ndarray, tokenpos_to_primitive: dict[int, str]) -> datalib.Constraint:
         refs = tuple(tokenpos_to_primitive[idx] for idx in ref_indices)
@@ -39,25 +39,36 @@ class DistanceHandler(ConstraintHandler):
 
     def to_freecad(self, constraint: datalib.Constraint, primitive_geoID: dict[str, tuple[int, int]]) -> list[tuple[str, list, float | None]]:
         refs = self._get_ref_strings(constraint)
-        val = self.get_constraint_value(constraint)
+        props = self.get_constraint_props(constraint)
+
+        type_name = ""
+        if props["direction"] == "MINIMUM":
+            type_name = "Distance"
+        elif props["direction"] == "HORIZONTAL":
+            type_name = "DistanceX"
+        elif props["direction"] == "VERTICAL":
+            type_name = "DistanceY"
+        else:
+            raise ValueError(f"Invalid direction for {self.name}: {props['direction']}")
 
         if len(refs) == 1:
             # Line length: Distance(e1, value)
             res1 = primitive_geoID.get(refs[0])
-            if res1:
-                return [('Distance', [res1[0], float(val)], None)]
+            assert res1
+            return [(type_name, [res1[0], props["value"]], None)]
         elif len(refs) == 2:
             res1 = primitive_geoID.get(refs[0])
             res2 = primitive_geoID.get(refs[1])
-            if res1 and res2:
-                g1, p1 = res1
-                g2, p2 = res2
-                # Point-Point or Point-Line distance
-                return [('Distance', [g1, p1, g2, p2, float(val)], None)]
+            assert res1 and res2
+            g1, p1 = res1
+            g2, p2 = res2
+            # Point-Point/Line/Circle/Arc, Line-Circle/Arc, Circle-Circle/Arc, Arc-Arc
+            # NOTE: Line-Line is valid only when they are parallel
+            return [(type_name, [g1, p1, g2, p2, props["value"]], None)]
 
         res1 = primitive_geoID.get(refs[0])
         res2 = primitive_geoID.get(refs[1])
-        raise ValueError(f"Invalid references or value for {self.name}: {refs=} ({res1=}, {res2=}), {val=}")
+        raise ValueError(f"Invalid references or value for {self.name}: {refs=} ({res1=}, {res2=}), {props=}")
 
     def from_freecad(self, fc_constraint, geoID_to_primitive: dict[tuple[int, int], str]) -> datalib.Constraint | None:
         if fc_constraint.Type != self.name:
@@ -81,9 +92,9 @@ class DistanceHandler(ConstraintHandler):
 
         # 1 ref = Length, 2 refs = Distance
         if len(refs) == 1:
-            return self.create_constraint("Length", tuple(refs), val)
+            return self.create_constraint("Length", tuple(refs), val, direction="MINIMUM")
         elif len(refs) == 2:
-            return self.create_constraint(self.name, tuple(refs), val)
+            return self.create_constraint(self.name, tuple(refs), val, direction="MINIMUM")
 
         raise ValueError(f"Invalid references or value for {self.name}: {refs=}, {val=}")
 

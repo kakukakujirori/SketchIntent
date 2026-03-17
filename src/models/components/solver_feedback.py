@@ -22,7 +22,7 @@ from src.sketch_handlers.context import SketchContext
 from src.sketch_handlers.freecad_utils import ensure_freecad_imported
 from src.sketch_handlers.sketch_freecad_converter import SketchFreecadConverter
 from src.sketch_handlers.sketch_tokenizer import SketchTokenizer
-from src.sketch_handlers.sketch_utils import compute_constraint_values
+from src.sketch_handlers.sketch_utils import complete_constraint_values
 
 if TYPE_CHECKING:
     FreeCAD, Part, Sketcher = ensure_freecad_imported()
@@ -269,7 +269,7 @@ class SolverFeedback:
                 sketchgraphs_sketch.entities[ent_id] = ent_ori
 
         # Assign dimensional values (since the model doesn't infer dimensional contraint values)
-        sketchgraphs_sketch = compute_constraint_values(sketchgraphs_sketch)
+        sketchgraphs_sketch = complete_constraint_values(sketchgraphs_sketch)
 
         if check_one_by_one:
             # incrementally add constraints

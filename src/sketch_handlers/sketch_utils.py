@@ -2,6 +2,8 @@
 img2cad.
 """
 import math
+from dataclasses import dataclass
+from typing import Literal
 
 import numpy as np
 
@@ -222,26 +224,57 @@ def cleanse_sketch_constraints(sketch: datalib.Sketch) -> int:
 
     return len(keys_to_remove) + n_modified
 
+################################################################
 
-def complete_constraint_values(sketch: datalib.Sketch) -> datalib.Sketch:
+@dataclass
+class SketchProperties:
+    direction: str = ""
+    aligned: bool = True
+
+
+def get_properties(constr: datalib.Constraint) -> SketchProperties:
+    props = SketchProperties()
+
+    for param in constr.parameters:
+        # direction
+        if isinstance(param, EnumParameter) and param.parameterId == 'direction':
+            props.direction = param.value
+        # aligned
+        elif isinstance(param, BooleanParameter) and param.parameterId == 'aligned':
+            props.aligned = param.value
+
+    if props.direction not in ("", "MINIMUM", "HORIZONTAL", "VERTICAL"):
+        raise ValueError(f"ERROR: Invalid direction for Distance constraint {constr}")
+
+    return props
+
+
+def complete_constraint_values(sketch: datalib.Sketch, expr_watermark: str = "VALUE_ASSIGNED:") -> datalib.Sketch:
     """
     Fill in the void dimensional constraint values by the primitive position.
+
+    Dimensional constraints in the original SketchGraphs dataset contain contraint values in param.expression.
+    Unfortunately, this is a plain text and param.value is left empty.
+    This function assigns a value to param.value based on the primitive positions.
+
+    NOTE: After the value is assigned, param.expression is updated in the format of "<expr_watermark>: <value>".
+    NOTE: The value match between the calculated param.value and existing param.expression is not verified in this function,
+          which is instead checked by `tests/test_compute_constraint_values.py`.
     """
-    import math
 
     def get_entity_point(entity: datalib.Entity, subnode: str | None = None) -> tuple[float, float] | None:
         """Get the point coordinates for an entity and optional subnode."""
-        if entity.type == datalib.EntityType.Point:
+        if isinstance(entity, datalib.Point):
             return (entity.x, entity.y)
-        elif entity.type == datalib.EntityType.Line:
+        elif isinstance(entity, datalib.Line):
             if subnode == 'start':
                 return entity.start_point.tolist()
             elif subnode == 'end':
                 return entity.end_point.tolist()
-        elif entity.type == datalib.EntityType.Circle:
+        elif isinstance(entity, datalib.Circle):
             if subnode == 'center':
                 return entity.center_point.tolist()
-        elif entity.type == datalib.EntityType.Arc:
+        elif isinstance(entity, datalib.Arc):
             if subnode == 'start':
                 return entity.start_point.tolist()
             elif subnode == 'end':
@@ -250,28 +283,12 @@ def complete_constraint_values(sketch: datalib.Sketch) -> datalib.Sketch:
                 return entity.center_point.tolist()
         return None
 
-    def get_direction(constr: datalib.Constraint) -> str:
-        direction = ""
-        for param in constr.parameters:
-            if isinstance(param, EnumParameter) and param.parameterId == 'direction':
-                direction = param.value
-                break
-        if direction not in ("MINIMUM", "HORIZONTAL", "VERTICAL"):
-            raise ValueError(f"ERROR: Invalid direction for Distance constraint {constr}")
-        return direction
-
-    def get_aligned(constr: datalib.Constraint) -> bool:
-        for param in constr.parameters:
-            if param.parameterId == 'aligned' and isinstance(param, BooleanParameter):
-                return param.value
-        return True  # Default to True
-
     def compute_dist_points(p1: tuple[float, float], p2: tuple[float, float], direction: str) -> float:
         """Calculate Euclidean distance between two points."""
         if direction == "HORIZONTAL":
-            return abs(p2[0] - p1[0])
+            return p2[0] - p1[0]
         elif direction == "VERTICAL":
-            return abs(p2[1] - p1[1])
+            return p2[1] - p1[1]
         elif direction == "MINIMUM":
             return math.sqrt((p2[0] - p1[0])**2 + (p2[1] - p1[1])**2)
         else:
@@ -304,7 +321,7 @@ def complete_constraint_values(sketch: datalib.Sketch) -> datalib.Sketch:
         cross_prod = abs(l1.dirX * l2.dirY - l1.dirY * l2.dirX)
         norm1 = math.sqrt(l1.dirX**2 + l1.dirY**2)
         norm2 = math.sqrt(l2.dirX**2 + l2.dirY**2)
-        if cross_prod / (norm1 * norm2) > 1e-6:
+        if cross_prod / (norm1 * norm2) > 1e-3:
             raise ValueError(f"Lines are not parallel: {l1}, {l2}")
 
         # Calculate distance from l1.start to l2
@@ -316,6 +333,7 @@ def complete_constraint_values(sketch: datalib.Sketch) -> datalib.Sketch:
         """Calculate the length of a line entity."""
         start_point = get_entity_point(line, 'start')
         end_point = get_entity_point(line, 'end')
+        assert start_point is not None and end_point is not None
         return compute_dist_points(start_point, end_point, direction)
 
     def compute_angle_between_lines(line1: datalib.Line, line2: datalib.Line, aligned: bool = True) -> float:
@@ -333,20 +351,25 @@ def complete_constraint_values(sketch: datalib.Sketch) -> datalib.Sketch:
         else:
             return (math.pi - cross_sign * diff) % (2 * math.pi)
 
-    def assign_value(constr: datalib.Constraint, value: float, param_id: str = 'length') -> datalib.Constraint:
+    def assign_value(
+        constr: datalib.Constraint,
+        value: float,
+        param_id: Literal['length', 'angle'],
+        expr_watermark: str,
+    ) -> datalib.Constraint:
         new_params = []
         value_assigned_times = 0
         for param in constr.parameters:
             if isinstance(param, QuantityParameter):
                 assert param_id == param.parameterId, f"ERROR: parameterId mismatch {param_id=}, {param.parameterId=}"
-                new_params.append(QuantityParameter(parameterId=param.parameterId, value=value, expression=str(value)))
+                new_params.append(QuantityParameter(parameterId=param.parameterId, value=value, expression=expr_watermark+str(value)))
                 value_assigned_times += 1
             else:
                 new_params.append(param)
 
         if value_assigned_times == 0:
             # No value assigned in the original constraint, which sometimes happens
-            new_params.append(QuantityParameter(parameterId=param_id, value=value, expression=str(value)))
+            new_params.append(QuantityParameter(parameterId=param_id, value=value, expression=expr_watermark+str(value)))
             value_assigned_times += 1
 
         if value_assigned_times != 1:
@@ -362,6 +385,9 @@ def complete_constraint_values(sketch: datalib.Sketch) -> datalib.Sketch:
             if isinstance(param, LocalReferenceParameter):
                 entity_refs.append(param.value)  # (e.g.) 5, 3.center, ...
 
+        # properties
+        props = get_properties(constr)
+
         # Process each constraint type
         if constr.type == datalib.ConstraintType.Angle:
             assert len(entity_refs) == 2, f"ERROR: Invalid references for Angle constraint {entity_refs}"
@@ -371,10 +397,9 @@ def complete_constraint_values(sketch: datalib.Sketch) -> datalib.Sketch:
             ent1 = sketch.entities.get(ent1_id)
             ent2 = sketch.entities.get(ent2_id)
 
-            if ent1 and ent2 and ent1.type == ent2.type == datalib.EntityType.Line:
-                aligned = get_aligned(constr)
-                angle = compute_angle_between_lines(ent1, ent2, aligned=aligned)
-                sketch.constraints[constr_id] = assign_value(constr, angle, 'angle')
+            if isinstance(ent1, datalib.Line) and isinstance(ent2, datalib.Line):
+                angle = compute_angle_between_lines(ent1, ent2, aligned=props.aligned)
+                sketch.constraints[constr_id] = assign_value(constr, angle, 'angle', expr_watermark)
             else:
                 raise ValueError(f"ERROR: Invalid references for Angle constraint {entity_refs}")
 
@@ -383,24 +408,22 @@ def complete_constraint_values(sketch: datalib.Sketch) -> datalib.Sketch:
             ent_id = entity_refs[0].split('.')[0] if '.' in entity_refs[0] else entity_refs[0]
             entity = sketch.entities.get(ent_id)
 
-            if entity and entity.type in (datalib.EntityType.Circle, datalib.EntityType.Arc):
+            if isinstance(entity, (datalib.Circle, datalib.Arc)):
                 diameter = entity.radius * 2
-                sketch.constraints[constr_id] = assign_value(constr, diameter, 'length')
+                sketch.constraints[constr_id] = assign_value(constr, diameter, 'length', expr_watermark)
             else:
                 raise ValueError(f"ERROR: Invalid references for Diameter constraint {entity_refs}")
 
         elif constr.type == datalib.ConstraintType.Distance:
-
-            direction = get_direction(constr)
 
             if len(entity_refs) == 1:
                 # Distance constraint on a single entity (line length)
                 ent_id = entity_refs[0].split('.')[0] if '.' in entity_refs[0] else entity_refs[0]
                 entity = sketch.entities.get(ent_id)
 
-                if entity and entity.type == datalib.EntityType.Line:
-                    length = compute_line_length(entity, direction)
-                    sketch.constraints[constr_id] = assign_value(constr, length, 'length')
+                if isinstance(entity, datalib.Line):
+                    length = compute_line_length(entity, props.direction)
+                    sketch.constraints[constr_id] = assign_value(constr, length, 'length', expr_watermark)
                 else:
                     raise ValueError(f"ERROR: Invalid references for Distance constraint {entity_refs}")
 
@@ -427,37 +450,37 @@ def complete_constraint_values(sketch: datalib.Sketch) -> datalib.Sketch:
                 p1 = get_entity_point(ent1, sub1)
                 p2 = get_entity_point(ent2, sub2)
                 if p1 and p2:
-                    distance = compute_dist_points(p1, p2, direction)
+                    distance = compute_dist_points(p1, p2, props.direction)
                 elif p1:
-                    assert direction == 'MINIMUM'
-                    if ent2.type == datalib.EntityType.Line:
+                    assert props.direction == 'MINIMUM'
+                    if isinstance(ent2, datalib.Line):
                         distance = compute_dist_point_line(p1, ent2)
-                    elif ent2.type in (datalib.EntityType.Circle, datalib.EntityType.Arc):
+                    elif isinstance(ent2, (datalib.Circle, datalib.Arc)):
                         distance = compute_dist_point_circle(p1, ent2)
                     else:
                         raise ValueError(f"ERROR: Invalid references for Distance constraint {entity_refs}")
                 elif p2:
-                    assert direction == 'MINIMUM'
-                    if ent1.type == datalib.EntityType.Line:
+                    assert props.direction == 'MINIMUM'
+                    if isinstance(ent1, datalib.Line):
                         distance = compute_dist_point_line(p2, ent1)
-                    elif ent1.type in (datalib.EntityType.Circle, datalib.EntityType.Arc):
+                    elif isinstance(ent1, (datalib.Circle, datalib.Arc)):
                         distance = compute_dist_point_circle(p2, ent1)
                     else:
                         raise ValueError(f"ERROR: Invalid references for Distance constraint {entity_refs}")
                 else:
-                    assert direction == 'MINIMUM'
-                    if ent1.type == datalib.EntityType.Line and ent2.type in (datalib.EntityType.Circle, datalib.EntityType.Arc):
+                    assert props.direction == 'MINIMUM'
+                    if isinstance(ent1, datalib.Line) and isinstance(ent2, (datalib.Circle, datalib.Arc)):
                         distance = compute_dist_line_circle(ent1, ent2)
-                    elif ent1.type in (datalib.EntityType.Circle, datalib.EntityType.Arc) and ent2.type == datalib.EntityType.Line:
+                    elif isinstance(ent1, (datalib.Circle, datalib.Arc)) and isinstance(ent2, datalib.Line):
                         distance = compute_dist_line_circle(ent2, ent1)
-                    elif ent1.type in (datalib.EntityType.Circle, datalib.EntityType.Arc) and ent2.type in (datalib.EntityType.Circle, datalib.EntityType.Arc):
+                    elif isinstance(ent1, (datalib.Circle, datalib.Arc)) and isinstance(ent2, (datalib.Circle, datalib.Arc)):
                         distance = compute_dist_circle_circle(ent1, ent2)
-                    elif ent1.type == datalib.EntityType.Line and ent2.type == datalib.EntityType.Line:
+                    elif isinstance(ent1, datalib.Line) and isinstance(ent2, datalib.Line):
                         distance = compute_dist_line_line(ent1, ent2)
                     else:
                         raise ValueError(f"ERROR: Invalid references for Distance constraint {ent1=}, {ent2=}")
 
-                sketch.constraints[constr_id] = assign_value(constr, distance, 'length')
+                sketch.constraints[constr_id] = assign_value(constr, distance, 'length', expr_watermark)
 
             else:
                 raise ValueError(f"ERROR: Invalid references for Distance constraint {entity_refs}")
@@ -467,11 +490,17 @@ def complete_constraint_values(sketch: datalib.Sketch) -> datalib.Sketch:
             ent_id = entity_refs[0].split('.')[0] if '.' in entity_refs[0] else entity_refs[0]
             entity = sketch.entities.get(ent_id)
 
-            direction = get_direction(constr)
-
-            if entity and entity.type == datalib.EntityType.Line:
-                length = compute_line_length(entity, direction)
-                sketch.constraints[constr_id] = assign_value(constr, length, 'length')
+            if isinstance(entity, datalib.Line):
+                length = compute_line_length(entity, props.direction)
+                sketch.constraints[constr_id] = assign_value(constr, length, 'length', expr_watermark)
+            elif isinstance(entity, datalib.Arc):
+                # Arc length = radius * angle (in radians)
+                angle_diff = abs(entity.endParam - entity.startParam)
+                # Handle full circle case
+                if angle_diff > math.pi * 2:
+                    angle_diff = angle_diff % (math.pi * 2)
+                length = entity.radius * angle_diff
+                sketch.constraints[constr_id] = assign_value(constr, length, 'length', expr_watermark)
             else:
                 raise ValueError(f"ERROR: Invalid references for Length constraint {entity_refs}")
 
@@ -480,9 +509,9 @@ def complete_constraint_values(sketch: datalib.Sketch) -> datalib.Sketch:
             ent_id = entity_refs[0].split('.')[0] if '.' in entity_refs[0] else entity_refs[0]
             entity = sketch.entities.get(ent_id)
 
-            if entity and entity.type in (datalib.EntityType.Circle, datalib.EntityType.Arc):
+            if isinstance(entity, (datalib.Circle, datalib.Arc)):
                 radius = entity.radius
-                sketch.constraints[constr_id] = assign_value(constr, radius, 'length')
+                sketch.constraints[constr_id] = assign_value(constr, radius, 'length', expr_watermark)
             else:
                 raise ValueError(f"ERROR: Invalid references for Radius constraint {entity_refs}")
 

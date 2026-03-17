@@ -17,8 +17,8 @@ class LengthHandler(ConstraintHandler):
 
     def encode(self, constraint: datalib.Constraint, primitive_tokenpos: dict[str, int]) -> tuple[int, tuple[int, ...], np.ndarray, tuple[int, ...]]:
         ref_tokens = self._get_sorted_ref_tokens(constraint, primitive_tokenpos)
-        val = self.get_constraint_value(constraint)
-        return self.token_id, ref_tokens, np.array([val]), (ConstraintToken.Length,)
+        props = self.get_constraint_props(constraint)
+        return self.token_id, ref_tokens, np.array([props["value"]]), (ConstraintToken.Length,)
 
     def decode(self, ref_indices: tuple[int, ...], params: np.ndarray, tokenpos_to_primitive: dict[int, str]) -> datalib.Constraint:
         refs = tuple(tokenpos_to_primitive[idx] for idx in ref_indices)
@@ -27,15 +27,15 @@ class LengthHandler(ConstraintHandler):
 
     def to_freecad(self, constraint: datalib.Constraint, primitive_geoID: dict[str, tuple[int, int]]) -> list[tuple[str, list, float | None]]:
         refs = self._get_ref_strings(constraint)
-        val = self.get_constraint_value(constraint)
+        props = self.get_constraint_props(constraint)
 
         # Length is mapped to FreeCAD's Distance on a single edge
         if len(refs) == 1:
             res1 = primitive_geoID.get(refs[0])
             assert res1
-            return [('Distance', [res1[0], float(val)], None)]
+            return [('Distance', [res1[0], props["value"]], None)]
 
-        raise ValueError(f"Invalid references or value for {self.name}: {refs=}, {val=}")
+        raise ValueError(f"Invalid references or value for {self.name}: {refs=}, {props=}")
 
     def from_freecad(self, fc_constraint, geoID_to_primitive: dict[tuple[int, int], str]) -> datalib.Constraint | None:
         # Length tokens don't come directly from a "Length" FC constraint type.

@@ -17,7 +17,7 @@ from src.sketch_handlers.freecad_utils import ensure_freecad_imported
 FreeCAD, Part, Sketcher = ensure_freecad_imported()
 
 # ============================================================
-# Helper Functions from notebooks/v20260124_qwen3_refine_data_with_solver.py
+# Helper Functions from scripts/qwen3_refine_data_with_solver.py
 # ============================================================
 
 def compute_arc_center(start: list[float], mid: list[float], end: list[float]) -> tuple[float, float, float] | None:

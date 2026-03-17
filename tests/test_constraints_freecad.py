@@ -28,9 +28,15 @@ from src.sketch_handlers.freecad_utils import ensure_freecad_imported
 FreeCAD, Part, Sketcher = ensure_freecad_imported()
 
 
-# ============================================================
-# Comparison Helpers
-# ============================================================
+def remove_external_refs(fc_sketch: 'Sketcher.SketchObject') -> 'Sketcher.SketchObject':
+    invalid_indices = []
+    for c_idx, c in enumerate(fc_sketch.Constraints):
+        if c.First < 0 or c.Second < 0:
+            invalid_indices.append(c_idx)
+    for c_idx in invalid_indices[::-1]:
+        fc_sketch.delConstraint(c_idx)
+    return fc_sketch
+
 
 def extract_constraints_from_sketch(fc_sketch: 'Sketcher.SketchObject') -> list[dict]:
     """
@@ -129,7 +135,7 @@ def compare_constraints(
 # Dataset Verification (matches verify_primitives_freecad.py style)
 # ============================================================
 
-def verify_constraints_freecad(directory: str = 'gt_completed_prim5_py', limit: int = 10000):
+def verify_constraints_freecad(directory: str = 'gt_completed_prim5_py', start_idx: int = 0, process_num: int = 1, verbose: bool = False):
     """
     Load real .py sketch scripts, do FC -> SG -> FC roundtrip,
     and verify constraint preservation.
@@ -141,8 +147,8 @@ def verify_constraints_freecad(directory: str = 'gt_completed_prim5_py', limit: 
         print("No .py files found.")
         return False
 
-    num_files = min(len(py_files), limit)
-    print(f"Found {len(py_files)} files. Testing {num_files}...")
+    print(f"Found {len(py_files)} files.")
+    end_idx = min(start_idx + process_num, len(py_files))
 
     context = SketchContext()
     converter = SketchFreecadConverter(context)
@@ -159,7 +165,7 @@ def verify_constraints_freecad(directory: str = 'gt_completed_prim5_py', limit: 
     type_fail_counts = Counter()
     type_missing_counts = Counter()
 
-    for i in range(num_files):
+    for i in range(start_idx, end_idx):
         py_file = py_files[i]
         basename = os.path.basename(py_file)
 
@@ -201,13 +207,26 @@ def verify_constraints_freecad(directory: str = 'gt_completed_prim5_py', limit: 
                 continue
 
             fc_sketch_orig = sketches[0]
+            fc_sketch_orig = remove_external_refs(fc_sketch_orig)
             orig_constraints = extract_constraints_from_sketch(fc_sketch_orig)
             total_constraints_orig += len(orig_constraints)
+
+            if verbose:
+                print("[Original Constraints]")
+                for constr in orig_constraints:
+                    print(constr)
+                print()
 
             # ---------------------------------------------------------------
             # 2. FC -> SketchGraphs
             # ---------------------------------------------------------------
             sg_sketch = converter.from_freecad(fc_sketch_orig)
+
+            if verbose:
+                print("[SketchGraphs Constraints]")
+                for constr_id, constr in sg_sketch.constraints.items():
+                    print(constr)
+                print()
 
             # ---------------------------------------------------------------
             # 3. SketchGraphs -> FC
@@ -215,6 +234,12 @@ def verify_constraints_freecad(directory: str = 'gt_completed_prim5_py', limit: 
             doc_recon, fc_sketch_recon, _, _ = converter.to_freecad(sg_sketch, doc_name=f"ReconDoc_{i}")
             recon_constraints = extract_constraints_from_sketch(fc_sketch_recon)
             total_constraints_recon += len(recon_constraints)
+
+            if verbose:
+                print("[Reconstructed Constraints]")
+                for constr in recon_constraints:
+                    print(constr)
+                print()
 
             # ---------------------------------------------------------------
             # 4. Compare
@@ -276,11 +301,11 @@ def verify_constraints_freecad(directory: str = 'gt_completed_prim5_py', limit: 
     print(f"\n{'='*60}")
     print(f"Constraint Roundtrip Verification Complete")
     print(f"{'='*60}")
-    print(f"Files Processed: {num_files}")
+    print(f"Files Processed: {process_num}")
     print(f"  Passed:  {passed_files}")
     print(f"  Failed:  {failed_files}")
     print(f"  Errors:  {error_files}")
-    pass_rate = (passed_files / max(num_files, 1)) * 100
+    pass_rate = (passed_files / max(process_num, 1)) * 100
     print(f"  Pass Rate: {pass_rate:.1f}%")
     print(f"\nTotal Constraints: {total_constraints_orig} orig, {total_constraints_recon} recon")
 
@@ -396,7 +421,7 @@ class TestConstraintRoundTrip(unittest.TestCase):
         def setup(sk):
             sk.addGeometry(Part.LineSegment(FreeCAD.Vector(0,0,0), FreeCAD.Vector(10,0,0)), False)
             sk.addGeometry(Part.LineSegment(FreeCAD.Vector(0,0,0), FreeCAD.Vector(10,10,0)), False)
-            sk.addConstraint(Sketcher.Constraint('Angle', 0, 1, 45.0))
+            sk.addConstraint(Sketcher.Constraint('Angle', 0, 1, 0.785398))
         self._roundtrip_check(setup)
 
     def test_midpoint_symmetric(self):
@@ -426,8 +451,10 @@ if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser(description='Constraint roundtrip verification')
     parser.add_argument('--dir', default='data_ryotaro_prim5', help='Directory with .py sketch scripts')
-    parser.add_argument('--limit', type=int, default=10000, help='Max files to test')
+    parser.add_argument('--start_idx', type=int, default=0, help='Start index')
+    parser.add_argument('--process_num', type=int, default=1, help='Number of files to process')
     parser.add_argument('--unit', action='store_true', help='Run unit tests only')
+    parser.add_argument('--verbose', action='store_true')
     args = parser.parse_args()
 
     if args.unit:
@@ -435,5 +462,5 @@ if __name__ == '__main__':
         sys.argv = sys.argv[:1]  # Strip custom args so unittest doesn't complain
         unittest.main()
     else:
-        success = verify_constraints_freecad(directory=args.dir, limit=args.limit)
+        success = verify_constraints_freecad(directory=args.dir, start_idx=args.start_idx, process_num=args.process_num, verbose=args.verbose)
         sys.exit(0 if success else 1)

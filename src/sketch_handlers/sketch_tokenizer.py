@@ -7,7 +7,8 @@ from .constants import (
     PrimitiveToken, PrimitiveAttrToken, ConstraintToken, ConstraintAttrToken,
     PRIMITIVE_VAL_OFFSET, CONSTRAINT_VAL_OFFSET, SpecialToken
 )
-from .context import SketchContext
+from src.sketch_handlers.context import SketchContext
+from src.models.components.token_visualizer import visualize_constraint_sequence
 
 
 class SketchTokenizer:
@@ -335,7 +336,7 @@ class SketchTokenizer:
 
                 if tok < val_offset:
                     # This is a type token (or other special) — save previous
-                    if block is not None:
+                    if block:
                         current_type = block[0]
                         current_refs = tuple(sorted([x - val_offset for x in block[1:]]))
                         parsed.append((current_type, current_refs, tuple(block)))
@@ -407,8 +408,8 @@ class SketchTokenizer:
                 assert handler is not None
 
                 # Validation check (NOTE: handlers don't check refs in decode to allow invalid constraints)
-                if not allow_invalid_constraints and handler.validate_refs(ref_positions):
-                    raise ValueError(f"Invalid refs for constraint {c_name}: {ref_positions}")
+                if not allow_invalid_constraints and not handler.validate_refs(ref_positions):
+                    raise ValueError(f"Invalid refs for constraint {c_name}: {ref_positions=} ({visualize_constraint_sequence(val_tokens)=})")
 
                 # Pass empty array for params as they are not tokenized
                 constr = handler.decode(ref_positions, np.array([]), tokenpos_to_primitive)

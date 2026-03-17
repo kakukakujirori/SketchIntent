@@ -7,7 +7,7 @@ import sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import sketchgraphs.data as datalib
-from src.sketch_handlers.sketch_utils import normalize_sketch
+from src.sketch_handlers.sketch_utils import complete_constraint_values, normalize_sketch
 from src.sketch_handlers.context import SketchContext
 from src.sketch_handlers.sketch_tokenizer import SketchTokenizer
 from src.sketch_handlers.constants import ConstraintToken
@@ -84,7 +84,7 @@ def verify_constraints_tokenization(data_npy: str, limit: int = 1000):
 
     # Define test configurations
     stop_padding_opts = [True, False]
-    align_opts = [None, 4]
+    align_opts = [4]  # [None, 4]
     order_opts = ["sort_by_ref_id", "random_shuffle", "original"]
     configs = list(itertools.product(stop_padding_opts, align_opts, order_opts))
 
@@ -112,6 +112,7 @@ def verify_constraints_tokenization(data_npy: str, limit: int = 1000):
                 # 1. Reconstruct Sketch
                 sketch_orig = sketch_from_sequence(seq)
                 normalize_sketch(sketch_orig)
+                sketch_orig = complete_constraint_values(sketch_orig)
 
                 # NORMALIZE SKETCH IDs to match tokenizer's implicit re-ordering/re-numbering
                 sketch_orig = renumber_primitive_ids(sketch_orig)

@@ -9,6 +9,7 @@ import os
 import random
 import re
 import sys
+import traceback
 from dataclasses import dataclass, field
 from io import BytesIO
 
@@ -26,6 +27,7 @@ from sketchgraphs.data import flat_array
 from src.sketch_handlers.context import SketchContext
 from src.sketch_handlers.freecad_utils import dump_freecad_commands, ensure_freecad_imported
 from src.sketch_handlers.sketch_freecad_converter import SketchFreecadConverter
+from src.sketch_handlers.sketch_utils import complete_constraint_values
 from scripts.draw_constraints import visualize_sketch_for_vlm, load_and_extract_from_file, export_sketch_to_dict
 
 
@@ -2458,19 +2460,20 @@ def main(args):
         # load and convert original data to commands
         seq = sequences[i]
         sketch = datalib.sketch_from_sequence(seq)
+        sketch = complete_constraint_values(sketch)
+
         doc = None
         try:
             doc, fc_sketch, _, _ = converter.to_freecad(sketch)
             history_commands = dump_freecad_commands(fc_sketch)
             sample_primitives, sample_constraints = parse_freecad_script(history_commands)
         except Exception as e:
-            print(f"Error processing sequence {i}: {e}")
+            print(f"Error processing sequence {i}: {traceback.format_exc()}")
             with open(error_log, "a") as f:
-                f.write(f"Error processing sequence {i}: {e}\n")
+                f.write(f"Error processing sequence {i}: {traceback.format_exc()}\n")
             continue
         finally:
-            if doc is not None:
-                FreeCAD.closeDocument(doc.Name)
+            FreeCAD.closeDocument(doc.Name) if doc else None
 
         # ======== GT PROCESSING ========
 
@@ -2812,7 +2815,7 @@ if __name__ == '__main__':
     parser.add_argument(
         '--sequence_path',
         type=str,
-        default="/data/ryotaro/my_works/My-Vitruvion/data_processed/sg_filtered_unique.npy",
+        default="/home/ryotaro/my_works/My-Vitruvion/data_processed/sg_filtered_unique_valid.npy",
         help="Path to the sequence data",
     )
     parser.add_argument(

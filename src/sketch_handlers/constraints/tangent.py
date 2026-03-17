@@ -36,8 +36,12 @@ class TangentHandler(ConstraintHandler):
         g1, p1 = res1
         g2, p2 = res2
 
-        val = self.get_constraint_value(constraint)
-        datum = val if val is not None and val != 0.0 else None
+        try:
+            props = self.get_constraint_props(constraint)
+            datum = props["value"]
+        except ValueError:
+            datum = None
+
         if p1 > 0 or p2 > 0:
             # Tangent with point specification: Tangent(e1, s1, e2, s2)
             if datum is not None:

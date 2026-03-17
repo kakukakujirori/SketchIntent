@@ -1,9 +1,9 @@
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 import sketchgraphs.data as datalib
-from sketchgraphs.data._constraint import DirectionValue
-from .context import SketchContext
-from .freecad_utils import ensure_freecad_imported
+from src.sketch_handlers.context import SketchContext
+from src.sketch_handlers.freecad_utils import ensure_freecad_imported
+from src.sketch_handlers.sketch_utils import complete_constraint_values
 
 if TYPE_CHECKING:
     FreeCAD, Part, Sketcher = ensure_freecad_imported()
@@ -43,23 +43,6 @@ class SketchFreecadConverter:
             Part.ArcOfCircle: 'Arc',
             Part.Point: 'Point'
         }
-
-    def _get_handler_name(self, constr: datalib.Constraint) -> str:
-        """
-        Helper method to correctly identify the required handler.
-        Certain constraint types (like Distance) use parameters to differentiate
-        between variants (DistanceX vs DistanceY).
-        """
-        c_name = constr.constraint_type.name
-        if c_name == 'Distance':
-            for p in constr.parameters:
-                if getattr(p, 'parameterId', None) == 'direction':
-                    val = getattr(p, 'value', None)
-                    if val == DirectionValue.HORIZONTAL or val == 'HORIZONTAL':
-                        return 'DistanceX'
-                    elif val == DirectionValue.VERTICAL or val == 'VERTICAL':
-                        return 'DistanceY'
-        return c_name
 
     def to_freecad_primitives(
         self,
@@ -146,29 +129,21 @@ class SketchFreecadConverter:
         constraint_freecad_mapping: dict[int, str] = {}
 
         for c_id, constr in sketch.constraints.items():
-            try:
-                handler_name = self._get_handler_name(constr)
-                handler = self.context.get_constraint_handler(handler_name)
-                if not handler:
-                    self.dprint(f"Warning: No handler for constraint {handler_name}")
-                    continue
+            handler_name = constr.constraint_type.name
+            handler = self.context.get_constraint_handler(handler_name)
+            if not handler:
+                self.dprint(f"Warning: No handler for constraint {handler_name}")
+                continue
 
-                # Handler returns list of (type_name, args_list, datum_or_none)
-                # NOTE: Dimension constraints define values in datum, while
-                #       Geometric constraints can define them in args_list (Tangent, Perpendicular)
-                fc_constraints = handler.to_freecad(constr, primitive_freecad_mapping)
-                for fc_type, fc_args, fc_datum in fc_constraints:
-                    try:
-                        idx = fc_sketch.addConstraint(Sketcher.Constraint(fc_type, *fc_args))
-                        constraint_freecad_mapping[idx] = c_id
-                        if fc_datum is not None:
-                            fc_sketch.setDatum(idx, fc_datum)
-                    except Exception as e:
-                        self.dprint(f"Error adding FreeCAD constraint {fc_type}({fc_args}): {e}")
-
-            except Exception as e:
-                self.dprint(f"Error creating FreeCAD constraint {c_id}: {e}")
-                raise e
+            # Handler returns list of (type_name, args_list, datum_or_none)
+            # NOTE: Dimension constraints define values in datum, while
+            #       Geometric constraints can define them in args_list (Tangent, Perpendicular)
+            fc_constraints = handler.to_freecad(constr, primitive_freecad_mapping)
+            for fc_type, fc_args, fc_datum in fc_constraints:
+                idx = fc_sketch.addConstraint(Sketcher.Constraint(fc_type, *fc_args))
+                constraint_freecad_mapping[idx] = c_id
+                if fc_datum is not None:
+                    fc_sketch.setDatum(idx, fc_datum)
 
         return constraint_freecad_mapping
 
@@ -180,6 +155,7 @@ class SketchFreecadConverter:
         """
         Full conversion: Primitives + Constraints.
         """
+        sketch = complete_constraint_values(sketch)
         doc, fc_sketch, primitive_freecad_mapping = self.to_freecad_primitives(sketch, doc_name)
         constraint_freecad_mapping = self.to_freecad_constraints(sketch, fc_sketch, primitive_freecad_mapping)
         doc.recompute()
@@ -265,7 +241,7 @@ class SketchFreecadConverter:
                 candidates = [c_type]
 
             # Try each candidate handler in order
-            for handler_name in candidates:
+            for handler_idx, handler_name in enumerate(candidates):
                 handler = self.context.get_constraint_handler(handler_name)
                 if handler:
                     try:
@@ -273,7 +249,9 @@ class SketchFreecadConverter:
                         if sg_constr:
                             break
                     except Exception as e:
-                        self.dprint(f"Error in {handler_name}.from_freecad for constraint {i} ({c_type}): {e}")
+                        # If there are multiple candidates, intermediate failures are false positives
+                        if handler_idx == len(candidates) - 1:
+                            self.dprint(f"Error in {handler_name}.from_freecad for constraint {i} ({c_type}): {e}")
 
             # Fallback: type name mapping
             if not sg_constr:

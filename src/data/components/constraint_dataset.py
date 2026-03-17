@@ -8,7 +8,7 @@ from sketchgraphs.data import flat_array, Arc, Circle, Line, Point
 from src.data.components.primitive_noise import PrimitiveNoise
 from src.sketch_handlers.context import SketchContext
 from src.sketch_handlers.sketch_tokenizer import SketchTokenizer
-from src.sketch_handlers.sketch_utils import normalize_sketch, cleanse_sketch_constraints
+from src.sketch_handlers.sketch_utils import cleanse_sketch_constraints, complete_constraint_values, normalize_sketch
 
 
 class ConstraintDataset(torch.utils.data.Dataset):
@@ -42,6 +42,7 @@ class ConstraintDataset(torch.utils.data.Dataset):
         seq = self.sequences[index]
 
         sketch = datalib.sketch_from_sequence(seq)
+        sketch = complete_constraint_values(seq)
 
         # Apply noise first (if enabled), then normalize
         # This ensures noisy values stay within [-0.5, 0.5] range

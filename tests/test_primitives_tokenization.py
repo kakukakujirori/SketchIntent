@@ -6,7 +6,7 @@ import numpy as np
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import sketchgraphs.data as datalib
-from src.sketch_handlers.sketch_utils import normalize_sketch
+from src.sketch_handlers.sketch_utils import complete_constraint_values, normalize_sketch
 from src.sketch_handlers.context import SketchContext
 from src.sketch_handlers.sketch_tokenizer import SketchTokenizer
 from sketchgraphs.data import flat_array
@@ -58,7 +58,7 @@ def verify_primitives_tokenization(data_npy: str, limit: int = 1000):
         print(f"Failed to load dataset: {e}", flush=True)
         return False
 
-    context = SketchContext()
+    context = SketchContext(align_constraint_token_length_to=4)
     tokenizer = SketchTokenizer(context)
 
     total_processed = 0
@@ -75,6 +75,7 @@ def verify_primitives_tokenization(data_npy: str, limit: int = 1000):
             # Reconstruct Sketch
             sketch_orig = sketch_from_sequence(seq)
             normalize_sketch(sketch_orig)
+            sketch_orig = complete_constraint_values(sketch_orig)
 
             # 2. Tokenize / Detokenize
             token_data = tokenizer.tokenize(sketch_orig)

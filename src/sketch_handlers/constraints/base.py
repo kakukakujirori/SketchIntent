@@ -7,9 +7,10 @@ from sketchgraphs.data._constraint import (
     ConstraintType,
     ConstraintParameterType,
     DirectionValue,
+    BooleanParameter,
+    EnumParameter,
     LocalReferenceParameter,
     QuantityParameter,
-    EnumParameter,
 )
 from src.sketch_handlers.freecad_utils import ensure_freecad_imported
 
@@ -95,30 +96,44 @@ class ConstraintHandler(ABC):
         """
         pass
 
-    def get_constraint_value(self, constraint: datalib.Constraint) -> float:
-        """Helper to extract value from constraint parameters."""
+    def get_constraint_props(self, constraint: datalib.Constraint, expr_watermark: str = "VALUE_ASSIGNED:") -> dict[str, Any]:
+        """Helper to extract a value and other properties from constraint parameters."""
+        props: dict[str, Any] = {"value": None, "direction": "", "aligned": True}
         for param in constraint.parameters:
             if param.type == ConstraintParameterType.Quantity:
                 if isinstance(param, QuantityParameter):
-                    # value might be string or float
+                    # NOTE: SketchGraphs data stores values not in param.value but in param.expression
+                    #       Since expression is a text with a unit, it's risky to extract metric value from it.
+                    #       Therefore, we assume that values in the sketch are filled by src.sketch_handler.sketch_utils.complete_constraint_values().
+                    if not param.expression.startswith(expr_watermark):
+                        raise ValueError(f"Value not assigned to constraint {constraint=}. Run `src.sketch_handler.sketch_utils.complete_constraint_values()` first.")
                     try:
-                        return float(param.value)
-                    except (ValueError, TypeError):
-                        return 0.0
-        return 0.0
+                        props["value"] = float(param.value)
+                    except:
+                        continue
+            # direction
+            elif isinstance(param, EnumParameter) and param.parameterId == 'direction':
+                props["direction"] = param.value
+            # aligned
+            elif isinstance(param, BooleanParameter) and param.parameterId == 'aligned':
+                props["aligned"] = param.value
 
-    # Types that don't exist in SketchGraphs ConstraintType -> map to nearest equivalent with params
-    _SG_TYPE_MAP = {
-        'DistanceX': ('Distance', EnumParameter(parameterId='direction', value='HORIZONTAL')),
-        'DistanceY': ('Distance', EnumParameter(parameterId='direction', value='VERTICAL')),
-    }
+        if props["value"] is None:
+            raise ValueError(f"No dimension constraints found: {constraint=}.")
+        return props
 
-    def create_constraint(self, constraint_type_name: str, refs: tuple[str, ...], value: float | None = None) -> datalib.Constraint:
+    def create_constraint(
+        self,
+        constraint_type_name: str,
+        refs: tuple[str, ...],
+        value: float | None = None,
+        direction: str | None = None,
+        aligned: bool | None = None,
+    ) -> datalib.Constraint:
         """Helper to create a sketchgraphs.data.Constraint object."""
 
         # Map to valid SketchGraphs enum; keep original name as identifier
-        sg_type_name, sg_additional_param = self._SG_TYPE_MAP.get(constraint_type_name, (constraint_type_name, None))
-        ctype = getattr(ConstraintType, sg_type_name)
+        ctype = getattr(ConstraintType, constraint_type_name)
         params = []
         for i, ref in enumerate(refs):
             params.append(LocalReferenceParameter(parameterId=f"local{i}", value=ref))
@@ -126,9 +141,11 @@ class ConstraintHandler(ABC):
         if value is not None:
             pid = 'angle' if constraint_type_name == 'Angle' else 'length'
             params.append(QuantityParameter(parameterId=pid, value=value, expression=str(value)))
-
-        if sg_additional_param:
-            params.append(sg_additional_param)
+        if direction is not None:
+            assert direction in ('MINIMUM', 'HORIZONTAL', 'VERTICAL')
+            params.append(EnumParameter(parameterId='direction', value=direction))
+        if aligned is not None:
+            params.append(BooleanParameter(parameterId='aligned', value=aligned))
 
         # NOTE: identifier=constraint_type_name is tentative. It's expected to be overwritten to represent a real UID.
         return Constraint(identifier=constraint_type_name, constraint_type=ctype, parameters=params)
