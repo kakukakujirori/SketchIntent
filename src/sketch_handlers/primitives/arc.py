@@ -144,7 +144,12 @@ class ArcHandler(PrimitiveHandler):
         p2 = FreeCAD.Vector(entity.mid_point[0], entity.mid_point[1], 0)
         p3 = FreeCAD.Vector(entity.end_point[0], entity.end_point[1], 0)
 
-        geo = Part.ArcOfCircle(p1, p2, p3)
+        # NOTE: For simplicity, configure StartPoint -> EndPoint counter-clockwise in FreeCAD
+        if entity.clockwise:
+            geo = Part.ArcOfCircle(p3, p2, p1)
+        else:
+            geo = Part.ArcOfCircle(p1, p2, p3)
+
         return geo, entity.isConstruction
 
     def from_freecad(self, fc_geo: Part.Geometry, output_id: str) -> datalib.Arc:

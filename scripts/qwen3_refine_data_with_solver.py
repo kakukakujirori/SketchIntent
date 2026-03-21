@@ -1,4 +1,3 @@
-from llama_cpp.server.cli import add_args_from_model
 from typing import Any
 import argparse
 import base64
@@ -27,7 +26,7 @@ from sketchgraphs.data import flat_array
 from src.sketch_handlers.context import SketchContext
 from src.sketch_handlers.freecad_utils import dump_freecad_commands, ensure_freecad_imported
 from src.sketch_handlers.sketch_freecad_converter import SketchFreecadConverter
-from src.sketch_handlers.sketch_utils import complete_constraint_values
+from src.sketch_handlers.sketch_utils import cleanse_sketch_primitives, cleanse_sketch_constraints, complete_constraint_values
 from scripts.draw_constraints import visualize_sketch_for_vlm, load_and_extract_from_file, export_sketch_to_dict
 
 
@@ -174,6 +173,7 @@ def compute_constraint_value(ctype: str, primitives: list, e1: int, s1: int | No
             return None
 
         if s1 is None:
+            # TODO: Accept s1=0 and s2=0 (DistanceX/Y too)
             return None
 
         p1 = get_point_from_primitive(primitives, e1, s1)
@@ -208,7 +208,7 @@ def compute_constraint_value(ctype: str, primitives: list, e1: int, s1: int | No
             if prim1["type"] == "LineSegment":
                 sx, sy = prim1["start"]
                 ex, ey = prim1["end"]
-                return abs(ex - sx)
+                return ex - sx
             return None
 
         # Case 2: Two points
@@ -232,7 +232,7 @@ def compute_constraint_value(ctype: str, primitives: list, e1: int, s1: int | No
             if prim1["type"] == "LineSegment":
                 sx, sy = prim1["start"]
                 ex, ey = prim1["end"]
-                return abs(ey - sy)
+                return ey - sy
             return None
 
         # Case 2: Two points
@@ -2460,6 +2460,8 @@ def main(args):
         # load and convert original data to commands
         seq = sequences[i]
         sketch = datalib.sketch_from_sequence(seq)
+        sketch = cleanse_sketch_primitives(sketch)
+        sketch = cleanse_sketch_constraints(sketch)
         sketch = complete_constraint_values(sketch)
 
         doc = None

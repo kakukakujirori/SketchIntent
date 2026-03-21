@@ -27,12 +27,18 @@ class AngleHandler(ConstraintHandler):
         val = float(params[0]) if len(params) > 0 else 0.0
         return self.create_constraint(self.name, refs, val)
 
-    def to_freecad(self, constraint: datalib.Constraint, primitive_geoID: dict[str, tuple[int, int]]) -> list[tuple[str, list, float | None]]:
+    def to_freecad(self, constraint: datalib.Constraint, primitives: dict[str, datalib.Entity], primitive_geoID: dict[str, tuple[int, int]]) -> list[tuple[str, list, float | None]]:
         refs = self._get_ref_strings(constraint)
         props = self.get_constraint_props(constraint)
 
-        # NOTE: Value is already in radians (stored as-is from FreeCAD)
+        # NOTE: Since the original SketchGraphs angle data is unclear in how it was computed, we instead use angles calculated on the fly.
+        #       Call src.sketch_handlers.sketch_utils.complete_constraint_values() first to make that change.
+        #       - Value is already set in radians (used as-is by FreeCAD)
+        #       - Aligned is always True
+        #       - Clockwise is neglected
         val_rad = props["value"]
+        if not props["aligned"]:
+            raise ValueError(f"Aligned is false for {self.name}: {constraint=}. Run sketch_utils.complete_constraint_values() first.")
 
         if len(refs) == 2:
             res1 = primitive_geoID.get(refs[0])
@@ -68,7 +74,7 @@ class AngleHandler(ConstraintHandler):
 
         assert self.validate_refs(tuple(refs))
 
-        return self.create_constraint(self.name, tuple(refs), val)
+        return self.create_constraint(self.name, tuple(refs), val, aligned=True)
 
     def validate_refs(self, refs: tuple[int | str, ...]) -> bool:
         return len(refs) == 1 or len(refs) == 2

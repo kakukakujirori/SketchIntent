@@ -59,12 +59,13 @@ def test_complete_constraint_values(sketch_ori: datalib.Sketch, eps: float = 0.1
     angle_diff = []
     for before, after, param_type in before_after:
         if param_type == 'length':
-            length_ratios.append(abs(after) / before)  # complete_constraint_values allows negative values
+            length_ratios.append(abs(after) / max(1e-6, before))  # complete_constraint_values allows negative values
         elif param_type == 'angle':
-            diff = abs(after - before) % (2 * math.pi)
-            angle_diff.append(diff)
+            # diff = abs(after - before) % (2 * math.pi)
+            # angle_diff.append(diff)
+            pass
 
-    dprint(f"\n{length_ratios=}\n{angle_diff=}")
+    dprint(f"\n{length_ratios=}")#\n{angle_diff=}")
 
     if length_ratios and eps < max(length_ratios) - min(length_ratios):
         dprint(f"Length ratios are not within tolerance: {length_ratios}")

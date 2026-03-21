@@ -69,12 +69,13 @@ class ConstraintHandler(ABC):
         pass
 
     @abstractmethod
-    def to_freecad(self, constraint: datalib.Constraint, primitive_geoID: dict[str, tuple[int, int]]) -> list[tuple[str, list, float | None]]:
+    def to_freecad(self, constraint: datalib.Constraint, primitives: dict[str, datalib.Entity], primitive_geoID: dict[str, tuple[int, int]]) -> list[tuple[str, list, float | None]]:
         """
         Convert a SketchGraphs Constraint to FreeCAD constraint argument tuples.
 
         Args:
             constraint: The SketchGraphs Constraint object.
+            primitives: The SketchGraphs Entity object sets.
             primitive_geoID: Dictionary mapping reference string (e.g. "0", "0.start", "0.center")
                              -> (GeoID, PointID) tuple.
 
@@ -157,7 +158,7 @@ class ConstraintHandler(ABC):
         """
         refs = []
         for param in constraint.parameters:
-            if type(param).__name__ != 'LocalReferenceParameter': continue
+            if not isinstance(param, LocalReferenceParameter): continue
 
             value = getattr(param, 'value', None)
             if not isinstance(value, str): continue
@@ -209,10 +210,8 @@ class ConstraintHandler(ABC):
         """
         refs = []
         for param in constraint.parameters:
-            if type(param).__name__ != 'LocalReferenceParameter':
-                continue
-            value = getattr(param, 'value', None)
-            if isinstance(value, str):
+            if isinstance(param, LocalReferenceParameter):
+                value = getattr(param, 'value', None)
                 refs.append(value)
         return tuple(refs)
 

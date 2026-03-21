@@ -23,7 +23,7 @@ class TangentHandler(ConstraintHandler):
         refs = tuple(tokenpos_to_primitive[idx] for idx in ref_indices)
         return self.create_constraint(self.name, refs)
 
-    def to_freecad(self, constraint: datalib.Constraint, primitive_geoID: dict[str, tuple[int, int]]) -> list[tuple[str, list, float | None]]:
+    def to_freecad(self, constraint: datalib.Constraint, primitives: dict[str, datalib.Entity], primitive_geoID: dict[str, tuple[int, int]]) -> list[tuple[str, list, float | None]]:
         refs = self._get_ref_strings(constraint)
         if not self.validate_refs(refs):
             raise ValueError(f"Invalid number of refs for {self.name}: {refs=}")
@@ -31,7 +31,7 @@ class TangentHandler(ConstraintHandler):
         res1 = primitive_geoID.get(refs[0])
         res2 = primitive_geoID.get(refs[1])
         if not res1 or not res2:
-            raise ValueError(f"Invalid geometry IDs for {self.name}: {refs=}")
+            raise ValueError(f"Invalid geometry IDs for {self.name}: {refs=} ({primitive_geoID=})")
 
         g1, p1 = res1
         g2, p2 = res2

@@ -37,7 +37,7 @@ class DistanceHandler(ConstraintHandler):
         val = float(params[0]) if len(params) > 0 else 0.0
         return self.create_constraint(self.name, refs, val)
 
-    def to_freecad(self, constraint: datalib.Constraint, primitive_geoID: dict[str, tuple[int, int]]) -> list[tuple[str, list, float | None]]:
+    def to_freecad(self, constraint: datalib.Constraint, primitives: dict[str, datalib.Entity], primitive_geoID: dict[str, tuple[int, int]]) -> list[tuple[str, list, float | None]]:
         refs = self._get_ref_strings(constraint)
         props = self.get_constraint_props(constraint)
 
@@ -62,9 +62,27 @@ class DistanceHandler(ConstraintHandler):
             assert res1 and res2
             g1, p1 = res1
             g2, p2 = res2
-            # Point-Point/Line/Circle/Arc, Line-Circle/Arc, Circle-Circle/Arc, Arc-Arc
-            # NOTE: Line-Line is valid only when they are parallel
-            return [(type_name, [g1, p1, g2, p2, props["value"]], None)]
+
+            # NOTE: Line-Line is invalid in FreeCAD. If parallel, translate it to Point-Line distance
+            ent1 = primitives[refs[0].split(".")[0]]
+            ent2 = primitives[refs[1].split(".")[0]]
+            if p1 == p2 == 0 and isinstance(ent1, datalib.Line) and isinstance(ent2, datalib.Line):
+                # check if parallel
+                l1_dir = np.array([ent1.dirX, ent1.dirY])
+                l2_dir = np.array([ent2.dirX, ent2.dirY])
+                l1_dir_norm = np.linalg.norm(l1_dir)
+                l2_dir_norm = np.linalg.norm(l2_dir)
+                if np.abs(l1_dir[0] * l2_dir[1] - l1_dir[1] * l2_dir[0]) / (l1_dir_norm * l2_dir_norm) < 0.001:
+                    return [(type_name, [g1, 1, g2, 0, props["value"]], None)]
+                else:
+                    raise ValueError(f"Lines {refs[0]} and {refs[1]} are not parallel, so Distance constraint cannot be applied.")
+
+            # NOTE: Line-XXX is invalid. Reverse to XXX-Line (XXX = Point, Circle, Arc)
+            # NOTE: When measuring the distance between Circle/Arc and Line, negative values mean that Line is inside the Circle/Arc.
+            if isinstance(ent1, datalib.Line) and p1 == 0:
+                return [(type_name, [g2, p2, g1, p1, props["value"]], None)]
+            else:
+                return [(type_name, [g1, p1, g2, p2, props["value"]], None)]
 
         res1 = primitive_geoID.get(refs[0])
         res2 = primitive_geoID.get(refs[1])

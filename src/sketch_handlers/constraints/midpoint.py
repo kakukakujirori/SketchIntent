@@ -36,7 +36,7 @@ class MidpointHandler(ConstraintHandler):
         NOTE: This function isused in _get_sorted_ref_tokens.
         """
         if len(ref_tokens) == 2:
-            return ref_tokens  # NOTE: DO NOT SORT
+            return ref_tokens  # NOTE: DO NOT SORT (Line + Point)
         elif len(ref_tokens) == 3:
             return tuple(sorted(ref_tokens[:2])) + (ref_tokens[2],)
         else:
@@ -51,7 +51,7 @@ class MidpointHandler(ConstraintHandler):
         refs = tuple(tokenpos_to_primitive[idx] for idx in ref_indices)
         return self.create_constraint(self.name, refs)
 
-    def to_freecad(self, constraint: datalib.Constraint, primitive_geoID: dict[str, tuple[int, int]]) -> list[tuple[str, list, float | None]]:
+    def to_freecad(self, constraint: datalib.Constraint, primitives: dict[str, datalib.Entity], primitive_geoID: dict[str, tuple[int, int]]) -> list[tuple[str, list, float | None]]:
         refs = self._get_ref_strings(constraint)
 
         if len(refs) == 2:

@@ -14,7 +14,8 @@ _SUBNODE_MAP = {
     'Point': [],  # Point entity itself maps to (gid, 1)
     'Line': [('.start', 1), ('.end', 2)],
     'Circle': [('.center', 3)],
-    'Arc': [('.start', 1), ('.end', 2), ('.center', 3)],
+    'Arc_clockwise': [('.start', 2), ('.end', 1), ('.center', 3)],
+    'Arc_counter_clockwise': [('.start', 1), ('.end', 2), ('.center', 3)],
 }
 
 # Default pointID for entity-level (edge) reference
@@ -87,7 +88,10 @@ class SketchFreecadConverter:
                 default_pid = _ENTITY_POINT_ID.get(entity_name, 0)
                 primitive_freecad_mapping[eid] = (gid, default_pid)
 
-                # Subnode references
+                # Subnode references (NOTE: For simplicity, configure StartPoint -> EndPoint counter-clockwise in FreeCAD)
+                if entity_name == 'Arc':
+                    assert isinstance(entity, datalib.Arc)
+                    entity_name = f"Arc_{'clockwise' if entity.clockwise else 'counter_clockwise'}"
                 subnodes = _SUBNODE_MAP.get(entity_name, [])
                 for suffix, pid in subnodes:
                     primitive_freecad_mapping[f"{eid}{suffix}"] = (gid, pid)
@@ -138,7 +142,7 @@ class SketchFreecadConverter:
             # Handler returns list of (type_name, args_list, datum_or_none)
             # NOTE: Dimension constraints define values in datum, while
             #       Geometric constraints can define them in args_list (Tangent, Perpendicular)
-            fc_constraints = handler.to_freecad(constr, primitive_freecad_mapping)
+            fc_constraints = handler.to_freecad(constr, sketch.entities, primitive_freecad_mapping)
             for fc_type, fc_args, fc_datum in fc_constraints:
                 idx = fc_sketch.addConstraint(Sketcher.Constraint(fc_type, *fc_args))
                 constraint_freecad_mapping[idx] = c_id

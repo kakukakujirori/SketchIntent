@@ -46,17 +46,22 @@ def export_sketch_to_dict(sketch_obj: 'Sketcher.SketchObject') -> dict[str, dict
             prim_data["coords"] = (geom.X, geom.Y)
 
         elif isinstance(geom, Part.ArcOfCircle):
+            # NOTE: FreeCAD assigns StartPoint/FirstParameter to the endpoint closer to angle 0,
+            #       REGARDLESS OF ENDPOINT DEFINITION ORDER!!!
+            # I.e., If defined counterclockwise, then geo_id.1 = StartPoint, geo_id.2 = EndPoint
+            #       If defined clockwise, then geo_id.1 = EndPoint, geo_id.2 = StartPoint
+            # Moreover, it is ensured that FirstParameter < LastParameter, so it's unnecessary to care the 2pi cycle.
             prim_data["type"] = "Arc"
             prim_data["center"] = (geom.Center.x, geom.Center.y)
             prim_data["radius"] = geom.Radius
             prim_data["start"] = (geom.StartPoint.x, geom.StartPoint.y)
             prim_data["end"] = (geom.EndPoint.x, geom.EndPoint.y)
-
-            cx, cy = geom.Center.x, geom.Center.y
-            sx, sy = geom.StartPoint.x, geom.StartPoint.y
-            ex, ey = geom.EndPoint.x, geom.EndPoint.y
-            prim_data["start_angle"] = math.degrees(math.atan2(sy - cy, sx - cx))
-            prim_data["end_angle"] = math.degrees(math.atan2(ey - cy, ex - cx))
+            start_angle_offset = math.degrees(math.atan2(geom.StartPoint.y - geom.Center.y, geom.StartPoint.x - geom.Center.x))
+            prim_data["start_angle"] = start_angle_offset + math.degrees(geom.FirstParameter)
+            prim_data["end_angle"] = start_angle_offset + math.degrees(geom.LastParameter)
+            prim_data["mid_angle"] = (prim_data["start_angle"] + prim_data["end_angle"]) / 2
+            prim_data["mid"] = (geom.Center.x + math.cos(math.radians(prim_data["mid_angle"])) * prim_data["radius"],
+                                geom.Center.y + math.sin(math.radians(prim_data["mid_angle"])) * prim_data["radius"])
 
         elif isinstance(geom, Part.Circle):
             prim_data["type"] = "Circle"
@@ -100,15 +105,16 @@ def export_sketch_to_dict(sketch_obj: 'Sketcher.SketchObject') -> dict[str, dict
 # 2. ファイルロード & 実行ロジック (Loading)
 # ==========================================
 
-def load_and_extract_from_file(file_path: str) -> dict[str, dict[str, Any]] | None:
+def load_and_extract_from_file(filepath_or_command_list: str | list[str]) -> dict[str, dict[str, Any]] | None:
     """
     指定されたPythonファイルを実行し、生成されたSketchからデータを抽出し、ドキュメントを閉じる
     """
-    if not os.path.exists(file_path):
-        print(f"File not found: {file_path}")
-        return None
+    if isinstance(filepath_or_command_list, str) and os.path.isfile(filepath_or_command_list):
+        with open(filepath_or_command_list, 'r') as f:
+            script_content = f.read()
+    else:
+        script_content = "\n".join(filepath_or_command_list)
 
-    # 実行用のコンテキスト辞書
     exec_globals = {
         "FreeCAD": FreeCAD,
         "Part": Part,
@@ -116,24 +122,19 @@ def load_and_extract_from_file(file_path: str) -> dict[str, dict[str, Any]] | No
         "Vector": FreeCAD.Vector
     }
 
-    # ファイル読み込み
-    with open(file_path, 'r') as f:
-        script_content = f.read()
+    target_sketch = None
 
     try:
-        # --- スクリプト実行 ---
+        # --- Run the script ---
         exec(script_content, exec_globals)
 
-        # --- Sketchオブジェクトの探索 ---
-        target_sketch = None
-
-        # 1. exec_globals の変数から探す
+        # 1. Find the target sketch from exec_globals
         for key, val in exec_globals.items():
             if hasattr(val, "TypeId") and val.TypeId == "Sketcher::SketchObject":
                 target_sketch = val
                 break
 
-        # 2. 見つからない場合、ActiveDocumentから探す
+        # 2. If not found, search ActiveDocument
         if target_sketch is None and FreeCAD.ActiveDocument:
             for obj in FreeCAD.ActiveDocument.Objects:
                 if obj.TypeId == "Sketcher::SketchObject":
@@ -147,7 +148,7 @@ def load_and_extract_from_file(file_path: str) -> dict[str, dict[str, Any]] | No
                 FreeCAD.closeDocument(FreeCAD.ActiveDocument.Name)
             return None
 
-        # --- データ抽出 ---
+        # --- Extract data ---
         extracted_data = export_sketch_to_dict(target_sketch)
         return extracted_data
 
@@ -207,8 +208,8 @@ def _draw_single_sketch(ax, data, title: str | None = None, title_fontsize: int 
             s, e = prim["start"], prim["end"]
             ax.scatter([s[0], e[0]], [s[1], e[1]], **STYLE_PNT)
             ax.scatter([c[0]], [c[1]], color='black', s=40, marker='+', zorder=11)
-            all_x.extend([c[0]-r, c[0]+r])
-            all_y.extend([c[1]-r, c[1]+r])
+            all_x.extend([prim["start"][0], prim["mid"][0], prim["end"][0]])
+            all_y.extend([prim["start"][1], prim["mid"][1], prim["end"][1]])
         elif prim["type"] == "Point":
             c = prim["coords"]
             ax.scatter([c[0]], [c[1]], **STYLE_PNT)
@@ -226,7 +227,7 @@ def _draw_single_sketch(ax, data, title: str | None = None, title_fontsize: int 
     view_min_y, view_max_y = min(all_y)-margin, max(all_y)+margin
 
     # --- Helper Functions ---
-    def get_pos_coord(target_info):
+    def get_pos_coord(target_info: dict[str, Any]) -> tuple[float, float]:
         tid, pos = target_info["id"], target_info["pos"]
         prim = prim_map.get(tid)
         if not prim: return (0,0)
@@ -238,15 +239,7 @@ def _draw_single_sketch(ax, data, title: str | None = None, title_fontsize: int 
             if pos == 1: return prim["start"]
             if pos == 2: return prim["end"]
             if pos == 3: return prim["center"]
-            start_ang = prim["start_angle"]
-            end_ang = prim["end_angle"]
-            if end_ang < start_ang:
-                mid_ang = (start_ang + end_ang + 360) / 2
-                if mid_ang >= 360: mid_ang -= 360
-            else:
-                mid_ang = (start_ang + end_ang) / 2
-            mid = math.radians(mid_ang)
-            return (prim["center"][0] + prim["radius"]*math.cos(mid), prim["center"][1] + prim["radius"]*math.sin(mid))
+            return prim["mid"]
         if prim["type"] == "Circle":
             if pos == 3: return prim["center"]
             return (prim["center"][0] + prim["radius"], prim["center"][1])
@@ -344,13 +337,7 @@ def _draw_single_sketch(ax, data, title: str | None = None, title_fontsize: int 
             # For Arc: use the arc's midpoint angle, draw leader line from edge only
             start_ang = prim["start_angle"]
             end_ang = prim["end_angle"]
-            # Calculate midpoint angle (handle wraparound)
-            if end_ang < start_ang:
-                mid_ang = (start_ang + end_ang + 360) / 2
-                if mid_ang >= 360: mid_ang -= 360
-            else:
-                mid_ang = (start_ang + end_ang) / 2
-            angle = math.radians(mid_ang)
+            angle = math.radians((start_ang + end_ang) / 2)
             dx, dy = math.cos(angle), math.sin(angle)
 
             p_edge = (c[0] + dx*r, c[1] + dy*r)
@@ -426,6 +413,60 @@ def _draw_single_sketch(ax, data, title: str | None = None, title_fontsize: int 
                 weight='bold', ha='center', va='center',
                 bbox=dict(facecolor='#f0f8ff', edgecolor='blue', boxstyle='round,pad=0.2', alpha=1.0), zorder=20)
 
+    def draw_angle_dimension(l1_pts, l2_pts):
+        (A, B), (C, D) = l1_pts, l2_pts
+
+        Ux, Uy = B[0] - A[0], B[1] - A[1]
+        Vx, Vy = D[0] - C[0], D[1] - C[1]
+
+        denom = Ux * Vy - Uy * Vx
+        if abs(denom) < 1e-6:
+            return  # near parallel
+
+        t = ((C[0] - A[0]) * Vy - (C[1] - A[1]) * Vx) / denom
+        V_pt = (A[0] + t * Ux, A[1] + t * Uy)
+
+        M1 = ((A[0]+B[0])/2, (A[1]+B[1])/2)
+        M2 = ((C[0]+D[0])/2, (C[1]+D[1])/2)
+
+        d1 = math.hypot(M1[0]-V_pt[0], M1[1]-V_pt[1])
+        d2 = math.hypot(M2[0]-V_pt[0], M2[1]-V_pt[1])
+
+        dir1 = (M1[0]-V_pt[0], M1[1]-V_pt[1])
+        dir2 = (M2[0]-V_pt[0], M2[1]-V_pt[1])
+
+        if d1 < 1e-6: dir1 = (Ux, Uy); d1 = math.hypot(Ux, Uy) / 2
+        if d2 < 1e-6: dir2 = (Vx, Vy); d2 = math.hypot(Vx, Vy) / 2
+
+        ang1 = math.degrees(math.atan2(dir1[1], dir1[0])) % 360
+        ang2 = math.degrees(math.atan2(dir2[1], dir2[0])) % 360
+
+        diff = (ang2 - ang1) % 360
+        if diff > 180:
+            ang1, ang2 = ang2, ang1
+            diff = 360 - diff
+
+        r = min(scale_ref * 2.0, max(scale_ref * 0.5, min(d1, d2) * 0.6))
+
+        arc = patches.Arc(V_pt, 2*r, 2*r, angle=0, theta1=ang1, theta2=ang2, color='blue', lw=1.2, zorder=6)
+        ax.add_patch(arc)
+
+        arm_len = r * 1.1
+        ax.plot([V_pt[0], V_pt[0] + arm_len*math.cos(math.radians(ang1))],
+                [V_pt[1], V_pt[1] + arm_len*math.sin(math.radians(ang1))],
+                color='black', linestyle=':', lw=0.8, zorder=5, alpha=0.5)
+        ax.plot([V_pt[0], V_pt[0] + arm_len*math.cos(math.radians(ang2))],
+                [V_pt[1], V_pt[1] + arm_len*math.sin(math.radians(ang2))],
+                color='black', linestyle=':', lw=0.8, zorder=5, alpha=0.5)
+
+        bisect_angle = math.radians(ang1 + diff / 2)
+        tx = V_pt[0] + r * 1.35 * math.cos(bisect_angle)
+        ty = V_pt[1] + r * 1.35 * math.sin(bisect_angle)
+
+        text = f"{(ang2 - ang1) % 360:.1f}°"
+        ax.text(tx, ty, text, color='blue', fontsize=icon_fontsize, weight='bold', ha='center', va='center',
+                bbox=dict(facecolor='#f0f8ff', edgecolor='blue', boxstyle='round,pad=0.2', alpha=1.0), zorder=20)
+
     align_counter = 0
     def draw_alignment_line(p1, p2, type_str):
         nonlocal align_counter
@@ -476,6 +517,44 @@ def _draw_single_sketch(ax, data, title: str | None = None, title_fontsize: int 
                         edgecolors=AXIS_COLOR, facecolors='white', linewidth=1.5)
         return
 
+    def get_resolved_points(t1, t2):
+        type1 = prim_map[t1["id"]]["type"]; type2 = prim_map[t2["id"]]["type"]
+        def get_ref(t, ptype):
+            if ptype in ["Circle", "Arc"] and t["pos"] == 0:
+                return prim_map[t["id"]]["center"], "circle"
+            elif ptype == "Line" and t["pos"] == 0:
+                s = prim_map[t["id"]]["start"]; e = prim_map[t["id"]]["end"]
+                return ((s[0]+e[0])/2, (s[1]+e[1])/2), "line"
+            else:
+                return get_pos_coord(t), "point"
+
+        r1, s1 = get_ref(t1, type1)
+        r2, s2 = get_ref(t2, type2)
+        c1, c2 = r1, r2
+
+        if s1 == "line" and s2 != "line":
+            l_s = prim_map[t1["id"]]["start"]; l_e = prim_map[t1["id"]]["end"]
+            c1 = project_point_onto_line(r2, l_s, l_e)
+        elif s2 == "line" and s1 != "line":
+            l_s = prim_map[t2["id"]]["start"]; l_e = prim_map[t2["id"]]["end"]
+            c2 = project_point_onto_line(r1, l_s, l_e)
+        elif s1 == "line" and s2 == "line":
+            l2_s = prim_map[t2["id"]]["start"]; l2_e = prim_map[t2["id"]]["end"]
+            c2 = project_point_onto_line(r1, l2_s, l2_e)
+
+        def move_to_edge(center, target_pt, radius):
+            dx, dy = target_pt[0] - center[0], target_pt[1] - center[1]
+            d = math.sqrt(dx*dx + dy*dy)
+            if d < 1e-6: return (center[0] + radius, center[1])
+            return (center[0] + dx/d * radius, center[1] + dy/d * radius)
+
+        if s1 == "circle":
+            c1 = move_to_edge(r1, c2, prim_map[t1["id"]]["radius"])
+        if s2 == "circle":
+            c2 = move_to_edge(r2, r1, prim_map[t2["id"]]["radius"])
+
+        return c1, c2
+
     # --- Constraints Loop ---
     text_props = dict(ha='center', va='center', weight='bold', zorder=30)
     constraint_counters = {"Parallel": 0, "Equal": 0}
@@ -487,9 +566,28 @@ def _draw_single_sketch(ax, data, title: str | None = None, title_fontsize: int 
         if not targets: continue
 
         # 1. Dimensions
-        if c_type in ["Distance", "Length", "Radius", "Diameter", "DistanceX", "DistanceY"]:
+        if c_type in ["Distance", "Length", "Radius", "Diameter", "DistanceX", "DistanceY", "Angle"]:
             val = const.get("value", "?")
             val_str = f"{val:.1f}"
+
+            if c_type == "Angle":
+                if len(targets) == 2:
+                    t1, t2 = targets[0], targets[1]
+                    ptype1 = prim_map[t1["id"]]["type"]
+                    ptype2 = prim_map[t2["id"]]["type"]
+                    if ptype1 == "Line" and ptype2 == "Line":
+                        l1_pts = (prim_map[t1["id"]]["start"], prim_map[t1["id"]]["end"])
+                        l2_pts = (prim_map[t2["id"]]["start"], prim_map[t2["id"]]["end"])
+                        draw_angle_dimension(l1_pts, l2_pts)
+                elif len(targets) == 1:
+                    t1 = targets[0]
+                    if prim_map[t1["id"]]["type"] == "Line":
+                        A, B = prim_map[t1["id"]]["start"], prim_map[t1["id"]]["end"]
+                        M1 = ((A[0]+B[0])/2, (A[1]+B[1])/2)
+                        l1_pts = (A, B)
+                        l2_pts = (M1, (M1[0]+1, M1[1]))
+                        draw_angle_dimension(l1_pts, l2_pts)
+                continue
 
             if c_type in ["Radius", "Diameter"] and len(targets) == 1:
                 tid = targets[0]["id"]
@@ -501,11 +599,9 @@ def _draw_single_sketch(ax, data, title: str | None = None, title_fontsize: int 
             if c_type in ["DistanceX", "DistanceY"]:
                 p1, p2 = None, None
                 if len(targets) == 1 and prim_map[targets[0]["id"]]["type"] == "Line":
-                    tid = targets[0]["id"]
-                    p1, p2 = prim_map[tid]["start"], prim_map[tid]["end"]
+                    tid = targets[0]["id"]; p1 = prim_map[tid]["start"]; p2 = prim_map[tid]["end"]
                 elif len(targets) == 2:
-                    p1 = get_pos_coord(targets[0])
-                    p2 = get_pos_coord(targets[1])
+                    p1, p2 = get_resolved_points(targets[0], targets[1])
                 if p1 and p2:
                     if c_type == "DistanceX":
                         draw_distanceX_dimension(p1, p2, val_str)
@@ -517,19 +613,7 @@ def _draw_single_sketch(ax, data, title: str | None = None, title_fontsize: int 
             if len(targets) == 1 and prim_map[targets[0]["id"]]["type"] == "Line":
                 tid = targets[0]["id"]; p1 = prim_map[tid]["start"]; p2 = prim_map[tid]["end"]
             elif len(targets) == 2:
-                t1, t2 = targets[0], targets[1]
-                type1 = prim_map[t1["id"]]["type"]; type2 = prim_map[t2["id"]]["type"]
-                c1 = get_pos_coord(t1); c2 = get_pos_coord(t2)
-                if type1 == "Line" and t1["pos"] == 0 and t2["pos"] != 0:
-                    l_start = prim_map[t1["id"]]["start"]; l_end = prim_map[t1["id"]]["end"]
-                    c1 = project_point_onto_line(c2, l_start, l_end)
-                elif type2 == "Line" and t2["pos"] == 0 and t1["pos"] != 0:
-                    l_start = prim_map[t2["id"]]["start"]; l_end = prim_map[t2["id"]]["end"]
-                    c2 = project_point_onto_line(c1, l_start, l_end)
-                elif type1 == "Line" and type2 == "Line" and t1["pos"] == 0 and t2["pos"] == 0:
-                    l2_start = prim_map[t2["id"]]["start"]; l2_end = prim_map[t2["id"]]["end"]
-                    c2 = project_point_onto_line(c1, l2_start, l2_end)
-                p1, p2 = c1, c2
+                p1, p2 = get_resolved_points(targets[0], targets[1])
             if p1 and p2: draw_linear_dimension(p1, p2, val_str)
             continue
 
@@ -712,6 +796,8 @@ def visualize_sketch_for_vlm(
 
     # Single view
     fig, ax = plt.subplots(figsize=(figsize[0] / dpi, figsize[1] / dpi), dpi=dpi)
+    # print(f"{data['primitives']=}")
+    # print(f"{data['constraints']=}")
     _draw_single_sketch(ax, data, title=title,
                         title_fontsize=title_fontsize, icon_fontsize=icon_fontsize)
 
@@ -726,13 +812,22 @@ def visualize_sketch_for_vlm(
 
 
 if __name__ == "__main__":
-    input_files = sorted(
-        glob.glob("/home/ryotaro/github/vitruvion/scripts/prediction_fc_search/history_gt_ar_refined_*.py"),
-        key=lambda x: int(x.split("_")[-1].split(".")[0]))
-    INPUT_SCRIPT_PATH = input_files[0]
+    if len(sys.argv) > 1:
+        INPUT_SCRIPT_PATH = sys.argv[1]
+    else:
+        input_files = sorted(
+            glob.glob("/home/ryotaro/my_works/My-Vitruvion/data_ryotaro_prim5/*.py"))
+        if not input_files:
+            print("No input files found.")
+            sys.exit(1)
+        INPUT_SCRIPT_PATH = input_files[0]
+
     OUTPUT_IMAGE_PATH = "vlm_judge_input.png"
 
-    assert os.path.isfile(INPUT_SCRIPT_PATH)
+    if not os.path.isfile(INPUT_SCRIPT_PATH):
+        print(f"File not found: {INPUT_SCRIPT_PATH}")
+        sys.exit(1)
+
     print(f"Checking {os.path.basename(INPUT_SCRIPT_PATH)}")
 
     # 1. 実行・抽出・クローズ
