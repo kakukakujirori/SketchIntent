@@ -147,10 +147,7 @@ class SolverFeedback:
         return is_distorted
 
     def get_solver_status(self, sketch: datalib.Sketch) -> SolverStatus:
-        """Get solver status from FreeCAD sketch.
-
-        Note: FreeCAD solver indices in getSolverStatus() are 1-based.
-        """
+        """Get solver status from FreeCAD sketch."""
         FreeCAD, Part, Sketcher = ensure_freecad_imported()
 
         doc = None
@@ -170,15 +167,13 @@ class SolverFeedback:
             relational, dimensional = SolverFeedback.count_relational_and_dimensional_constraints(fc_sketch)
             is_distorted = SolverFeedback.check_geometry_distortion(fc_sketch_primitives_only, fc_sketch, self.distortion_threshold)
 
-            # NOTE: `getSolverStatus`` returns 1-based indices., while `constraint_freecad_mapping`` keys are 0-based.
-            #       So we must subtract 1 from solver indices before looking up mapping.
-            def _map_indices(fc_indices_1based: list[int]) -> list[str]:
-                sketchgraphs_indices_0based = []
-                for fc_idx_1based in fc_indices_1based:
-                    idx_str = constraint_freecad_mapping.get(fc_idx_1based - 1, None)  # idx_str = 'c_xxx'
+            def _map_indices(fc_indices: list[int]) -> list[str]:
+                sketchgraphs_indices = []
+                for fc_idx in fc_indices:
+                    idx_str = constraint_freecad_mapping.get(fc_idx, None)  # idx_str = 'c_xxx'
                     if idx_str is not None:
-                        sketchgraphs_indices_0based.append(idx_str)
-                return sorted(list(set(sketchgraphs_indices_0based)))
+                        sketchgraphs_indices.append(idx_str)
+                return sorted(list(set(sketchgraphs_indices)))
 
             status = SolverStatus(
                 DoF = fc_status['DoF'],

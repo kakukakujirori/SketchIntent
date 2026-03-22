@@ -47,7 +47,8 @@ fc_sketch.getSolverStatus()
 #   'ConflictGroups': [[c_id1, c_id2, ...], [c_id3, c_id4, ...], ...]
 # }
 ```
-This functionality is extensively used in [src/models/components/solver_feedback.py](src/models/components/solver_feedback.py).
+Note that the constraint indices are 0-based.
+Please refer to [scripts/qwen3_refine_data_with_solver.py](scripts/qwen3_refine_data_with_solver.py) and [src/models/components/solver_feedback.py](src/models/components/solver_feedback.py) for its usage.
 
 ## Install Dependencies
 

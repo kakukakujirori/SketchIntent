@@ -26,7 +26,7 @@ from sketchgraphs.data import flat_array
 from src.sketch_handlers.context import SketchContext
 from src.sketch_handlers.freecad_utils import dump_freecad_commands, ensure_freecad_imported
 from src.sketch_handlers.sketch_freecad_converter import SketchFreecadConverter
-from src.sketch_handlers.sketch_utils import cleanse_sketch_primitives, cleanse_sketch_constraints, complete_constraint_values
+from src.sketch_handlers.sketch_utils import cleanse_sketch_primitives, cleanse_sketch_constraints, complete_constraint_values, normalize_sketch
 from scripts.draw_constraints import visualize_sketch_for_vlm, load_and_extract_from_file, export_sketch_to_dict
 
 
@@ -45,7 +45,11 @@ def parse_vector(vec_str: str) -> list[float]:
     return [float(n) for n in nums[:2]]
 
 
-def compute_arc_center(start: list, mid: list, end: list) -> tuple | None:
+def compute_arc_center(
+    start: tuple[float, float],
+    mid: tuple[float, float],
+    end: tuple[float, float],
+) -> tuple[float, float, float]:
     """
     Compute the center of a circle passing through three points (start, mid, end).
     Returns (cx, cy, radius) or None if points are collinear.
@@ -57,7 +61,7 @@ def compute_arc_center(start: list, mid: list, end: list) -> tuple | None:
     # Calculate the determinant to check if points are collinear
     d = 2 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by))
     if abs(d) < 1e-10:
-        return None  # Points are collinear
+        raise ValueError(f"Points are collinear: {start}, {mid}, {end}")
 
     # Calculate center coordinates
     ux = ((ax**2 + ay**2) * (by - cy) + (bx**2 + by**2) * (cy - ay) + (cx**2 + cy**2) * (ay - by)) / d
@@ -69,7 +73,11 @@ def compute_arc_center(start: list, mid: list, end: list) -> tuple | None:
     return (ux, uy, radius)
 
 
-def get_point_from_primitive(primitives: list, entity_idx: int, subnode: int | None) -> list | None:
+def get_point_from_primitive(
+    primitives: list[dict[str, Any]],
+    entity_idx: int,
+    subnode: int | None,
+) -> tuple[float, float] | None:
     """
     Get a point [x, y] from a primitive based on entity index and subnode.
 
@@ -107,12 +115,7 @@ def get_point_from_primitive(primitives: list, entity_idx: int, subnode: int | N
             return [prim["x"], prim["y"]]
 
     elif subnode == 3:  # CenterPoint
-        if ptype == "Circle":
-            return prim["center"]
-        elif ptype == "Arc":
-            result = compute_arc_center(prim["start"], prim["mid"], prim["end"])
-            if result:
-                return [result[0], result[1]]
+        return prim["center"]
 
     return None
 
@@ -140,8 +143,14 @@ def oscillate_primitives(primitives: list[dict[str, Any]], noise_std: float = 0.
     return oscillated_primitives
 
 
-def compute_constraint_value(ctype: str, primitives: list, e1: int, s1: int | None = None,
-                              e2: int | None = None, s2: int | None = None) -> float | None:
+def compute_constraint_value(
+    ctype: str,
+    primitives: list[dict[str, Any]],
+    e1: int,
+    s1: int | None = None,
+    e2: int | None = None,
+    s2: int | None = None,
+) -> float:
     """
     Compute the value for a dimensional constraint based on primitive coordinates.
 
@@ -152,12 +161,13 @@ def compute_constraint_value(ctype: str, primitives: list, e1: int, s1: int | No
         e2, s2: Second entity index and subnode (optional)
 
     Returns:
-        Computed value or None if unable to compute
+        Computed value
     """
     if e1 is None or e1 < 0 or e1 >= len(primitives):
-        return None
+        raise ValueError(f"Entity index invalid or out of range: {e1} ({primitives=})")
 
     prim1 = primitives[e1]
+    prim2 = primitives[e2] if e2 is not None else None
 
     if ctype == "Distance":
         # Case 1: Single entity (e.g. Line Length)
@@ -166,41 +176,88 @@ def compute_constraint_value(ctype: str, primitives: list, e1: int, s1: int | No
                 sx, sy = prim1["start"]
                 ex, ey = prim1["end"]
                 return math.sqrt((ex - sx)**2 + (ey - sy)**2)
-            return None
+            else:
+                raise ValueError(f"Unsupported primitive type: {prim1['type']}")
 
         # Case 2: Two entities (Point-Point or Point-Line)
-        if e2 >= len(primitives):
-            return None
+        if prim2 is None:
+            raise ValueError(f"Entity index out of range: {e2} ({primitives=})")
 
-        if s1 is None:
-            # TODO: Accept s1=0 and s2=0 (DistanceX/Y too)
-            return None
+        def compute_dist_point_to_obj(p1: tuple[float, float], prim2: dict[str, Any]) -> float:
+            if prim2["type"] == "Point":
+                p2 = get_point_from_primitive(primitives, e2, s2)
+                if p2 is None:
+                    raise ValueError(f"Entity index {e2} not found: {primitives=}")
+                return math.sqrt((p2[0] - p1[0])**2 + (p2[1] - p1[1])**2)
+            if prim2["type"] == "LineSegment":
+                lx1, ly1 = prim2["start"]
+                lx2, ly2 = prim2["end"]
+                dx, dy = lx2 - lx1, ly2 - ly1
+                tx, ty = p1[0] - lx1, p1[1] - ly1
+                area = abs(tx * dy - ty * dx)
+                norm = math.sqrt(dx**2 + dy**2)
+                return area / norm if norm > 0 else 0.0
+            if prim2["type"] in ("Circle", "Arc"):
+                cx, cy = prim2["center"]
+                r = prim2["radius"]
+                d_centers = math.sqrt((p1[0] - cx)**2 + (p1[1] - cy)**2)
+                return abs(d_centers - r)  # For Point-Circle, FreeCAD expects non-negative values.
+            raise ValueError(f"Unsupported primitive type: {prim2['type']}")
+
+        def compute_dist_line_to_obj(line: dict[str, Any], prim2: dict[str, Any]) -> float:
+            if line["type"] != "LineSegment":
+                raise ValueError(f"`line` is not a Line primitive: {line=}")
+
+            if prim2["type"] == "Point":
+                p2 = get_point_from_primitive(primitives, e2, s2)
+                if p2 is None:
+                    raise ValueError(f"Entity index {e2} not found: {primitives=}")
+                return compute_dist_point_to_obj(p2, line)
+            if prim2["type"] == "LineSegment":
+                dx1, dy1 = line["end"][0] - line["start"][0], line["end"][1] - line["start"][1]
+                dx2, dy2 = prim2["end"][0] - prim2["start"][0], prim2["end"][1] - prim2["start"][1]
+                # Check parallelism: |v1 x v2| should be close to 0
+                cross_prod = abs(dx1 * dy2 - dy1 * dx2)
+                norm1 = math.sqrt(dx1**2 + dy1**2)
+                norm2 = math.sqrt(dx2**2 + dy2**2)
+                if cross_prod / (norm1 * norm2) > 1e-3:
+                    raise ValueError(f"Lines are not parallel: {line}, {prim2}")
+                # Calculate distance from l1.start to l2
+                return compute_dist_point_to_obj(line["start"], prim2)
+            if prim2["type"] in ("Circle", "Arc"):
+                d_center_to_line = compute_dist_point_to_obj(prim2["center"], line)
+                return d_center_to_line - prim2["radius"]
+            raise ValueError(f"Unsupported primitive type: {prim2['type']}")
+
+        def compute_dist_circle_to_circle(prim1: dict[str, Any], prim2: dict[str, Any]) -> float:
+            if prim1["type"] not in ("Circle", "Arc") or prim2["type"] not in ("Circle", "Arc"):
+                raise ValueError(f"Both primitives must be a Circle or an Arc: {prim1=}, {prim2=}")
+            cx1, cy1 = prim1["center"]
+            cx2, cy2 = prim2["center"]
+            d_centers = math.sqrt((cx1 - cx2)**2 + (cy1 - cy2)**2)
+            if d_centers < abs(prim1["radius"] - prim2["radius"]):
+                # whole circle is included by the other (positive)
+                return abs(prim1["radius"] - prim2["radius"]) - d_centers
+            else:
+                # circles are disjoint (positive) or partially overlapping (negative)
+                return d_centers - (prim1["radius"] + prim2["radius"])
 
         p1 = get_point_from_primitive(primitives, e1, s1)
-        if p1 is None:
-            return None
+        p2 = get_point_from_primitive(primitives, e2, s2)
 
-        # Attempt to get p2 (Point-to-Point)
-        # Use subnode2 if present, else default to 0
-        sub2 = s2 if s2 is not None else 0
-        p2 = get_point_from_primitive(primitives, e2, sub2)
-
-        if p2 is not None:
-            # Point-to-Point distance
-            return math.sqrt((p2[0] - p1[0])**2 + (p2[1] - p1[1])**2)
-
-        # If p2 is None, check for Point-to-Line
-        prim2 = primitives[e2]
-        if prim2["type"] == "LineSegment":
-            lx1, ly1 = prim2["start"]
-            lx2, ly2 = prim2["end"]
-            dx, dy = lx2 - lx1, ly2 - ly1
-            line_len_sq = dx**2 + dy**2
-            if line_len_sq > 1e-9:
-                t = ((p1[0] - lx1) * dx + (p1[1] - ly1) * dy) / line_len_sq
-                closest_x = lx1 + t * dx
-                closest_y = ly1 + t * dy
-                return math.sqrt((p1[0] - closest_x)**2 + (p1[1] - closest_y)**2)
+        # Case2.1: Point-XXX (XXX = Point, Line, Circle, Arc)
+        if p1 is not None:
+            return compute_dist_point_to_obj(p1, prim2)
+        elif p1 is not None:
+            return compute_dist_point_to_obj(p2, prim1)
+        # Case 2.2: Line-XXX (XXX = Line, Circle, Arc)
+        elif prim1["type"] == "LineSegment":
+            return compute_dist_line_to_obj(prim1, prim2)
+        elif prim2["type"] == "LineSegment":
+            return compute_dist_line_to_obj(prim2, prim1)
+        # Case 2.3: Circle/Arc-Circle/Arc
+        else:
+            return compute_dist_circle_to_circle(prim1, prim2)
 
     elif ctype == "DistanceX":
         # Case 1: Single entity (horizontal span of a line)
@@ -209,22 +266,20 @@ def compute_constraint_value(ctype: str, primitives: list, e1: int, s1: int | No
                 sx, sy = prim1["start"]
                 ex, ey = prim1["end"]
                 return ex - sx
-            return None
+            else:
+                raise ValueError(f"Unsupported primitive type: {prim1['type']}")
 
         # Case 2: Two points
-        if e2 >= len(primitives):
-            return None
-        if s1 is None:
-            return None
+        if prim2 is None:
+            raise ValueError(f"Entity index out of range: {e2} ({primitives=})")
 
         p1 = get_point_from_primitive(primitives, e1, s1)
-        if p1 is None:
-            return None
+        p2 = get_point_from_primitive(primitives, e2, s2)
 
-        sub2 = s2 if s2 is not None else 0
-        p2 = get_point_from_primitive(primitives, e2, sub2)
-        if p2 is not None:
+        if p1 is not None and p2 is not None:
             return p2[0] - p1[0]
+
+        raise ValueError(f"DistanceX only accepts Line length and Point-Point distance: got {prim1=}, {prim2=}")
 
     elif ctype == "DistanceY":
         # Case 1: Single entity (vertical span of a line)
@@ -233,39 +288,26 @@ def compute_constraint_value(ctype: str, primitives: list, e1: int, s1: int | No
                 sx, sy = prim1["start"]
                 ex, ey = prim1["end"]
                 return ey - sy
-            return None
+            else:
+                raise ValueError(f"Unsupported primitive type: {prim1['type']}")
 
         # Case 2: Two points
-        if e2 >= len(primitives):
-            return None
-        if s1 is None:
-            return None
+        if prim2 is None:
+            raise ValueError(f"Entity index out of range: {e2} ({primitives=})")
 
         p1 = get_point_from_primitive(primitives, e1, s1)
-        if p1 is None:
-            return None
+        p2 = get_point_from_primitive(primitives, e2, s2)
 
-        sub2 = s2 if s2 is not None else 0
-        p2 = get_point_from_primitive(primitives, e2, sub2)
-        if p2 is not None:
+        if p1 is not None and p2 is not None:
             return p2[1] - p1[1]
 
+        raise ValueError(f"DistanceY only accepts Line length and Point-Point distance: got {prim1=}, {prim2=}")
+
     elif ctype == "Radius":
-        if prim1["type"] == "Circle":
-            return prim1.get("radius")
-        elif prim1["type"] == "Arc":
-            result = compute_arc_center(prim1["start"], prim1["mid"], prim1["end"])
-            if result:
-                return result[2]  # radius
+        return prim1["radius"]
 
     elif ctype == "Diameter":
-        if prim1["type"] == "Circle":
-            r = prim1.get("radius")
-            return r * 2 if r else None
-        elif prim1["type"] == "Arc":
-            result = compute_arc_center(prim1["start"], prim1["mid"], prim1["end"])
-            if result:
-                return result[2] * 2
+        return prim1["radius"] * 2
 
     elif ctype == "Angle":
         if e2 is not None:
@@ -279,14 +321,18 @@ def compute_constraint_value(ctype: str, primitives: list, e1: int, s1: int | No
                 angle1 = math.atan2(dy1, dx1)
                 angle2 = math.atan2(dy2, dx2)
                 return angle2 - angle1  # radian
+            else:
+                raise ValueError(f"Unsupported primitive type: {prim1=}, {prim2=}")
         else:
             # Single line angle (slope angle from horizontal)
             if prim1["type"] == "LineSegment":
                 dx = prim1["end"][0] - prim1["start"][0]
                 dy = prim1["end"][1] - prim1["start"][1]
                 return math.atan2(dy, dx)  # radian
+            else:
+                raise ValueError(f"Unsupported primitive type: {prim1=}")
 
-    return None
+    raise ValueError(f"Unsupported constraint type: {ctype}")
 
 
 # ============================================================
@@ -296,7 +342,7 @@ def compute_constraint_value(ctype: str, primitives: list, e1: int, s1: int | No
 DIMENSIONAL_CONSTRAINT_TYPES = {"Distance", "DistanceX", "DistanceY", "Angle", "Radius", "Diameter"}
 
 
-def classify_constraints(constraints: list) -> tuple[list, list]:
+def classify_constraints(constraints: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """
     Classify constraints into relational and dimensional.
 
@@ -316,7 +362,7 @@ def classify_constraints(constraints: list) -> tuple[list, list]:
     return relational, dimensional
 
 
-def extract_primitives_from_sketch(fc_sketch: "Sketcher.SketchObject") -> list:
+def extract_primitives_from_sketch(fc_sketch: "Sketcher.SketchObject") -> list[dict[str, Any]]:
     """
     Extract primitive coordinates from FreeCAD sketch geometry.
 
@@ -346,7 +392,7 @@ def extract_primitives_from_sketch(fc_sketch: "Sketcher.SketchObject") -> list:
         if ptype is None:
             raise NotImplementedError(f"Unsupported geometry type: {geo_type}")
 
-        new_prim = {"type": ptype}
+        new_prim: dict[str, Any] = {"type": ptype}
 
         # Get construction flag from fc_sketch
         try:
@@ -388,6 +434,8 @@ def extract_primitives_from_sketch(fc_sketch: "Sketcher.SketchObject") -> list:
             new_prim["start"] = [sp.x, sp.y]
             new_prim["mid"] = [mx, my]
             new_prim["end"] = [ep.x, ep.y]
+            new_prim["center"] = [cx, cy]
+            new_prim["radius"] = r
         else:
             # Unknown geometry type, skip
             continue
@@ -493,18 +541,10 @@ def compute_centroid_aligned_deviation(
                               (prim_a["end"][1] - prim_a["start"][1])**2)
             len_dev = abs(len_b - len_a)
 
-        elif ptype == "Circle":
+        elif ptype == "Circle" or ptype == "Arc":
             r_b = prim_b.get("radius", 0)
             r_a = prim_a.get("radius", 0)
             len_dev = abs(r_b - r_a)
-
-        elif ptype == "Arc":
-            arc_result_b = compute_arc_center(prim_b["start"], prim_b["mid"], prim_b["end"])
-            arc_result_a = compute_arc_center(prim_a["start"], prim_a["mid"], prim_a["end"])
-            if arc_result_b and arc_result_a:
-                r_b = arc_result_b[2]
-                r_a = arc_result_a[2]
-                len_dev = abs(r_b - r_a)
 
         if len_dev > max_length_deviation:
             max_length_deviation = len_dev
@@ -542,7 +582,7 @@ def format_constraint_to_json(ctype: str, args: list) -> dict:
         "entity3": None, "subnode3": None
     }
 
-    def get_arg(idx):
+    def get_arg(idx: int):
         return args[idx] if idx < len(args) else None
 
     # Helper to check if arg is numeric (not a value like distance)
@@ -551,7 +591,7 @@ def format_constraint_to_json(ctype: str, args: list) -> dict:
 
     if ctype == "Coincident":
         # Coincident(e1, s1, e2, s2) - 4 args
-        if len(args) >= 4:
+        if len(args) == 4:
             c_out["entity1"] = get_arg(0)
             c_out["subnode1"] = get_arg(1)
             c_out["entity2"] = get_arg(2)
@@ -559,16 +599,17 @@ def format_constraint_to_json(ctype: str, args: list) -> dict:
 
     elif ctype == "PointOnObject":
         # PointOnObject(e1, s1, e2) - 3 args
-        c_out["entity1"] = get_arg(0)
-        c_out["subnode1"] = get_arg(1)
-        c_out["entity2"] = get_arg(2)
+        if len(args) == 3:
+            c_out["entity1"] = get_arg(0)
+            c_out["subnode1"] = get_arg(1)
+            c_out["entity2"] = get_arg(2)
 
     elif ctype in ["Horizontal", "Vertical"]:
         # Horizontal(e1) - 1 arg for line
         # Horizontal(e1, s1, e2, s2) - 4 args for two points
         if len(args) == 1:
             c_out["entity1"] = get_arg(0)
-        elif len(args) >= 4:
+        elif len(args) == 4:
             c_out["entity1"] = get_arg(0)
             c_out["subnode1"] = get_arg(1)
             c_out["entity2"] = get_arg(2)
@@ -576,8 +617,9 @@ def format_constraint_to_json(ctype: str, args: list) -> dict:
 
     elif ctype in ["Parallel", "Perpendicular", "Equal"]:
         # Parallel(e1, e2) - 2 args
-        c_out["entity1"] = get_arg(0)
-        c_out["entity2"] = get_arg(1)
+        if len(args) == 2:
+            c_out["entity1"] = get_arg(0)
+            c_out["entity2"] = get_arg(1)
 
     elif ctype == "Tangent":
         # Tangent(e1, e2) - 2 args (edge-edge)
@@ -585,7 +627,7 @@ def format_constraint_to_json(ctype: str, args: list) -> dict:
         if len(args) == 2:
             c_out["entity1"] = get_arg(0)
             c_out["entity2"] = get_arg(1)
-        elif len(args) >= 4:
+        elif len(args) == 4:
             c_out["entity1"] = get_arg(0)
             c_out["subnode1"] = get_arg(1)
             c_out["entity2"] = get_arg(2)
@@ -593,39 +635,47 @@ def format_constraint_to_json(ctype: str, args: list) -> dict:
 
     elif ctype == "TangentViaPoint":
         # TangentViaPoint(e1, e2, e3, s3) - 4 args
-        c_out["entity1"] = get_arg(0)
-        c_out["entity2"] = get_arg(1)
-        c_out["entity3"] = get_arg(2)
-        c_out["subnode3"] = get_arg(3)
+        if len(args) == 4:
+            c_out["entity1"] = get_arg(0)
+            c_out["entity2"] = get_arg(1)
+            c_out["entity3"] = get_arg(2)
+            c_out["subnode3"] = get_arg(3)
 
     elif ctype == "Concentric":
         # Concentric(e1, e2) - 2 args (centers coincide)
-        c_out["entity1"] = get_arg(0)
-        c_out["entity2"] = get_arg(1)
+        if len(args) == 2:
+            c_out["entity1"] = get_arg(0)
+            c_out["entity2"] = get_arg(1)
 
     elif ctype == "Symmetric":
         # Symmetric(e1, s1, e2, s2, e3, s3) - 6 args
-        c_out["entity1"] = get_arg(0)
-        c_out["subnode1"] = get_arg(1)
-        c_out["entity2"] = get_arg(2)
-        c_out["subnode2"] = get_arg(3)
-        c_out["entity3"] = get_arg(4)
-        c_out["subnode3"] = get_arg(5)
+        if len(args) == 6:
+            c_out["entity1"] = get_arg(0)
+            c_out["subnode1"] = get_arg(1)
+            c_out["entity2"] = get_arg(2)
+            c_out["subnode2"] = get_arg(3)
+            c_out["entity3"] = get_arg(4)
+            c_out["subnode3"] = get_arg(5)
 
     elif ctype in ["Distance", "DistanceX", "DistanceY"]:
         # Distance/DistanceX/DistanceY share the same argument signatures:
         # (e1, value) - 2 args (line length / horizontal or vertical span)
-        # (e1, s1, e2, value) - 4 args (point-line distance)
+        # (e1, e2, value) - 3 args (distance between two entities)
+        # (e1, s1, e2, value) - 4 args (point-entity distance)
         # (e1, s1, e2, s2, value) - 5 args (point-point distance)
         if len(args) == 2:
             c_out["entity1"] = get_arg(0)
             c_out["value"] = get_arg(1)
+        elif len(args) == 3:
+            c_out["entity1"] = get_arg(0)
+            c_out["entity2"] = get_arg(1)
+            c_out["value"] = get_arg(2)
         elif len(args) == 4:
             c_out["entity1"] = get_arg(0)
             c_out["subnode1"] = get_arg(1)
             c_out["entity2"] = get_arg(2)
             c_out["value"] = get_arg(3)
-        elif len(args) >= 5:
+        elif len(args) == 5:
             c_out["entity1"] = get_arg(0)
             c_out["subnode1"] = get_arg(1)
             c_out["entity2"] = get_arg(2)
@@ -635,8 +685,9 @@ def format_constraint_to_json(ctype: str, args: list) -> dict:
     elif ctype in ["Diameter", "Radius"]:
         # Diameter(e1, value) - 2 args
         # Radius(e1, value) - 2 args
-        c_out["entity1"] = get_arg(0)
-        c_out["value"] = get_arg(1)  # Preserve the value
+        if len(args) == 2:
+            c_out["entity1"] = get_arg(0)
+            c_out["value"] = get_arg(1)  # Preserve the value
 
     elif ctype == "Angle":
         # Angle(e1, value) - 2 args (single line angle)
@@ -649,15 +700,15 @@ def format_constraint_to_json(ctype: str, args: list) -> dict:
             c_out["entity1"] = get_arg(0)
             c_out["entity2"] = get_arg(1)
             c_out["value"] = get_arg(2)  # Preserve the value
-        elif len(args) >= 5:
+        elif len(args) == 5:
             c_out["entity1"] = get_arg(0)
             c_out["subnode1"] = get_arg(1)
             c_out["entity2"] = get_arg(2)
             c_out["subnode2"] = get_arg(3)
             c_out["value"] = get_arg(4)  # Preserve the value
 
-    else:
-        raise NotImplementedError(f"Unknown constraint type: {ctype}")
+    if c_out["entity1"] is None:
+        raise ValueError(f"Unhandled arguments: {ctype=}, {args=}")
 
     # Return only non-null fields
     return {k: v for k, v in c_out.items() if v is not None}
@@ -741,12 +792,15 @@ def parse_freecad_script(filepath_or_commands: str | list[str]) -> tuple[list[di
                     p1 = parse_vector(vecs[0])
                     p2 = parse_vector(vecs[1])
                     p3 = parse_vector(vecs[2])
+                    cx, cy, radius = compute_arc_center(p1, p2, p3)
                     primitives.append({
                         "id": primitive_cnt,
                         "type": "Arc",
                         "start": p1,
                         "mid": p2,
                         "end": p3,
+                        "center": (cx, cy),
+                        "radius": radius,
                         "is_construction": is_construction
                     })
 
@@ -866,7 +920,7 @@ def generate_freecad_primitives(primitives: list):
             yield ptype, None, is_const, f"Exception parsing primitive: {e}"
 
 
-def generate_freecad_constraints(primitives: list, constraints: list):
+def generate_freecad_constraints(primitives: list[dict[str, Any]], constraints: list[dict[str, Any]]):
     """
     Generator that parses constraints and yields normalized FreeCAD arguments.
 
@@ -887,19 +941,32 @@ def generate_freecad_constraints(primitives: list, constraints: list):
             final_args = []
 
             # Qwen3 format: resolve from keys
-            e1 = c.get("entity1")
-            s1 = c.get("subnode1")
-            e2 = c.get("entity2")
-            s2 = c.get("subnode2")
-            e3 = c.get("entity3")
-            s3 = c.get("subnode3")
+            e1, s1 = c.get("entity1"), c.get("subnode1", 0)
+            e2, s2 = c.get("entity2"), c.get("subnode2", 0)
+            e3, s3 = c.get("entity3"), c.get("subnode3", 0)
+            prim1 = primitives[e1] if e1 is not None else None
+            prim2 = primitives[e2] if e2 is not None else None
+            prim3 = primitives[e3] if e3 is not None else None
+
+            if e1 is None:
+                yield idx, ctype, None, f"First reference is None for {ctype}"
+                continue
+
+            # Preprocessing: Point entity should have subnode=1, not 0
+            if prim1 and prim1["type"] == "Point":
+                s1 = 1
+            if prim2 and prim2["type"] == "Point":
+                s2 = 1
+            if prim3 and prim3["type"] == "Point":
+                s3 = 1
 
             # --- Value Recomputation for Dimensional Constraints ---
             value = None
             if ctype in ["Distance", "DistanceX", "DistanceY", "Angle", "Radius", "Diameter"]:
                 # ALWAYS recompute value
-                value = compute_constraint_value(ctype, primitives, e1, s1, e2, s2)
-                if value is None:
+                try:
+                    value = compute_constraint_value(ctype, primitives, e1, s1, e2, s2)
+                except ValueError as e:
                     yield idx, ctype, None, f"Failed to compute value for {ctype}"
                     continue # Skip if computation fails
 
@@ -967,31 +1034,33 @@ def generate_freecad_constraints(primitives: list, constraints: list):
                     continue
 
             elif ctype in ["Distance", "DistanceX", "DistanceY"]:
-                if e2 is not None and s1 is not None and s2 is not None:
-                    # Point-Point
-                    final_args = [int(e1), int(s1), int(e2), int(s2), float(value)]
-                elif e2 is not None and s1 is not None:
-                    # Point-Line (s2 implicit 0)
-                    final_args = [int(e1), int(s1), int(e2), 0, float(value)]
-                elif e1 is not None:
+                assert value is not None
+                if e2 is None:
                     # Line span (e1, value)
-                    final_args = [int(e1), float(value)]
+                    final_args = [int(e1), value]
+                elif s1 is not None and s2 is not None:
+                    # Point-Point
+                    final_args = [int(e1), int(s1), int(e2), int(s2), value]
+                elif prim1 and prim1["type"] == "LineSegment":
+                    # FreeCAD doesn't accept Line-XXX (XXX = Point/Circle/Arc). XXX-Line is okay.
+                    final_args = [int(e2), int(s2), int(e1), int(s1), value]
                 else:
-                    yield idx, ctype, None, f"Missing args for {ctype}"
-                    continue
+                    final_args = [int(e1), int(s1), int(e2), int(s2), value]
 
             elif ctype == "Angle":
+                assert value is not None
                 if e2 is not None:
-                    final_args = [int(e1), int(e2), float(value)]
+                    final_args = [int(e1), int(e2), value]
                 elif e1 is not None:
-                    final_args = [int(e1), float(value)]
+                    final_args = [int(e1), value]
                 else:
                     yield idx, ctype, None, "Missing args for Angle"
                     continue
 
             elif ctype in ["Radius", "Diameter"]:
+                assert value is not None
                 if e1 is not None:
-                    final_args = [int(e1), float(value)]
+                    final_args = [int(e1), value]
                 else:
                     yield idx, ctype, None, f"Missing args for {ctype}"
                     continue
@@ -1006,6 +1075,7 @@ def generate_freecad_constraints(primitives: list, constraints: list):
 
         except Exception as e:
             # If any parsing fails, skip this constraint but log/track failure if needed
+            print(traceback.format_exc())
             yield idx, ctype, None, f"Exception parsing constraint: {e}"
 
 
@@ -1014,7 +1084,7 @@ def generate_freecad_constraints(primitives: list, constraints: list):
 # FreeCAD Interaction (Builders)
 # ============================================================
 
-def add_primitives_to_sketch(primitives: list, fc_sketch: "Sketcher.SketchObject") -> None:
+def add_primitives_to_sketch(primitives: list[dict[str, Any]], fc_sketch: "Sketcher.SketchObject") -> None:
     """Add primitives to FreeCAD sketch object.
 
     Args:
@@ -1060,17 +1130,14 @@ def add_primitives_to_sketch(primitives: list, fc_sketch: "Sketcher.SketchObject
 
 
 def add_constraints_to_sketch(
-    primitives: list,
-    constraints: list,
+    primitives: list[dict[str, Any]],
+    constraints: list[dict[str, Any]],
     fc_sketch: "Sketcher.SketchObject"
 ) -> tuple[dict[int, int], list[int], list]:
-    """Add constraints to FreeCAD sketch object using two-pass approach.
+    """Add constraints to FreeCAD sketch object.
 
-    Two-pass approach:
-    1. Apply relational constraints first (Coincident, Symmetric, etc.)
-    2. Extract updated primitives after relational constraints
-    3. Apply dimensional constraints (Distance, Angle, etc.) using updated primitives
-       to compute correct dimension values
+    1. Pre-calculate all the missing dimensional constraint values
+    2. Apply all the constraints
 
     Args:
         primitives: List of primitive dicts
@@ -1089,77 +1156,114 @@ def add_constraints_to_sketch(
     # Classify constraints into relational and dimensional
     relational_constraints, dimensional_constraints = classify_constraints(constraints)
 
-    # Build index mapping: constraint -> original index in constraints list
-    def get_original_index(c):
-        for i, orig_c in enumerate(constraints):
-            if orig_c is c:
-                return i
-        return -1
+    # 1. Determine dimensional constraint values (values are computed within generate_freecad_constraints)
+    relational_constraints_for_freecad = list(generate_freecad_constraints(primitives, relational_constraints))
+    dimensional_constraints_for_freecad = list(generate_freecad_constraints(primitives, dimensional_constraints))
 
-    # --- Pass 1: Apply relational constraints ---
-    for idx, ctype, args, error_msg in generate_freecad_constraints(primitives, relational_constraints):
-        orig_idx = get_original_index(relational_constraints[idx])
-        if error_msg:
-            failed_indices.append(orig_idx)
-            continue
+    for pass_constraints, source_list in [
+        (relational_constraints_for_freecad, relational_constraints),
+        (dimensional_constraints_for_freecad, dimensional_constraints),
+    ]:
+        for idx, ctype, args, error_msg in pass_constraints:
+            orig_idx = constraints.index(source_list[idx])
+            if error_msg:
+                print(f"[add_constraints_to_sketch] Error: {idx=}, {ctype=}, {error_msg=}", flush=True)
+                failed_indices.append(orig_idx)
+                continue
 
-        fc_idx = int(fc_sketch.ConstraintCount)
+            fc_idx = int(fc_sketch.ConstraintCount)
+            try:
+                fc_sketch.addConstraint(Sketcher.Constraint(ctype, *args))
+                constraint_mapping[fc_idx] = orig_idx
+            except Exception:
+                failed_indices.append(orig_idx)
 
-        try:
-            fc_sketch.addConstraint(Sketcher.Constraint(ctype, *args))
-            constraint_mapping[fc_idx] = orig_idx
-        except Exception:
-            failed_indices.append(orig_idx)
-
-    # Solve after relational constraints
     fc_sketch.solve()
-
-    # Extract updated primitives (after relational constraints)
-    updated_primitives = extract_primitives_from_sketch(fc_sketch)
-
-    # --- Pass 2: Apply dimensional constraints using updated primitives ---
-    for idx, ctype, args, error_msg in generate_freecad_constraints(updated_primitives, dimensional_constraints):
-        orig_idx = get_original_index(dimensional_constraints[idx])
-        if error_msg:
-            failed_indices.append(orig_idx)
-            continue
-
-        fc_idx = int(fc_sketch.ConstraintCount)
-
-        try:
-            fc_sketch.addConstraint(Sketcher.Constraint(ctype, *args))
-            constraint_mapping[fc_idx] = orig_idx
-        except Exception:
-            failed_indices.append(orig_idx)
-
-    # Final solve
-    fc_sketch.solve()
-
-    # Get final primitives (after all constraints)
     final_primitives = extract_primitives_from_sketch(fc_sketch)
 
     return constraint_mapping, failed_indices, final_primitives
 
 
-def export_to_freecad_script(primitives: list, constraints: list, output_path: str, keep_primitives: bool = False) -> str | None:
-    """
-    Generates a FreeCAD Python script to create a sketch with given primitives and constraints.
+def _write_freecad_script(primitives: list[dict[str, Any]], constraints: list[dict[str, Any]]) -> list[str]:
+    """Write primitive and constraint commands into lines list.
 
-    Uses two-pass constraint application:
-    1. Apply relational constraints to get updated primitives
-    2. Use updated primitives for dimensional constraint values
-    3. Export script with updated primitive coordinates
-    """
-    if keep_primitives:
-        raise NotImplementedError
+    Uses original primitives for constraint value computation.
 
-    # First, apply constraints to get updated primitives and correct dimensional values
+    Args:
+        primitives: Original (pre-constraint) primitive list, used for constraint value computation
+        constraints: Constraint list
+        lines: Output list to append script lines into
+    """
+
+    lines = [
+        "import FreeCAD",
+        "import Part",
+        "import Sketcher",
+        "",
+        "doc = FreeCAD.newDocument('SketchDoc')",
+        "body = doc.addObject('PartDesign::Body', 'Body')",
+        "fc_sketch = body.newObject('Sketcher::SketchObject', 'Sketch')",
+        "xy_plane = body.Origin.OriginFeatures[3]",
+        "fc_sketch.AttachmentSupport = xy_plane",
+        "fc_sketch.MapMode = 'FlatFace'",
+        "",
+    ]
+
+    lines.append("# --- Add Primitives ---")
+    for ptype, args, is_const, error_msg in generate_freecad_primitives(primitives):
+        if error_msg:
+            lines.append(f"# ERROR: Invalid primitive: {error_msg}, Type: {ptype}")
+            continue
+        if ptype == "LineSegment":
+            sx, sy, sz, ex, ey, ez = args
+            lines.append(f"fc_sketch.addGeometry(Part.LineSegment(FreeCAD.Vector({sx}, {sy}, {sz}), FreeCAD.Vector({ex}, {ey}, {ez})), {is_const})")
+        elif ptype == "Point":
+            x, y, z = args
+            lines.append(f"fc_sketch.addGeometry(Part.Point(FreeCAD.Vector({x}, {y}, {z})), {is_const})")
+        elif ptype == "Circle":
+            cx, cy, cz, nx, ny, nz, r = args
+            lines.append(f"fc_sketch.addGeometry(Part.Circle(FreeCAD.Vector({cx}, {cy}, {cz}), FreeCAD.Vector({nx}, {ny}, {nz}), {r}), {is_const})")
+        elif ptype == "ArcOfCircle":
+            sx, sy, sz, mx, my, mz, ex, ey, ez = args
+            lines.append(f"fc_sketch.addGeometry(Part.ArcOfCircle(FreeCAD.Vector({sx}, {sy}, {sz}), FreeCAD.Vector({mx}, {my}, {mz}), FreeCAD.Vector({ex}, {ey}, {ez})), {is_const})")
+
+    lines.append("")
+    lines.append("# --- Add Constraints ---")
+    for _, ctype, args, error_msg in generate_freecad_constraints(primitives, constraints):
+        if error_msg:
+            lines.append(f"# ERROR: Invalid constraint: {error_msg}")
+            continue
+        args_str = ", ".join(map(str, args))
+        lines.append(f"fc_sketch.addConstraint(Sketcher.Constraint('{ctype}', {args_str}))")
+
+    lines += [
+        "",
+        "doc.recompute()",
+        "FreeCAD.ActiveDocument.recompute()",
+    ]
+
+    return lines
+
+
+def export_to_freecad_script(primitives: list, constraints: list, output_path: str) -> str | None:
+    """Generate a FreeCAD Python script to create a sketch with given primitives and constraints.
+
+    Applies constraints via add_constraints_to_sketch to obtain final solved primitive
+    coordinates, then exports a script using those coordinates with constraint values
+    computed from the original primitives.
+
+    Args:
+        primitives: Original primitive list
+        constraints: Constraint list
+        output_path: Path to write the output script
+
+    Returns:
+        None on success, error string on failure
+    """
     doc = None
-    updated_primitives = primitives
-    relational_constraints, dimensional_constraints = classify_constraints(constraints)
+    final_primitives = primitives  # fallback if FreeCAD fails
 
     try:
-        # Create temporary FreeCAD document to apply constraints
         doc = FreeCAD.newDocument("ExportTempDoc")
         body = doc.addObject('PartDesign::Body', 'Body')
         fc_sketch = body.newObject('Sketcher::SketchObject', 'Sketch')
@@ -1167,106 +1271,20 @@ def export_to_freecad_script(primitives: list, constraints: list, output_path: s
         fc_sketch.AttachmentSupport = xy_plane
         fc_sketch.MapMode = 'FlatFace'
 
-        # Add primitives
         add_primitives_to_sketch(primitives, fc_sketch)
         doc.recompute()
 
-        # Apply relational constraints first
-        for _idx, ctype, args, error_msg in generate_freecad_constraints(primitives, relational_constraints):
-            if error_msg or args is None:
-                continue
-            fc_sketch.addConstraint(Sketcher.Constraint(ctype, *args))
-
-        fc_sketch.solve()
+        _, _, final_primitives = add_constraints_to_sketch(primitives, constraints, fc_sketch)
         doc.recompute()
-
-        # Extract updated primitives after relational constraints
-        updated_primitives = extract_primitives_from_sketch(fc_sketch)
-
-        # Apply dimensional constraints with updated primitives
-        for _idx, ctype, args, error_msg in generate_freecad_constraints(updated_primitives, dimensional_constraints):
-            if error_msg or args is None:
-                continue
-            fc_sketch.addConstraint(Sketcher.Constraint(ctype, *args))
-
-        fc_sketch.solve()
-        doc.recompute()
-
-        # Get final primitives
-        updated_primitives = extract_primitives_from_sketch(fc_sketch)
 
     except Exception as e:
-        print(f"Warning: Failed to compute updated primitives for export: {e}")
         return str(e)
-
     finally:
         FreeCAD.closeDocument(doc.Name) if doc else None
 
-    # Now generate the script with updated primitives
-    lines = []
-    lines.append("import FreeCAD")
-    lines.append("import Part")
-    lines.append("import Sketcher")
-    lines.append("")
-    lines.append("doc = FreeCAD.newDocument('SketchDoc')")
-    lines.append("body = doc.addObject('PartDesign::Body', 'Body')")
-    lines.append("fc_sketch = body.newObject('Sketcher::SketchObject', 'Sketch')")
-    lines.append("xy_plane = body.Origin.OriginFeatures[3]")
-    lines.append("fc_sketch.AttachmentSupport = xy_plane")
-    lines.append("fc_sketch.MapMode = 'FlatFace'")
-    lines.append("")
-    lines.append("# --- Add Primitives ---")
-
-    # Use updated primitives for export
-    for ptype, args, is_const, error_msg in generate_freecad_primitives(updated_primitives):
-        if error_msg:
-            lines.append(f"# ERROR: Invalid primitive: {error_msg}, Type: {ptype}")
-            continue
-
-        if ptype == "LineSegment":
-            # args: [sx, sy, 0, ex, ey, 0]
-            sx, sy, sz, ex, ey, ez = args
-            lines.append(f"fc_sketch.addGeometry(Part.LineSegment(FreeCAD.Vector({sx}, {sy}, {sz}), FreeCAD.Vector({ex}, {ey}, {ez})), {is_const})")
-        elif ptype == "Point":
-            # args: [x, y, 0]
-            x, y, z = args
-            lines.append(f"fc_sketch.addGeometry(Part.Point(FreeCAD.Vector({x}, {y}, {z})), {is_const})")
-        elif ptype == "Circle":
-            # args: [cx, cy, 0, 0, 0, 1, r]
-            cx, cy, cz, nx, ny, nz, r = args
-            lines.append(f"fc_sketch.addGeometry(Part.Circle(FreeCAD.Vector({cx}, {cy}, {cz}), FreeCAD.Vector({nx}, {ny}, {nz}), {r}), {is_const})")
-        elif ptype == "ArcOfCircle":
-            # args: [sx, sy, 0, mx, my, 0, ex, ey, 0]
-            sx, sy, sz, mx, my, mz, ex, ey, ez = args
-            lines.append(f"fc_sketch.addGeometry(Part.ArcOfCircle(FreeCAD.Vector({sx}, {sy}, {sz}), FreeCAD.Vector({mx}, {my}, {mz}), FreeCAD.Vector({ex}, {ey}, {ez})), {is_const})")
-
-    lines.append("")
-    lines.append("# --- Add Constraints ---")
-
-    # Generate constraints with two-pass approach (relational first, then dimensional with updated primitives)
-    # Relational constraints
-    for idx, ctype, args, error_msg in generate_freecad_constraints(updated_primitives, relational_constraints):
-        if error_msg:
-            lines.append(f"# ERROR: Invalid constraint (relational): {error_msg}")
-            continue
-
-        # Convert args to string representation for script
-        args_str = ", ".join(map(str, args))
-        lines.append(f"fc_sketch.addConstraint(Sketcher.Constraint('{ctype}', {args_str}))")
-
-    # Dimensional constraints (values already computed from updated_primitives in generate_freecad_constraints)
-    for idx, ctype, args, error_msg in generate_freecad_constraints(updated_primitives, dimensional_constraints):
-        if error_msg:
-            lines.append(f"# ERROR: Invalid constraint (dimensional): {error_msg}")
-            continue
-
-        # Convert args to string representation for script
-        args_str = ", ".join(map(str, args))
-        lines.append(f"fc_sketch.addConstraint(Sketcher.Constraint('{ctype}', {args_str}))")
-
-    lines.append("")
-    lines.append("doc.recompute()")
-    lines.append("FreeCAD.ActiveDocument.recompute()")
+    # Use final_primitives for geometry coordinates (solved positions),
+    # but original primitives for constraint value computation.
+    lines = _write_freecad_script(final_primitives, constraints)
 
     with open(output_path, 'w') as f:
         f.write("\n".join(lines))
@@ -1519,7 +1537,7 @@ def verify_constraints(
         status = fc_sketch.getSolverStatus()
 
         result.dof = status['DoF']
-        result.status = status['Status']
+        result.status = "Malformed" if failed_indices else status['Status']
         # Malformed = Reported by solver + Failed to add
         result.malformed_count = len(status.get('MalformedConstraints', [])) + len(failed_indices)
         result.conflicting_count = len(status.get('ConflictingConstraints', []))
@@ -1606,10 +1624,10 @@ def static_constraints_diagnosis(
 
         # Check for malformed/diagonal Distance constraints
         if c["type"] in ["Distance", "DistanceX", "DistanceY"]:
-            if (e1 is not None and p1 is None) and (e2 is not None and p2 is None):
-                warnings.append(f"Constraint {i} ({constraint_name}) is malformed: You cannot define a distance between lines. Either Subnode1 or Subnode2 must be >= 1.")
+            if (e1 and primitives_list[e1]["type"] == "LineSegment" and p1 is None) and (e2 and primitives_list[e2]["type"] == "LineSegment" and p2 is None):
+                warnings.append(f"Constraint {i} ({constraint_name}) is malformed: You cannot define a distance between lines. Define Point-Line distance instead by setting either Subnode1 >= 1 or Subnode2 >= 1.")
             elif c["type"] in ["DistanceX", "DistanceY"] and (e1 != e2) and (p1 is None or p2 is None):
-                warnings.append(f"Constraint {i} ({constraint_name}) is malformed: You cannot define a horizontal/vertical distance between a point and a line. Both Subnode1 and Subnode2 must be >= 1.")
+                warnings.append(f"Constraint {i} ({constraint_name}) is malformed: You cannot define a horizontal/vertical distance between a point and a line. Use a normal Distance instead, or define Point-Point distance by setting both Subnode1 and Subnode2 >= 1.")
             elif c["type"] == "Distance" and p1 and p2:
                 # Diagonal check only applies to Distance, not DistanceX/Y (which are axis-aligned by definition)
                 # p1, p2 are [x, y] lists
@@ -1658,7 +1676,6 @@ def run_solver_tool(
             except:
                 pass
 
-        # We need the mapping to convert 1-based FC indices back to 0-based input indices
         constraint_mapping, failed_indices, _ = add_constraints_to_sketch(primitives_list, constraints_json_list, fc_sketch)
         doc.recompute()
 
@@ -1666,11 +1683,10 @@ def run_solver_tool(
         fc_sketch.solve()
         status = fc_sketch.getSolverStatus()
 
-        # Helper to convert FC 1-based indices to 0-based input indices
         fc_to_orig = constraint_mapping
 
         def convert_indices(fc_indices):
-            return [fc_to_orig.get(idx - 1, -1) for idx in fc_indices if (idx - 1) in fc_to_orig]
+            return [fc_to_orig[idx] for idx in fc_indices if idx in fc_to_orig]
 
         def convert_groups(groups):
             return [convert_indices(set(group)) for group in groups]
@@ -1683,7 +1699,7 @@ def run_solver_tool(
         # Construct response dict
         response = {
             'DoF': status['DoF'],
-            'Status': status['Status'],
+            'Status': "Malformed" if all_malformed else status['Status'],
             'ConflictingConstraints': convert_indices(status.get('ConflictingConstraints', [])),
             'RedundantConstraints': convert_indices(status.get('RedundantConstraints', [])),
             'ConflictGroups': convert_groups(status.get('ConflictGroups', [])),
@@ -1864,7 +1880,6 @@ def cleanup_constraints_from_lists(
             redundant_fc = status.get('RedundantConstraints', [])
 
             # Map FC indices back to original constraint indices
-            # FC getSolverStatus returns 1-based indices
 
             # Malformed: remove all (these are syntax errors)
             malformed_orig_indices = set()
@@ -1873,21 +1888,21 @@ def cleanup_constraints_from_lists(
                     malformed_orig_indices.add(idx)
 
             for fc_idx in malformed_fc:
-                orig_idx = fc_to_orig.get(fc_idx - 1)  # Convert 1-based to 0-based
+                orig_idx = fc_to_orig.get(fc_idx)
                 if orig_idx is not None and orig_idx >= prefix_size:
                     malformed_orig_indices.add(orig_idx)
 
             # Conflicting: collect all, but will remove only last one
             conflicting_orig_indices = set()
             for fc_idx in conflicting_fc:
-                orig_idx = fc_to_orig.get(fc_idx - 1)
+                orig_idx = fc_to_orig.get(fc_idx)
                 if orig_idx is not None and orig_idx >= prefix_size:
                     conflicting_orig_indices.add(orig_idx)
 
             # Redundant: collect all, but will remove only last one
             redundant_orig_indices = set()
             for fc_idx in redundant_fc:
-                orig_idx = fc_to_orig.get(fc_idx - 1)
+                orig_idx = fc_to_orig.get(fc_idx)
                 if orig_idx is not None and orig_idx >= prefix_size:
                     redundant_orig_indices.add(orig_idx)
 
@@ -1989,7 +2004,13 @@ def prepare_prompts(
         encoded_images.append(encoded_data)
 
     primitives_text = json.dumps(primitives_list, indent=2)
-    constraints_text = json.dumps(constraints_list, indent=2)
+
+    constraints_list_value_stripped = []
+    for constraint in constraints_list:
+        constraint_copy = constraint.copy()
+        constraint_copy.pop("value", None)
+        constraints_list_value_stripped.append(constraint_copy)
+    constraints_text = json.dumps(constraints_list_value_stripped, indent=2)
 
     # Run solver on partial constraints to get initial status
     initial_solver_output = run_solver_tool(primitives_list, constraints_list, geo_threshold_mm)
@@ -2015,7 +2036,7 @@ The supported primitives and their arguments are:
 - LineSegment((start_x, start_y), (end_x, end_y), is_construction)
 - Circle((center_x, center_y), is_clockwise, radius, is_construction)
 - Arc((start_x, start_y), (mid_x, mid_y), (end_x, end_y), is_construction)
-* Note: mid_x/y for Arc is a point *on the arc* (roughly halfway), not the center or the mid-coord point.
+* Note: mid_x/y for Arc is a point *on the arc*, not the center or the mid-coord point.
 The primitives are implicitly indexed starting from 0 (0-indexed) based on their order in the input list.
 The partial constraints format is described in the following section.
 
@@ -2025,7 +2046,7 @@ Output the **complete** list of constraints, which consists of:
 2. Additional constraints you infer from the visual arrangement, geometric properties, and the design intent.
 
 General Argument Structure follows the pattern below:
-{Type, Entity1, Subnode1, Entity2, Subnode2, Entity3, Subnode3, Value}
+{Type, Entity1, Subnode1, Entity2, Subnode2, Entity3, Subnode3}
 
 - Type: The type of the constraint (e.g., "Coincident", "Horizontal", "Parallel", "Tangent", etc. See [Constraint Types and Signatures] below).
 - EntityN: The 0-based index of the primitive.
@@ -2034,17 +2055,12 @@ General Argument Structure follows the pattern below:
     - 1: StartPoint (Vertex)
     - 2: EndPoint (Vertex)
     - 3: CenterPoint (Strictly the center of a Circle or Arc, NOT the midpoint of a line or an arc)
-- Value: The parameter value of dimension constraints (e.g., length, angle, etc.)
 
 NOTE: Depending on the Type, some arguments may be omitted. For example, Horizontal constraint only requires Entity1.
 NOTE: For "Point" primitives, always use subnode=1 instead of 0.
 
 [Constraint Types and Signatures]
 Strictly adhere to the following signatures for each constraint type. Arguments not listed for a type should be omitted.
-
-NOTE: For INPUT partial dimension constraints, we show the parameter `Value` such as length or angle.
-However, for OUTPUT complete constraints, you may omit the inference of these parameter `Value` for dimensional constraints.
-Even though you infer the parameter `Value`, we discard them and instead calculate the `Value` from the original primitive configuration.
 
 1. Relational Constraints:
 - Coincident(Entity1, Subnode1, Entity2, Subnode2)
@@ -2081,36 +2097,34 @@ Even though you infer the parameter `Value`, we discard them and instead calcula
     * NOTE: Entity1.Subnode1 and Entity2.Subnode2 must be points, so Subnode1/2 must be >= 1.
 
 2. Dimensional Constraints (Use only when necessary for fully constraining the sketch):
-- Distance(Entity1, Subnode1, Entity2, Subnode2, Value)
+- Distance(Entity1, Subnode1, Entity2, Subnode2)
     * Examples:
-        - Fixes distance between two points: Distance(Entity1, Subnode1, Entity2, Subnode2, Value)
-        - Fixes distance between a point and a line (you can omit Subnode2 = 0 in this case): Distance(Entity1, Subnode1, Line2, Value)
-        - Fixes length of a line: Distance(Line, 1, Line, 2, Value), or Distance(Line, Value) for shorthand notation.
-    * NOTE: You CANNOT define the distance between two lines: Distance(Line1, 0, Line2, 0, Value) is judged as malformed.
-- DistanceX(Entity1, Subnode1, Entity2, Subnode2, Value)
+        - Fixes distance between two points: Distance(Entity1, Subnode1, Entity2, Subnode2)
+        - Fixes distance between a point and a line (you can omit Subnode2 = 0 in this case): Distance(Entity1, Subnode1, Line2)
+        - Fixes length of a line: Distance(Line, 1, Line, 2), or Distance(Line) for shorthand notation.
+    * NOTE: You CANNOT define the distance between two lines: Distance(Line1, 0, Line2, 0) is judged as malformed.
+- DistanceX(Entity1, Subnode1, Entity2, Subnode2)
     * Fixes the HORIZONTAL (X-axis) distance between two points. This constrains only the X-component of the displacement.
     * Examples:
-        - Horizontal distance between two points: DistanceX(Entity1, Subnode1, Entity2, Subnode2, Value)
-        - Horizontal span of a line: DistanceX(Line, 1, Line, 2, Value), or DistanceX(Line, Value) for shorthand.
+        - Horizontal distance between two points: DistanceX(Entity1, Subnode1, Entity2, Subnode2)
+        - Horizontal span of a line: DistanceX(Line, 1, Line, 2), or DistanceX(Line) for shorthand.
     * PREFERRED over diagonal Distance constraints when constraining horizontal positioning.
     * NOTE: You CANNOT define the horizontal distance between a point and a line: Either Subnode1=0 or Subnode2=0 is judged as malformed.
-- DistanceY(Entity1, Subnode1, Entity2, Subnode2, Value)
+- DistanceY(Entity1, Subnode1, Entity2, Subnode2)
     * Fixes the VERTICAL (Y-axis) distance between two points. This constrains only the Y-component of the displacement.
     * Examples:
-        - Vertical distance between two points: DistanceY(Entity1, Subnode1, Entity2, Subnode2, Value)
-        - Vertical span of a line: DistanceY(Line, 1, Line, 2, Value), or DistanceY(Line, Value) for shorthand.
+        - Vertical distance between two points: DistanceY(Entity1, Subnode1, Entity2, Subnode2)
+        - Vertical span of a line: DistanceY(Line, 1, Line, 2), or DistanceY(Line) for shorthand.
     * PREFERRED over diagonal Distance constraints when constraining vertical positioning.
     * NOTE: You CANNOT define the vertical distance between a point and a line: Either Subnode1=0 or Subnode2=0 is judged as malformed.
-- Diameter(Entity1, Value)
+- Diameter(Entity1)
     * Fixes diameter of Circle or Arc.
-- Radius(Entity1, Value)
+- Radius(Entity1)
     * Fixes radius of Circle or Arc.
-- Angle(Entity1, Value)
+- Angle(Entity1)
     * Fixes slope angle of a LineSegment or angular span of an Arc (Subnode1 should be 0).
-- Angle(Entity1, Subnode1, Entity2, Subnode2, Value)
-    * Fixes angle between two lines.
-- AngleViaPoint(Entity1, Entity2, Entity3, Subnode3, Value)
-    * Fixes angle between two curves at a specific point.
+- Angle(Entity1, Entity2)
+    * Fixes the angle between two lines (Subnode1 and Subnode2 are ignored).
 
 [Input/Output Format]
 All inputs (except for the sketch image) and outputs are in JSON format. After the thinking session (i.e., after the </think> tag),
@@ -2311,7 +2325,7 @@ Example Tool Outputs (the input primitives and partial constraints are the same 
   "DistortingConstraints": []
 }
 
-# Example 3: Valid Constraints (NOTE: You can omit "Value" in Distance constraints)
+# Example 3: Valid Constraints
 [
   {"type": "Coincident", "entity1": 1, "subnode1": 1, "entity2": 0, "subnode2": 2},
   {"type": "Coincident", "entity1": 2, "subnode1": 1, "entity2": 1, "subnode2": 2},
@@ -2342,11 +2356,10 @@ Example Tool Outputs (the input primitives and partial constraints are the same 
     a. Try to achieve it with fewer constraints.
     b. Always prioritize relational constraints over dimensional constraints.
     c. When you have to use dimensional constraints, follow these rules:
-        i. Avoid using angles to the maximum extent possible.
+        i. Avoid using angles to the maximum extent possible unless you think appropriate.
         ii. When defining Distance constraints, prioritize HORIZONTAL and VERTICAL directions, and avoid diagonal or slanted directions.
-        iii. You may use point-line distances to achieve HORIZONTAL or VERTICAL distance constraints: Distance(Entity1, Subnode1, Line2, 0, Value) or Distance(Entity1, Subnode1, Line2, Value) for short.
-        iv. Chain dimensions horizontally or vertically. Chaining means defining length incrementally without overlaps, for example, A---B and B---C, rather than A---B and A---C.
-        v. When a sketch has concave regions, define length in the positive sketch area: the line defining that length should be inside the valid sketch area.
+        iii. Try to define horizontal or vertical distances ***incrementally without overlaps***. For example, A---B and B---C, rather than A---B and A---C.
+        iv. In concave sketches, avoid defining distance constraints across gaps; instead, define them between primitives within the sketch geometry.
     d. Always consider that the enforced constraints are intuitive, aligned with the design intent, and easy to understand/modify for post-editing.
 3. You must submit your answer without the <final> tag several rounds to reflect the solver feedback.
 4. If you cannot name all the constraints to achieve DoF=2, output the constraints you have identified so far to achieve the lowest DoF without any malformed or conflicting constraints.
@@ -2460,15 +2473,42 @@ def main(args):
         # load and convert original data to commands
         seq = sequences[i]
         sketch = datalib.sketch_from_sequence(seq)
+        _ = normalize_sketch(sketch, dst_length=1000)
         sketch = cleanse_sketch_primitives(sketch)
         sketch = cleanse_sketch_constraints(sketch)
         sketch = complete_constraint_values(sketch)
 
+        # ======== GT PROCESSING ========
+
+        # Check the solver status
         doc = None
         try:
             doc, fc_sketch, _, _ = converter.to_freecad(sketch)
+            initial_status = fc_sketch.getSolverStatus()
+            while initial_status['Status'] == "Redundant":
+                for cid in sorted(initial_status['RedundantConstraints'], reverse=True):
+                    fc_sketch.delConstraint(cid)
+                doc.recompute()
+                initial_status = fc_sketch.getSolverStatus()
+
+            if initial_status['Status'] != "Converged" or len(initial_status['ConflictingConstraints']) > 0 or len(initial_status['MalformedConstraints']) > 0:
+                print(f"Initial status is not Converged: {initial_status}")
+                with open(error_log, "a") as f:
+                    f.write(f"Initial status is not Converged for sequence {i}: {initial_status}\n")
+                continue
+
             history_commands = dump_freecad_commands(fc_sketch)
             sample_primitives, sample_constraints = parse_freecad_script(history_commands)
+
+            if not (len(sample_primitives) == fc_sketch.GeometryCount and len(sample_constraints) == fc_sketch.ConstraintCount):
+                error_msg = f"Number of constraints does not match with sketch {i}:\n\n"
+                error_msg += "\n".join(history_commands) + "\n\n"
+                for p in sample_primitives:
+                    error_msg += f"{p}\n"
+                for c in sample_constraints:
+                    error_msg += f"{c}\n"
+                raise ValueError(error_msg)
+
         except Exception as e:
             print(f"Error processing sequence {i}: {traceback.format_exc()}")
             with open(error_log, "a") as f:
@@ -2477,38 +2517,15 @@ def main(args):
         finally:
             FreeCAD.closeDocument(doc.Name) if doc else None
 
-        # ======== GT PROCESSING ========
-
-        # GT Verification (with cleanup)
-        print("\n--- GT Verification (with cleanup) ---")
-        sample_constraints_cleaned, sample_cleanup_result = cleanup_constraints_from_lists(
-            sample_primitives, sample_constraints
-        )
-        if sample_cleanup_result.error:
-            print(f"  ✗ GT CLEANUP ERROR: {sample_cleanup_result.error.splitlines()[-1]}")
-            with open(error_log, "a") as f:
-                f.write(f"GT Cleanup Error for sample {i}:\n{sample_cleanup_result.error}\n")
-            continue
-
-        print(f"  Cleanup: {len(sample_constraints)} -> {len(sample_constraints_cleaned)} constraints")
-
-        # Convert sample_constraints_cleaned to Qwen3 JSON format for both export and Qwen3 input
-        sample_constraints_cleaned_json = []
-        for c in sample_constraints_cleaned:
-            if "args" in c:
-                sample_constraints_cleaned_json.append(format_constraint_to_json(c["type"], c["args"]))
-            else:
-                sample_constraints_cleaned_json.append(c)
-
-        # Export GT commands with cleaned constraints
-        error = export_to_freecad_script(sample_primitives, sample_constraints_cleaned_json, output_history_original)
+        # Export GT commands
+        error = export_to_freecad_script(sample_primitives, sample_constraints, output_history_original)
         if error:
             print(f"Error exporting GT commands: {error}")
             with open(error_log, "a") as f:
                 f.write(f"Error exporting GT commands for sample {i}:\n{error}\n")
             continue
 
-        # Export GT sketch image with cleaned constraints
+        # Export GT sketch image
         sketch_data = load_and_extract_from_file(output_history_original)
         if sketch_data is None:
             print(f"Error loading GT sketch for sample {i}")
@@ -2524,18 +2541,17 @@ def main(args):
         )
 
         # Sanity check
-        sample_verification = verify_constraints(sample_primitives, sample_constraints_cleaned, args.geo_threshold)
+        sample_verification = verify_constraints(sample_primitives, sample_constraints, args.geo_threshold)
         sample_summary = sample_verification.summary()
         if not sample_verification.is_valid():
-            print("  ✗ GT INVALID: Issues detected - commenting out GT file")
-            os.remove(output_history_original)
-            os.remove(output_image_path_original)
+            print(f"GT INVALID: Issues detected in sample {i}: {sample_summary}")
+            comment_out_file(output_history_original)
             continue
 
         # ======== VLM PROCESSING ========
 
         print("\n--- Qwen3 Generation (Interactive) ---")
-        messages = prepare_prompts(sample_primitives, sample_constraints_cleaned, output_image_path_original, args.max_turns, args.geo_threshold)
+        messages = prepare_prompts(sample_primitives, sample_constraints, output_image_path_original, args.max_turns, args.geo_threshold)
         print(messages[0]["content"])
         for msg in messages[1]["content"]:
             if "text" in msg:
@@ -2630,6 +2646,20 @@ def main(args):
             # Note: We expect run_solver_tool to ALWAYS return valid JSON. If it fails (JSONDecodeError),
             # it indicates an implementation bug in run_solver_tool, so we let it raise.
             solver_resp = json.loads(solver_output)
+
+
+
+
+            if solver_resp.get("MalformedConstraints", []):
+                assert solver_resp["Status"] == "Malformed",f"{i=}: {solver_resp}"
+            elif solver_resp.get("ConflictingConstraints", []):
+                assert solver_resp["Status"] == "Conflicting", f"{i=}: {solver_resp}"
+            elif solver_resp.get("RedundantConstraints", []):
+                assert solver_resp["Status"] == "Redundant", f"{i=}: {solver_resp}"
+
+
+
+
 
             # Case 1: Top-level Error (e.g. Exception)
             if "Error" in solver_resp:
