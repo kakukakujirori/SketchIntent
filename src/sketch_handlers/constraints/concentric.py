@@ -1,9 +1,14 @@
-from typing import Any
+from typing import Any, TYPE_CHECKING
 import numpy as np
 import sketchgraphs.data as datalib
 from .base import ConstraintHandler
 from src.sketch_handlers.constants import ConstraintToken
+from src.sketch_handlers.freecad_utils import ensure_freecad_imported
 from src.sketch_handlers.registry import CONSTRAINT_HANDLERS
+
+if TYPE_CHECKING:
+    FreeCAD, Part, Sketcher = ensure_freecad_imported()
+
 
 @CONSTRAINT_HANDLERS.register_module()
 class ConcentricHandler(ConstraintHandler):
@@ -37,7 +42,7 @@ class ConcentricHandler(ConstraintHandler):
         # FreeCAD represents concentric as a Coincident with center point subnodes
         return [('Coincident', [res1[0], 3, res2[0], 3], None)]
 
-    def from_freecad(self, fc_constraint, geoID_to_primitive: dict[tuple[int, int], str]) -> datalib.Constraint | None:
+    def from_freecad(self, fc_constraint: 'Sketcher.Constraint', fc_primitives: list, geoID_to_primitive: dict[tuple[int, int], str]) -> datalib.Constraint | None:
         # Concentric comes in as Coincident with both FirstPos=3 and SecondPos=3
         if fc_constraint.Type != 'Coincident':
             raise ValueError(f"Invalid constraint type for {self.name}: {fc_constraint.Type}")

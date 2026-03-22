@@ -1,3 +1,4 @@
+import traceback
 from typing import TYPE_CHECKING
 
 import sketchgraphs.data as datalib
@@ -49,6 +50,7 @@ class SketchFreecadConverter:
         self,
         sketch: datalib.Sketch,
         doc_name: str = "Sketch",
+        skip_invalid_primitives: bool = False,
     ) -> tuple['FreeCAD.Document', 'Sketcher.SketchObject', dict[str, tuple[int, int]]]:
         """
         Converts primitives in datalib.Sketch to a FreeCAD SketchObject.
@@ -79,8 +81,15 @@ class SketchFreecadConverter:
                     continue
 
                 # Register to FreeCAD
-                geo, is_construction = handler.to_freecad(entity)
-                gid = fc_sketch.addGeometry(geo, is_construction)
+                try:
+                    geo, is_construction = handler.to_freecad(entity)
+                    gid = fc_sketch.addGeometry(geo, is_construction)
+                except Exception as e:
+                    if skip_invalid_primitives:
+                        self.dprint(f"Warning: Failed to add primitive {entity}: {traceback.format_exc()}")
+                        continue
+                    else:
+                        raise e
 
                 eid = entity.entityId
 
@@ -120,6 +129,7 @@ class SketchFreecadConverter:
         sketch: datalib.Sketch,
         fc_sketch: 'Sketcher.SketchObject',
         primitive_freecad_mapping: dict[str, tuple[int, int]],
+        skip_invalid_constraints: bool = False,
     ) -> dict[int, str]:
         """
         Adds constraints to the FreeCAD SketchObject.
@@ -142,12 +152,19 @@ class SketchFreecadConverter:
             # Handler returns list of (type_name, args_list, datum_or_none)
             # NOTE: Dimension constraints define values in datum, while
             #       Geometric constraints can define them in args_list (Tangent, Perpendicular)
-            fc_constraints = handler.to_freecad(constr, sketch.entities, primitive_freecad_mapping)
-            for fc_type, fc_args, fc_datum in fc_constraints:
-                idx = fc_sketch.addConstraint(Sketcher.Constraint(fc_type, *fc_args))
-                constraint_freecad_mapping[idx] = c_id
-                if fc_datum is not None:
-                    fc_sketch.setDatum(idx, fc_datum)
+            try:
+                fc_constraints = handler.to_freecad(constr, sketch.entities, primitive_freecad_mapping)
+                for fc_type, fc_args, fc_datum in fc_constraints:
+                    idx = fc_sketch.addConstraint(Sketcher.Constraint(fc_type, *fc_args))
+                    constraint_freecad_mapping[idx] = c_id
+                    if fc_datum is not None:
+                        fc_sketch.setDatum(idx, fc_datum)
+            except Exception as e:
+                if skip_invalid_constraints:
+                    self.dprint(f"Warning: Failed to add constraint {handler_name} ({fc_type}, {fc_args}, {fc_datum}): {traceback.format_exc()}")
+                    continue
+                else:
+                    raise e
 
         return constraint_freecad_mapping
 
@@ -155,13 +172,14 @@ class SketchFreecadConverter:
         self,
         sketch: datalib.Sketch,
         doc_name: str = "Sketch",
+        skip_invalid: bool = False,
     ) -> tuple['FreeCAD.Document', 'Sketcher.SketchObject', dict[str, tuple[int, int]], dict[int, str]]:
         """
         Full conversion: Primitives + Constraints.
         """
         sketch = complete_constraint_values(sketch)
-        doc, fc_sketch, primitive_freecad_mapping = self.to_freecad_primitives(sketch, doc_name)
-        constraint_freecad_mapping = self.to_freecad_constraints(sketch, fc_sketch, primitive_freecad_mapping)
+        doc, fc_sketch, primitive_freecad_mapping = self.to_freecad_primitives(sketch, doc_name, skip_invalid)
+        constraint_freecad_mapping = self.to_freecad_constraints(sketch, fc_sketch, primitive_freecad_mapping, skip_invalid)
         doc.recompute()
         return doc, fc_sketch, primitive_freecad_mapping, constraint_freecad_mapping
 
@@ -200,7 +218,11 @@ class SketchFreecadConverter:
                         geoID_to_primitive[(i, default_pid)] = eid
 
                         # Subnode references
-                        subnodes = _SUBNODE_MAP.get(p_name, [])
+                        if p_name == 'Arc':
+                            mapped_name = f"Arc_{'clockwise' if getattr(entity, 'clockwise', False) else 'counter_clockwise'}"
+                        else:
+                            mapped_name = p_name
+                        subnodes = _SUBNODE_MAP.get(mapped_name, [])
                         for suffix, pid in subnodes:
                             geoID_to_primitive[(i, pid)] = f"{eid}{suffix}"
 
@@ -217,24 +239,22 @@ class SketchFreecadConverter:
 
         return entities, geoID_to_primitive
 
-    def from_freecad_constraints(self, sketch_obj: 'Sketcher.SketchObject', geoID_to_primitive: dict[tuple[int, int], str]) -> dict[str, datalib.Constraint]:
+    def from_freecad_constraints(self, fc_sketch: 'Sketcher.SketchObject', geoID_to_primitive: dict[tuple[int, int], str]) -> dict[str, datalib.Constraint]:
         """
         Extracts constraints from FreeCAD SketchObject.
 
         Uses multi-handler dispatch for ambiguous FC types:
-        - 'Coincident' -> try Concentric (center-center), then Coincident
         - 'Symmetric'  -> try Midpoint (same-line start/end), then Mirror
         - 'PointOnObject' -> Coincident handler
         """
-        # Build handler candidate lists for ambiguous FC types
+        # Build handler candidate lists for FC types unexisting in SketchGraphs
         _HANDLER_ORDER: dict[str, list[str]] = {
-            'Coincident': ['Concentric', 'Coincident'],
             'Symmetric': ['Midpoint', 'Mirror'],
             'PointOnObject': ['Coincident'],
         }
 
         constraints = {}
-        for i, fc_constr in enumerate(sketch_obj.Constraints):
+        for i, fc_constr in enumerate(fc_sketch.Constraints):
             c_type = fc_constr.Type
             sg_constr = None
 
@@ -249,13 +269,13 @@ class SketchFreecadConverter:
                 handler = self.context.get_constraint_handler(handler_name)
                 if handler:
                     try:
-                        sg_constr = handler.from_freecad(fc_constr, geoID_to_primitive)
+                        sg_constr = handler.from_freecad(fc_constr, fc_sketch.Geometry, geoID_to_primitive)
                         if sg_constr:
                             break
                     except Exception as e:
                         # If there are multiple candidates, intermediate failures are false positives
                         if handler_idx == len(candidates) - 1:
-                            self.dprint(f"Error in {handler_name}.from_freecad for constraint {i} ({c_type}): {e}")
+                            self.dprint(f"Error in {handler_name}.from_freecad for constraint {i} ({c_type}): {traceback.format_exc()}")
 
             # Fallback: type name mapping
             if not sg_constr:
@@ -271,7 +291,7 @@ class SketchFreecadConverter:
                     handler = self.context.get_constraint_handler(fallback_name)
                     if handler:
                         try:
-                            sg_constr = handler.from_freecad(fc_constr, geoID_to_primitive)
+                            sg_constr = handler.from_freecad(fc_constr, fc_sketch.Geometry, geoID_to_primitive)
                         except Exception as e:
                             self.dprint(f"Error converting constraint {i} ({c_type}): {e}")
 

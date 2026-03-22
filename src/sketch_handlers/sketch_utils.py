@@ -266,27 +266,27 @@ def _resolve_midpoint_mirror_ref_order(sketch: datalib.Sketch) -> datalib.Sketch
     ) -> tuple[tuple[int, str | None], tuple[int, str | None], tuple[int, str | None]]:
 
         (geo1, pt1), (geo2, pt2), (geo3, pt3) = refs
-        coord1 = np.array(get_entity_point(entities[str(geo1)], pt1))
-        coord2 = np.array(get_entity_point(entities[str(geo2)], pt2))
-        coord3 = np.array(get_entity_point(entities[str(geo3)], pt3))
+        coord1 = np.array(get_entity_point(entities[str(geo1)], pt1) or [])
+        coord2 = np.array(get_entity_point(entities[str(geo2)], pt2) or [])
+        coord3 = np.array(get_entity_point(entities[str(geo3)], pt3) or [])
 
-        if (coord1 is not None) and (coord2 is not None) and (coord3 is not None):
+        if (coord1.size == 2) and (coord2.size == 2) and (coord3.size == 2):
             coords = [coord1, coord2, coord3]
             for i in range(3):
                 a, b = coords[(i+1) % 3], coords[(i+2) % 3]
-                if np.allclose(2*coords[i], a+b):
+                if np.allclose(2*coords[i], a+b, atol=1e-6):
                     return (refs[(i+1) % 3], refs[(i+2) % 3], refs[i])
                 # else:
                 #     print(f"{i}: {coords[i]=}, {a=}, {b=}")
             raise ValueError(f"Three points are not equidistant collinear: {coord1=}, {coord2=}, {coord3=}")
-        elif coord1 is None:
-            assert coord2 is not None and coord3 is not None
+        elif coord1.size == 0:
+            assert coord2.size == coord3.size == 2
             return (refs[1], refs[2], refs[0])
-        elif coord2 is None:
-            assert coord1 is not None and coord3 is not None
+        elif coord2.size == 0:
+            assert coord1.size == coord3.size == 2
             return (refs[0], refs[2], refs[1])
-        elif coord3 is None:
-            assert coord1 is not None and coord2 is not None
+        elif coord3.size == 0:
+            assert coord1.size == coord2.size == 2
             return (refs[0], refs[1], refs[2])
         else:
             raise ValueError(f"At least two references must be points: got {refs=}")
@@ -525,6 +525,15 @@ def complete_constraint_values(sketch: datalib.Sketch, expr_watermark: str = "VA
         diff = a2 - a1
         return diff
 
+    def compute_angle_arc(arc: datalib.Arc) -> float:
+        """Compute the angle of an arc in radians."""
+        sx, sy = arc.start_point
+        tx, ty = arc.end_point
+        a1 = math.atan2(sy - arc.yCenter, sx - arc.xCenter)
+        a2 = math.atan2(ty - arc.yCenter, tx - arc.xCenter)
+        diff = a2 - a1
+        return diff
+
     def assign_value(
         constr: datalib.Constraint,
         value: float,
@@ -593,18 +602,39 @@ def complete_constraint_values(sketch: datalib.Sketch, expr_watermark: str = "VA
             #       - Value is already set in radians (used as-is by FreeCAD)
             #       - Aligned is always True
             #       - Clockwise is neglected
-            assert len(entity_refs) == 2, f"ERROR: Invalid references for Angle constraint {entity_refs}"
-            ent1_id = entity_refs[0].split('.')[0] if '.' in entity_refs[0] else entity_refs[0]
-            ent2_id = entity_refs[1].split('.')[0] if '.' in entity_refs[1] else entity_refs[1]
+            if len(entity_refs) == 1:
+                ent1_id = entity_refs[0].split('.')[0] if '.' in entity_refs[0] else entity_refs[0]
+                ent1 = sketch.entities.get(ent1_id)
 
-            ent1 = sketch.entities.get(ent1_id)
-            ent2 = sketch.entities.get(ent2_id)
+                if isinstance(ent1, datalib.Line):
+                    x_axis = datalib.Line(entityId=-1, pntX=0, pntY=0, dirX=1, dirY=0, startParam=-0.5, endParam=0.5)
+                    angle = compute_angle_between_lines(ent1, x_axis)
+                    new_constr = assign_value(constr, angle, 'angle', expr_watermark)
+                    new_constr = assign_boolean(new_constr, True, 'aligned')
+                    sketch.constraints[constr_id] = new_constr
+                elif isinstance(ent1, datalib.Arc):
+                    angle = compute_angle_arc(ent1)
+                    new_constr = assign_value(constr, angle, 'angle', expr_watermark)
+                    new_constr = assign_boolean(new_constr, True, 'aligned')
+                    sketch.constraints[constr_id] = new_constr
+                else:
+                    raise ValueError(f"ERROR: Invalid references for Angle constraint {entity_refs}")
 
-            if isinstance(ent1, datalib.Line) and isinstance(ent2, datalib.Line):
-                angle = compute_angle_between_lines(ent1, ent2)
-                new_constr = assign_value(constr, angle, 'angle', expr_watermark)
-                new_constr = assign_boolean(new_constr, True, 'aligned')
-                sketch.constraints[constr_id] = new_constr
+            elif len(entity_refs) == 2:
+                ent1_id = entity_refs[0].split('.')[0] if '.' in entity_refs[0] else entity_refs[0]
+                ent2_id = entity_refs[1].split('.')[0] if '.' in entity_refs[1] else entity_refs[1]
+
+                ent1 = sketch.entities.get(ent1_id)
+                ent2 = sketch.entities.get(ent2_id)
+
+                if isinstance(ent1, datalib.Line) and isinstance(ent2, datalib.Line):
+                    angle = compute_angle_between_lines(ent1, ent2)
+                    new_constr = assign_value(constr, angle, 'angle', expr_watermark)
+                    new_constr = assign_boolean(new_constr, True, 'aligned')
+                    sketch.constraints[constr_id] = new_constr
+                else:
+                    raise ValueError(f"ERROR: Invalid references for Angle constraint {entity_refs}")
+
             else:
                 raise ValueError(f"ERROR: Invalid references for Angle constraint {entity_refs}")
 

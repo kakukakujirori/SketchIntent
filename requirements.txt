@@ -1,5 +1,7 @@
 cairosvg
+einops
 hydra-core
+hydra-colorlog
 huggingface_hub
 lightning
 lz4

@@ -1,9 +1,14 @@
-from typing import Any
+from typing import Any, TYPE_CHECKING
 import numpy as np
 import sketchgraphs.data as datalib
 from .base import ConstraintHandler
 from src.sketch_handlers.constants import ConstraintToken
+from src.sketch_handlers.freecad_utils import ensure_freecad_imported
 from src.sketch_handlers.registry import CONSTRAINT_HANDLERS
+
+if TYPE_CHECKING:
+    FreeCAD, Part, Sketcher = ensure_freecad_imported()
+
 
 @CONSTRAINT_HANDLERS.register_module()
 class PerpendicularHandler(ConstraintHandler):
@@ -43,7 +48,7 @@ class PerpendicularHandler(ConstraintHandler):
             return [('Perpendicular', [res1[0], res2[0]], val)]
         return [('Perpendicular', [res1[0], res2[0]], None)]
 
-    def from_freecad(self, fc_constraint, geoID_to_primitive: dict[tuple[int, int], str]) -> datalib.Constraint | None:
+    def from_freecad(self, fc_constraint: 'Sketcher.Constraint', fc_primitives: list, geoID_to_primitive: dict[tuple[int, int], str]) -> datalib.Constraint | None:
         if fc_constraint.Type != 'Perpendicular':
             raise ValueError(f"Invalid constraint type for {self.name}: {fc_constraint.Type}")
 

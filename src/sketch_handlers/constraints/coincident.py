@@ -1,9 +1,14 @@
-from typing import Any
+from typing import Any, TYPE_CHECKING
 import numpy as np
 import sketchgraphs.data as datalib
 from .base import ConstraintHandler
 from src.sketch_handlers.constants import ConstraintToken
+from src.sketch_handlers.freecad_utils import ensure_freecad_imported
 from src.sketch_handlers.registry import CONSTRAINT_HANDLERS
+
+if TYPE_CHECKING:
+    FreeCAD, Part, Sketcher = ensure_freecad_imported()
+
 
 @CONSTRAINT_HANDLERS.register_module()
 class CoincidentHandler(ConstraintHandler):
@@ -37,8 +42,23 @@ class CoincidentHandler(ConstraintHandler):
         g2, p2 = res2
 
         if p1 == 0 and p2 == 0:
-            # Edge-Edge: not valid for Coincident
-            raise ValueError(f"Edge-Edge is not valid for {self.name}: {refs} ({res1=}, {res2=})")
+            prim1 = primitives[refs[0]]
+            prim2 = primitives[refs[1]]
+            # Pint-XXX ==> PointOnObject
+            if isinstance(prim1, datalib.Point) and isinstance(prim2, datalib.Point):
+                return [('Coincident', [g1, 1, g2, 1], None)]
+            elif isinstance(prim1, datalib.Point):
+                return [('PointOnObject', [g1, 1, g2], None)]
+            elif isinstance(prim2, datalib.Point):
+                return [('PointOnObject', [g2, 1, g1], None)]
+            # Line-Line ==> Collinear, which can be achieved by Tangent in FreeCAD
+            elif isinstance(prim1, datalib.Line) and isinstance(prim2, datalib.Line):
+                return [('Tangent', [g1, 0, g2, 0], None)]
+            # Circle-Circle ==> Concentric + Equal Radius
+            elif isinstance(prim1, (datalib.Circle, datalib.Arc)) and isinstance(prim2, (datalib.Circle, datalib.Arc)):
+                return [('Coincident', [g1, 3, g2, 3], None), ('Equal', [g1, g2], None)]
+            else:
+                raise ValueError(f"Invalid references for {self.name}: {refs}")
         elif p1 == 0:
             # PointOnObject: point (g2,p2) on edge g1
             return [('PointOnObject', [g2, p2, g1], None)]
@@ -49,32 +69,38 @@ class CoincidentHandler(ConstraintHandler):
             # Point-Point
             return [('Coincident', [g1, p1, g2, p2], None)]
 
-    def from_freecad(self, fc_constraint, geoID_to_primitive: dict[tuple[int, int], str]) -> datalib.Constraint | None:
+    def from_freecad(self, fc_constraint: 'Sketcher.Constraint', fc_primitives: list, geoID_to_primitive: dict[tuple[int, int], str]) -> datalib.Constraint | None:
+        FreeCAD, Part, Sketcher = ensure_freecad_imported()
+
         ctype = fc_constraint.Type
         if ctype not in ('Coincident', 'PointOnObject'):
             raise ValueError(f"Invalid constraint type for {self.name}: {ctype}")
 
+        g1, p1 = fc_constraint.First, fc_constraint.FirstPos
+        g2, p2 = fc_constraint.Second, fc_constraint.SecondPos
+        prim1 = fc_primitives[g1]
+        prim2 = fc_primitives[g2]
+
         refs = ()
         if ctype == 'Coincident':
-            g1, p1 = fc_constraint.First, fc_constraint.FirstPos
-            g2, p2 = fc_constraint.Second, fc_constraint.SecondPos
             r1 = geoID_to_primitive.get((g1, p1))
             r2 = geoID_to_primitive.get((g2, p2))
-            if r1 and r2:
-                refs = (r1, r2)
+            assert r1 is not None and r2 is not None, f"{(g1, p1)=}, {(g2, p2)=}, {geoID_to_primitive=}"
+            refs = (r1, r2)
         elif ctype == 'PointOnObject':
-            g1, p1 = fc_constraint.First, fc_constraint.FirstPos
-            g2 = fc_constraint.Second
             r1 = geoID_to_primitive.get((g1, p1))  # Point
             r2 = geoID_to_primitive.get((g2, 0))   # Edge
-            if r1 and r2:
-                refs = (r1, r2)
+            assert r1 is not None and r2 is not None, f"{(g1, p1)=}, {(g2, 0)=}, {geoID_to_primitive=}"
+            refs = (r1, r2)
         else:
             raise ValueError(f"Invalid constraint type for {self.name}: {ctype}")
 
         assert self.validate_refs(refs)
 
-        return self.create_constraint('Coincident', tuple(refs))
+        if isinstance(prim1, (Part.Circle, Part.ArcOfCircle)) and p1 == 3 and isinstance(prim2, (Part.Circle, Part.ArcOfCircle)) and p2 == 3:
+            return self.create_constraint('Concentric', (r1, r2))
+        else:
+            return self.create_constraint('Coincident', (r1, r2))
 
     def validate_refs(self, refs: tuple[int | str, ...]) -> bool:
         return len(refs) == 2

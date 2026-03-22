@@ -86,12 +86,13 @@ class ConstraintHandler(ABC):
         pass
 
     @abstractmethod
-    def from_freecad(self, fc_constraint: 'Sketcher.Constraint', geoID_to_primitive: dict[tuple[int, int], str]) -> datalib.Constraint | None:
+    def from_freecad(self, fc_constraint: 'Sketcher.Constraint', fc_primitives: list, geoID_to_primitive: dict[tuple[int, int], str]) -> datalib.Constraint | None:
         """
         Convert a FreeCAD constraint to a SketchGraphs Constraint.
 
         Args:
             fc_constraint: The FreeCAD Constraint object.
+            fc_primitives: List of FreeCAD Geometry objects.
             geoID_to_primitive: Dictionary mapping (GeoID, PointID) tuple -> reference string
                                 (e.g. "0", "0.start", "0.center").
         """

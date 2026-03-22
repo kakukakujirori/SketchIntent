@@ -1,9 +1,14 @@
-from typing import Any
+from typing import Any, TYPE_CHECKING
 import numpy as np
 import sketchgraphs.data as datalib
 from .base import ConstraintHandler
 from src.sketch_handlers.constants import ConstraintToken
+from src.sketch_handlers.freecad_utils import ensure_freecad_imported
 from src.sketch_handlers.registry import CONSTRAINT_HANDLERS
+
+if TYPE_CHECKING:
+    FreeCAD, Part, Sketcher = ensure_freecad_imported()
+
 
 @CONSTRAINT_HANDLERS.register_module()
 class TangentHandler(ConstraintHandler):
@@ -53,7 +58,9 @@ class TangentHandler(ConstraintHandler):
                 return [('Tangent', [g1, g2], datum)]
             return [('Tangent', [g1, g2], None)]
 
-    def from_freecad(self, fc_constraint, geoID_to_primitive: dict[tuple[int, int], str]) -> datalib.Constraint | None:
+    def from_freecad(self, fc_constraint: 'Sketcher.Constraint', fc_primitives: list, geoID_to_primitive: dict[tuple[int, int], str]) -> datalib.Constraint | None:
+        FreeCAD, Part, Sketcher = ensure_freecad_imported()
+
         if fc_constraint.Type != 'Tangent':
             raise ValueError(f"Invalid constraint type for {self.name}: {fc_constraint.Type}")
 
@@ -62,20 +69,18 @@ class TangentHandler(ConstraintHandler):
         g2 = fc_constraint.Second
         p2 = fc_constraint.SecondPos
 
-        if p1 > 0 or p2 > 0:
-            # Point tangent
-            r1 = geoID_to_primitive.get((g1, p1))
-            r2 = geoID_to_primitive.get((g2, p2))
-        else:
-            # Edge tangent
-            r1 = geoID_to_primitive.get((g1, 0))
-            r2 = geoID_to_primitive.get((g2, 0))
+        r1 = geoID_to_primitive.get((g1, p1 if p1 > 0 else 0))
+        r2 = geoID_to_primitive.get((g2, p2 if p2 > 0 else 0))
 
         if not r1 or not r2:
             raise ValueError(f"Invalid geometry IDs for {self.name}: {g1}, {g2}")
 
         val = fc_constraint.Value
-        return self.create_constraint(self.name, (r1, r2), val if val != 0.0 else None)
+
+        if p1 == 0 and p2 == 0 and isinstance(fc_primitives[g1], Part.LineSegment) and isinstance(fc_primitives[g2], Part.LineSegment):
+            return self.create_constraint('Coincident', (r1, r2), None)  # SketchGraphs achieve Collinear by Coincident(Line, 0, Line, 0)
+        else:
+            return self.create_constraint(self.name, (r1, r2), val if val != 0.0 else None)
 
     def validate_refs(self, refs: tuple[int | str, ...]) -> bool:
         return len(refs) == 2
