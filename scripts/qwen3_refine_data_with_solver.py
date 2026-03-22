@@ -248,7 +248,7 @@ def compute_constraint_value(
         # Case2.1: Point-XXX (XXX = Point, Line, Circle, Arc)
         if p1 is not None:
             return compute_dist_point_to_obj(p1, prim2)
-        elif p1 is not None:
+        elif p2 is not None:
             return compute_dist_point_to_obj(p2, prim1)
         # Case 2.2: Line-XXX (XXX = Line, Circle, Arc)
         elif prim1["type"] == "LineSegment":
@@ -799,7 +799,7 @@ def parse_freecad_script(filepath_or_commands: str | list[str]) -> tuple[list[di
                         "start": p1,
                         "mid": p2,
                         "end": p3,
-                        "center": (cx, cy),
+                        "center": [cx, cy],
                         "radius": radius,
                         "is_construction": is_construction
                     })
@@ -1624,9 +1624,9 @@ def static_constraints_diagnosis(
 
         # Check for malformed/diagonal Distance constraints
         if c["type"] in ["Distance", "DistanceX", "DistanceY"]:
-            if (e1 and primitives_list[e1]["type"] == "LineSegment" and p1 is None) and (e2 and primitives_list[e2]["type"] == "LineSegment" and p2 is None):
+            if (e1 is not None and primitives_list[e1]["type"] == "LineSegment" and p1 is None) and (e2 is not None and primitives_list[e2]["type"] == "LineSegment" and p2 is None):
                 warnings.append(f"Constraint {i} ({constraint_name}) is malformed: You cannot define a distance between lines. Define Point-Line distance instead by setting either Subnode1 >= 1 or Subnode2 >= 1.")
-            elif c["type"] in ["DistanceX", "DistanceY"] and (e1 != e2) and (p1 is None or p2 is None):
+            elif c["type"] in ["DistanceX", "DistanceY"] and (e2 is not None) and (e1 != e2) and (p1 is None or p2 is None):
                 warnings.append(f"Constraint {i} ({constraint_name}) is malformed: You cannot define a horizontal/vertical distance between a point and a line. Use a normal Distance instead, or define Point-Point distance by setting both Subnode1 and Subnode2 >= 1.")
             elif c["type"] == "Distance" and p1 and p2:
                 # Diagonal check only applies to Distance, not DistanceX/Y (which are axis-aligned by definition)
@@ -1780,10 +1780,10 @@ def run_solver_tool(
             except Exception as e:
                 print(f"Failed to generate feedback image: {e}")
 
-            try:
-                FreeCAD.closeDocument(doc.Name)
-            except:
-                pass
+        try:
+            FreeCAD.closeDocument(doc.Name) if doc else None
+        except:
+            pass
 
     return json.dumps(response, indent=2)
 
@@ -2473,10 +2473,16 @@ def main(args):
         # load and convert original data to commands
         seq = sequences[i]
         sketch = datalib.sketch_from_sequence(seq)
-        _ = normalize_sketch(sketch, dst_length=1000)
-        sketch = cleanse_sketch_primitives(sketch)
-        sketch = cleanse_sketch_constraints(sketch)
-        sketch = complete_constraint_values(sketch)
+        try:
+            _ = normalize_sketch(sketch, dst_length=1000)
+            sketch = cleanse_sketch_primitives(sketch)
+            sketch = cleanse_sketch_constraints(sketch)
+            sketch = complete_constraint_values(sketch)
+        except Exception as e:
+            print(f"Error processing sequence {i}: {traceback.format_exc()}")
+            with open(error_log, "a") as f:
+                f.write(f"Error processing sequence {i}: {traceback.format_exc()}\n")
+            continue
 
         # ======== GT PROCESSING ========
 
@@ -2847,7 +2853,7 @@ if __name__ == '__main__':
     parser.add_argument(
         '--sequence_path',
         type=str,
-        default="/home/ryotaro/my_works/My-Vitruvion/data_processed/sg_filtered_unique_valid.npy",
+        default="/home/ryotaro/my_works/My-Vitruvion/data_processed/sg_filtered_unique.npy",
         help="Path to the sequence data",
     )
     parser.add_argument(
