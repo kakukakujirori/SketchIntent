@@ -43,7 +43,7 @@ if __name__ == '__main__':
 
     for i, f in enumerate(tqdm(files)):
         try:
-            sketch_or_error = converter.from_freecad_commands(f)
+            sketch = converter.from_freecad_commands(f)
         except Exception:
             print(f"Error processing {f}:")
             traceback.print_exc()
