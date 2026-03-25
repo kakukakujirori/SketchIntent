@@ -277,24 +277,6 @@ class SketchFreecadConverter:
                         if handler_idx == len(candidates) - 1:
                             self.dprint(f"Error in {handler_name}.from_freecad for constraint {i} ({c_type}): {traceback.format_exc()}")
 
-            # Fallback: type name mapping
-            if not sg_constr:
-                fallback_name = None
-                if c_type in ['DistanceX', 'DistanceY']:
-                    fallback_name = c_type
-                elif c_type == 'Radius':
-                    fallback_name = 'Radius'
-                elif c_type == 'Diameter':
-                    fallback_name = 'Diameter'
-
-                if fallback_name:
-                    handler = self.context.get_constraint_handler(fallback_name)
-                    if handler:
-                        try:
-                            sg_constr = handler.from_freecad(fc_constr, fc_sketch.Geometry, geoID_to_primitive)
-                        except Exception as e:
-                            self.dprint(f"Error converting constraint {i} ({c_type}): {e}")
-
             if sg_constr:
                 c_id = f"c_{i}"
                 # Make identifier a real UID

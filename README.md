@@ -73,7 +73,8 @@ wget "https://huggingface.co/Qwen/Qwen3-VL-30B-A3B-Thinking-GGUF/resolve/main/mm
 - SketchGraphs Dataset
   ```bash
   bash scripts/download_shards.sh data_shards
-  python scripts/convert_sketchgraphs_to_seq.py input_folder=./data_shards output_folder=./data_processed
+  python scripts/convert_sketchgraphs_to_seq.py
+  python scripts/cleanse_seq_for_freecad.py data_processed/sg_filtered.npy
   ```
 
 - Qwen3 Augmented Dataset
@@ -81,6 +82,7 @@ wget "https://huggingface.co/Qwen/Qwen3-VL-30B-A3B-Thinking-GGUF/resolve/main/mm
   python scripts/qwen3_refine_data_with_solver.py
   mkdir data_qwen && cp qwen3_refined_data_with_solver/*_refined.py data_qwen/
   python scripts/convert_freecad_to_seq.py ./data_qwen3
+  python scripts/cleanse_seq_for_freecad.py data_processed/data_qwen3.npy
   ```
 
 ## Training

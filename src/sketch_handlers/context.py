@@ -18,8 +18,8 @@ class SketchContext:
     Context object holding configuration and registry for tokenization/detokenization.
     """
     # Configuration
-    max_token_length: int = 1024
-    num_quantization_bins: int = 128
+    max_token_length: int | None = 256
+    num_quantization_bins: int = 64
     align_constraint_token_length_to: int | None = None
     use_stop_padding: bool = False
     constraint_order: Literal["sort_by_ref_id", "random_shuffle", "original"] = "sort_by_ref_id"

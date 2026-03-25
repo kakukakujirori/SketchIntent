@@ -98,7 +98,7 @@ class SketchTokenizer:
             # 4. Register in primitive_tokenpos
             ent_id = ent.entityId
             subnode_offsets = handler.get_subnode_offset()
-            if len(val_tokens) <= self.max_token_length:
+            if self.max_token_length is None or len(val_tokens) <= self.max_token_length:
                 primitive_tokenpos[ent_id] = ent_start_pos
                 for sub_name, sub_offset in subnode_offsets.items():
                     primitive_tokenpos[f"{ent_id}.{sub_name}"] = ent_start_pos + sub_offset

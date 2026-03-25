@@ -44,17 +44,17 @@ class AngleHandler(ConstraintHandler):
         if not props["aligned"]:
             raise ValueError(f"Aligned is false for {self.name}: {constraint=}. Run sketch_utils.complete_constraint_values() first.")
 
-        if len(refs) == 2:
+        if len(refs) == 1:
+            res1 = primitive_geoID.get(refs[0])
+            if res1:
+                # Angle(Line, value) or Angle(Arc, value)
+                return [('Angle', [res1[0], val_rad], None)]
+        elif len(refs) == 2:
             res1 = primitive_geoID.get(refs[0])
             res2 = primitive_geoID.get(refs[1])
             if res1 and res2:
                 # Angle(Line1, Line2, value)
                 return [('Angle', [res1[0], res2[0], val_rad], None)]
-        elif len(refs) == 1:
-            res1 = primitive_geoID.get(refs[0])
-            if res1:
-                # Angle(Line, value)
-                return [('Angle', [res1[0], val_rad], None)]
 
         raise ValueError(f"Invalid references or value for {self.name}: {refs=}, {props=}")
 
