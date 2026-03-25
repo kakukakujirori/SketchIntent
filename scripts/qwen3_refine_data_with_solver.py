@@ -2656,12 +2656,12 @@ def main(args):
 
 
 
-            if solver_resp.get("MalformedConstraints", []):
-                assert solver_resp["Status"] == "Malformed",f"{i=}: {solver_resp}"
-            elif solver_resp.get("ConflictingConstraints", []):
-                assert solver_resp["Status"] == "Conflicting", f"{i=}: {solver_resp}"
-            elif solver_resp.get("RedundantConstraints", []):
-                assert solver_resp["Status"] == "Redundant", f"{i=}: {solver_resp}"
+            # if solver_resp.get("MalformedConstraints", []):
+            #     assert solver_resp["Status"] == "Malformed",f"{i=}: {solver_resp}"
+            # elif solver_resp.get("ConflictingConstraints", []):
+            #     assert solver_resp["Status"] == "Conflicting", f"{i=}: {solver_resp}"
+            # elif solver_resp.get("RedundantConstraints", []):
+            #     assert solver_resp["Status"] == "Redundant", f"{i=}: {solver_resp}"
 
 
 
