@@ -44,19 +44,14 @@ class ConstraintDataset(torch.utils.data.Dataset):
         sketch = datalib.sketch_from_sequence(seq)
 
         # NOTE: Keep the order: complete_constraint_values is based on the correct cleanse_sketch_primitives output.
+        _ = normalize_sketch(sketch)
         sketch = cleanse_sketch_primitives(sketch)
+        sketch = cleanse_sketch_constraints(sketch)
         sketch = complete_constraint_values(sketch)
 
-        # Apply noise first (if enabled), then normalize
-        # This ensures noisy values stay within [-0.5, 0.5] range
+        # Apply noise and renormalize so that noisy values stay within [-0.5, 0.5] range
         sketch_noisy = self.primitive_noise.apply_primitive_noise(sketch)
-
-        normalize_sketch(sketch)
-        normalize_sketch(sketch_noisy)
-
-        # Remove degenerate constraints before tokenization
-        cleanse_sketch_constraints(sketch)
-        cleanse_sketch_constraints(sketch_noisy)
+        _ = normalize_sketch(sketch_noisy)
 
         result_tokens = self.tokenizer.tokenize(sketch_noisy)
 
