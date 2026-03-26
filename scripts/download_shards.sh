@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Download SketchGraphs shards 003..128 sequentially.
+# Download SketchGraphs shards 001..128 sequentially.
 # Usage:
 #   ./download_shards.sh [OUTPUT_DIR]
 # If OUTPUT_DIR is omitted, files are saved in the current directory.

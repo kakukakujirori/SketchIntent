@@ -7,7 +7,6 @@ as an intermediate sequence dataset (sg_filtered.npy) for further processing.
 import dataclasses
 import enum
 import functools
-import logging
 import os
 
 import hydra
@@ -84,10 +83,6 @@ def filter_sketch(sketch: datalib.Sketch, config: FilterConfiguration) -> Filter
 
 @hydra.main(config_name='conf')
 def main(config: ConvertSketchgraphsRunConfiguration):
-    logger = logging.getLogger(__name__)
-
-    # --- Step 1: Filter Sequences ---
-    logger.info("=== Step 1: Filtering Sequences ===")
     input_folder = hydra.utils.to_absolute_path(config.input_folder)
     output_folder = hydra.utils.to_absolute_path(config.output_folder)
     os.makedirs(output_folder, exist_ok=True)
@@ -102,10 +97,8 @@ def main(config: ConvertSketchgraphsRunConfiguration):
     )
 
     filtered_sequence_path = os.path.join(output_folder, 'sg_filtered.npy')
-    logger.info(f'Saving filtered result at {filtered_sequence_path}')
+    print(f'Saving result at {filtered_sequence_path}')
     np.save(filtered_sequence_path, filtered_result, allow_pickle=False)
-
-    logger.info('=== Filtering Complete ===')
 
 
 if __name__ == '__main__':
