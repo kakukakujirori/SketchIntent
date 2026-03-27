@@ -78,6 +78,6 @@ class ConstraintIoU(torchmetrics.Metric):
             raise ValueError(f"Expected 1D tensor, got {tokens.shape}")
 
         val_tokens = tokens[self.prefix_len:].cpu().numpy()
-        type_refs_block = self.tokenizer.parse_constraint_tokens(val_tokens)
-        type_refs = [(typ, refs) for typ, refs, block in type_refs_block]
+        parsed_valid, parsed_malformed = self.tokenizer.parse_constraint_tokens(val_tokens)
+        type_refs = [(typ, refs) for typ, refs, block, start_idx in parsed_valid]
         return set(type_refs)

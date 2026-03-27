@@ -1,4 +1,3 @@
-from sketch_handlers.sketch_utils import complete_constraint_values
 import numpy as np
 import torch
 
@@ -120,67 +119,33 @@ class SolverReward(torch.nn.Module):
             ################################################################
             # 0. Convert to a sketch
             ################################################################
-            solver_status, sketch, invalid_cons_token_blocks = self.solver_feedback.evaluate_constraints(prim, cons, sketch_original, check_one_by_one=True)
-            invalid_cons_token_blocks = np.array(invalid_cons_token_blocks)
-            assert invalid_cons_token_blocks.size == 0 or invalid_cons_token_blocks.shape == (invalid_cons_token_blocks.shape[0], 4), f"{invalid_cons_token_blocks=}"
+            solver_status, sketch, constraint_to_token_start, invalid_constraint_block_start = \
+                self.solver_feedback.evaluate_constraints(prim, cons, sketch_original, check_one_by_one=True)
 
             ################################################################
             # 1. Constraint-wise penalty
             ################################################################
-            problematic_constraint_ids = set(solver_status.ConflictingConstraints + solver_status.RedundantConstraints + solver_status.MalformedConstraints)
-            problematic_constraints = {c_id: sketch.constraints[c_id] for c_id in problematic_constraint_ids}
-            problematic_sketch = datalib.Sketch(entities=sketch.entities, constraints=problematic_constraints)
-            problematic_sketch, _ = complete_constraint_values(problematic_sketch, skip_invalid_constraints=True)
+            problematic_constraint_ids = set(
+                solver_status.ConflictingConstraints +
+                solver_status.RedundantConstraints +
+                solver_status.MalformedConstraints
+            )
 
-            # NOTE: To deduce the corresponding token indices,
-            #       we re-tokenize the problematic constraints, and
-            #       search for the corresponding token subsequence in cons_tokens.
-            problematic_constraint_tokens = self.sketch_tokenizer.tokenize(problematic_sketch, allow_invalid_constraints=True)['c_val']
-            if len(problematic_constraint_tokens) > 0 and problematic_constraint_tokens[0] == ConstraintToken.Start:
-                problematic_constraint_tokens = problematic_constraint_tokens[1:]
-            while len(problematic_constraint_tokens) > 0 and problematic_constraint_tokens[-1] in (ConstraintToken.Pad, ConstraintToken.Stop):
-                problematic_constraint_tokens = problematic_constraint_tokens[:-1]
-
-            # Find matching
-            cons_sorted = self.sort_intra_refs(cons)
-            invalid_cons_token_blocks = self.sort_intra_refs(invalid_cons_token_blocks.flatten())
-            cons_windows = np.lib.stride_tricks.sliding_window_view(cons, window_shape=self.sketch_tokenizer.align_constraint_token_length_to)  # (T) => (T, 4)
+            # Gather token start positions for all problematic constraints and malformed/invalid blocks.
+            problematic_token_starts = sorted(set(
+                [constraint_to_token_start[c_id] for c_id in problematic_constraint_ids] +
+                list(invalid_constraint_block_start.keys())))
 
             if self.sketch_tokenizer.align_constraint_token_length_to > 0:
-                problematic_constraint_tokens = problematic_constraint_tokens.reshape(-1, self.sketch_tokenizer.align_constraint_token_length_to)  # (K*4) => (K, 4)
-                invalid_cons_token_blocks = invalid_cons_token_blocks.reshape(-1, self.sketch_tokenizer.align_constraint_token_length_to)
-                problematic_constraint_tokens = np.concatenate([problematic_constraint_tokens, invalid_cons_token_blocks], axis=0)
-
-                # cons_windows[:, None, :] shape: (T, 1, 4)
-                # problematic_constraint_tokens[None, :, :] shape: (1, K, 4)
-                # Comparison shape: (T, K, 4) -> all(axis=2) makes it (T, K)
-                matches_batch = np.all(cons_windows[:, None, :] == problematic_constraint_tokens[None, :, :], axis=2)
-                matched_cons_start_indices, matched_problematic_indices = np.where(matches_batch)
-                if len(np.unique(matched_problematic_indices)) != len(problematic_constraint_tokens):
-                    error_msg = "[SolverReward] ERROR: Failed to match problematic constraints to tokens:"
-                    error_msg += f"\n{matched_cons_start_indices=}\n{matched_problematic_indices=}"
-
-                    error_msg += "\n\nproblematic_constraint_tokens=["
-                    for token_vis in visualize_constraint_sequence(problematic_constraint_tokens):
-                        error_msg += f"\n{token_vis}"
-                    error_msg += "]"
-
-                    error_msg += f"\n\ncons_tokens={cons}"
-
-                    error_msg += f"\n\ncons_tokens_vis={visualize_constraint_sequence(cons)}"
-
-                    error_msg += "\n\nsketchgraphs_problematic_constraints=["
-                    for c_id, c in problematic_constraints.items():
-                        error_msg += f"\n{c_id}: {c}"
-                    error_msg += "]"
-
-                    raise ValueError(error_msg)
-
-                matched_cons_end_indices = matched_cons_start_indices + self.sketch_tokenizer.align_constraint_token_length_to - 1
+                problematic_token_ends = np.array(
+                    [s + self.sketch_tokenizer.align_constraint_token_length_to - 1
+                     for s in problematic_token_starts],
+                    dtype=np.int64,
+                )
             else:
-                raise NotImplementedError(f"IMPLEMENT IT!!!")
+                raise NotImplementedError("IMPLEMENT IT!!!")
 
-            scores[i, matched_cons_end_indices] += self.penalty_per_constraint
+            scores[i, problematic_token_ends] += self.penalty_per_constraint
 
             ################################################################
             # 2. Sequence-wise penalty

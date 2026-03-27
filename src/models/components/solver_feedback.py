@@ -199,7 +199,7 @@ class SolverFeedback:
         cons_tokens: np.ndarray | torch.Tensor,
         sketch_original: datalib.Sketch | None = None,
         check_one_by_one: bool = False,
-    ) -> tuple[SolverStatus, datalib.Sketch, list[tuple[int, ...]]]:
+    ) -> tuple[SolverStatus, datalib.Sketch, dict[str, int], dict[int, tuple[int, ...]]]:
         """Evaluate constraint status for a single sample.
 
         Parameters
@@ -216,8 +216,14 @@ class SolverFeedback:
 
         Returns
         -------
-        SolverStatus
+        SolverStatus: SolverStatus
             Solver status
+        sketchgraphs_sketch : datalib.Sketch
+            Reconstructed sketch from tokens
+        constraint_to_token_start : dict[str, int]
+            Mapping from constraint id to token start index
+        invalid_constraint_block_start : dict[int, tuple[int, ...]]
+            Mapping from token start index to invalid constraint token block
         """
         assert len(prim_tokens.shape) == 1, f"{prim_tokens.shape=}"
         assert len(cons_tokens.shape) == 1, f"{cons_tokens.shape=}"
@@ -229,7 +235,7 @@ class SolverFeedback:
             cons_tokens = cons_tokens.cpu().numpy()
 
         # Tokens → SketchGraphs
-        sketchgraphs_sketch, invalid_cons_token_blocks = self.sketch_tokenizer.detokenize(
+        sketchgraphs_sketch, constraint_to_token_start, invalid_constraint_block_start = self.sketch_tokenizer.detokenize(
             {"p_val": prim_tokens, "c_val": cons_tokens},
             allow_invalid_constraints=True,
         )
@@ -324,9 +330,9 @@ class SolverFeedback:
             solver_report.DoF = status.DoF if solver_report.Status == "Converged" else -1
             solver_report.NumRelationalConstraints = status.NumRelationalConstraints
             solver_report.NumDimensionalConstraints = status.NumDimensionalConstraints
-            return solver_report, sketchgraphs_sketch, invalid_cons_token_blocks
+            return solver_report, sketchgraphs_sketch, constraint_to_token_start, invalid_constraint_block_start
         else:
-            return status, sketchgraphs_sketch, invalid_cons_token_blocks
+            return status, sketchgraphs_sketch, constraint_to_token_start, invalid_constraint_block_start
 
     def evaluate_constraints_batch(
         self,
@@ -379,7 +385,7 @@ class SolverFeedback:
 
         for prim_tokens, cons_tokens, sketch_original in tqdm(zip(prim_tokens_batch, cons_tokens_batch, sketch_original_list), desc="Solver Testing"):
 
-            status, sketch, invalid_cons_token_blocks = self.evaluate_constraints(
+            status, sketch, constraint_to_token_start, invalid_constraint_block_start = self.evaluate_constraints(
                 prim_tokens, cons_tokens, sketch_original, check_one_by_one=False)
 
             if status.Status == "Error":

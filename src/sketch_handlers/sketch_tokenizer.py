@@ -296,7 +296,10 @@ class SketchTokenizer:
 
         return {e.entityId: e for e in entities}, tokenpos_to_primitive
 
-    def parse_constraint_tokens(self, val_tokens: np.ndarray) -> list[tuple[int, tuple[int, ...], tuple[int, ...]]]:
+    def parse_constraint_tokens(self, val_tokens: np.ndarray) -> tuple[
+        list[tuple[int, tuple[int, ...], tuple[int, ...], int]],
+        list[tuple[int, tuple[int, ...], tuple[int, ...], int]],
+    ]:
         """Parse constraint token sequence into lightweight (type_id, ref_positions) tuples.
 
         Handles both variable-length and fixed-block modes based on
@@ -309,22 +312,31 @@ class SketchTokenizer:
                 Start token, may end with Stop/Pad).
 
         Returns:
-            List of ``(constraint_type_token_id, (sorted_ref_positions...), corresponding original token sequence)``.
+            Tuple of:
+            - valid_blocks: List of ``(type_id, ref_positions, token_block, start_index)``
+              where ``start_index`` is the position of the block's first token in
+              the **original** ``val_tokens`` array.
+            - malformed_blocks: List of ``(type_id, ref_positions, token_block, start_index)``
+              for blocks that are structurally malformed (e.g. ConstraintType tokens found
+              in a ref slot). These are neither padding nor valid constraints.
+              NOTE: ref_positions is a dummy empty tuple.
         """
         val_offset = CONSTRAINT_VAL_OFFSET
         tokens = val_tokens.tolist() if hasattr(val_tokens, 'tolist') else list(val_tokens)
 
         # Skip Start token
-        idx = 1 if tokens and tokens[0] == SpecialToken.Start else 0
-        tokens = tokens[idx:]
+        start_offset = 1 if tokens and tokens[0] == SpecialToken.Start else 0
+        tokens = tokens[start_offset:]
 
-        parsed: list[tuple[int, tuple[int, ...], tuple[int, ...]]] = []
+        valid_blocks: list[tuple[int, tuple[int, ...], tuple[int, ...], int]] = []
+        malformed_blocks: list[tuple[int, tuple[int, ...], tuple[int, ...], int]] = []
 
         if self.align_constraint_token_length_to is None or self.align_constraint_token_length_to <= 0:
             # --- Variable-length mode ---
-            block = []
+            block: list[int] = []
+            block_start_i: int = 0
 
-            for tok in tokens:
+            for i, tok in enumerate(tokens):
                 tok = int(tok)
 
                 if tok == SpecialToken.Pad:
@@ -339,8 +351,9 @@ class SketchTokenizer:
                     if block:
                         current_type = block[0]
                         current_refs = tuple(sorted([x - val_offset for x in block[1:]]))
-                        parsed.append((current_type, current_refs, tuple(block)))
+                        valid_blocks.append((current_type, current_refs, tuple(block), start_offset + block_start_i))
                     block = [tok]
+                    block_start_i = i
                 else:
                     # Reference token
                     block.append(tok - val_offset)
@@ -349,7 +362,7 @@ class SketchTokenizer:
             if block:
                 current_type = block[0]
                 current_refs = tuple(int(b) - val_offset for b in block[1:])
-                parsed.append((current_type, current_refs, tuple(block)))
+                valid_blocks.append((current_type, current_refs, tuple(block), start_offset + block_start_i))
 
         else:
             # --- Fixed block mode ---
@@ -358,17 +371,22 @@ class SketchTokenizer:
 
             while block_idx + block_size <= len(tokens):
                 block = tokens[block_idx:block_idx + block_size]
+                block_start_in_val = start_offset + block_idx
                 block_idx += block_size
 
                 type_tok = int(block[0])
 
+                # End parsing at Stop token
                 if type_tok == SpecialToken.Stop:
                     break
 
-                # Skip invalid blocks (Pad, Stop, Mask, InnerPad, or non-type token)
-                if type_tok in (SpecialToken.Pad, SpecialToken.Mask, ConstraintToken.InnerPad):
+                # Skip Mask token
+                if type_tok == SpecialToken.Mask:
                     continue
-                if type_tok >= val_offset:
+
+                # Skip blocks where first token is a ref or an unexpected type token
+                if type_tok >= val_offset or type_tok in (SpecialToken.Pad, ConstraintToken.InnerPad):
+                    malformed_blocks.append((type_tok, tuple(), tuple(block), block_start_in_val))
                     continue
 
                 # Collect valid ref tokens (strip InnerPad from tail, then validate)
@@ -378,29 +396,45 @@ class SketchTokenizer:
 
                 # All remaining tokens must be valid ref tokens (>= val_offset)
                 if not all(int(b) >= val_offset for b in ref_block):
+                    malformed_blocks.append((type_tok, tuple(), tuple(block), block_start_in_val))
                     continue
 
                 refs = tuple(int(b) - val_offset for b in ref_block)
-                parsed.append((type_tok, refs, tuple(block)))
+                valid_blocks.append((type_tok, refs, tuple(block), block_start_in_val))
 
-        return parsed
+        return valid_blocks, malformed_blocks
 
     def detokenize_constraints(
         self,
         val_tokens: np.ndarray,
         tokenpos_to_primitive: dict[int, str],
         allow_invalid_constraints: bool = False
-    ) -> tuple[dict[str, datalib.Constraint], list[tuple[int, ...]]]:
+    ) -> tuple[
+        dict[str, datalib.Constraint],
+        dict[str, int],
+        dict[int, tuple[int, ...]],
+    ]:
         """Detokenize constraints using the map from primitives.
 
         Uses :meth:`parse_constraint_tokens` for robust token parsing, then
         delegates to each constraint handler's ``decode`` method.
-        """
-        constraints = {}
-        invalid_token_blocks = []
-        parsed = self.parse_constraint_tokens(val_tokens)
 
-        for type_id, ref_positions, token_block in parsed:
+        Returns:
+            constraints: Decoded constraint dict keyed by ``c_N`` identifiers.
+            c_id_to_token_start: Maps each ``c_N`` to its start index in ``val_tokens``.
+            invalid_block_start: Start index in ``val_tokens`` for each invalid block.
+        """
+        constraints: dict[str, datalib.Constraint] = {}
+        c_id_to_token_start: dict[str, int] = {}
+        invalid_block_start: dict[int, tuple[int, ...]] = {}
+
+        parsed_valid, parsed_malformed = self.parse_constraint_tokens(val_tokens)
+
+        # Structurally malformed blocks (e.g. non-ref token in ref slot)
+        for _, _, token_block, start_index in parsed_malformed:
+            invalid_block_start[start_index] = token_block
+
+        for type_id, ref_positions, token_block, start_index in parsed_valid:
             try:
                 # Look up handler by constraint type name
                 c_name = ConstraintToken(type_id).name
@@ -417,20 +451,33 @@ class SketchTokenizer:
                 unique_id = f"c_{len(constraints)}"
                 constr = constr._replace(identifier=unique_id)
                 constraints[unique_id] = constr
+                c_id_to_token_start[unique_id] = start_index
             except Exception as e:
                 if allow_invalid_constraints:
-                    invalid_token_blocks.append(token_block)
+                    invalid_block_start[start_index] = token_block
                     continue
                 else:
                     raise e
 
-        return constraints, invalid_token_blocks
+        return constraints, c_id_to_token_start, invalid_block_start
 
-    def detokenize(self, tokens: dict[str, np.ndarray], allow_invalid_constraints: bool = False) -> tuple[datalib.Sketch, list[tuple[int, ...]]]:
+    def detokenize(
+        self,
+        tokens: dict[str, np.ndarray],
+        allow_invalid_constraints: bool = False,
+    ) -> tuple[datalib.Sketch, dict[str, int], dict[int, tuple[int, ...]]]:
         """
         Detokenize separate primitive and constraint streams into a Sketch object.
+
+        Returns:
+            sketch, constraint_to_token_start, invalid_constraint_block_start
         """
         entities, tokenpos_to_primitive = self.detokenize_primitives(tokens['p_val'])
-        constraints, invalid_token_blocks = self.detokenize_constraints(tokens['c_val'], tokenpos_to_primitive, allow_invalid_constraints)
+        constraints, constraint_to_token_start, invalid_constraint_block_start = \
+            self.detokenize_constraints(tokens['c_val'], tokenpos_to_primitive, allow_invalid_constraints)
 
-        return datalib.Sketch(entities=entities, constraints=constraints), invalid_token_blocks
+        return (
+            datalib.Sketch(entities=entities, constraints=constraints),
+            constraint_to_token_start,
+            invalid_constraint_block_start,
+        )

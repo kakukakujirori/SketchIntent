@@ -765,6 +765,7 @@ def complete_constraint_values(sketch: datalib.Sketch, expr_watermark: str = "VA
                     else:
                         new_params.append(param)
                 sketch.constraints[constr_id] = constr._replace(parameters=new_params)
+                invalid_constraints.append(constr_id)
                 print(f"WARNING: Invalid references for constraint {constr_id}: {e}")
             else:
                 raise e
