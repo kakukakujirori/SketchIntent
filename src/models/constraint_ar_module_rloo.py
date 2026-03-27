@@ -1,4 +1,5 @@
 import copy
+import inspect
 from typing import Any
 
 import lightning as L
@@ -74,10 +75,13 @@ class ConstraintARModuleRLOO(L.LightningModule):
         if self.hparams.scheduler is not None:
             # total_steps (e.g. for OneCycleLR) is a runtime Trainer property and
             # cannot be resolved statically in Hydra configs, so we inject it here.
-            scheduler = self.hparams.scheduler(
-                optimizer=optimizer,
-                total_steps=self.trainer.estimated_stepping_batches,
-            )
+            if 'total_steps' in inspect.signature(self.hparams.scheduler).parameters:
+                scheduler = self.hparams.scheduler(
+                    optimizer=optimizer,
+                    total_steps=self.trainer.estimated_stepping_batches,
+                )
+            else:
+                scheduler = self.hparams.scheduler(optimizer=optimizer)
             return {
                 "optimizer": optimizer,
                 "lr_scheduler": {
