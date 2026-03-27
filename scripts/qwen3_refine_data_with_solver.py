@@ -94,28 +94,24 @@ def get_point_from_primitive(
     ptype = prim["type"]
 
     if subnode == 0 or subnode is None:  # Entity itself
-        if ptype == "Point":
-            return [prim["x"], prim["y"]]
+        if ptype == "Point" and "x" in prim and "y" in prim:
+            return (prim["x"], prim["y"])
         return None
 
     elif subnode == 1:  # StartPoint (or Point Vertex 1)
-        if ptype == "LineSegment":
-            return prim["start"]
-        elif ptype == "Arc":
-            return prim["start"]
-        elif ptype == "Point":
-            return [prim["x"], prim["y"]]
+        if ptype == "Point" and "x" in prim and "y" in prim:
+            return (prim["x"], prim["y"])
+        else:
+            return prim.get("start")
 
     elif subnode == 2:  # EndPoint
-        if ptype == "LineSegment":
-            return prim["end"]
-        elif ptype == "Arc":
-            return prim["end"]
-        elif ptype == "Point":
-            return [prim["x"], prim["y"]]
+        if ptype == "Point" and "x" in prim and "y" in prim:
+            return (prim["x"], prim["y"])
+        else:
+            return prim.get("end")
 
     elif subnode == 3:  # CenterPoint
-        return prim["center"]
+        return prim.get("center")
 
     return None
 
