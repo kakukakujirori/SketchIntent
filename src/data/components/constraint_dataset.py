@@ -47,7 +47,7 @@ class ConstraintDataset(torch.utils.data.Dataset):
         _ = normalize_sketch(sketch)
         sketch = cleanse_sketch_primitives(sketch)
         sketch = cleanse_sketch_constraints(sketch)
-        sketch = complete_constraint_values(sketch)
+        sketch, _ = complete_constraint_values(sketch)
 
         # Apply noise and renormalize so that noisy values stay within [-0.5, 0.5] range
         sketch_noisy = self.primitive_noise.apply_primitive_noise(sketch)

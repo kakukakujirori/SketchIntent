@@ -112,7 +112,7 @@ def verify_constraints_tokenization(data_npy: str, limit: int = 1000):
                 # 1. Reconstruct Sketch
                 sketch_orig = sketch_from_sequence(seq)
                 normalize_sketch(sketch_orig)
-                sketch_orig = complete_constraint_values(sketch_orig)
+                sketch_orig, _ = complete_constraint_values(sketch_orig)
 
                 # NORMALIZE SKETCH IDs to match tokenizer's implicit re-ordering/re-numbering
                 sketch_orig = renumber_primitive_ids(sketch_orig)

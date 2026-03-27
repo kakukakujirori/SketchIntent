@@ -30,7 +30,7 @@ def cleanse_sketch(sketch: datalib.Sketch) -> datalib.Sketch:
     _ = normalize_sketch(sketch)
     sketch = cleanse_sketch_primitives(sketch)
     sketch = cleanse_sketch_constraints(sketch)
-    sketch = complete_constraint_values(sketch)
+    sketch, _ = complete_constraint_values(sketch)
     return sketch
 
 

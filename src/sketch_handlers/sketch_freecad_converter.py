@@ -177,7 +177,7 @@ class SketchFreecadConverter:
         """
         Full conversion: Primitives + Constraints.
         """
-        sketch = complete_constraint_values(sketch)
+        sketch, _ = complete_constraint_values(sketch)
         doc, fc_sketch, primitive_freecad_mapping = self.to_freecad_primitives(sketch, doc_name, skip_invalid)
         constraint_freecad_mapping = self.to_freecad_constraints(sketch, fc_sketch, primitive_freecad_mapping, skip_invalid)
         doc.recompute()

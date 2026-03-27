@@ -22,7 +22,7 @@ def test_complete_constraint_values(sketch_ori: datalib.Sketch, eps: float = 0.1
         dprint(f"{pid}: {prim}")
 
     # Recover dimensions
-    sketch_new = complete_constraint_values(copy.deepcopy(sketch_ori))
+    sketch_new, _ = complete_constraint_values(copy.deepcopy(sketch_ori))
 
     # list to store before/after
     before_after: list[tuple[float, float, str]] = []

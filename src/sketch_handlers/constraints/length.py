@@ -28,7 +28,7 @@ class LengthHandler(ConstraintHandler):
     def decode(self, ref_indices: tuple[int, ...], params: np.ndarray, tokenpos_to_primitive: dict[int, str]) -> datalib.Constraint:
         refs = tuple(tokenpos_to_primitive[idx] for idx in ref_indices)
         val = float(params[0]) if len(params) > 0 else 0.0
-        return self.create_constraint(self.name, refs, val)
+        return self.create_constraint(self.name, refs, val, direction="MINIMUM")
 
     def to_freecad(self, constraint: datalib.Constraint, primitives: dict[str, datalib.Entity], primitive_geoID: dict[str, tuple[int, int]]) -> list[tuple[str, list, float | None]]:
         refs = self._get_ref_strings(constraint)
@@ -43,8 +43,7 @@ class LengthHandler(ConstraintHandler):
         raise ValueError(f"Invalid references or value for {self.name}: {refs=}, {props=}")
 
     def from_freecad(self, fc_constraint: 'Sketcher.Constraint', fc_primitives: list, geoID_to_primitive: dict[tuple[int, int], str]) -> datalib.Constraint | None:
-        # Length tokens don't come directly from a "Length" FC constraint type.
-        # They come from "Distance" on a single entity (handled by DistanceHandler).
+        # Length is undefined in FreeCAD. Instead, it uses the Distance constraint (thus handled by DistanceHandler).
         raise ValueError(f"Invalid constraint type for {self.name}: {fc_constraint.Type}")
 
     def validate_refs(self, refs: tuple[int | str, ...]) -> bool:

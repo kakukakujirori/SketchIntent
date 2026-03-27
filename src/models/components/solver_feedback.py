@@ -264,13 +264,17 @@ class SolverFeedback:
                 sketchgraphs_sketch.entities[ent_id] = ent_ori
 
         # Assign dimensional values (since the model doesn't infer dimensional contraint values)
-        sketchgraphs_sketch = complete_constraint_values(sketchgraphs_sketch)
+        sketchgraphs_sketch, invalid_constraints = complete_constraint_values(sketchgraphs_sketch, skip_invalid_constraints=True)
 
         if check_one_by_one:
             # incrementally add constraints
-            solver_report = SolverStatus(DistortingConstraints=[])
+            solver_report = SolverStatus(MalformedConstraints=invalid_constraints, DistortingConstraints=[])
             incremental_constraints: dict[str, datalib.Constraint] = {}
             for cons_id_str, cons in sketchgraphs_sketch.constraints.items():
+
+                # invalid constraints are already registered in solver_report
+                if cons_id_str in invalid_constraints:
+                    continue
 
                 sketchgraphs_sketch_incremental = datalib.Sketch(
                     entities=sketchgraphs_sketch.entities,
@@ -305,6 +309,9 @@ class SolverFeedback:
 
         # Final verdict
         status = self.get_solver_status(sketchgraphs_sketch)
+        status.MalformedConstraints = sorted(list(set(status.MalformedConstraints) | set(invalid_constraints)))
+        if status.MalformedConstraints:
+            status.Status = "Malformed"
 
         if check_one_by_one:
             solver_report.DoF = status.DoF if solver_report.Status == "Converged" else -1

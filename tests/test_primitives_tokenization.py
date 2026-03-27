@@ -75,7 +75,7 @@ def verify_primitives_tokenization(data_npy: str, limit: int = 1000):
             # Reconstruct Sketch
             sketch_orig = sketch_from_sequence(seq)
             normalize_sketch(sketch_orig)
-            sketch_orig = complete_constraint_values(sketch_orig)
+            sketch_orig, _ = complete_constraint_values(sketch_orig)
 
             # 2. Tokenize / Detokenize
             token_data = tokenizer.tokenize(sketch_orig)

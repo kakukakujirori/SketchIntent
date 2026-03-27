@@ -2473,7 +2473,7 @@ def main(args):
             _ = normalize_sketch(sketch, dst_length=1000)
             sketch = cleanse_sketch_primitives(sketch)
             sketch = cleanse_sketch_constraints(sketch)
-            sketch = complete_constraint_values(sketch)
+            sketch, _ = complete_constraint_values(sketch)
         except Exception as e:
             print(f"Error processing sequence {i}: {traceback.format_exc()}")
             with open(error_log, "a") as f:

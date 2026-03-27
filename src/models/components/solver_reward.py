@@ -1,3 +1,4 @@
+from sketch_handlers.sketch_utils import complete_constraint_values
 import numpy as np
 import torch
 
@@ -68,15 +69,19 @@ class SolverReward(torch.nn.Module):
                 cons_len, self.sketch_tokenizer.align_constraint_token_length_to)
             for i in range(cons_len):
                 cons_id, ref1, ref2, ref3 = body_tokens_reshaped[i].tolist()
-                cons_type = ConstraintToken(cons_id).name
-                handler = self.sketch_tokenizer.context.get_constraint_handler(cons_type)
-                if handler is not None:
-                    true_refs = tuple(r for r in [ref1, ref2, ref3] if r >= CONSTRAINT_VAL_OFFSET)
-                    pad_refs = tuple(r for r in [ref1, ref2, ref3] if r < CONSTRAINT_VAL_OFFSET)
-                    sorted_true_refs = handler._sort_ref_tokens(true_refs)
-                    body_tokens_reshaped[i] = np.array([cons_id, *sorted_true_refs, *pad_refs])
+                if cons_id in ConstraintToken._value2member_map_:
+                    cons_type = ConstraintToken(cons_id).name
+                    handler = self.sketch_tokenizer.context.get_constraint_handler(cons_type)
+                    if handler is not None:
+                        true_refs = tuple(r for r in [ref1, ref2, ref3] if r >= CONSTRAINT_VAL_OFFSET)
+                        pad_refs = tuple(r for r in [ref1, ref2, ref3] if r < CONSTRAINT_VAL_OFFSET)
+                        sorted_true_refs = handler._sort_ref_tokens(true_refs)
+                        body_tokens_reshaped[i] = np.array([cons_id, *sorted_true_refs, *pad_refs])
+                    else:
+                        continue  # cons_type can be STOP or PAD
                 else:
-                    continue  # cons_type can be STOP or PAD
+                    # Non-existing constraint type. We don't raise Exception here since it's outside the scope of this function
+                    continue
             body_tokens = body_tokens_reshaped.flatten()
         else:
             raise NotImplementedError("IMPLEMENT IT!!!")
@@ -103,12 +108,9 @@ class SolverReward(torch.nn.Module):
 
         for i, (prim, cons, sketch_original) in enumerate(zip(prim_tokens, cons_tokens, sketch_original_list)):
             prim, cons = prim.detach().cpu().numpy(), cons.detach().cpu().numpy()
-            solver_status, sketch, invalid_cons_token_blocks = self.solver_feedback.evaluate_constraints(prim, cons, sketch_original, check_one_by_one=True)
-            invalid_cons_token_blocks = np.array(invalid_cons_token_blocks)
-            assert invalid_cons_token_blocks.size == 0 or invalid_cons_token_blocks.shape == (invalid_cons_token_blocks.shape[0], 4), f"{invalid_cons_token_blocks=}"
 
             ################################################################
-            # 0. Replace after-STOP tokens by PAD (to prevent failse matching in Step 1)
+            # -1. Replace after-STOP tokens by PAD (to prevent false matching in Step 1)
             ################################################################
             stop_indices = (cons == ConstraintToken.Stop).nonzero()[0]
             first_stop_idx = stop_indices[0] if len(stop_indices) > 0 else -1
@@ -116,11 +118,19 @@ class SolverReward(torch.nn.Module):
                 cons[first_stop_idx+1:] = ConstraintToken.Pad
 
             ################################################################
+            # 0. Convert to a sketch
+            ################################################################
+            solver_status, sketch, invalid_cons_token_blocks = self.solver_feedback.evaluate_constraints(prim, cons, sketch_original, check_one_by_one=True)
+            invalid_cons_token_blocks = np.array(invalid_cons_token_blocks)
+            assert invalid_cons_token_blocks.size == 0 or invalid_cons_token_blocks.shape == (invalid_cons_token_blocks.shape[0], 4), f"{invalid_cons_token_blocks=}"
+
+            ################################################################
             # 1. Constraint-wise penalty
             ################################################################
             problematic_constraint_ids = set(solver_status.ConflictingConstraints + solver_status.RedundantConstraints + solver_status.MalformedConstraints)
             problematic_constraints = {c_id: sketch.constraints[c_id] for c_id in problematic_constraint_ids}
             problematic_sketch = datalib.Sketch(entities=sketch.entities, constraints=problematic_constraints)
+            problematic_sketch, _ = complete_constraint_values(problematic_sketch, skip_invalid_constraints=True)
 
             # NOTE: To deduce the corresponding token indices,
             #       we re-tokenize the problematic constraints, and
