@@ -293,6 +293,13 @@ class SolverFeedback:
                     solver_report.ConflictingConstraints.append(cons_id_str)
                 elif status.Status == "Malformed" or status.Status == "Failed" or status.Status.startswith("Error"):
                     solver_report.MalformedConstraints.append(cons_id_str)
+                elif status.Status == "OverConstrained":
+                    if status.MalformedConstraints:
+                        solver_report.MalformedConstraints.append(cons_id_str)
+                    elif status.ConflictingConstraints:
+                        solver_report.ConflictingConstraints.append(cons_id_str)
+                    elif status.RedundantConstraints:
+                        solver_report.RedundantConstraints.append(cons_id_str)
                 else:
                     raise NotImplementedError(f"Unhandled SolverStatus: {status.Status}")
 

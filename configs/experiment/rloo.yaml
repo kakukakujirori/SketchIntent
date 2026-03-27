@@ -18,7 +18,7 @@ model:
 
 trainer:
   check_val_every_n_epoch: null
-  val_check_interval: 100
+  val_check_interval: 10
 
 pretrained_ckpt_path: logs/train/runs/2026-03-26_18-46-25/checkpoints/epoch_29.ckpt
 

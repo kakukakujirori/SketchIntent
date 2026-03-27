@@ -2849,7 +2849,7 @@ if __name__ == '__main__':
     parser.add_argument(
         '--sequence_path',
         type=str,
-        default="/home/ryotaro/my_works/My-Vitruvion/data_processed/sg_filtered_unique.npy",
+        default="~/my_works/My-Vitruvion/data_processed/sg_filtered_unique.npy",
         help="Path to the sequence data",
     )
     parser.add_argument(
@@ -2865,4 +2865,5 @@ if __name__ == '__main__':
         help="Path to the Qwen3VL or Qwen3.5 projection module weight",
     )
     args = parser.parse_args()
+    args.sequence_path = os.path.expanduser(args.sequence_path)
     main(args)
