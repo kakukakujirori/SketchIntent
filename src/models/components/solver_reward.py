@@ -172,9 +172,9 @@ class SolverReward(torch.nn.Module):
 
                 # dimension constraints penalty
                 NumTotalConstraints = solver_status.NumRelationalConstraints + solver_status.NumDimensionalConstraints
-                if NumTotalConstraints == 0:
-                    if not (np.all(cons[:2] == np.array([ConstraintToken.Stop, ConstraintToken.Pad])) or np.all(cons[:2] == np.array([ConstraintToken.Start, ConstraintToken.Stop]))):
-                        raise ValueError(f"{visualize_constraint_sequence(cons)=}\n{solver_status=}")
+                # if NumTotalConstraints == 0:  # NOTE: Predicted constraint tokens can be [START, Coincident, STOP], so this check is invalid.
+                #     if not (np.all(cons[:2] == np.array([ConstraintToken.Stop, ConstraintToken.Pad])) or np.all(cons[:2] == np.array([ConstraintToken.Start, ConstraintToken.Stop]))):
+                #         raise ValueError(f"{visualize_constraint_sequence(cons)=}\n{solver_status=}")
 
                 seq_reward -= NumTotalConstraints / len(sketch.entities)
                 seq_reward -= solver_status.NumDimensionalConstraints / max(1, NumTotalConstraints)
