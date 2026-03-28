@@ -4,7 +4,7 @@ import torch
 from src.sketch_handlers.constants import ConstraintToken
 
 
-def visualize_constraint_sequence(tokens: torch.Tensor | np.ndarray, max_show: int | None = None):
+def visualize_constraint_sequence(tokens: torch.Tensor | np.ndarray, max_show: int | None = None) -> list:
     """Format constraint tokens for display."""
     if len(tokens.shape) > 1:
         return [visualize_constraint_sequence(t, max_show) for t in tokens]

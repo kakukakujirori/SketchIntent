@@ -377,10 +377,10 @@ class SolverFeedback:
         counts = {
             'fully_constrained': 0,
             'under_constrained': 0,
-            'over_constrained': 0,
+            'conflicting': 0,
             'redundant': 0,
             'malformed': 0,
-            'conversion_failed': 0,
+            'failed': 0,
         }
 
         for prim_tokens, cons_tokens, sketch_original in tqdm(zip(prim_tokens_batch, cons_tokens_batch, sketch_original_list), desc="Solver Testing"):
@@ -389,11 +389,11 @@ class SolverFeedback:
                 prim_tokens, cons_tokens, sketch_original, check_one_by_one=False)
 
             if status.Status == "Error":
-                counts['conversion_failed'] += 1
+                counts['failed'] += 1
             elif status.MalformedConstraints:
                 counts['malformed'] += 1
             elif status.ConflictingConstraints:
-                counts['over_constrained'] += 1
+                counts['conflicting'] += 1
             elif status.RedundantConstraints:
                 counts['redundant'] += 1
             elif status.DoF <= fully_constrained_dof:
@@ -402,15 +402,15 @@ class SolverFeedback:
                 counts['under_constrained'] += 1
 
         # Compute rates
-        total_valid = B - counts['conversion_failed']
+        total_valid = B - counts['failed']
         if total_valid == 0:
             return {}
 
         return {
             'fc_rate': counts['fully_constrained'] / total_valid,
             'under_rate': counts['under_constrained'] / total_valid,
-            'over_rate': counts['over_constrained'] / total_valid,
+            'conflicting_rate': counts['conflicting'] / total_valid,
             'redundant_rate': counts['redundant'] / total_valid,
             'malformed_rate': counts['malformed'] / total_valid,
-            'conversion_fail_rate': counts['conversion_failed'] / B,
+            'failed_rate': counts['failed'] / B,
         }

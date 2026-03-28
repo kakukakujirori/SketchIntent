@@ -79,11 +79,14 @@ wget "https://huggingface.co/Qwen/Qwen3-VL-30B-A3B-Thinking-GGUF/resolve/main/mm
 
 - Qwen3 Augmented Dataset
   ```bash
-  python scripts/qwen3_refine_data_with_solver.py
-  mkdir data_qwen && cp qwen3_refined_data_with_solver/*_refined.py data_qwen/
-  python scripts/convert_freecad_to_seq.py ./data_qwen3
+  python scripts/qwen3_refine_data_with_solver.py           # `data_qwen3_refined_with_solver` generated
+  python scripts/qwen3_sieve_generated_data.py --fc_only    # `data_qwen3_refined_with_solver/commands_refined_fc` generated
+  python scripts/convert_freecad_to_seq.py \
+    --data_dir ./data_qwen3_refined_with_solver/commands_refined_fc \
+    --out_path ./data_processed/data_qwen3.npy
   python scripts/cleanse_seq_for_freecad.py data_processed/data_qwen3.npy
   ```
+  After the preprocessing, you will obtain `data_processed/data_qwen3_unique_valid.npy`.
 
 ## Training
 

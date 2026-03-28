@@ -58,6 +58,7 @@ class ConstraintARModuleRLOO(L.LightningModule):
         self.accuracy_metric = TokenAccuracy(ignore_index=ConstraintToken.Pad)
         self.iou_metrics = ConstraintIoU(context, prefix_len=1)  # NOTE: prefix_len is important
         self.token_reordering = TokenReordering(context=context, prefix_len=1)  # NOTE: prefix_len is important
+        self.solver_feedback = SolverFeedback(context)
 
     def _reset_metrics(self):
         """Reset all metrics to prevent accumulation across epochs."""
@@ -280,18 +281,48 @@ class ConstraintARModuleRLOO(L.LightningModule):
             for metric_name, metric_value in iou_metrics.items():
                 self.log(f'validation_gen/{metric_name}', metric_value, add_dataloader_idx=False, sync_dist=True)
 
-            # Print comparison on rank 0
+            # Evaluate solver constraints and log solver feedback metrics
+            try:
+                solver_results = self.solver_feedback.evaluate_constraints_batch(
+                    batch['p_val'],
+                    generated,
+                    batch['sketch'],
+                    fully_constrained_dof=2,
+                )
+                if solver_results:
+                    for metric_name, metric_value in solver_results.items():
+                        self.log(f'validation_gen/solver_{metric_name}', metric_value, add_dataloader_idx=False, sync_dist=True)
+            except Exception as e:
+                if self.global_rank == 0:
+                    print(f"[on_validation_epoch_end] Solver evaluation failed: {e}")
+
+            # Print comparison on rank 0 and log text to Wandb
             if self.global_rank == 0:
                 print("\n" + "="*80)
                 print(f"VALIDATION SAMPLE COMPARISON")
                 print("="*80)
 
+                columns = ["Ground Truth", "Generated"]
+                table_data = []
+
                 for i in range(min(5, generated.size(0))):
+                    gt_str = ", ".join(visualize_constraint_sequence(target_sorted[i].cpu().numpy()))
+                    gen_str = ", ".join(visualize_constraint_sequence(generated_sorted[i].cpu().numpy()))
                     print(f"\n[Sample {i}]:")
-                    print(f"  GT  : {visualize_constraint_sequence(target_sorted[i].cpu().numpy())}")
-                    print(f"  Gen : {visualize_constraint_sequence(generated_sorted[i].cpu().numpy())}")
+                    print(f"  GT  : {gt_str}")
+                    print(f"  Gen : {gen_str}")
+                    table_data.append([gt_str, gen_str])
 
                 print("="*80 + "\n")
+
+                if hasattr(self, "logger") and self.logger is not None and hasattr(self.logger, "experiment"):
+                    experiment = self.logger.experiment
+                    if type(experiment).__name__ == "Run" and "wandb" in type(experiment).__module__:
+                        import wandb
+                        # Use getattr to suppress lint since linter thinks experiment is object
+                        getattr(experiment, "log")({
+                            f"validation/samples_loader_{loader_idx}": wandb.Table(columns=columns, data=table_data)
+                        })
 
     def test_step(self, batch: dict[str, Any], batch_idx: int, dataloader_idx: int = 0):
         loss, logits, target = self._compute_ce_loss(batch)
@@ -337,30 +368,47 @@ class ConstraintARModuleRLOO(L.LightningModule):
             for metric_name, metric_value in iou_metrics.items():
                 self.log(f'test_gen/{metric_name}', metric_value, add_dataloader_idx=False, sync_dist=True)
 
-            # Print samples on rank 0
+            # Print samples on rank 0 and log text to Wandb
             if self.global_rank == 0:
                 print("\n" + "="*80)
                 print(f"TEST SAMPLE COMPARISON")
                 print("="*80)
 
+                columns = ["Ground Truth", "Generated"]
+                table_data = []
+
                 for i in range(min(5, generated.size(0))):
+                    gt_str = ", ".join(visualize_constraint_sequence(target_sorted[i].cpu().numpy()))
+                    gen_str = ", ".join(visualize_constraint_sequence(generated_sorted[i].cpu().numpy()))
                     print(f"\n[Sample {i}]:")
-                    print(f"  GT  : {visualize_constraint_sequence(target_sorted[i].cpu().numpy())}")
-                    print(f"  Gen : {visualize_constraint_sequence(generated_sorted[i].cpu().numpy())}")
+                    print(f"  GT  : {gt_str}")
+                    print(f"  Gen : {gen_str}")
+                    table_data.append([gt_str, gen_str])
 
                 print("="*80 + "\n")
 
-            # Solver-based evaluation (rank 0 only)
-            if self.global_rank == 0:
-                try:
-                    solver_feedback = SolverFeedback(self.hparams.context)
-                    solver_results = solver_feedback.evaluate_constraints_batch(
-                        batch['p_val'],
-                        generated,
-                        batch['sketch'],
-                        fully_constrained_dof=2,
-                    )
-                    if solver_results:
+                if hasattr(self, "logger") and self.logger is not None and hasattr(self.logger, "experiment"):
+                    experiment = self.logger.experiment
+                    if type(experiment).__name__ == "Run" and "wandb" in type(experiment).__module__:
+                        import wandb
+                        # Use getattr to suppress linter type errors since experiment is Any
+                        getattr(experiment, "log")({
+                            f"test/samples_loader_{loader_idx}": wandb.Table(columns=columns, data=table_data)
+                        })
+
+            # Evaluate solver constraints and log solver feedback metrics
+            try:
+                solver_results = self.solver_feedback.evaluate_constraints_batch(
+                    batch['p_val'],
+                    generated,
+                    batch['sketch'],
+                    fully_constrained_dof=2,
+                )
+                if solver_results:
+                    for metric_name, metric_value in solver_results.items():
+                        self.log(f'test_gen/solver_{metric_name}', metric_value, add_dataloader_idx=False, sync_dist=True)
+                    if self.global_rank == 0:
                         print(f"Solver Report: {solver_results}")
-                except ImportError as e:
-                    print(str(e))
+            except Exception as e:
+                if self.global_rank == 0:
+                    print(f"Solver evaluation failed: {e}")

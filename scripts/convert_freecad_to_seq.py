@@ -75,24 +75,25 @@ def freecad_to_sketchgraphs(freecad_python_file: str) -> datalib.Sketch | str:
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Convert a batch of FreeCAD python command data into a single npy file.")
-    parser.add_argument("data_folder", type=str, help="Path to the folder containing FreeCAD python command data.")
-    parser.add_argument("--output_folder", type=str, default="data_processed", help="Directory output the npy file.")
+    parser.add_argument("--data_dir", type=str, help="Path to the folder containing FreeCAD python command data.")
+    parser.add_argument("--out_path", type=str, help="Path to output the npy file.")
     parser.add_argument("--num_quant_bins", type=int, default=64, help="FreeCAD conversion should work under this quantization lelvel.")
     args = parser.parse_args()
 
-    if not os.path.isdir(args.data_folder):
-        raise FileNotFoundError(f"{args.data_folder} is not a folder.")
+    if not os.path.isdir(args.data_dir):
+        raise FileNotFoundError(f"{args.data_dir} is not a folder.")
 
-    os.makedirs(args.output_folder, exist_ok=True)
+    if not args.out_path.endswith(".npy"):
+        raise ValueError(f"{args.out_path} must end with .npy")
+    os.makedirs(os.path.dirname(args.out_path), exist_ok=True)
 
     # Process
-    files = sorted([os.path.join(args.data_folder, f) for f in os.listdir(args.data_folder) if f.endswith(".py")])
+    files = sorted([os.path.join(args.data_dir, f) for f in os.listdir(args.data_dir) if f.endswith(".py")])
     sequences = []
     sketch_ids = []
     error_list = []
 
     for i, f in enumerate(tqdm(files)):
-        print(i, f)
         sketch_or_error = freecad_to_sketchgraphs(f)
         if isinstance(sketch_or_error, str):
             print(f"Error processing {f}:")
@@ -128,12 +129,10 @@ if __name__ == '__main__':
     })
 
     # Save
-    basename = os.path.basename(os.path.normpath(args.data_folder)) + ".npy"
-    output_file = os.path.join(args.output_folder, basename)
-    np.save(output_file, out_npy, allow_pickle=False)
-    print(f"Output saved at {output_file}.")
+    np.save(args.out_path, out_npy, allow_pickle=False)
+    print(f"Output saved at {args.out_path}.")
     print(f"Files with errors: {len(error_list)}/{len(files)}")
     if error_list:
-        with open(output_file + ".errors", "w") as f:
+        with open(args.out_path + ".errors", "w") as f:
             for f_path, e_msg in error_list:
                 f.write(f"{f_path}:\n{e_msg}\n\n")

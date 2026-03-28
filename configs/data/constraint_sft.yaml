@@ -1,6 +1,6 @@
 _target_: src.data.constraint_datamodule.ConstraintDataModule
 
-train_sequence_file: data_processed/data_qwen_unique_valid.npy
+train_sequence_file: data_processed/data_qwen3_unique_valid.npy
 val_sequence_file: data_processed/data_ryotaro_prim5_unique_valid.npy
 test_sequence_file: data_processed/data_ryotaro_prim5_unique_valid.npy
 
