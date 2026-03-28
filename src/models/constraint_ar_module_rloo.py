@@ -111,14 +111,10 @@ class ConstraintARModuleRLOO(L.LightningModule):
 
         expanded = {k: v.repeat_interleave(K, dim=0) if isinstance(v, torch.Tensor) else [x for x in v for _ in range(K)] for k, v in batch.items()}  # [0, 1, 2, ...] => [0, ..., 0, 1, ..., 1, 2, ..., 2, ...]
 
+        # Sample trajectories
         with torch.no_grad():
             generated = self.generate_sample(expanded, max_len, dtype=batch['c_val'].dtype)
             rewards = self.reward(expanded['p_val'], generated, expanded['sketch']).to(self.device)  # [B*K, L]
-
-        # RLOO advantage
-        rewards_grouped = rewards.view(B, K, max_len)
-        baseline   = (rewards_grouped.sum(dim=1, keepdim=True) - rewards_grouped) / (K - 1)
-        advantages = (rewards_grouped - baseline).view(B * K, max_len)[:, 1:]  # [B*K, L-1]
 
         mask = (generated[:, 1:] != ConstraintToken.Pad).float()   # [B*K, L-1]
         n_valid = mask.sum().clamp(min=1)
@@ -131,23 +127,37 @@ class ConstraintARModuleRLOO(L.LightningModule):
             dim=-1, index=generated[:, 1:].unsqueeze(-1)
         ).squeeze(-1)                                              # [B*K, L-1]
 
-        # KL (no_grad)
-        kl_loss = torch.tensor(0.0, device=self.device)
+        # KL penalty
+        kl_loss_metric = torch.tensor(0.0, device=self.device)
+        adjusted_rewards = rewards.clone()
         if self.kl_coeff > 0.0:
             with torch.no_grad():
                 ref_output = self.ref_model({**expanded, 'c_val': generated})
                 ref_log_probs = torch.log_softmax(ref_output[:, :-1], dim=-1).gather(
                     dim=-1, index=generated[:, 1:].unsqueeze(-1)
                 ).squeeze(-1)
-            kl_loss = ((token_log_probs - ref_log_probs) * mask).sum() / n_valid
+                kl_penalty = token_log_probs.detach() - ref_log_probs
 
+            # Subtract KL penalty from rewards
+            adjusted_rewards[:, 1:] -= self.kl_coeff * kl_penalty
+            kl_loss_metric = (kl_penalty * mask).sum() / n_valid
+
+        # Compute Returns (cumulative sum of future rewards)
+        returns = adjusted_rewards.flip(dims=[1]).cumsum(dim=1).flip(dims=[1])
+
+        # RLOO advantage
+        returns_grouped = returns.view(B, K, max_len)
+        baseline   = (returns_grouped.sum(dim=1, keepdim=True) - returns_grouped) / (K - 1)
+        advantages = (returns_grouped - baseline).view(B * K, max_len)[:, 1:]  # [B*K, L-1]
+
+        # Policy Gradient loss
         pg_loss = -(advantages.detach() * token_log_probs * mask).sum() / n_valid
-        loss = pg_loss + self.kl_coeff * kl_loss
+        loss = pg_loss
 
         stop_mask = (generated == ConstraintToken.Stop).float()
         metrics = {
             'pg_loss':        pg_loss,
-            'kl_loss':        kl_loss,
+            'kl_loss':        kl_loss_metric,
             'reward_mean':    rewards.mean(),
             'reward_std':     rewards.std(),
             'reward_at_stop': (rewards * stop_mask).sum() / stop_mask.sum().clamp(min=1),
@@ -190,11 +200,19 @@ class ConstraintARModuleRLOO(L.LightningModule):
             next_token_logits[:, ConstraintToken.Mask] = -torch.inf
             next_token = torch.distributions.Categorical(logits=next_token_logits).sample()
 
+            # Replace with Pad if sequence has already generated STOP
+            already_stopped = (generated[:, :pos+1] == ConstraintToken.Stop).any(dim=1)
+            next_token = torch.where(
+                already_stopped,
+                torch.tensor(ConstraintToken.Pad, device=self.device, dtype=dtype),
+                next_token,
+            )
+
             # Fill in position pos+1
             generated[:, pos + 1] = next_token
 
             # Early stopping if all sequences have generated STOP
-            if (generated == ConstraintToken.Stop).any(dim=1).all():
+            if already_stopped.all():
                 break
 
         return generated
