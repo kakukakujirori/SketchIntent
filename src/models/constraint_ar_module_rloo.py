@@ -139,7 +139,7 @@ class ConstraintARModuleRLOO(L.LightningModule):
                 kl_penalty = token_log_probs.detach() - ref_log_probs
 
             # Subtract KL penalty from rewards
-            adjusted_rewards[:, 1:] -= self.kl_coeff * kl_penalty
+            adjusted_rewards[:, 1:] -= self.kl_coeff * kl_penalty * mask
             kl_loss_metric = (kl_penalty * mask).sum() / n_valid
 
         # Compute Returns (cumulative sum of future rewards)

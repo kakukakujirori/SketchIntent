@@ -13,6 +13,7 @@ class SolverReward(torch.nn.Module):
     def __init__(
         self,
         context: SketchContext,
+        reward_dof_reduction: float = 1.0,
         penalty_conflicting: float = -1.0,
         penalty_redundant: float = -1.0,
         penalty_malformed: float = -0.5,
@@ -31,6 +32,7 @@ class SolverReward(torch.nn.Module):
         assert all(v <= 0 for v in [penalty_conflicting, penalty_redundant, penalty_malformed, penalty_deformed, penalty_per_problematic_constraint, penalty_num_total_constraints, penalty_num_dimensional_constraints]), \
             f"{penalty_conflicting=}, {penalty_redundant=}, {penalty_malformed=}, {penalty_deformed=}, {penalty_per_problematic_constraint=}, {penalty_num_total_constraints=}, {penalty_num_dimensional_constraints=}"
 
+        self.reward_dof_reduction = reward_dof_reduction
         self.penalty_conflicting = penalty_conflicting
         self.penalty_redundant = penalty_redundant
         self.penalty_malformed = penalty_malformed
@@ -163,12 +165,14 @@ class SolverReward(torch.nn.Module):
                 if solver_status.RedundantConstraints:   invalid_penalties.append(self.penalty_redundant)
                 if solver_status.MalformedConstraints:   invalid_penalties.append(self.penalty_malformed)
 
-                seq_reward = min(invalid_penalties) # heaviest penalty as the final penalty
+                # heaviest penalty as the final penalty. If no specific penalty (e.g. conversion error), use 0.0.
+                seq_reward = min(invalid_penalties) if invalid_penalties else 0.0
 
             else:
                 # valid sequence
                 orig_dof = self._get_dof_without_constraints(sketch)
-                seq_reward = (orig_dof - solver_status.DoF) / (orig_dof - self.fully_constrained_dof)
+                dof_reduction_rate = (orig_dof - solver_status.DoF) / max(1, orig_dof - self.fully_constrained_dof)
+                seq_reward = self.reward_dof_reduction * dof_reduction_rate
 
                 # geometric distortion
                 if solver_status.DistortingConstraints:

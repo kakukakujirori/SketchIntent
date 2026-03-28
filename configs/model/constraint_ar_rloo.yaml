@@ -15,13 +15,14 @@ model:
 reward:
   _target_: src.models.components.solver_reward.SolverReward
   context: ${data.context}
+  reward_dof_reduction: 10.0
   penalty_conflicting: -1.0
   penalty_redundant: -1.0
   penalty_malformed: -0.5
   penalty_deformed: -0.25
   penalty_per_problematic_constraint: -1.0
-  penalty_num_total_constraints: -0.01
-  penalty_num_dimensional_constraints: -0.2
+  penalty_num_total_constraints: -0.0
+  penalty_num_dimensional_constraints: -0.0
   fully_constrained_dof: 2
   distortion_threshold: null
 
