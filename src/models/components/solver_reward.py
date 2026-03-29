@@ -1,3 +1,5 @@
+from collections import Counter
+
 import numpy as np
 import torch
 
@@ -98,7 +100,7 @@ class SolverReward(torch.nn.Module):
         prim_tokens: torch.Tensor,
         cons_tokens: torch.Tensor,
         sketch_original_list: list[datalib.Sketch] | None = None,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, dict[str, Counter]]:
         """
         Args:
             prim_tokens: (B, L_prim)
@@ -110,6 +112,9 @@ class SolverReward(torch.nn.Module):
             sketch_original_list = [None] * prim_tokens.size(0)
         assert prim_tokens.size(0) == len(sketch_original_list), f"Batch size mismatch: {prim_tokens.shape=} != {len(sketch_original_list)=}"
         scores = torch.zeros_like(cons_tokens, dtype=torch.float32)
+
+        solver_dof_counter: Counter[int] = Counter()
+        solver_status_counter: Counter[str] = Counter()
 
         for i, (prim, cons, sketch_original) in enumerate(zip(prim_tokens, cons_tokens, sketch_original_list)):
             prim, cons = prim.detach().cpu().numpy(), cons.detach().cpu().numpy()
@@ -127,6 +132,9 @@ class SolverReward(torch.nn.Module):
             ################################################################
             solver_status, sketch, constraint_to_token_start, invalid_constraint_block_start = \
                 self.solver_feedback.evaluate_constraints(prim, cons, sketch_original, check_one_by_one=True)
+
+            solver_dof_counter[solver_status.DoF] += 1
+            solver_status_counter[solver_status.Status] += 1
 
             ################################################################
             # 1. Constraint-wise penalty
@@ -194,4 +202,8 @@ class SolverReward(torch.nn.Module):
             ################################################################
             scores[i, first_stop_idx] += seq_reward
 
-        return scores
+        metrics = {
+            "dof": solver_dof_counter,
+            "status": solver_status_counter,
+        }
+        return scores, metrics

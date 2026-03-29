@@ -114,8 +114,27 @@ class ConstraintARModuleRLOO(L.LightningModule):
 
         # Sample trajectories
         with torch.no_grad():
-            generated = self.generate_sample(expanded, max_len, dtype=batch['c_val'].dtype)
-            rewards = self.reward(expanded['p_val'], generated, expanded['sketch']).to(self.device)  # [B*K, L]
+            generated, gen_logprobs = self.generate_sample(expanded, max_len, dtype=batch['c_val'].dtype)
+            rewards, solver_metrics = self.reward(expanded['p_val'], generated, expanded['sketch'])
+            rewards = rewards.to(self.device).float()  # [B*K, L]
+
+            # Process solver metrics from collections.Counter into scalar values for logging
+            parsed_solver_metrics = {}
+            if "status" in solver_metrics:
+                status_counter = solver_metrics["status"]
+                total_status = sum(status_counter.values())
+                if total_status > 0:
+                    for s, c in status_counter.items():
+                        # Group all "Error: ..." statuses into a single "Error" key
+                        s_name = s.split(':')[0].strip() if s.startswith("Error") else s
+                        parsed_solver_metrics[f"solver_{s_name.lower()}_rate"] = c / total_status
+
+            if "dof" in solver_metrics:
+                dof_counter = solver_metrics["dof"]
+                # Compute mean DoF only for successful constraint sequences (DoF >= 0)
+                valid_dof_sum = sum(d * c for d, c in dof_counter.items() if d >= 0)
+                valid_dof_count = sum(c for d, c in dof_counter.items() if d >= 0)
+                parsed_solver_metrics["solver_valid_dof_mean"] = valid_dof_sum / valid_dof_count if valid_dof_count > 0 else 0.0
 
         mask = (generated[:, 1:] != ConstraintToken.Pad).float()   # [B*K, L-1]
         n_valid = mask.sum().clamp(min=1)
@@ -124,9 +143,15 @@ class ConstraintARModuleRLOO(L.LightningModule):
         gen_batch = {**expanded, 'c_val': generated}
         output = self.model(gen_batch)                             # [B*K, L, V]
         logits = output[:, :-1, :]                                 # [B*K, L-1, V]
-        token_log_probs = torch.log_softmax(logits, dim=-1).gather(
-            dim=-1, index=generated[:, 1:].unsqueeze(-1)
-        ).squeeze(-1)                                              # [B*K, L-1]
+
+        dist = torch.distributions.Categorical(logits=logits)
+        entropy = (dist.entropy() * mask).sum() / n_valid
+
+        token_log_probs = dist.log_prob(generated[:, 1:])          # [B*K, L-1]
+
+        # Ratio
+        ratio = torch.exp(token_log_probs - gen_logprobs[:, 1:])
+        avg_ratio = (ratio * mask).sum() / n_valid
 
         # KL penalty
         kl_loss_metric = torch.tensor(0.0, device=self.device)
@@ -162,6 +187,9 @@ class ConstraintARModuleRLOO(L.LightningModule):
             'reward_mean':    rewards.mean(),
             'reward_std':     rewards.std(),
             'reward_at_stop': (rewards * stop_mask).sum() / stop_mask.sum().clamp(min=1),
+            'entropy':        entropy,
+            'ratio':          avg_ratio,
+            **parsed_solver_metrics
         }
         return loss, metrics
 
@@ -177,14 +205,15 @@ class ConstraintARModuleRLOO(L.LightningModule):
         batch: dict[str, Any],
         max_len: int,
         dtype: torch.dtype = torch.long,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         # Start with just START token, rest is zeros (will be filled)
         batch_size = batch['p_val'].shape[0]
         generated = torch.full((batch_size, max_len), ConstraintToken.Pad, device=self.device, dtype=dtype)
         generated[:, 0] = ConstraintToken.Start
+        logprobs = torch.zeros((batch_size, max_len), device=self.device, dtype=torch.float32)
 
         # Autoregressive generation
-        for pos in tqdm(range(max_len - 1), desc="Sampling"):
+        for pos in tqdm(range(max_len - 1), desc="Sampling", leave=False, disable=self.training):
             # Create batch with current generated tokens
             gen_batch = {
                 'p_val': batch['p_val'],
@@ -199,7 +228,9 @@ class ConstraintARModuleRLOO(L.LightningModule):
             # Sample next token at position pos
             next_token_logits = output[:, pos, :]  # [B, V]
             next_token_logits[:, ConstraintToken.Mask] = -torch.inf
-            next_token = torch.distributions.Categorical(logits=next_token_logits).sample()
+            dist = torch.distributions.Categorical(logits=next_token_logits)
+            next_token = dist.sample()
+            next_logprob = dist.log_prob(next_token)
 
             # Replace with Pad if sequence has already generated STOP
             already_stopped = (generated[:, :pos+1] == ConstraintToken.Stop).any(dim=1)
@@ -208,15 +239,19 @@ class ConstraintARModuleRLOO(L.LightningModule):
                 torch.tensor(ConstraintToken.Pad, device=self.device, dtype=dtype),
                 next_token,
             )
-
-            # Fill in position pos+1
+            next_logprob = torch.where(
+                already_stopped,
+                torch.tensor(0.0, device=self.device, dtype=torch.float32),
+                next_logprob,
+            )
             generated[:, pos + 1] = next_token
+            logprobs[:, pos + 1] = next_logprob
 
             # Early stopping if all sequences have generated STOP
             if already_stopped.all():
                 break
 
-        return generated
+        return generated, logprobs
 
     def training_step(self, batch: dict[str, Any], batch_idx: int):
         rl_loss, rl_metrics = self._compute_rloo_loss(batch)
@@ -239,64 +274,56 @@ class ConstraintARModuleRLOO(L.LightningModule):
             self.ref_model.load_state_dict(self.model.state_dict())
 
     def validation_step(self, batch: dict[str, Any], batch_idx: int, dataloader_idx: int = 0):
-        loss, logits, target = self._compute_ce_loss(batch)
+        loss, logits, ce_target = self._compute_ce_loss(batch)
         preds = self.logits_to_preds(logits)
 
-        accuracy = self.accuracy_metric(preds, target)
+        accuracy = self.accuracy_metric(preds, ce_target)
 
         self.log(f'validation/loss', loss, add_dataloader_idx=True, sync_dist=True)
         self.log(f'validation/accuracy', accuracy, add_dataloader_idx=True, sync_dist=True)
 
+        # Generate sample
+        full_target = batch['c_val']
+        max_len = full_target.shape[1]
+        generated, _ = self.generate_sample(batch, max_len, dtype=full_target.dtype)
+
+        # Compute constraint-level metrics
+        generated_sorted, _ = self.token_reordering(generated, None, None, "canonical_with_tail_strip")
+        target_sorted, _ = self.token_reordering(full_target, None, None, "canonical_with_tail_strip")
+        iou_metrics = self.iou_metrics(generated_sorted, target_sorted)
+        for metric_name, metric_value in iou_metrics.items():
+            self.log(f'validation_gen/{metric_name}', metric_value, add_dataloader_idx=False, sync_dist=True, on_epoch=True)
+
+        # Evaluate solver constraints and log solver feedback metrics
+        try:
+            solver_results = self.solver_feedback.evaluate_constraints_batch(
+                batch['p_val'],
+                generated,
+                batch['sketch'],
+                fully_constrained_dof=2,
+            )
+            if solver_results:
+                for metric_name, metric_value in solver_results.items():
+                    self.log(f'validation_gen/solver_{metric_name}', metric_value, add_dataloader_idx=False, sync_dist=True, on_epoch=True)
+        except Exception as e:
+            if self.global_rank == 0:
+                print(f"[validation_step] Solver evaluation failed: {e}")
+
+        # Save first batch for wandb visualization
+        if batch_idx == 0:
+            if not hasattr(self, "_val_samples"):
+                self._val_samples = []
+            self._val_samples.append((target_sorted, generated_sorted, dataloader_idx))
+
     @torch.no_grad()
     def on_validation_epoch_end(self):
-        val_loaders = self.trainer.val_dataloaders
-        if val_loaders is None:
-            return
-
-        # Handle single dataloader vs list
-        if not isinstance(val_loaders, list):
-            val_loaders = [val_loaders]
-
-        # Reset metrics before generation evaluation
+        # Reset metrics
         self._reset_metrics()
 
-        for loader_idx, loader in enumerate(val_loaders):
-            try:
-                val_iter = next(iter(loader))
-            except StopIteration:
-                continue
+        if not hasattr(self, "_val_samples") or not self._val_samples:
+            return
 
-            # Move batch to device
-            batch = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v for k, v in val_iter.items()}
-
-            # Get target and sequence length
-            target = batch['c_val']
-            _, max_len = target.shape
-            generated = self.generate_sample(batch, max_len, dtype=target.dtype)
-
-            # Compute constraint-level metrics
-            generated_sorted, _ = self.token_reordering(generated, None, None, "canonical_with_tail_strip")
-            target_sorted, _ = self.token_reordering(target, None, None, "canonical_with_tail_strip")
-            iou_metrics = self.iou_metrics(generated_sorted, target_sorted)
-            for metric_name, metric_value in iou_metrics.items():
-                self.log(f'validation_gen/{metric_name}', metric_value, add_dataloader_idx=False, sync_dist=True)
-
-            # Evaluate solver constraints and log solver feedback metrics
-            try:
-                solver_results = self.solver_feedback.evaluate_constraints_batch(
-                    batch['p_val'],
-                    generated,
-                    batch['sketch'],
-                    fully_constrained_dof=2,
-                )
-                if solver_results:
-                    for metric_name, metric_value in solver_results.items():
-                        self.log(f'validation_gen/solver_{metric_name}', metric_value, add_dataloader_idx=False, sync_dist=True)
-            except Exception as e:
-                if self.global_rank == 0:
-                    print(f"[on_validation_epoch_end] Solver evaluation failed: {e}")
-
-            # Print comparison on rank 0 and log text to Wandb
+        for target_sorted, generated_sorted, loader_idx in self._val_samples:
             if self.global_rank == 0:
                 print("\n" + "="*80)
                 print(f"VALIDATION SAMPLE COMPARISON")
@@ -305,7 +332,7 @@ class ConstraintARModuleRLOO(L.LightningModule):
                 columns = ["Ground Truth", "Generated"]
                 table_data = []
 
-                for i in range(min(5, generated.size(0))):
+                for i in range(min(5, generated_sorted.size(0))):
                     gt_str = ", ".join(visualize_constraint_sequence(target_sorted[i].cpu().numpy()))
                     gen_str = ", ".join(visualize_constraint_sequence(generated_sorted[i].cpu().numpy()))
                     print(f"\n[Sample {i}]:")
@@ -315,60 +342,68 @@ class ConstraintARModuleRLOO(L.LightningModule):
 
                 print("="*80 + "\n")
 
-                if hasattr(self, "logger") and self.logger is not None and hasattr(self.logger, "experiment"):
-                    experiment = self.logger.experiment
-                    if type(experiment).__name__ == "Run" and "wandb" in type(experiment).__module__:
-                        import wandb
-                        # Use getattr to suppress lint since linter thinks experiment is object
-                        getattr(experiment, "log")({
-                            f"validation/samples_loader_{loader_idx}": wandb.Table(columns=columns, data=table_data)
-                        })
+                if self.logger is not None and hasattr(self.logger, "log_text"):
+                    self.logger.log_text(  # type: ignore
+                        key=f"validation/samples_{loader_idx}",
+                        columns=columns,
+                        data=table_data,
+                    )
+
+        self._val_samples.clear()
 
     def test_step(self, batch: dict[str, Any], batch_idx: int, dataloader_idx: int = 0):
-        loss, logits, target = self._compute_ce_loss(batch)
+        loss, logits, ce_target = self._compute_ce_loss(batch)
         preds = self.logits_to_preds(logits)
 
-        accuracy = self.accuracy_metric(preds, target)
+        accuracy = self.accuracy_metric(preds, ce_target)
 
         self.log(f'test/loss', loss, add_dataloader_idx=True, sync_dist=True)
         self.log(f'test/accuracy', accuracy, add_dataloader_idx=True, sync_dist=True)
 
+        # Generate sample
+        full_target = batch['c_val']
+        max_len = full_target.shape[1]
+        generated, _ = self.generate_sample(batch, max_len, dtype=full_target.dtype)
+
+        # Compute constraint-level metrics
+        generated_sorted, _ = self.token_reordering(generated, None, None, "canonical_with_tail_strip")
+        target_sorted, _ = self.token_reordering(full_target, None, None, "canonical_with_tail_strip")
+        iou_metrics = self.iou_metrics(generated_sorted, target_sorted)
+        for metric_name, metric_value in iou_metrics.items():
+            self.log(f'test_gen/{metric_name}', metric_value, add_dataloader_idx=False, sync_dist=True, on_epoch=True)
+
+        # Evaluate solver constraints and log solver feedback metrics
+        try:
+            solver_results = self.solver_feedback.evaluate_constraints_batch(
+                batch['p_val'],
+                generated,
+                batch['sketch'],
+                fully_constrained_dof=2,
+            )
+            if solver_results:
+                for metric_name, metric_value in solver_results.items():
+                    self.log(f'test_gen/solver_{metric_name}', metric_value, add_dataloader_idx=False, sync_dist=True, on_epoch=True)
+                if self.global_rank == 0:
+                    print(f"Solver Report: {solver_results}")
+        except Exception as e:
+            if self.global_rank == 0:
+                print(f"[test_step] Solver evaluation failed: {e}")
+
+        # Save first batch for wandb visualization
+        if batch_idx == 0:
+            if not hasattr(self, "_test_samples"):
+                self._test_samples = []
+            self._test_samples.append((target_sorted, generated_sorted, dataloader_idx))
+
     @torch.no_grad()
     def on_test_epoch_end(self):
-        """Generate samples autoregressively and compute metrics for test dataloaders."""
-        test_loaders = self.trainer.test_dataloaders
-        if test_loaders is None:
-            return
-
-        # Handle single dataloader vs list
-        if not isinstance(test_loaders, list):
-            test_loaders = [test_loaders]
-
-        # Reset metrics before generation evaluation
+        # Reset metrics
         self._reset_metrics()
 
-        for loader_idx, loader in enumerate(test_loaders):
-            try:
-                test_iter = next(iter(loader))
-            except StopIteration:
-                continue
+        if not hasattr(self, "_test_samples") or not self._test_samples:
+            return
 
-            # Move batch to device
-            batch = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v for k, v in test_iter.items()}
-
-            # Get target and sequence length
-            target = batch['c_val']
-            batch_size, max_len = target.shape
-            generated = self.generate_sample(batch, max_len, dtype=target.dtype)
-
-            # Compute constraint-level metrics
-            generated_sorted, _ = self.token_reordering(generated, None, None, "canonical_with_tail_strip")
-            target_sorted, _ = self.token_reordering(target, None, None, "canonical_with_tail_strip")
-            iou_metrics = self.iou_metrics(generated_sorted, target_sorted)
-            for metric_name, metric_value in iou_metrics.items():
-                self.log(f'test_gen/{metric_name}', metric_value, add_dataloader_idx=False, sync_dist=True)
-
-            # Print samples on rank 0 and log text to Wandb
+        for target_sorted, generated_sorted, loader_idx in self._test_samples:
             if self.global_rank == 0:
                 print("\n" + "="*80)
                 print(f"TEST SAMPLE COMPARISON")
@@ -377,7 +412,7 @@ class ConstraintARModuleRLOO(L.LightningModule):
                 columns = ["Ground Truth", "Generated"]
                 table_data = []
 
-                for i in range(min(5, generated.size(0))):
+                for i in range(min(5, generated_sorted.size(0))):
                     gt_str = ", ".join(visualize_constraint_sequence(target_sorted[i].cpu().numpy()))
                     gen_str = ", ".join(visualize_constraint_sequence(generated_sorted[i].cpu().numpy()))
                     print(f"\n[Sample {i}]:")
@@ -387,28 +422,11 @@ class ConstraintARModuleRLOO(L.LightningModule):
 
                 print("="*80 + "\n")
 
-                if hasattr(self, "logger") and self.logger is not None and hasattr(self.logger, "experiment"):
-                    experiment = self.logger.experiment
-                    if type(experiment).__name__ == "Run" and "wandb" in type(experiment).__module__:
-                        import wandb
-                        # Use getattr to suppress linter type errors since experiment is Any
-                        getattr(experiment, "log")({
-                            f"test/samples_loader_{loader_idx}": wandb.Table(columns=columns, data=table_data)
-                        })
+                if self.logger is not None and hasattr(self.logger, "log_text"):
+                    self.logger.log_text(  # type: ignore
+                        key=f"test/samples_{loader_idx}",
+                        columns=columns,
+                        data=table_data,
+                    )
 
-            # Evaluate solver constraints and log solver feedback metrics
-            try:
-                solver_results = self.solver_feedback.evaluate_constraints_batch(
-                    batch['p_val'],
-                    generated,
-                    batch['sketch'],
-                    fully_constrained_dof=2,
-                )
-                if solver_results:
-                    for metric_name, metric_value in solver_results.items():
-                        self.log(f'test_gen/solver_{metric_name}', metric_value, add_dataloader_idx=False, sync_dist=True)
-                    if self.global_rank == 0:
-                        print(f"Solver Report: {solver_results}")
-            except Exception as e:
-                if self.global_rank == 0:
-                    print(f"Solver evaluation failed: {e}")
+        self._test_samples.clear()
