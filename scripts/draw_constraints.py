@@ -25,7 +25,7 @@ from FreeCAD import Vector
 # 1. データ抽出ロジック (Extraction)
 # ==========================================
 
-def export_sketch_to_dict(sketch_obj: 'Sketcher.SketchObject') -> dict[str, dict[str, Any]]:
+def export_sketch_to_dict(sketch_obj: 'Sketcher.SketchObject') -> dict[str, list[dict[str, Any]]]:
     drawing_data = {
         "primitives": [],
         "constraints": []
@@ -105,7 +105,7 @@ def export_sketch_to_dict(sketch_obj: 'Sketcher.SketchObject') -> dict[str, dict
 # 2. ファイルロード & 実行ロジック (Loading)
 # ==========================================
 
-def load_and_extract_from_file(filepath_or_command_list: str | list[str]) -> dict[str, dict[str, Any]] | None:
+def load_and_extract_from_file(filepath_or_command_list: str | list[str]) -> dict[str, list[dict[str, Any]]] | None:
     """
     指定されたPythonファイルを実行し、生成されたSketchからデータを抽出し、ドキュメントを閉じる
     """
@@ -167,7 +167,7 @@ def load_and_extract_from_file(filepath_or_command_list: str | list[str]) -> dic
 # 3. 可視化ロジック (Visualizing)
 # ==========================================
 
-def _draw_single_sketch(ax, data, title: str | None = None, title_fontsize: int = 24, icon_fontsize: int = 10):
+def _draw_single_sketch(ax, data: dict[str, list[dict[str, Any]]], title: str | None = None, title_fontsize: int = 24, icon_fontsize: int = 10):
     """Helper function to draw a single sketch on a given axes."""
     ax.set_aspect('equal')
     ax.axis('off') # Hide axes for cleaner look
@@ -778,7 +778,7 @@ def _draw_single_sketch(ax, data, title: str | None = None, title_fontsize: int 
 
 
 def visualize_sketch_for_vlm(
-    data,
+    data: dict[str, list[dict[str, Any]]] | None,
     save_path: str | None = None,
     title: str | None = None,
     title_fontsize: int = 24,
