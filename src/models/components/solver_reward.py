@@ -1,4 +1,6 @@
+import os
 from collections import Counter
+from concurrent.futures import ProcessPoolExecutor
 
 import numpy as np
 import torch
@@ -9,6 +11,19 @@ from src.models.components.token_visualizer import visualize_constraint_sequence
 from src.sketch_handlers.constants import ConstraintToken, CONSTRAINT_VAL_OFFSET
 from src.sketch_handlers.context import SketchContext
 from src.sketch_handlers.sketch_tokenizer import SketchTokenizer
+
+_worker_solver_feedback: SolverFeedback | None = None
+
+def _init_worker(context, distortion_threshold):
+    global _worker_solver_feedback
+    _worker_solver_feedback = SolverFeedback(context, distortion_threshold)
+
+def _evaluate_single_worker(args):
+    prim_np, cons_np, sketch_original = args
+    assert _worker_solver_feedback is not None
+    return _worker_solver_feedback.evaluate_constraints(
+        prim_np, cons_np, sketch_original, check_one_by_one=True
+    )
 
 
 class SolverReward(torch.nn.Module):
@@ -27,7 +42,7 @@ class SolverReward(torch.nn.Module):
         distortion_threshold: float | None = None,
     ):
         super().__init__()
-        self.solver_feedback = SolverFeedback(context, distortion_threshold = distortion_threshold or 1/context.num_quantization_bins)
+        # self.solver_feedback = SolverFeedback(context, distortion_threshold = distortion_threshold or 1/context.num_quantization_bins)
         self.sketch_tokenizer = SketchTokenizer(context)
         self.fully_constrained_dof = fully_constrained_dof
 
@@ -42,6 +57,14 @@ class SolverReward(torch.nn.Module):
         self.penalty_per_problematic_constraint = penalty_per_problematic_constraint
         self.penalty_num_total_constraints = penalty_num_total_constraints
         self.penalty_num_dimensional_constraints = penalty_num_dimensional_constraints
+
+        # Execution and caching
+        self.context = context
+        self.distortion_threshold = distortion_threshold or 1/context.num_quantization_bins
+        self.max_workers = os.cpu_count()
+        self._evaluation_cache = {}
+        self.max_cache_size = 20000
+
 
     def _get_dof_without_constraints(self, sketch: datalib.Sketch) -> int:
         dof = 0
@@ -108,30 +131,74 @@ class SolverReward(torch.nn.Module):
             sketch_original_list: Original sketch, used for precise primitive value assignment.
         """
         assert prim_tokens.size(0) == cons_tokens.size(0), f"Batch size mismatch: {prim_tokens.shape=} != {cons_tokens.shape=}"
-        if sketch_original_list is None:
-            sketch_original_list = [None] * prim_tokens.size(0)
-        assert prim_tokens.size(0) == len(sketch_original_list), f"Batch size mismatch: {prim_tokens.shape=} != {len(sketch_original_list)=}"
-        scores = torch.zeros_like(cons_tokens, dtype=torch.float32)
+        B = prim_tokens.size(0)
+        _sketch_list = sketch_original_list if sketch_original_list is not None else [None] * B
+        assert B == len(_sketch_list), f"Batch size mismatch: {prim_tokens.shape=} != {len(_sketch_list)=}"
 
-        solver_dof_counter: Counter[int] = Counter()
-        solver_status_counter: Counter[str] = Counter()
+        # 0. Clear cache if it gets too large
+        if len(self._evaluation_cache) > self.max_cache_size:
+            self._evaluation_cache.clear()
 
-        for i, (prim, cons, sketch_original) in enumerate(zip(prim_tokens, cons_tokens, sketch_original_list)):
-            prim, cons = prim.detach().cpu().numpy(), cons.detach().cpu().numpy()
+        # Step A: Pre-process tokens, check cache, and prepare multiprocessing arguments
+        args_list = []
+        indices_to_evaluate = []
+        cache_hits = []
+        first_stop_indices = []
 
-            ################################################################
-            # -1. Replace after-STOP tokens by PAD (to prevent false matching in Step 1)
-            ################################################################
+        for i in range(B):
+            prim = prim_tokens[i].detach().cpu().numpy()
+            cons = cons_tokens[i].detach().cpu().numpy()
+            sketch_original = _sketch_list[i]
+
+            # Replace after-STOP tokens by PAD (to prevent false matching)
             stop_indices = (cons == ConstraintToken.Stop).nonzero()[0]
             first_stop_idx = stop_indices[0] if len(stop_indices) > 0 else -1
             if first_stop_idx >= 0:
                 cons[first_stop_idx+1:] = ConstraintToken.Pad
+            first_stop_indices.append(first_stop_idx)
 
-            ################################################################
-            # 0. Convert to a sketch
-            ################################################################
-            solver_status, sketch, constraint_to_token_start, invalid_constraint_block_start = \
-                self.solver_feedback.evaluate_constraints(prim, cons, sketch_original, check_one_by_one=True)
+            cache_key = (tuple(prim.tolist()), tuple(cons.tolist()))
+            if cache_key in self._evaluation_cache:
+                cache_hits.append((i, self._evaluation_cache[cache_key]))
+            else:
+                indices_to_evaluate.append(i)
+                args_list.append((prim, cons, sketch_original))
+
+        # Step B: Evaluate missing items using ProcessPoolExecutor
+        evaluation_results = [None] * B
+
+        # Fill cache hits
+        for i, cached_res in cache_hits:
+            evaluation_results[i] = cached_res
+
+        # Evaluate others in parallel
+        if args_list:
+            with ProcessPoolExecutor(
+                max_workers=self.max_workers,
+                initializer=_init_worker,
+                initargs=(self.context, self.distortion_threshold)
+            ) as executor:
+                results = list(executor.map(_evaluate_single_worker, args_list))
+
+            for idx_in_evaluate, res in enumerate(results):
+                i = indices_to_evaluate[idx_in_evaluate]
+                evaluation_results[i] = res
+
+                # Fetch original arrays to reconstruct cache_key
+                prim, cons, _ = args_list[idx_in_evaluate]
+                cache_key = (tuple(prim.tolist()), tuple(cons.tolist()))
+                self._evaluation_cache[cache_key] = res
+
+        # Step C: Compute rewards from the evaluation results
+        scores = torch.zeros_like(cons_tokens, dtype=torch.float32)
+        solver_dof_counter: Counter[int] = Counter()
+        solver_status_counter: Counter[str] = Counter()
+
+        for i in range(B):
+            res = evaluation_results[i]
+            assert res is not None
+            solver_status, sketch, constraint_to_token_start, invalid_constraint_block_start = res
+            first_stop_idx = first_stop_indices[i]
 
             solver_dof_counter[solver_status.DoF] += 1
             solver_status_counter[solver_status.Status] += 1
@@ -188,9 +255,6 @@ class SolverReward(torch.nn.Module):
 
                 # dimension constraints penalty
                 NumTotalConstraints = solver_status.NumRelationalConstraints + solver_status.NumDimensionalConstraints
-                # if NumTotalConstraints == 0:  # NOTE: Predicted constraint tokens can be [START, Coincident, STOP], so this check is invalid.
-                #     if not (np.all(cons[:2] == np.array([ConstraintToken.Stop, ConstraintToken.Pad])) or np.all(cons[:2] == np.array([ConstraintToken.Start, ConstraintToken.Stop]))):
-                #         raise ValueError(f"{visualize_constraint_sequence(cons)=}\n{solver_status=}")
 
                 # Scale down length penalty to avoid punishing valid constraints
                 seq_reward += self.penalty_num_total_constraints * NumTotalConstraints
