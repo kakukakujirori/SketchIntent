@@ -15,7 +15,7 @@ class PrimitiveNoise:
         """
         self.std = std
         self.max_diff = max_diff
-        assert std >= 0.0 and self.max_diff > 0.0
+        assert std >= 0.0 and self.max_diff >= 0.0
 
     def _trunc_normal_entity_noise(self, entity: datalib.Entity):
         """Applies truncated normal noise to entity parameters.

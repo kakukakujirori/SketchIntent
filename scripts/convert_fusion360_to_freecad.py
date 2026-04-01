@@ -42,7 +42,7 @@ def extract_sketches(json_path: str) -> list[dict]:
     return sketches
 
 
-def generate_freecad_script(sketch: dict[str, Any], remove_constraints: bool = False) -> str:
+def generate_freecad_script(sketch: dict[str, Any], remove_constraints: bool = False) -> list[str]:
     sketch_name = sketch["name"]
     script =[
         "import sys",
@@ -234,7 +234,7 @@ def generate_freecad_script(sketch: dict[str, Any], remove_constraints: bool = F
             "doc.recompute()",
             "FreeCAD.ActiveDocument.recompute()",
         ]
-        return "\n".join(script)
+        return script
 
 
     script.append("# --- Anchor to Origin ---")
@@ -565,7 +565,7 @@ def generate_freecad_script(sketch: dict[str, Any], remove_constraints: bool = F
         "doc.recompute()",
         "FreeCAD.ActiveDocument.recompute()",
     ]
-    return "\n".join(script)
+    return script
 
 
 if __name__ == '__main__':
@@ -588,27 +588,33 @@ if __name__ == '__main__':
     for json_path in tqdm(json_path_list):
         for sketch_id, sketch in enumerate(extract_sketches(json_path)):
             try:
+
+                # 1. Convert
                 freecad_script = generate_freecad_script(sketch, remove_constraints=False)
+
+                # 2. Test-run the script
+                sketch_data = load_and_extract_from_file(freecad_script)
+
+                # 3. Export the commands
+                if sketch_data is not None:
+                    command_file_path = os.path.join(args.out_dir, f"{os.path.basename(json_path).replace('.json', f'_sketch{sketch_id:02d}.py')}")
+                    with open(command_file_path, "w", encoding="utf-8") as f:
+                        f.write("\n".join(freecad_script))
+
+                # 4. Export the sketch
+                sketch_file_path = os.path.join(args.sketch_dump_dir, f"{os.path.basename(json_path).replace('.json', f'_sketch{sketch_id:02d}.jpg')}")
+                visualize_sketch_for_vlm(
+                    sketch_data,
+                    save_path=sketch_file_path,
+                    title=None,
+                    icon_fontsize=10,
+                    figsize=(640, 640),
+                )
+                plt.close()
+
+            except KeyError:
+                # NOTE: Ellipses are not supported in visualize_sketch_for_vlm, and emit key errors. We skip them.
+                pass
             except Exception as e:
                 print(f"Error processing {sketch_id}-th sketch in {json_path}:\n{traceback.format_exc()}")
                 continue
-
-            command_file_path = os.path.join(args.out_dir, f"{os.path.basename(json_path).replace('.json', f'_sketch{sketch_id:02d}.py')}")
-            with open(command_file_path, "w", encoding="utf-8") as f:
-                f.write(freecad_script)
-
-            # Export the sketch image (NOTE: Ellipses are not supported, and emit key errors. We skip them)
-            try:
-                sketch_data = load_and_extract_from_file(command_file_path)
-                if sketch_data is not None:
-                    sketch_file_path = os.path.join(args.sketch_dump_dir, f"{os.path.basename(json_path).replace('.json', f'_sketch{sketch_id:02d}.jpg')}")
-                    visualize_sketch_for_vlm(
-                        sketch_data,
-                        save_path=sketch_file_path,
-                        title=None,
-                        icon_fontsize=10,
-                        figsize=(640, 640),
-                    )
-                    plt.close()
-            except KeyError:
-                pass
