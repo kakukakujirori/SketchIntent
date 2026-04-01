@@ -12,6 +12,24 @@ defaults:
 
 tags: ["rloo"]
 
+callbacks:
+  model_checkpoint_epoch:
+    every_n_train_steps: 100
+    save_top_k: 5
+    filename: "epoch_{epoch}_step_{step}"
+
+  model_checkpoint_loss: null
+
+  model_checkpoint_reward:
+    _target_: lightning.pytorch.callbacks.ModelCheckpoint
+    dirpath: ${paths.output_dir}/checkpoints
+    monitor: "validation_gen/solver_fc_rate"
+    filename: "step_{step}_fc_{validation_gen/solver_fc_rate:.3f}"
+    save_top_k: 3
+    mode: "max"
+    auto_insert_metric_name: false
+    every_n_train_steps: 100
+
 model:
   optimizer:
     lr: 1e-5

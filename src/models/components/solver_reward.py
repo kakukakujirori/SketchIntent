@@ -61,7 +61,7 @@ class SolverReward(torch.nn.Module):
         # Execution and caching
         self.context = context
         self.distortion_threshold = distortion_threshold or 1/context.num_quantization_bins
-        self.max_workers = os.cpu_count()
+        self.max_workers = (os.cpu_count() or 2) // 2
         self._evaluation_cache = {}
         self.max_cache_size = 20000
 
