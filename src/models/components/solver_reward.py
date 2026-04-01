@@ -1,6 +1,7 @@
 import os
+import multiprocessing as mp
 from collections import Counter
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, TimeoutError as FutureTimeoutError
 
 import numpy as np
 import torch
@@ -61,10 +62,40 @@ class SolverReward(torch.nn.Module):
         # Execution and caching
         self.context = context
         self.distortion_threshold = distortion_threshold or 1/context.num_quantization_bins
-        self.max_workers = (os.cpu_count() or 2) // 2
+        self.max_workers = (os.cpu_count() or 1)
         self._evaluation_cache = {}
         self.max_cache_size = 20000
 
+        # Worker timeout per task (seconds). FreeCAD can occasionally hang.
+        self.worker_timeout = 60
+
+        # max_tasks_per_child: each worker is recycled after this many tasks to
+        # prevent FreeCAD's internal memory leaks from accumulating indefinitely.
+        self._max_tasks_per_child = 32
+        self._executor: ProcessPoolExecutor | None = None
+
+
+    def _get_executor(self) -> ProcessPoolExecutor:
+        """Return the persistent ProcessPoolExecutor, creating it if needed.
+
+        Workers are spawned (not forked) to avoid CUDA/Qt context contamination,
+        and are automatically recycled every `_max_tasks_per_child` calls to
+        counteract FreeCAD's internal memory leaks.
+        """
+        if self._executor is None:
+            self._executor = ProcessPoolExecutor(
+                max_workers=self.max_workers,
+                mp_context=mp.get_context("spawn"),
+                initializer=_init_worker,
+                initargs=(self.context, self.distortion_threshold),
+                max_tasks_per_child=self._max_tasks_per_child,
+            )
+        return self._executor
+
+    def __del__(self):
+        if getattr(self, "_executor", None) is not None:
+            self._executor.shutdown(wait=False)
+            self._executor = None
 
     def _get_dof_without_constraints(self, sketch: datalib.Sketch) -> int:
         dof = 0
@@ -171,23 +202,30 @@ class SolverReward(torch.nn.Module):
         for i, cached_res in cache_hits:
             evaluation_results[i] = cached_res
 
-        # Evaluate others in parallel
+        # Evaluate others in parallel using the persistent executor.
+        # Each future has a timeout so a hanging FreeCAD worker cannot freeze
+        # the main training process indefinitely.
         if args_list:
-            with ProcessPoolExecutor(
-                max_workers=self.max_workers,
-                initializer=_init_worker,
-                initargs=(self.context, self.distortion_threshold)
-            ) as executor:
-                results = list(executor.map(_evaluate_single_worker, args_list))
+            executor = self._get_executor()
+            futures = [executor.submit(_evaluate_single_worker, arg) for arg in args_list]
+            results = []
+            for f in futures:
+                try:
+                    results.append(f.result(timeout=self.worker_timeout))
+                except FutureTimeoutError:
+                    results.append(None)  # treated as evaluation failure below
+                except Exception:
+                    results.append(None)
 
             for idx_in_evaluate, res in enumerate(results):
                 i = indices_to_evaluate[idx_in_evaluate]
                 evaluation_results[i] = res
 
-                # Fetch original arrays to reconstruct cache_key
-                prim, cons, _ = args_list[idx_in_evaluate]
-                cache_key = (tuple(prim.tolist()), tuple(cons.tolist()))
-                self._evaluation_cache[cache_key] = res
+                if res is not None:
+                    # Only cache successful evaluations
+                    prim, cons, _ = args_list[idx_in_evaluate]
+                    cache_key = (tuple(prim.tolist()), tuple(cons.tolist()))
+                    self._evaluation_cache[cache_key] = res
 
         # Step C: Compute rewards from the evaluation results
         scores = torch.zeros_like(cons_tokens, dtype=torch.float32)
@@ -196,9 +234,16 @@ class SolverReward(torch.nn.Module):
 
         for i in range(B):
             res = evaluation_results[i]
-            assert res is not None
-            solver_status, sketch, constraint_to_token_start, invalid_constraint_block_start = res
             first_stop_idx = first_stop_indices[i]
+
+            if res is None:
+                # Worker timed out or raised an exception; treat as evaluation failure.
+                # Score stays 0, and we record a sentinel status for logging.
+                solver_dof_counter[-1] += 1
+                solver_status_counter["Timeout"] += 1
+                continue
+
+            solver_status, sketch, constraint_to_token_start, invalid_constraint_block_start = res
 
             solver_dof_counter[solver_status.DoF] += 1
             solver_status_counter[solver_status.Status] += 1
