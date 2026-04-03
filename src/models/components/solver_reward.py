@@ -170,14 +170,18 @@ class SolverReward(torch.nn.Module):
             self._evaluation_cache.clear()
 
         # Step A: Pre-process tokens, check cache, and prepare multiprocessing arguments
+        # Transfer entire batch to CPU at once to avoid per-sample PCIe round trips.
+        prim_tokens_np = prim_tokens.detach().cpu().numpy()  # [B, L_prim]
+        cons_tokens_np = cons_tokens.detach().cpu().numpy()  # [B, L_cons]
+
         args_list = []
         indices_to_evaluate = []
         cache_hits = []
         first_stop_indices = []
 
         for i in range(B):
-            prim = prim_tokens[i].detach().cpu().numpy()
-            cons = cons_tokens[i].detach().cpu().numpy()
+            prim = prim_tokens_np[i]
+            cons = cons_tokens_np[i].copy()  # copy so we can mutate (PAD fill) safely
             sketch_original = _sketch_list[i]
 
             # Replace after-STOP tokens by PAD (to prevent false matching)

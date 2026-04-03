@@ -38,5 +38,5 @@ def evaluate_single(args: tuple[np.ndarray, np.ndarray, datalib.Sketch | None]) 
     prim_np, cons_np, sketch_original = args
     assert _worker_solver_feedback is not None
     return _worker_solver_feedback.evaluate_constraints(
-        prim_np, cons_np, sketch_original, check_one_by_one=True
+        prim_np, cons_np, sketch_original, check_one_by_one=False
     )
