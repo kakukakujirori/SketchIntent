@@ -231,7 +231,7 @@ def verify_constraints_freecad(directory: str = 'gt_completed_prim5_py', start_i
             # ---------------------------------------------------------------
             # 3. SketchGraphs -> FC
             # ---------------------------------------------------------------
-            doc_recon, fc_sketch_recon, _, _ = converter.to_freecad(sg_sketch, doc_name=f"ReconDoc_{i}")
+            doc_recon, fc_sketch_recon, _, _, _ = converter.to_freecad(sg_sketch, doc_name=f"ReconDoc_{i}")
             recon_constraints = extract_constraints_from_sketch(fc_sketch_recon)
             total_constraints_recon += len(recon_constraints)
 
@@ -354,7 +354,7 @@ class TestConstraintRoundTrip(unittest.TestCase):
         sg_sketch = converter.from_freecad(sketch_orig)
 
         # 2. SG -> FC
-        doc_recon, sketch_recon, _, _ = converter.to_freecad(sg_sketch, doc_name="ReconDoc")
+        doc_recon, sketch_recon, _, _, _ = converter.to_freecad(sg_sketch, doc_name="ReconDoc")
 
         # 3. Compare
         orig_constraints = extract_constraints_from_sketch(sketch_orig)

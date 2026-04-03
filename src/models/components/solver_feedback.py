@@ -152,10 +152,11 @@ class SolverFeedback:
 
         doc = None
         doc_primitives_only = None
+        invalid_constraints = []
         try:
             # SketchGraphs → FreeCAD
-            doc, fc_sketch, primitive_freecad_mapping, constraint_freecad_mapping = \
-                self.sketch_freecad_converter.to_freecad(sketch, doc_name="SolverEval")
+            doc, fc_sketch, primitive_freecad_mapping, constraint_freecad_mapping, invalid_constraints = \
+                self.sketch_freecad_converter.to_freecad(sketch, doc_name="SolverEval", skip_invalid=True)
             doc_primitives_only, fc_sketch_primitives_only, _ = \
                 self.sketch_freecad_converter.to_freecad_primitives(sketch, doc_name="SolverEvalPrimitivesOnly")
 
@@ -180,13 +181,16 @@ class SolverFeedback:
                 Status = fc_status['Status'],
                 NumRelationalConstraints = relational,
                 NumDimensionalConstraints = dimensional,
-                MalformedConstraints = _map_indices(fc_status['MalformedConstraints']),
+                MalformedConstraints = sorted(list(set(_map_indices(fc_status['MalformedConstraints']) + invalid_constraints))),
                 ConflictingConstraints = _map_indices(fc_status['ConflictingConstraints']),
                 RedundantConstraints = _map_indices(fc_status['RedundantConstraints']),
                 DistortingConstraints = is_distorted,
             )
         except Exception:
-            status = SolverStatus(Status=f"Error: {traceback.format_exc()}")
+            status = SolverStatus(
+                Status=f"Error: {traceback.format_exc()}",
+                MalformedConstraints = invalid_constraints,
+            )
         finally:
             # Close document
             FreeCAD.closeDocument(doc.Name) if doc else None

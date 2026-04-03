@@ -103,7 +103,7 @@ def test_robust(data_npy: str, num_tests: int = -1):
         sketch = datalib.sketch_from_sequence(seq)
 
         try:
-            doc1, fc_sketch1, _, _ = converter.to_freecad(sketch, doc_name=f"Doc1_{i}")
+            doc1, fc_sketch1, _, _, _ = converter.to_freecad(sketch, doc_name=f"Doc1_{i}")
         except Exception as e:
             print(f"Seq {i} skipped: original conversion failed: {e}")
             continue # skip if original conversion fails for some reason

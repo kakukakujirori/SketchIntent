@@ -5,7 +5,7 @@ import os
 import shutil
 import sys
 import traceback
-from collections import defaultdict
+from collections import defaultdict, Counter
 from tqdm import tqdm
 from typing import Any
 
@@ -135,13 +135,14 @@ def generate_freecad_script(sketch: dict[str, Any], remove_constraints: bool = F
             minor_r = curve["minor_axis_radius"]
             major_axis = curve["major_axis"]
 
-            script.append(f"cp = {get_pt(cp_id)}")
-            script.append(f"maj_axis = FreeCAD.Vector({major_axis['x']}, {major_axis['y']}, 0).normalize()")
-            script.append(f"min_axis = FreeCAD.Vector(-maj_axis.y, maj_axis.x, 0)") # Rotate 90 deg
-            script.append(f"s1 = cp + maj_axis * {major_r}")
-            script.append(f"s2 = cp + min_axis * {minor_r}")
-            script.append(f"ell = Part.Ellipse(s1, s2, cp)")
-            script.append(f"fc_sketch.addGeometry(ell, {is_const})")
+            cp = sketch["points"][cp_id]
+            maj_len = np.hypot(major_axis['x'], major_axis['y'])
+            maj_ux, maj_uy = major_axis['x'] / maj_len, major_axis['y'] / maj_len
+            s1_x = cp['x'] + maj_ux * major_r
+            s1_y = cp['y'] + maj_uy * major_r
+            s2_x = cp['x'] + (-maj_uy) * minor_r
+            s2_y = cp['y'] + maj_ux * minor_r
+            script.append(f"fc_sketch.addGeometry(Part.Ellipse(FreeCAD.Vector({s1_x}, {s1_y}, 0), FreeCAD.Vector({s2_x}, {s2_y}, 0), {get_pt(cp_id)}), {is_const})")
 
             uuid_to_fcid[curve_uuid] = next_fc_id
             fcid_to_uuid[next_fc_id] = curve_uuid
@@ -156,13 +157,14 @@ def generate_freecad_script(sketch: dict[str, Any], remove_constraints: bool = F
             minor_r = curve["minor_axis_radius"]
             major_axis = curve["major_axis"]
 
-            script.append(f"cp = {get_pt(cp_id)}")
-            script.append(f"maj_axis = FreeCAD.Vector({major_axis['x']}, {major_axis['y']}, 0).normalize()")
-            script.append(f"min_axis = FreeCAD.Vector(-maj_axis.y, maj_axis.x, 0)")
-            script.append(f"s1 = cp + maj_axis * {major_r}")
-            script.append(f"s2 = cp + min_axis * {minor_r}")
-            script.append(f"ell = Part.Ellipse(s1, s2, cp)")
-            script.append(f"fc_sketch.addGeometry(Part.ArcOfEllipse(ell, {get_pt(sp_id)}, {get_pt(ep_id)}), {is_const})")
+            cp = sketch["points"][cp_id]
+            maj_len = np.hypot(major_axis['x'], major_axis['y'])
+            maj_ux, maj_uy = major_axis['x'] / maj_len, major_axis['y'] / maj_len
+            s1_x = cp['x'] + maj_ux * major_r
+            s1_y = cp['y'] + maj_uy * major_r
+            s2_x = cp['x'] + (-maj_uy) * minor_r
+            s2_y = cp['y'] + maj_ux * minor_r
+            script.append(f"fc_sketch.addGeometry(Part.ArcOfEllipse(Part.Ellipse(FreeCAD.Vector({s1_x}, {s1_y}, 0), FreeCAD.Vector({s2_x}, {s2_y}, 0), {get_pt(cp_id)}), {get_pt(sp_id)}, {get_pt(ep_id)}), {is_const})")
 
             uuid_to_fcid[curve_uuid] = next_fc_id
             fcid_to_uuid[next_fc_id] = curve_uuid
@@ -568,12 +570,31 @@ def generate_freecad_script(sketch: dict[str, Any], remove_constraints: bool = F
     return script
 
 
+def count_freecad_commands(freecad_script: list[str]) -> tuple[Counter[str], Counter[str]]:
+    primitive_counter = Counter()
+    constraint_counter = Counter()
+    for line in freecad_script:
+        if line.startswith("fc_sketch.addGeometry(Part."):
+            prim = line[len("fc_sketch.addGeometry(Part."):].split("()")[0]
+            primitive_counter[prim] += 1
+        elif line.startswith("fc_sketch.addConstraint(Sketcher.Constraint("):
+            cons = line[len("fc_sketch.addConstraint(Sketcher.Constraint("):].split("()")[0]
+            constraint_counter[cons] += 1
+    return primitive_counter, constraint_counter
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_dir", type=str, default="/disk2/Fusion360Gallery/r1.0.1/reconstruction")
     parser.add_argument("--out_dir", type=str, default="/disk2/Fusion360Gallery/r1.0.1/freecad_commands")
     parser.add_argument("--sketch_dump_dir", type=str, default="/disk2/Fusion360Gallery/r1.0.1/freecad_images")
+    parser.add_argument("--test_data_only", action='store_true', help="If True, process only test data")
+    parser.add_argument("--prim_num_range", type=int, nargs=2, default=(6, 16), help="Only convert sketches with number of primitives in this range")
+    parser.add_argument("--cons_num_range", type=int, nargs=2, default=(0, 64),help="Only convert sketches with number of constraints in this range" )
     args = parser.parse_args()
+
+    UNHANDLED_PRIMITIVES = {"Ellipse", "ArcOfEllipse", "BSplineCurve"}
+    UNHANDLED_CONSTRAINTS = {"Offset"}
 
     if os.path.isdir(args.out_dir):
         shutil.rmtree(args.out_dir)
@@ -583,7 +604,15 @@ if __name__ == '__main__':
     os.makedirs(args.out_dir, exist_ok=True)
     os.makedirs(args.sketch_dump_dir, exist_ok=True)
 
-    json_path_list = sorted(glob.glob(os.path.join(args.data_dir, "*.json")))
+    if args.test_data_only:
+        train_test_json = os.path.join(os.path.dirname(args.data_dir), "train_test.json")
+        assert os.path.isfile(train_test_json)
+        with open(train_test_json, "r") as f:
+            train_test_ids = json.load(f)
+        test_ids = train_test_ids["test"]
+        json_path_list = sorted([os.path.join(args.data_dir, f"{test_id}.json") for test_id in test_ids])
+    else:
+        json_path_list = sorted(glob.glob(os.path.join(args.data_dir, "*.json")))
 
     for json_path in tqdm(json_path_list):
         for sketch_id, sketch in enumerate(extract_sketches(json_path)):
@@ -592,25 +621,33 @@ if __name__ == '__main__':
                 # 1. Convert
                 freecad_script = generate_freecad_script(sketch, remove_constraints=False)
 
-                # 2. Test-run the script
+                # 2, Filter
+                primitives_counter, constraints_counter = count_freecad_commands(freecad_script)
+                if not (args.prim_num_range[0] <= sum(primitives_counter.values()) <= args.prim_num_range[1] and
+                        args.cons_num_range[0] <= sum(constraints_counter.values()) <= args.cons_num_range[1]):
+                    continue
+                if primitives_counter.keys() & UNHANDLED_PRIMITIVES or constraints_counter.keys() & UNHANDLED_CONSTRAINTS:
+                    continue
+
+                # 3. Test-run the script
                 sketch_data = load_and_extract_from_file(freecad_script)
 
-                # 3. Export the commands
+                # 4. Export the commands
                 if sketch_data is not None:
                     command_file_path = os.path.join(args.out_dir, f"{os.path.basename(json_path).replace('.json', f'_sketch{sketch_id:02d}.py')}")
                     with open(command_file_path, "w", encoding="utf-8") as f:
                         f.write("\n".join(freecad_script))
 
                 # 4. Export the sketch
-                sketch_file_path = os.path.join(args.sketch_dump_dir, f"{os.path.basename(json_path).replace('.json', f'_sketch{sketch_id:02d}.jpg')}")
-                visualize_sketch_for_vlm(
-                    sketch_data,
-                    save_path=sketch_file_path,
-                    title=None,
-                    icon_fontsize=10,
-                    figsize=(640, 640),
-                )
-                plt.close()
+                # sketch_file_path = os.path.join(args.sketch_dump_dir, f"{os.path.basename(json_path).replace('.json', f'_sketch{sketch_id:02d}.jpg')}")
+                # visualize_sketch_for_vlm(
+                #     sketch_data,
+                #     save_path=sketch_file_path,
+                #     title=None,
+                #     icon_fontsize=10,
+                #     figsize=(640, 640),
+                # )
+                # plt.close()
 
             except KeyError:
                 # NOTE: Ellipses are not supported in visualize_sketch_for_vlm, and emit key errors. We skip them.
