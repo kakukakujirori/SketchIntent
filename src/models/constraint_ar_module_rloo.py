@@ -1,6 +1,6 @@
 import copy
 import inspect
-from typing import Any
+from typing import Any, cast
 
 import lightning as L
 import torch
@@ -115,34 +115,28 @@ class ConstraintARModuleRLOO(L.LightningModule):
 
         expanded = {k: v.repeat_interleave(K, dim=0) if isinstance(v, torch.Tensor) else [x for x in v for _ in range(K)] for k, v in batch.items()}  # [0, 1, 2, ...] => [0, ..., 0, 1, ..., 1, 2, ..., 2, ...]
 
-        # Sample trajectories
+        # ------------------------------------------------------------------ #
+        # Step 1: Sample trajectories (GPU)                                   #
+        # ------------------------------------------------------------------ #
         with torch.no_grad():
             generated, gen_logprobs = self.generate_sample(expanded, max_len, dtype=batch['c_val'].dtype)
-            rewards, solver_metrics = self.reward(expanded['p_val'], generated, expanded['sketch'])
-            rewards = rewards.to(self.device).float()  # [B*K, L]
 
-            # Process solver metrics from collections.Counter into scalar values for logging
-            parsed_solver_metrics = {}
-            if "status" in solver_metrics:
-                status_counter = solver_metrics["status"]
-                total_status = sum(status_counter.values())
-                if total_status > 0:
-                    for s, c in status_counter.items():
-                        # Group all "Error: ..." statuses into a single "Error" key
-                        s_name = s.split(':')[0].strip() if s.startswith("Error") else s
-                        parsed_solver_metrics[f"solver_{s_name.lower()}_rate"] = c / total_status
+        # ------------------------------------------------------------------ #
+        # Step 2: Kick off solver asynchronously (CPU workers start now)      #
+        # The solver runs CONCURRENTLY with the GPU forward passes below.     #
+        # ------------------------------------------------------------------ #
+        p_val_expanded: torch.Tensor = cast(torch.Tensor, expanded['p_val'])  # always Tensor
+        solver_handle = self.reward.submit_async(
+            p_val_expanded, generated, expanded['sketch']
+        )
 
-            if "dof" in solver_metrics:
-                dof_counter = solver_metrics["dof"]
-                # Compute mean DoF only for successful constraint sequences (DoF >= 0)
-                valid_dof_sum = sum(d * c for d, c in dof_counter.items() if d >= 0)
-                valid_dof_count = sum(c for d, c in dof_counter.items() if d >= 0)
-                parsed_solver_metrics["solver_valid_dof_mean"] = valid_dof_sum / valid_dof_count if valid_dof_count > 0 else 0.0
-
+        # ------------------------------------------------------------------ #
+        # Step 3: GPU compute — runs while CPU solver is in flight            #
+        # ------------------------------------------------------------------ #
         mask = (generated[:, 1:] != ConstraintToken.Pad).float()   # [B*K, L-1]
         n_valid = mask.sum().clamp(min=1)
 
-        # token log probs
+        # Policy model forward pass (needs gradient for PG loss)
         gen_batch = {**expanded, 'c_val': generated}
         output = self.model(gen_batch)                             # [B*K, L, V]
         logits = output[:, :-1, :]                                 # [B*K, L-1, V]
@@ -152,13 +146,14 @@ class ConstraintARModuleRLOO(L.LightningModule):
 
         token_log_probs = dist.log_prob(generated[:, 1:])          # [B*K, L-1]
 
-        # Ratio
+        # Ratio (for monitoring)
         ratio = torch.exp(token_log_probs - gen_logprobs[:, 1:])
         avg_ratio = (ratio * mask).sum() / n_valid
 
-        # KL penalty
+        # KL penalty — computed before collect_results() because it does not
+        # depend on rewards; this maximises overlap with the CPU solver.
         kl_loss_metric = torch.tensor(0.0, device=self.device)
-        adjusted_rewards = rewards.clone()
+        kl_penalty: torch.Tensor | None = None
         if self.kl_coeff > 0.0:
             with torch.no_grad():
                 ref_output = self.ref_model({**expanded, 'c_val': generated})
@@ -166,10 +161,41 @@ class ConstraintARModuleRLOO(L.LightningModule):
                     dim=-1, index=generated[:, 1:].unsqueeze(-1)
                 ).squeeze(-1)
                 kl_penalty = token_log_probs.detach() - ref_log_probs
+            kl_loss_metric = (kl_penalty * mask).sum() / n_valid
 
+        # ------------------------------------------------------------------ #
+        # Step 4: Collect solver results (blocks only if solver not done yet) #
+        # By this point the CPU solver has had time to complete while GPU     #
+        # was doing the forward passes above.                                 #
+        # ------------------------------------------------------------------ #
+        rewards_cpu, solver_metrics = self.reward.collect_results(solver_handle)
+        rewards = rewards_cpu.to(self.device).float()  # [B*K, L]
+
+        # Parse solver metrics (Counter → scalar)
+        parsed_solver_metrics = {}
+        if "status" in solver_metrics:
+            status_counter = solver_metrics["status"]
+            total_status = sum(status_counter.values())
+            if total_status > 0:
+                for s, c in status_counter.items():
+                    # Group all "Error: ..." statuses into a single "Error" key
+                    s_name = s.split(':')[0].strip() if s.startswith("Error") else s
+                    parsed_solver_metrics[f"solver_{s_name.lower()}_rate"] = c / total_status
+
+        if "dof" in solver_metrics:
+            dof_counter = solver_metrics["dof"]
+            # Compute mean DoF only for successful constraint sequences (DoF >= 0)
+            valid_dof_sum = sum(d * c for d, c in dof_counter.items() if d >= 0)
+            valid_dof_count = sum(c for d, c in dof_counter.items() if d >= 0)
+            parsed_solver_metrics["solver_valid_dof_mean"] = valid_dof_sum / valid_dof_count if valid_dof_count > 0 else 0.0
+
+        # ------------------------------------------------------------------ #
+        # Step 5: Apply KL penalty and compute returns / advantages           #
+        # ------------------------------------------------------------------ #
+        adjusted_rewards = rewards.clone()
+        if self.kl_coeff > 0.0 and kl_penalty is not None:
             # Subtract KL penalty from rewards
             adjusted_rewards[:, 1:] -= self.kl_coeff * kl_penalty * mask
-            kl_loss_metric = (kl_penalty * mask).sum() / n_valid
 
         # Compute Returns (cumulative sum of future rewards)
         returns = adjusted_rewards.flip(dims=[1]).cumsum(dim=1).flip(dims=[1])
@@ -197,6 +223,7 @@ class ConstraintARModuleRLOO(L.LightningModule):
             **parsed_solver_metrics
         }
         return loss, metrics
+
 
     @torch.no_grad()
     def logits_to_preds(self, logits: torch.Tensor) -> torch.Tensor:
