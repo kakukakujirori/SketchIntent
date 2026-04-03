@@ -22,6 +22,7 @@ class SolverReward(torch.nn.Module):
         self,
         context: SketchContext,
         reward_dof_reduction: float = 1.0,
+        reward_fully_constrained: float = 1.0,
         penalty_conflicting: float = -1.0,
         penalty_redundant: float = -1.0,
         penalty_malformed: float = -0.5,
@@ -40,6 +41,7 @@ class SolverReward(torch.nn.Module):
             f"{penalty_conflicting=}, {penalty_redundant=}, {penalty_malformed=}, {penalty_deformed=}, {penalty_per_problematic_constraint=}, {penalty_num_total_constraints=}, {penalty_num_dimensional_constraints=}"
 
         self.reward_dof_reduction = reward_dof_reduction
+        self.reward_fully_constrained = reward_fully_constrained
         self.penalty_conflicting = penalty_conflicting
         self.penalty_redundant = penalty_redundant
         self.penalty_malformed = penalty_malformed
@@ -291,9 +293,12 @@ class SolverReward(torch.nn.Module):
                 dof_reduction_rate = (orig_dof - solver_status.DoF) / max(1, orig_dof - self.fully_constrained_dof)
                 seq_reward = self.reward_dof_reduction * dof_reduction_rate
 
-                # geometric distortion
                 if solver_status.DistortingConstraints:
+                    # geometric distortion penalty
                     seq_reward += self.penalty_deformed
+                elif solver_status.DoF <= self.fully_constrained_dof:
+                    # fully constrained bonus
+                    seq_reward += self.reward_fully_constrained
 
                 # dimension constraints penalty
                 NumTotalConstraints = solver_status.NumRelationalConstraints + solver_status.NumDimensionalConstraints

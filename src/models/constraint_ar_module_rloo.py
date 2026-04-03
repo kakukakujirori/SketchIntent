@@ -28,6 +28,7 @@ class ConstraintARModuleRLOO(L.LightningModule):
         scheduler: torch.optim.lr_scheduler._LRScheduler | None,
         ref_update_steps: int = -1,
         group_sample_size: int = 8,
+        entropy_bonus: float = 0.01,
         kl_coeff: float = 0.01,
         sft_coeff: float = 0.0,
     ):
@@ -50,6 +51,7 @@ class ConstraintARModuleRLOO(L.LightningModule):
         # hyper parameters
         self.ref_update_steps = ref_update_steps
         self.group_sample_size = group_sample_size
+        self.entropy_bonus = entropy_bonus
         self.kl_coeff = kl_coeff
         self.sft_coeff = sft_coeff
 
@@ -178,7 +180,9 @@ class ConstraintARModuleRLOO(L.LightningModule):
 
         # Policy Gradient loss
         pg_loss = -(advantages.detach() * token_log_probs * mask).sum() / n_valid
-        loss = pg_loss
+
+        # Entropy bonus
+        loss = pg_loss - self.entropy_bonus * entropy
 
         stop_mask = (generated == ConstraintToken.Stop).float()
         metrics = {
