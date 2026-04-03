@@ -130,7 +130,7 @@ class SketchFreecadConverter:
         fc_sketch: 'Sketcher.SketchObject',
         primitive_freecad_mapping: dict[str, tuple[int, int]],
         skip_invalid_constraints: bool = False,
-    ) -> dict[int, str]:
+    ) -> tuple[dict[int, str], list[str]]:
         """
         Adds constraints to the FreeCAD SketchObject.
         Returns constraint_freecad_mapping.
@@ -141,6 +141,7 @@ class SketchFreecadConverter:
         """
         FreeCAD, Part, Sketcher = ensure_freecad_imported()
         constraint_freecad_mapping: dict[int, str] = {}
+        invalid_constraints = []
 
         for c_id, constr in sketch.constraints.items():
             handler_name = constr.constraint_type.name
@@ -161,27 +162,28 @@ class SketchFreecadConverter:
                         fc_sketch.setDatum(idx, fc_datum)
             except Exception as e:
                 if skip_invalid_constraints:
-                    self.dprint(f"Warning: Failed to add constraint {handler_name} ({fc_type}, {fc_args}, {fc_datum}): {traceback.format_exc()}")
+                    self.dprint(f"Warning: Failed to add constraint {handler_name}: {traceback.format_exc()}")
+                    invalid_constraints.append(c_id)
                     continue
                 else:
                     raise e
 
-        return constraint_freecad_mapping
+        return constraint_freecad_mapping, invalid_constraints
 
     def to_freecad(
         self,
         sketch: datalib.Sketch,
         doc_name: str = "Sketch",
         skip_invalid: bool = False,
-    ) -> tuple['FreeCAD.Document', 'Sketcher.SketchObject', dict[str, tuple[int, int]], dict[int, str]]:
+    ) -> tuple['FreeCAD.Document', 'Sketcher.SketchObject', dict[str, tuple[int, int]], dict[int, str], list[str]]:
         """
         Full conversion: Primitives + Constraints.
         """
         sketch, _ = complete_constraint_values(sketch)
         doc, fc_sketch, primitive_freecad_mapping = self.to_freecad_primitives(sketch, doc_name, skip_invalid)
-        constraint_freecad_mapping = self.to_freecad_constraints(sketch, fc_sketch, primitive_freecad_mapping, skip_invalid)
+        constraint_freecad_mapping, invalid_constraints = self.to_freecad_constraints(sketch, fc_sketch, primitive_freecad_mapping, skip_invalid)
         doc.recompute()
-        return doc, fc_sketch, primitive_freecad_mapping, constraint_freecad_mapping
+        return doc, fc_sketch, primitive_freecad_mapping, constraint_freecad_mapping, invalid_constraints
 
     def from_freecad_primitives(self, sketch_obj: 'Sketcher.SketchObject') -> tuple[dict[str, datalib.Entity], dict[tuple[int, int], str]]:
         """

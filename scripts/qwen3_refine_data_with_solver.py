@@ -2485,7 +2485,7 @@ def main(args):
         # Check the solver status
         doc = None
         try:
-            doc, fc_sketch, _, _ = converter.to_freecad(sketch)
+            doc, fc_sketch, _, _, _ = converter.to_freecad(sketch)
             initial_status = fc_sketch.getSolverStatus()
             while initial_status['Status'] == "Redundant":
                 for cid in sorted(initial_status['RedundantConstraints'], reverse=True):
