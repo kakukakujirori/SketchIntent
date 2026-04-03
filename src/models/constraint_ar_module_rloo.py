@@ -8,6 +8,7 @@ import torchmetrics
 from tqdm import tqdm
 
 from src.metrics import ConstraintIoU, TokenAccuracy
+from src.models.components.constraint_ar_model import ConstraintARModel
 from src.models.components.solver_feedback import SolverFeedback
 from src.models.components.solver_reward import SolverReward
 from src.models.components.token_reordering import TokenReordering
@@ -22,7 +23,7 @@ class ConstraintARModuleRLOO(L.LightningModule):
     def __init__(
         self,
         context: SketchContext,
-        model: torch.nn.Module,
+        model: ConstraintARModel,
         reward: SolverReward,
         optimizer: torch.optim.Optimizer,
         scheduler: torch.optim.lr_scheduler._LRScheduler | None,
@@ -216,6 +217,16 @@ class ConstraintARModuleRLOO(L.LightningModule):
         generated[:, 0] = ConstraintToken.Start
         logprobs = torch.zeros((batch_size, max_len), device=self.device, dtype=torch.float32)
 
+        # ------------------------------------------------------------------ #
+        # Precompute primitive memory ONCE (prim_model is the expensive part) #
+        # All AR steps share the same primitive context.                       #
+        # ------------------------------------------------------------------ #
+        memory = self.model.compute_memory(batch)  # [B, N_special+L_prim, E]
+
+        # Running tracker: True once a STOP token has been emitted.
+        # Replaces the O(pos) full-sequence scan inside the loop.
+        stopped = torch.zeros(batch_size, dtype=torch.bool, device=self.device)
+
         # Autoregressive generation
         for pos in tqdm(range(max_len - 1), desc="Sampling", leave=False, disable=self.training):
             # Create batch with current generated tokens
@@ -226,8 +237,8 @@ class ConstraintARModuleRLOO(L.LightningModule):
                 'c_val': generated,
             }
 
-            # Forward pass
-            output = self.model(gen_batch)  # [B, L, V]
+            # Forward pass — reuse precomputed memory
+            output = self.model(gen_batch, memory=memory)  # [B, L, V]
 
             # Sample next token at position pos
             next_token_logits = output[:, pos, :]  # [B, V]
@@ -237,22 +248,24 @@ class ConstraintARModuleRLOO(L.LightningModule):
             next_logprob = dist.log_prob(next_token)
 
             # Replace with Pad if sequence has already generated STOP
-            already_stopped = (generated[:, :pos+1] == ConstraintToken.Stop).any(dim=1)
             next_token = torch.where(
-                already_stopped,
+                stopped,
                 torch.tensor(ConstraintToken.Pad, device=self.device, dtype=dtype),
                 next_token,
             )
             next_logprob = torch.where(
-                already_stopped,
+                stopped,
                 torch.tensor(0.0, device=self.device, dtype=torch.float32),
                 next_logprob,
             )
             generated[:, pos + 1] = next_token
             logprobs[:, pos + 1] = next_logprob
 
+            # Update running STOP tracker AFTER writing the token
+            stopped = stopped | (next_token == ConstraintToken.Stop)
+
             # Early stopping if all sequences have generated STOP
-            if already_stopped.all():
+            if stopped.all():
                 break
 
         return generated, logprobs

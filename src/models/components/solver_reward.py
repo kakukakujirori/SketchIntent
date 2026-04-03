@@ -191,7 +191,8 @@ class SolverReward(torch.nn.Module):
                 cons[first_stop_idx+1:] = ConstraintToken.Pad
             first_stop_indices.append(first_stop_idx)
 
-            cache_key = (tuple(prim.tolist()), tuple(cons.tolist()))
+            # tobytes() is O(1) — much faster than tuple(tolist()) for large arrays.
+            cache_key = (prim.tobytes(), cons.tobytes())
             if cache_key in self._evaluation_cache:
                 cache_hits.append((i, self._evaluation_cache[cache_key]))
             else:
@@ -231,7 +232,7 @@ class SolverReward(torch.nn.Module):
                     self._evaluation_cache[cache_key] = res
 
         # Step C: Compute rewards from the evaluation results
-        scores = torch.zeros_like(cons_tokens, dtype=torch.float32)
+        scores = torch.zeros_like(cons_tokens, device=torch.device('cpu'), dtype=torch.float32)
         solver_dof_counter: Counter[int] = Counter()
         solver_status_counter: Counter[str] = Counter()
 
@@ -321,4 +322,4 @@ class SolverReward(torch.nn.Module):
             "dof": solver_dof_counter,
             "status": solver_status_counter,
         }
-        return scores, metrics
+        return scores.to(cons_tokens.device), metrics

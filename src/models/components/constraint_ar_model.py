@@ -34,17 +34,33 @@ class ConstraintARModel(torch.nn.Module):
         self.trans_decoder = torch.nn.TransformerDecoder(decoder_layers, num_layers)
         self.embed_dim = embed_dim
 
-    def _embed_tokens(self, src: dict[str, torch.Tensor]):
-        # Embed primitives
-        prim_embeddings = self.prim_model(src)
-        # Prepend fixed val embeddings (constraint types)
-        batch_size, seq_len = src['c_val'].shape[:2]
+    def compute_memory(self, src: dict[str, torch.Tensor]) -> torch.Tensor:
+        """Compute the decoder memory (primitive + special-token embeddings).
+
+        This is the part of the forward pass that depends only on the primitives,
+        NOT on the constraint tokens.  Call once and pass to forward(memory=...)
+        to avoid redundant prim_model calls during autoregressive generation.
+
+        Returns
+        -------
+        memory : torch.Tensor  [B, N_special + L_prim, embed_dim]
+        """
+        prim_embeddings = self.prim_model(src)  # [B, L_prim, E]
+        batch_size = prim_embeddings.shape[0]
         fixed_tokens = np.tile(range(self.constraint_token_num), (batch_size, 1))
-        fixed_tokens = torch.tensor(fixed_tokens).to(src['c_val'].device)
-        fixed_val_embeddings = self.val_embed(fixed_tokens)
-        prim_embeddings = torch.cat([fixed_val_embeddings, prim_embeddings], 1)
+        fixed_tokens = torch.tensor(fixed_tokens, device=prim_embeddings.device)
+        fixed_val_embeddings = self.val_embed(fixed_tokens)  # [B, N_special, E]
+        return torch.cat([fixed_val_embeddings, prim_embeddings], dim=1)  # [B, N_special+L_prim, E]
+
+    def _embed_tokens(self, src: dict[str, torch.Tensor], memory: torch.Tensor | None = None):
+        # Compute (or reuse) primitive + special-token embeddings
+        if memory is None:
+            prim_embeddings = self.compute_memory(src)
+        else:
+            prim_embeddings = memory  # reuse precomputed memory
 
         # Gather embeddings for constraint tokens
+        batch_size, seq_len = src['c_val'].shape[:2]
         c_val_indices = src['c_val'].unsqueeze(-1).expand(-1, -1, self.embed_dim)
         val_embeddings = torch.gather(prim_embeddings, 1, c_val_indices)
 
@@ -54,9 +70,20 @@ class ConstraintARModel(torch.nn.Module):
         embeddings = val_embeddings + pos_embeddings
         return embeddings, prim_embeddings
 
-    def forward(self, src: dict[str, torch.Tensor]):
+    def forward(self, src: dict[str, torch.Tensor], memory: torch.Tensor | None = None):
+        """Forward pass.
+
+        Parameters
+        ----------
+        src : dict
+            Must contain 'c_val' (and primitive keys when memory is None).
+        memory : torch.Tensor | None
+            Precomputed decoder memory [B, N_special+L_prim, E] from
+            compute_memory().  Pass to skip redundant prim_model re-computation
+            during autoregressive generation.
+        """
         # Embed
-        c_embeddings, p_embeddings = self._embed_tokens(src)
+        c_embeddings, p_embeddings = self._embed_tokens(src, memory=memory)
         # Pass to transformer with causal mask
         seq_len = c_embeddings.shape[1]
         tgt_mask = c_embeddings.new_full((seq_len, seq_len), fill_value=float('-inf')).triu_(diagonal=1)
