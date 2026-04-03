@@ -15,7 +15,6 @@ from tqdm import tqdm
 from typing import TYPE_CHECKING
 
 import numpy as np
-import torch
 
 import sketchgraphs.data as datalib
 from src.sketch_handlers.context import SketchContext
@@ -195,8 +194,8 @@ class SolverFeedback:
 
     def evaluate_constraints(
         self,
-        prim_tokens: np.ndarray | torch.Tensor,
-        cons_tokens: np.ndarray | torch.Tensor,
+        prim_tokens: np.ndarray,
+        cons_tokens: np.ndarray,
         sketch_original: datalib.Sketch | None = None,
         check_one_by_one: bool = False,
     ) -> tuple[SolverStatus, datalib.Sketch, dict[str, int], dict[int, tuple[int, ...]]]:
@@ -204,10 +203,10 @@ class SolverFeedback:
 
         Parameters
         ----------
-        prim_tokens : array-like
-            Primitive value tokens [L_prim]
-        cons_tokens : array-like
-            Constraint value tokens [L_cons]
+        prim_tokens : np.ndarray
+            Primitive value tokens [L_prim]. Must be a numpy array.
+        cons_tokens : np.ndarray
+            Constraint value tokens [L_cons]. Must be a numpy array.
         sketch_original : datalib.Sketch | None
             Original sketch, used for precise primitive value assignment.
             If None, primitive values are assigned from the quantized prim_tokens.
@@ -225,14 +224,12 @@ class SolverFeedback:
         invalid_constraint_block_start : dict[int, tuple[int, ...]]
             Mapping from token start index to invalid constraint token block
         """
+        if not isinstance(prim_tokens, np.ndarray):
+            raise TypeError(f"prim_tokens must be np.ndarray, got {type(prim_tokens)}. Call .cpu().numpy() before passing.")
+        if not isinstance(cons_tokens, np.ndarray):
+            raise TypeError(f"cons_tokens must be np.ndarray, got {type(cons_tokens)}. Call .cpu().numpy() before passing.")
         assert len(prim_tokens.shape) == 1, f"{prim_tokens.shape=}"
         assert len(cons_tokens.shape) == 1, f"{cons_tokens.shape=}"
-
-        # Convert to numpy if needed
-        if isinstance(prim_tokens, torch.Tensor):
-            prim_tokens = prim_tokens.cpu().numpy()
-        if isinstance(cons_tokens, torch.Tensor):
-            cons_tokens = cons_tokens.cpu().numpy()
 
         # Tokens → SketchGraphs
         sketchgraphs_sketch, constraint_to_token_start, invalid_constraint_block_start = self.sketch_tokenizer.detokenize(
@@ -336,8 +333,8 @@ class SolverFeedback:
 
     def evaluate_constraints_batch(
         self,
-        prim_tokens_batch: torch.Tensor | np.ndarray,
-        cons_tokens_batch: torch.Tensor | np.ndarray,
+        prim_tokens_batch: np.ndarray,
+        cons_tokens_batch: np.ndarray,
         sketch_original_list: list[datalib.Sketch] | None = None,
         fully_constrained_dof: int = 2,
     ) -> dict[str, float]:
@@ -345,10 +342,10 @@ class SolverFeedback:
 
         Parameters
         ----------
-        prim_tokens_batch : torch.Tensor
-            Primitive tokens [B, L_prim]
-        cons_tokens_batch : torch.Tensor
-            Constraint tokens [B, L_cons]
+        prim_tokens_batch : np.ndarray
+            Primitive tokens [B, L_prim]. Must be a numpy array.
+        cons_tokens_batch : np.ndarray
+            Constraint tokens [B, L_cons]. Must be a numpy array.
         sketch_original_list : list[datalib.Sketch] | None
             Original sketches, used for precise primitive value assignment.
             If None, primitive values are assigned from the quantized prim_tokens.
@@ -362,17 +359,16 @@ class SolverFeedback:
         """
         FreeCAD, Part, Sketcher = ensure_freecad_imported()
 
+        if not isinstance(prim_tokens_batch, np.ndarray):
+            raise TypeError(f"prim_tokens_batch must be np.ndarray, got {type(prim_tokens_batch)}. Call .cpu().numpy() before passing.")
+        if not isinstance(cons_tokens_batch, np.ndarray):
+            raise TypeError(f"cons_tokens_batch must be np.ndarray, got {type(cons_tokens_batch)}. Call .cpu().numpy() before passing.")
         assert prim_tokens_batch.shape[0] == cons_tokens_batch.shape[0], f"Batch size mismatch: {prim_tokens_batch.shape=} != {cons_tokens_batch.shape=}"
         B = prim_tokens_batch.shape[0]
         if sketch_original_list is None:
             sketch_original_list = [None] * B
         assert len(sketch_original_list) == B, f"Sketch original list size mismatch: {len(sketch_original_list)=} != {B=}"
 
-        # Convert to numpy if needed
-        if isinstance(prim_tokens_batch, torch.Tensor):
-            prim_tokens_batch = prim_tokens_batch.cpu().numpy()
-        if isinstance(cons_tokens_batch, torch.Tensor):
-            cons_tokens_batch = cons_tokens_batch.cpu().numpy()
 
         counts = {
             'fully_constrained': 0,

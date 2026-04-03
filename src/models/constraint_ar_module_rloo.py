@@ -297,8 +297,8 @@ class ConstraintARModuleRLOO(L.LightningModule):
         # Evaluate solver constraints and log solver feedback metrics
         try:
             solver_results = self.solver_feedback.evaluate_constraints_batch(
-                batch['p_val'],
-                generated,
+                batch['p_val'].cpu().numpy(),
+                generated.cpu().numpy(),
                 batch['sketch'],
                 fully_constrained_dof=2,
             )
@@ -375,8 +375,8 @@ class ConstraintARModuleRLOO(L.LightningModule):
         # Evaluate solver constraints and log solver feedback metrics
         try:
             solver_results = self.solver_feedback.evaluate_constraints_batch(
-                batch['p_val'],
-                generated,
+                batch['p_val'].cpu().numpy(),
+                generated.cpu().numpy(),
                 batch['sketch'],
                 fully_constrained_dof=2,
             )

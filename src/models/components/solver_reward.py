@@ -8,23 +8,13 @@ import torch
 
 import sketchgraphs.data as datalib
 from src.models.components.solver_feedback import SolverFeedback
+from src.models.components.solver_worker import init_worker as _init_worker, evaluate_single as _evaluate_single_worker
 from src.models.components.token_visualizer import visualize_constraint_sequence
 from src.sketch_handlers.constants import ConstraintToken, CONSTRAINT_VAL_OFFSET
 from src.sketch_handlers.context import SketchContext
 from src.sketch_handlers.sketch_tokenizer import SketchTokenizer
 
 _worker_solver_feedback: SolverFeedback | None = None
-
-def _init_worker(context, distortion_threshold):
-    global _worker_solver_feedback
-    _worker_solver_feedback = SolverFeedback(context, distortion_threshold)
-
-def _evaluate_single_worker(args):
-    prim_np, cons_np, sketch_original = args
-    assert _worker_solver_feedback is not None
-    return _worker_solver_feedback.evaluate_constraints(
-        prim_np, cons_np, sketch_original, check_one_by_one=True
-    )
 
 
 class SolverReward(torch.nn.Module):
@@ -43,7 +33,6 @@ class SolverReward(torch.nn.Module):
         distortion_threshold: float | None = None,
     ):
         super().__init__()
-        # self.solver_feedback = SolverFeedback(context, distortion_threshold = distortion_threshold or 1/context.num_quantization_bins)
         self.sketch_tokenizer = SketchTokenizer(context)
         self.fully_constrained_dof = fully_constrained_dof
 
@@ -62,7 +51,9 @@ class SolverReward(torch.nn.Module):
         # Execution and caching
         self.context = context
         self.distortion_threshold = distortion_threshold or 1/context.num_quantization_bins
-        self.max_workers = (os.cpu_count() or 1)
+        # Limit parallel workers: too many concurrent FreeCAD inits causes deadlocks.
+        # Use at most 8 workers (or cpu_count // 4) to avoid spawn-time contention.
+        self.max_workers = min(8, max(1, (os.cpu_count() or 1) // 4))
         self._evaluation_cache = {}
         self.max_cache_size = 20000
 
@@ -71,7 +62,8 @@ class SolverReward(torch.nn.Module):
 
         # max_tasks_per_child: each worker is recycled after this many tasks to
         # prevent FreeCAD's internal memory leaks from accumulating indefinitely.
-        self._max_tasks_per_child = 32
+        # Set high to minimize respawn frequency (each spawn risks a deadlock).
+        self._max_tasks_per_child = 512
         self._executor: ProcessPoolExecutor | None = None
 
 
@@ -81,6 +73,10 @@ class SolverReward(torch.nn.Module):
         Workers are spawned (not forked) to avoid CUDA/Qt context contamination,
         and are automatically recycled every `_max_tasks_per_child` calls to
         counteract FreeCAD's internal memory leaks.
+
+        The initializer and worker function are imported from solver_worker.py,
+        which is a torch-free module. This ensures spawned workers never trigger
+        CUDA initialization.
         """
         if self._executor is None:
             self._executor = ProcessPoolExecutor(
@@ -93,8 +89,9 @@ class SolverReward(torch.nn.Module):
         return self._executor
 
     def __del__(self):
-        if getattr(self, "_executor", None) is not None:
-            self._executor.shutdown(wait=False)
+        executor = getattr(self, "_executor", None)
+        if executor is not None:
+            executor.shutdown(wait=False)
             self._executor = None
 
     def _get_dof_without_constraints(self, sketch: datalib.Sketch) -> int:
