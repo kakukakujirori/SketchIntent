@@ -1,5 +1,6 @@
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 from src.models.components.primitive_model import PrimitiveModel
 from src.sketch_handlers.constants import ConstraintToken
@@ -92,3 +93,176 @@ class ConstraintARModel(torch.nn.Module):
         p_embeddings = p_embeddings.transpose(1, 2)
         output = torch.matmul(output, p_embeddings)
         return output
+
+    # ------------------------------------------------------------------ #
+    #  KV-cache API for efficient autoregressive generation               #
+    # ------------------------------------------------------------------ #
+
+    def embed_token_at_pos(
+        self,
+        memory: torch.Tensor,
+        token_ids: torch.Tensor,
+        pos: int,
+    ) -> torch.Tensor:
+        """Embed a single batch of tokens at position *pos*.
+
+        Parameters
+        ----------
+        memory   : [B, M, E]  — output of compute_memory()
+        token_ids: [B]        — integer indices into memory
+        pos      : int        — position in the sequence
+
+        Returns
+        -------
+        [B, 1, E]
+        """
+        E = self.embed_dim
+        idx = token_ids.unsqueeze(-1).unsqueeze(-1).expand(-1, 1, E)  # [B, 1, E]
+        val_emb = memory.gather(1, idx)                                # [B, 1, E]
+        pos_idx = torch.full(
+            (token_ids.shape[0], 1), pos,
+            device=memory.device, dtype=torch.long,
+        )
+        pos_emb = self.pos_embed(pos_idx)                             # [B, 1, E]
+        return val_emb + pos_emb
+
+    def compute_cross_kv_cache(
+        self,
+        memory: torch.Tensor,
+    ) -> list[tuple[torch.Tensor, torch.Tensor]]:
+        """Project memory into K, V for every cross-attention layer.
+
+        Call **once** before the AR loop.  The same cache is reused at every
+        generation step (memory does not change across steps).
+
+        Parameters
+        ----------
+        memory : [B, M, E]
+
+        Returns
+        -------
+        list of (k, v) per layer, each shaped [B, H, M, d_head]
+        """
+        B, M, E = memory.shape
+        caches: list[tuple[torch.Tensor, torch.Tensor]] = []
+        for layer in self.trans_decoder.layers:
+            ca = layer.multihead_attn
+            H  = ca.num_heads
+            d  = E // H
+            w, b = ca.in_proj_weight, ca.in_proj_bias
+            # K and V projections applied to memory (Q projection is for the tgt)
+            k = F.linear(memory, w[E:2*E], b[E:2*E] if b is not None else None)  # [B, M, E]
+            v = F.linear(memory, w[2*E:],  b[2*E:]  if b is not None else None)  # [B, M, E]
+            # Reshape to [B, H, M, d] — format expected by SDPA
+            k = k.view(B, M, H, d).transpose(1, 2)  # [B, H, M, d]
+            v = v.view(B, M, H, d).transpose(1, 2)
+            caches.append((k, v))
+        return caches
+
+    def init_kv_cache(
+        self,
+        batch_size: int,
+        max_len: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> list[tuple[torch.Tensor, torch.Tensor]]:
+        """Pre-allocate self-attention KV cache buffers for all layers.
+
+        Returns a list of (k_buf, v_buf) per layer, each [B, H, max_len, d_head].
+        Buffers are written in-place inside decoder_step_cached().
+
+        Pre-allocation avoids repeated torch.cat() calls (O(L²) memory copies)
+        that would occur with a naive append-each-step approach.
+        """
+        layer0 = self.trans_decoder.layers[0]
+        H = layer0.self_attn.num_heads
+        d = self.embed_dim // H
+        return [
+            (
+                torch.zeros(batch_size, H, max_len, d, device=device, dtype=dtype),
+                torch.zeros(batch_size, H, max_len, d, device=device, dtype=dtype),
+            )
+            for _ in self.trans_decoder.layers
+        ]
+
+    def decoder_step_cached(
+        self,
+        tgt: torch.Tensor,
+        pos: int,
+        self_kv: list[tuple[torch.Tensor, torch.Tensor]],
+        cross_kv: list[tuple[torch.Tensor, torch.Tensor]],
+    ) -> torch.Tensor:
+        """Run one AR step through all decoder layers with KV cache.
+
+        self_kv buffers are **mutated in-place** (k_buf[:, :, pos, :] is written).
+
+        Parameters
+        ----------
+        tgt      : [B, 1, E]  — embedding of the new token at position *pos*
+        pos      : int        — current sequence position (write index)
+        self_kv  : list of (k_buf, v_buf) per layer, each [B, H, max_len, d_head]
+        cross_kv : list of (k, v) per layer from compute_cross_kv_cache
+
+        Returns
+        -------
+        [B, 1, E]  — decoder output for this position
+        """
+        B, _, E = tgt.shape
+
+        for i, layer in enumerate(self.trans_decoder.layers):
+            H = layer.self_attn.num_heads
+            d = E // H
+
+            # ── Self-attention (with pre-allocated KV cache) ─────────── #
+            sa = layer.self_attn
+
+            # Fused QKV projection: one GEMM for all three projections
+            qkv    = F.linear(tgt, sa.in_proj_weight, sa.in_proj_bias)  # [B, 1, 3E]
+            q, k_new, v_new = qkv.split(E, dim=-1)                      # each [B, 1, E]
+
+            # Reshape to SDPA format
+            q     = q.view(B, 1, H, d).transpose(1, 2)   # [B, H, 1, d]
+            k_new = k_new.view(B, H, d)                   # [B, H, d]
+            v_new = v_new.view(B, H, d)                   # [B, H, d]
+
+            # Write new K, V into pre-allocated buffer at position *pos*
+            k_buf, v_buf = self_kv[i]
+            k_buf[:, :, pos, :] = k_new
+            v_buf[:, :, pos, :] = v_new
+
+            # Read the accumulated cache up to (and including) *pos*
+            k_all = k_buf[:, :, :pos + 1, :]  # [B, H, pos+1, d]
+            v_all = v_buf[:, :, :pos + 1, :]
+
+            # SDPA — automatically uses Flash Attention on CUDA + float16/bfloat16
+            attn_dp = sa.dropout if self.training else 0.0
+            sa_out = F.scaled_dot_product_attention(q, k_all, v_all, dropout_p=attn_dp)
+            sa_out = sa_out.transpose(1, 2).contiguous().view(B, 1, E)
+            sa_out = F.linear(sa_out, sa.out_proj.weight, sa.out_proj.bias)
+
+            tgt = layer.norm1(tgt + layer.dropout(sa_out))
+
+            # ── Cross-attention (reuses precomputed KV from memory) ───── #
+            ca = layer.multihead_attn
+            cross_k, cross_v = cross_kv[i]   # [B, H, M, d]
+
+            # Only Q is computed for the new token; K/V come from cache
+            q_c = F.linear(
+                tgt,
+                ca.in_proj_weight[:E],
+                ca.in_proj_bias[:E] if ca.in_proj_bias is not None else None,
+            )
+            q_c = q_c.view(B, 1, H, d).transpose(1, 2)  # [B, H, 1, d]
+
+            ca_dp  = ca.dropout if self.training else 0.0
+            ca_out = F.scaled_dot_product_attention(q_c, cross_k, cross_v, dropout_p=ca_dp)
+            ca_out = ca_out.transpose(1, 2).contiguous().view(B, 1, E)
+            ca_out = F.linear(ca_out, ca.out_proj.weight, ca.out_proj.bias)
+
+            tgt = layer.norm2(tgt + layer.dropout(ca_out))
+
+            # ── Feed-forward ──────────────────────────────────────────── #
+            ff_out = layer.linear2(layer.dropout(layer.activation(layer.linear1(tgt))))
+            tgt = layer.norm3(tgt + layer.dropout(ff_out))
+
+        return tgt  # [B, 1, E]

@@ -113,26 +113,20 @@ class ConstraintARModuleRLOO(L.LightningModule):
         B, K = batch['p_val'].shape[0], self.group_sample_size
         _, max_len = batch['c_val'].shape
 
-        expanded = {k: v.repeat_interleave(K, dim=0) if isinstance(v, torch.Tensor) else [x for x in v for _ in range(K)] for k, v in batch.items()}  # [0, 1, 2, ...] => [0, ..., 0, 1, ..., 1, 2, ..., 2, ...]
+        expanded = {k: v.repeat_interleave(K, dim=0) if isinstance(v, torch.Tensor) else [x for x in v for _ in range(K)] for k, v in batch.items()}
 
-        # ------------------------------------------------------------------ #
-        # Step 1: Sample trajectories (GPU)                                   #
-        # ------------------------------------------------------------------ #
+        # Step 1: Sample trajectories (GPU)
         with torch.no_grad():
             generated, gen_logprobs = self.generate_sample(expanded, max_len, dtype=batch['c_val'].dtype)
 
-        # ------------------------------------------------------------------ #
-        # Step 2: Kick off solver asynchronously (CPU workers start now)      #
-        # The solver runs CONCURRENTLY with the GPU forward passes below.     #
-        # ------------------------------------------------------------------ #
-        p_val_expanded: torch.Tensor = cast(torch.Tensor, expanded['p_val'])  # always Tensor
+        # Step 2: Kick off solver asynchronously (CPU workers start now,
+        # running concurrently with the GPU forward passes below)
+        p_val_expanded: torch.Tensor = cast(torch.Tensor, expanded['p_val'])
         solver_handle = self.reward.submit_async(
             p_val_expanded, generated, expanded['sketch']
         )
 
-        # ------------------------------------------------------------------ #
-        # Step 3: GPU compute — runs while CPU solver is in flight            #
-        # ------------------------------------------------------------------ #
+        # Step 3: GPU compute — runs while CPU solver is in flight
         mask = (generated[:, 1:] != ConstraintToken.Pad).float()   # [B*K, L-1]
         n_valid = mask.sum().clamp(min=1)
 
@@ -143,15 +137,13 @@ class ConstraintARModuleRLOO(L.LightningModule):
 
         dist = torch.distributions.Categorical(logits=logits)
         entropy = (dist.entropy() * mask).sum() / n_valid
-
         token_log_probs = dist.log_prob(generated[:, 1:])          # [B*K, L-1]
 
         # Ratio (for monitoring)
         ratio = torch.exp(token_log_probs - gen_logprobs[:, 1:])
         avg_ratio = (ratio * mask).sum() / n_valid
 
-        # KL penalty — computed before collect_results() because it does not
-        # depend on rewards; this maximises overlap with the CPU solver.
+        # KL penalty (computed before collect_results — no dependency on rewards)
         kl_loss_metric = torch.tensor(0.0, device=self.device)
         kl_penalty: torch.Tensor | None = None
         if self.kl_coeff > 0.0:
@@ -163,11 +155,7 @@ class ConstraintARModuleRLOO(L.LightningModule):
                 kl_penalty = token_log_probs.detach() - ref_log_probs
             kl_loss_metric = (kl_penalty * mask).sum() / n_valid
 
-        # ------------------------------------------------------------------ #
-        # Step 4: Collect solver results (blocks only if solver not done yet) #
-        # By this point the CPU solver has had time to complete while GPU     #
-        # was doing the forward passes above.                                 #
-        # ------------------------------------------------------------------ #
+        # Step 4: Collect solver results (blocks only for remaining solver time)
         rewards_cpu, solver_metrics = self.reward.collect_results(solver_handle)
         rewards = rewards_cpu.to(self.device).float()  # [B*K, L]
 
@@ -189,9 +177,7 @@ class ConstraintARModuleRLOO(L.LightningModule):
             valid_dof_count = sum(c for d, c in dof_counter.items() if d >= 0)
             parsed_solver_metrics["solver_valid_dof_mean"] = valid_dof_sum / valid_dof_count if valid_dof_count > 0 else 0.0
 
-        # ------------------------------------------------------------------ #
-        # Step 5: Apply KL penalty and compute returns / advantages           #
-        # ------------------------------------------------------------------ #
+        # Step 5: Compute returns / advantages / loss
         adjusted_rewards = rewards.clone()
         if self.kl_coeff > 0.0 and kl_penalty is not None:
             # Subtract KL penalty from rewards
@@ -224,7 +210,6 @@ class ConstraintARModuleRLOO(L.LightningModule):
         }
         return loss, metrics
 
-
     @torch.no_grad()
     def logits_to_preds(self, logits: torch.Tensor) -> torch.Tensor:
         lf = logits.clone()
@@ -238,43 +223,52 @@ class ConstraintARModuleRLOO(L.LightningModule):
         max_len: int,
         dtype: torch.dtype = torch.long,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        # Start with just START token, rest is zeros (will be filled)
+        """Autoregressive token generation using KV cache.
+
+        Complexity: O(L²) total instead of O(L³) (avoids re-running the full
+        sequence through the decoder at every step).
+
+        Cross-attention KV vectors are precomputed once from the fixed primitive
+        memory.  Self-attention KV vectors are accumulated in pre-allocated
+        buffers that are written in-place (no torch.cat allocations).
+        """
         batch_size = batch['p_val'].shape[0]
         generated = torch.full((batch_size, max_len), ConstraintToken.Pad, device=self.device, dtype=dtype)
         generated[:, 0] = ConstraintToken.Start
         logprobs = torch.zeros((batch_size, max_len), device=self.device, dtype=torch.float32)
 
-        # ------------------------------------------------------------------ #
-        # Precompute primitive memory ONCE (prim_model is the expensive part) #
-        # All AR steps share the same primitive context.                       #
-        # ------------------------------------------------------------------ #
-        memory = self.model.compute_memory(batch)  # [B, N_special+L_prim, E]
+        # ── Step A: compute primitive memory (done ONCE) ──────────────── #
+        memory = self.model.compute_memory(batch)   # [B, M, E]
 
-        # Running tracker: True once a STOP token has been emitted.
-        # Replaces the O(pos) full-sequence scan inside the loop.
+        # ── Step B: pre-compute cross-attention KV from memory (ONCE) ─── #
+        # Memory never changes across AR steps → K, V can be cached permanently.
+        cross_kv = self.model.compute_cross_kv_cache(memory)  # list[(k,v)] per layer
+
+        # ── Step C: pre-allocate self-attention KV buffers ────────────── #
+        # Buffers are written in-place at each step; no repeated cat().
+        self_kv = self.model.init_kv_cache(
+            batch_size, max_len, device=self.device, dtype=memory.dtype
+        )
+
         stopped = torch.zeros(batch_size, dtype=torch.bool, device=self.device)
 
-        # Autoregressive generation
+        # ── AR loop ───────────────────────────────────────────────────── #
         for pos in tqdm(range(max_len - 1), desc="Sampling", leave=False, disable=self.training):
-            # Create batch with current generated tokens
-            gen_batch = {
-                'p_val': batch['p_val'],
-                'p_attr': batch['p_attr'],
-                'p_pos': batch['p_pos'],
-                'c_val': generated,
-            }
+            # Embed current token at position pos: [B, 1, E]
+            new_emb = self.model.embed_token_at_pos(memory, generated[:, pos], pos)
 
-            # Forward pass — reuse precomputed memory
-            output = self.model(gen_batch, memory=memory)  # [B, L, V]
+            # One decoder step — writes to self_kv in-place, O(pos) per step
+            dec_out = self.model.decoder_step_cached(new_emb, pos, self_kv, cross_kv)  # [B, 1, E]
 
-            # Sample next token at position pos
-            next_token_logits = output[:, pos, :]  # [B, V]
+            # Pointer logits: [B, 1, E] @ [B, E, M] → [B, M]
+            next_token_logits = torch.matmul(dec_out, memory.transpose(1, 2)).squeeze(1)
             next_token_logits[:, ConstraintToken.Mask] = -torch.inf
+
             dist = torch.distributions.Categorical(logits=next_token_logits)
-            next_token = dist.sample()
+            next_token  = dist.sample()
             next_logprob = dist.log_prob(next_token)
 
-            # Replace with Pad if sequence has already generated STOP
+            # Override with Pad for sequences that already stopped
             next_token = torch.where(
                 stopped,
                 torch.tensor(ConstraintToken.Pad, device=self.device, dtype=dtype),
@@ -286,16 +280,14 @@ class ConstraintARModuleRLOO(L.LightningModule):
                 next_logprob,
             )
             generated[:, pos + 1] = next_token
-            logprobs[:, pos + 1] = next_logprob
+            logprobs[:, pos + 1]  = next_logprob
 
-            # Update running STOP tracker AFTER writing the token
             stopped = stopped | (next_token == ConstraintToken.Stop)
-
-            # Early stopping if all sequences have generated STOP
             if stopped.all():
                 break
 
         return generated, logprobs
+
 
     def training_step(self, batch: dict[str, Any], batch_idx: int):
         rl_loss, rl_metrics = self._compute_rloo_loss(batch)
