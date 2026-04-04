@@ -16,6 +16,9 @@ import rootutils
 rootutils.setup_root(__file__, indicator=".project-root", pythonpath=True)
 
 from scripts.draw_constraints import load_and_extract_from_file, visualize_sketch_for_vlm
+from src.sketch_handlers.context import SketchContext
+from src.sketch_handlers.sketch_freecad_converter import SketchFreecadConverter
+from src.sketch_handlers.sketch_utils import cleanse_sketch_constraints
 
 
 def extract_sketches(json_path: str) -> list[dict]:
@@ -232,21 +235,21 @@ def generate_freecad_script(sketch: dict[str, Any], remove_constraints: bool = F
         return script
 
 
-    script.append("# --- Anchor to Origin ---")
-    anchored_one = False
-    for pt_uuid, pt in sketch["points"].items():
-        if abs(pt['x']) < 1e-8 and abs(pt['y']) < 1e-8:
-            if pt_uuid in point_connections:
-                curve_uuid, vtx = point_connections[pt_uuid][0]
-                script.append(f"fc_sketch.addConstraint(Sketcher.Constraint('Coincident', {uuid_to_fcid[curve_uuid]}, {vtx}, -1, 1))")
-                anchored_one = True
-                break
-            elif pt_uuid in uuid_to_fcid:
-                script.append(f"fc_sketch.addConstraint(Sketcher.Constraint('Coincident', {uuid_to_fcid[pt_uuid]}, 1, -1, 1))")
-                anchored_one = True
-                break
-            else:
-                pass
+    # script.append("# --- Anchor to Origin ---")
+    # anchored_one = False
+    # for pt_uuid, pt in sketch["points"].items():
+    #     if abs(pt['x']) < 1e-8 and abs(pt['y']) < 1e-8:
+    #         if pt_uuid in point_connections:
+    #             curve_uuid, vtx = point_connections[pt_uuid][0]
+    #             script.append(f"fc_sketch.addConstraint(Sketcher.Constraint('Coincident', {uuid_to_fcid[curve_uuid]}, {vtx}, -1, 1))")
+    #             anchored_one = True
+    #             break
+    #         elif pt_uuid in uuid_to_fcid:
+    #             script.append(f"fc_sketch.addConstraint(Sketcher.Constraint('Coincident', {uuid_to_fcid[pt_uuid]}, 1, -1, 1))")
+    #             anchored_one = True
+    #             break
+    #         else:
+    #             pass
 
     script.append("# --- Add Implicit Coincident Constraints ---")
     for pt_uuid, connections in point_connections.items():
@@ -393,9 +396,71 @@ def generate_freecad_script(sketch: dict[str, Any], remove_constraints: bool = F
                 c2, v2 = point_connections[e2][0]
                 script.append(f"fc_sketch.addConstraint(Sketcher.Constraint('Symmetric', {uuid_to_fcid[c1]}, {v1}, {uuid_to_fcid[c2]}, {v2}, {uuid_to_fcid[sym_line]}))")
             elif e1 in uuid_to_fcid and e2 in uuid_to_fcid:
-                # script.append(f"fc_sketch.addConstraint(Sketcher.Constraint('Symmetric', {uuid_to_fcid[e1]}, {uuid_to_fcid[e2]}, {uuid_to_fcid[sym_line]}))")
-                print(f"Warning: SymmetryConstraint between non-points are unsupported in FreeCAD, skipping")
-                continue
+                type1 = sketch["curves"][e1]["type"]
+                type2 = sketch["curves"][e2]["type"]
+                if type1 != type2:
+                    print(f"Warning: SymmetryConstraint between different types {type1} and {type2} unsupported, skipping")
+                    continue
+
+                fc_id_1 = uuid_to_fcid[e1]
+                fc_id_2 = uuid_to_fcid[e2]
+                fc_sym = uuid_to_fcid[sym_line]
+
+                script.append(f"fc_sketch.addConstraint(Sketcher.Constraint('Equal', {fc_id_1}, {fc_id_2}))")
+
+                if type1 == "SketchLine":
+                    sym_c = sketch["curves"].get(sym_line)
+                    reversed_pts = False
+                    if sym_c and sym_c.get("type") == "SketchLine":
+                        s_s = sketch["points"][sym_c["start_point"]]
+                        s_e = sketch["points"][sym_c["end_point"]]
+                        l1_s = sketch["points"][sketch["curves"][e1]["start_point"]]
+                        l1_e = sketch["points"][sketch["curves"][e1]["end_point"]]
+                        l2_s = sketch["points"][sketch["curves"][e2]["start_point"]]
+                        l2_e = sketch["points"][sketch["curves"][e2]["end_point"]]
+
+                        ux = s_e['x'] - s_s['x']
+                        uy = s_e['y'] - s_s['y']
+                        alen = (ux**2 + uy**2)**0.5
+                        if alen > 1e-6:
+                            ux /= alen
+                            uy /= alen
+                        else:
+                            ux, uy = 1.0, 0.0
+
+                        def pair_error(px, py):
+                            # vector connecting l1_s to p
+                            cx, cy = px - l1_s['x'], py - l1_s['y']
+                            # Dot product with unit axis vector (parallel deviation)
+                            dp = abs(cx * ux + cy * uy)
+
+                            # Midpoint distance to axis (perpendicular deviation)
+                            mx, my = (l1_s['x'] + px)/2, (l1_s['y'] + py)/2
+                            dist = abs((mx - s_s['x']) * uy - (my - s_s['y']) * ux)
+
+                            return dp + dist
+
+                        err1 = pair_error(l2_s['x'], l2_s['y'])
+                        err2 = pair_error(l2_e['x'], l2_e['y'])
+
+                        if err2 < err1:
+                            reversed_pts = True
+
+                    if reversed_pts:
+                        script.append(f"fc_sketch.addConstraint(Sketcher.Constraint('Symmetric', {fc_id_1}, 1, {fc_id_2}, 2, {fc_sym}))")
+                        script.append(f"fc_sketch.addConstraint(Sketcher.Constraint('Symmetric', {fc_id_1}, 2, {fc_id_2}, 1, {fc_sym}))")
+                    else:
+                        script.append(f"fc_sketch.addConstraint(Sketcher.Constraint('Symmetric', {fc_id_1}, 1, {fc_id_2}, 1, {fc_sym}))")
+                        script.append(f"fc_sketch.addConstraint(Sketcher.Constraint('Symmetric', {fc_id_1}, 2, {fc_id_2}, 2, {fc_sym}))")
+                elif type1 == "SketchCircle":
+                    script.append(f"fc_sketch.addConstraint(Sketcher.Constraint('Symmetric', {fc_id_1}, 3, {fc_id_2}, 3, {fc_sym}))")
+                elif type1 == "SketchArc":
+                    # NOTE: We do not add explicit endpoint symmetries for Arcs here because Fusion 360
+                    # JSON explicitly includes point symmetries for Arcs to preserve their directionality.
+                    pass
+                else:
+                    print(f"Warning: SymmetryConstraint between non-points of type {type1} are unsupported in FreeCAD, skipping")
+                    continue
             else:
                 print(f"Warning: SymmetryConstraint targets unresolved: e1={e1}, e2={e2}, sym_line={sym_line}, skipping")
                 continue
@@ -517,9 +582,29 @@ def generate_freecad_script(sketch: dict[str, Any], remove_constraints: bool = F
                 c2_in_curves = e2 in sketch["curves"]
                 c1_type = sketch["curves"][e1]["type"] if c1_in_curves else "SketchPoint"
                 c2_type = sketch["curves"][e2]["type"] if c2_in_curves else "SketchPoint"
-                v1 = 1 if c1_type == "SketchPoint" else 0
-                v2 = 1 if c2_type == "SketchPoint" else 0
-                script.append(f"fc_sketch.addConstraint(Sketcher.Constraint('{fc_type}', {uuid_to_fcid[e1]}, {v1}, {uuid_to_fcid[e2]}, {v2}, {value}))")
+
+                if c1_type == "SketchLine" and c2_type == "SketchLine" and fc_type == "Distance":
+                    p1_start = sketch["points"][sketch["curves"][e1]["start_point"]]
+                    p1_end   = sketch["points"][sketch["curves"][e1]["end_point"]]
+                    p2_start = sketch["points"][sketch["curves"][e2]["start_point"]]
+                    p2_end   = sketch["points"][sketch["curves"][e2]["end_point"]]
+
+                    v1x, v1y = p1_end['x'] - p1_start['x'], p1_end['y'] - p1_start['y']
+                    v2x, v2y = p2_end['x'] - p2_start['x'], p2_end['y'] - p2_start['y']
+
+                    cross = abs(v1x * v2y - v1y * v2x)
+                    len1 = (v1x**2 + v1y**2)**0.5
+                    len2 = (v2x**2 + v2y**2)**0.5
+
+                    if len1 > 1e-6 and len2 > 1e-6 and cross / (len1 * len2) < 1e-4:
+                        script.append(f"fc_sketch.addConstraint(Sketcher.Constraint('Parallel', {uuid_to_fcid[e1]}, {uuid_to_fcid[e2]}))")
+                        script.append(f"fc_sketch.addConstraint(Sketcher.Constraint('Distance', {uuid_to_fcid[e1]}, 1, {uuid_to_fcid[e2]}, 0, {value}))")
+                    else:
+                        raise ValueError(f"Distance constraint between non-parallel lines {e1} and {e2} is unsupported.")
+                else:
+                    v1 = 1 if c1_type == "SketchPoint" else 0
+                    v2 = 1 if c2_type == "SketchPoint" else 0
+                    script.append(f"fc_sketch.addConstraint(Sketcher.Constraint('{fc_type}', {uuid_to_fcid[e1]}, {v1}, {uuid_to_fcid[e2]}, {v2}, {value}))")
             else:
                 raise ValueError(f"Linear/Offset Dimension targets unresolved: e1={e1}, e2={e2}")
 
@@ -559,30 +644,33 @@ def generate_freecad_script(sketch: dict[str, Any], remove_constraints: bool = F
         else:
             raise NotImplementedError(f"Unhandled dimension type {c_type}")
 
-    script.append("# --- Handle Fixed Entities ---")
-    for curve_uuid, curve in sketch["curves"].items():
-        if "fixed" in curve and curve["fixed"]:
-            if curve_uuid not in uuid_to_fcid:
-                raise KeyError(f"Fixed curve {curve_uuid} not found in uuid_to_fcid")
-            fcid = uuid_to_fcid[curve_uuid]
-            c_type = curve["type"]
-            # Helper to lock a specific point index of a geometry
-            def lock_pt(geom_id, pt_idx, x, y):
-                script.append(f"fc_sketch.addConstraint(Sketcher.Constraint('DistanceX', {geom_id}, {pt_idx}, -1, 1, {x}))")
-                script.append(f"fc_sketch.addConstraint(Sketcher.Constraint('DistanceY', {geom_id}, {pt_idx}, -1, 1, {y}))")
+    # script.append("# --- Handle Fixed Entities ---")
+    # for curve_uuid, curve in sketch["curves"].items():
+    #     if "fixed" in curve and curve["fixed"]:
+    #         if curve_uuid not in uuid_to_fcid:
+    #             raise KeyError(f"Fixed curve {curve_uuid} not found in uuid_to_fcid")
+    #         fcid = uuid_to_fcid[curve_uuid]
+    #         c_type = curve["type"]
+    #         # Helper to lock a specific point index of a geometry
+    #         def lock_pt(geom_id, pt_idx, x, y):
+    #             script.append(f"fc_sketch.addConstraint(Sketcher.Constraint('DistanceX', {geom_id}, {pt_idx}, -1, 1, {x}))")
+    #             script.append(f"fc_sketch.addConstraint(Sketcher.Constraint('DistanceY', {geom_id}, {pt_idx}, -1, 1, {y}))")
 
-            if c_type == "SketchLine":
-                p1 = sketch["points"][curve["start_point"]]
-                p2 = sketch["points"][curve["end_point"]]
-                lock_pt(fcid, 1, p1['x'], p1['y'])
-                lock_pt(fcid, 2, p2['x'], p2['y'])
-            elif c_type in ["SketchCircle", "SketchArc", "SketchEllipse", "SketchEllipticalArc"]:
-                cp = sketch["points"][curve["center_point"]]
-                lock_pt(fcid, 3, cp['x'], cp['y'])
-            elif c_type in ("SketchFittedSpline", "SketchFixedSpline"):
-                pass
-            else:
-                raise NotImplementedError(f"Fixing curve type {c_type} is not implemented")
+    #         if c_type == "SketchLine":
+    #             p1 = sketch["points"][curve["start_point"]]
+    #             p2 = sketch["points"][curve["end_point"]]
+    #             lock_pt(fcid, 1, p1['x'], p1['y'])
+    #             lock_pt(fcid, 2, p2['x'], p2['y'])
+    #         elif c_type in ["SketchCircle", "SketchArc", "SketchEllipse", "SketchEllipticalArc"]:
+    #             cp = sketch["points"][curve["center_point"]]
+    #             lock_pt(fcid, 3, cp['x'], cp['y'])
+    #         elif c_type in ("SketchFittedSpline", "SketchFixedSpline"):
+    #             pass
+    #         else:
+    #             raise NotImplementedError(f"Fixing curve type {c_type} is not implemented")
+
+    # Deduplicate constraints
+    script = deduplicate_constraints(script)
 
     script += [
         "",
@@ -592,15 +680,29 @@ def generate_freecad_script(sketch: dict[str, Any], remove_constraints: bool = F
     return script
 
 
+def deduplicate_constraints(script: list[str]) -> list[str]:
+    script_deduplicated = []
+    seen_constraints = set()
+    for line in script:
+        if line.startswith("fc_sketch.addConstraint(Sketcher.Constraint("):
+            if line in seen_constraints:
+                continue
+            seen_constraints.add(line)
+            script_deduplicated.append(line)
+        else:
+            script_deduplicated.append(line)
+    return script_deduplicated
+
+
 def count_freecad_commands(freecad_script: list[str]) -> tuple[Counter[str], Counter[str]]:
     primitive_counter = Counter()
     constraint_counter = Counter()
     for line in freecad_script:
         if line.startswith("fc_sketch.addGeometry(Part."):
-            prim = line[len("fc_sketch.addGeometry(Part."):].split("()")[0]
+            prim = line[len("fc_sketch.addGeometry(Part."):].split("(")[0]
             primitive_counter[prim] += 1
-        elif line.startswith("fc_sketch.addConstraint(Sketcher.Constraint("):
-            cons = line[len("fc_sketch.addConstraint(Sketcher.Constraint("):].split("()")[0]
+        elif line.startswith("fc_sketch.addConstraint(Sketcher.Constraint('"):
+            cons = line[len("fc_sketch.addConstraint(Sketcher.Constraint('"):].split("'")[0]
             constraint_counter[cons] += 1
     return primitive_counter, constraint_counter
 
@@ -625,6 +727,9 @@ if __name__ == '__main__':
 
     os.makedirs(args.out_dir, exist_ok=True)
     os.makedirs(args.sketch_dump_dir, exist_ok=True)
+
+    context = SketchContext()
+    sketch_freecad_converter = SketchFreecadConverter(context)
 
     if args.test_data_only:
         train_test_json = os.path.join(os.path.dirname(args.data_dir), "train_test.json")
@@ -652,10 +757,15 @@ if __name__ == '__main__':
                 if primitives_counter.keys() & UNHANDLED_PRIMITIVES or constraints_counter.keys() & UNHANDLED_CONSTRAINTS:
                     continue
 
-                # 3. Test-run the script
+                # 3. Resolve redundancy
+                sg_sketch = sketch_freecad_converter.from_freecad_commands(freecad_script)
+                sg_sketch = cleanse_sketch_constraints(sg_sketch, resolve_redundancy=True)
+                freecad_script = sketch_freecad_converter.to_freecad_commands(sg_sketch)
+
+                # 4. Test-run the script
                 sketch_data = load_and_extract_from_file(freecad_script)
 
-                # 4. Export the commands
+                # 5. Export the commands
                 if sketch_data is not None:
                     command_file_path = os.path.join(args.out_dir, f"{os.path.basename(json_path).replace('.json', f'_sketch{sketch_id:02d}.py')}")
                     with open(command_file_path, "w", encoding="utf-8") as f:

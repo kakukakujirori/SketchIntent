@@ -109,13 +109,23 @@ class MidpointHandler(ConstraintHandler):
         g2, p2 = fc_constraint.Second, fc_constraint.SecondPos
         g3, p3 = fc_constraint.Third, fc_constraint.ThirdPos
 
-        # Check if it's a midpoint: First and Second are endpoints of same line
-        if g1 == g2 and p1 == 1 and p2 == 2:
-            # This is Midpoint(point on line)
+        # Ensure p3 > 0, otherwise it's symmetry with respect to an axis (Mirror)
+        if p3 <= 0:
+            raise ValueError(f"Midpoint constraint must specify a center 'point' of symmetry, but got {(g3, p3)=}")
+
+        if g1 == g2 and (p1, p2) in [(1, 2), (2, 1)]:
+            # 2-ref form: point + line
             r_point = geoID_to_primitive.get((g3, p3))
             r_line = geoID_to_primitive.get((g1, 0))
             assert r_point and r_line
             return self.create_constraint('Midpoint', (r_point, r_line))
+        elif g1 != g2 and p1 > 0 and p2 > 0:
+            # 3-ref form: two endpoints + midpoint
+            r1 = geoID_to_primitive.get((g1, p1))
+            r2 = geoID_to_primitive.get((g2, p2))
+            r3 = geoID_to_primitive.get((g3, p3))
+            assert r1 and r2 and r3
+            return self.create_constraint('Midpoint', (r1, r2, r3))
 
         raise ValueError(f"Invalid constraint for {self.name}: {fc_constraint}")
 

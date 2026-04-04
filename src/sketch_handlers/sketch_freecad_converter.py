@@ -3,7 +3,7 @@ from typing import TYPE_CHECKING
 
 import sketchgraphs.data as datalib
 from src.sketch_handlers.context import SketchContext
-from src.sketch_handlers.freecad_utils import ensure_freecad_imported
+from src.sketch_handlers.freecad_utils import dump_freecad_commands, ensure_freecad_imported, load_freecad_commands
 from src.sketch_handlers.sketch_utils import complete_constraint_values
 
 if TYPE_CHECKING:
@@ -185,6 +185,19 @@ class SketchFreecadConverter:
         doc.recompute()
         return doc, fc_sketch, primitive_freecad_mapping, constraint_freecad_mapping, invalid_constraints
 
+    def to_freecad_commands(self, sketch: datalib.Sketch, skip_invalid: bool = False) -> list[str]:
+        """
+        Wrapper of to_freecad to output FreeCAD commands.
+        """
+        doc = None
+        try:
+            doc, fc_sketch, _, _, _ = self.to_freecad(sketch, skip_invalid=skip_invalid)
+            commands = dump_freecad_commands(fc_sketch)
+            return commands
+        finally:
+            FreeCAD, _, _ = ensure_freecad_imported()
+            FreeCAD.closeDocument(doc.Name) if doc else None
+
     def from_freecad_primitives(self, sketch_obj: 'Sketcher.SketchObject') -> tuple[dict[str, datalib.Entity], dict[tuple[int, int], str]]:
         """
         Converts FreeCAD SketchObject geometry to datalib Entities.
@@ -294,3 +307,16 @@ class SketchFreecadConverter:
         entities, geoID_to_primitive = self.from_freecad_primitives(sketch_obj)
         constraints = self.from_freecad_constraints(sketch_obj, geoID_to_primitive)
         return datalib.Sketch(entities=entities, constraints=constraints)
+
+    def from_freecad_commands(self, commands_or_file: list[str] | str) -> datalib.Sketch:
+        """
+        Wrapper of from_freecad to create a FreeCAD document from python commands and extract the sketch.
+        """
+        doc = None
+        try:
+            doc, fc_sketch = load_freecad_commands(commands_or_file)
+            sg_sketch = self.from_freecad(fc_sketch)
+            return sg_sketch
+        finally:
+            FreeCAD, _, _ = ensure_freecad_imported()
+            FreeCAD.closeDocument(doc.Name) if doc else None

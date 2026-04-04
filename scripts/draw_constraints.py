@@ -15,7 +15,7 @@ from PIL import Image
 
 rootutils.setup_root(__file__, indicator=".project-root", pythonpath=True)
 
-from src.sketch_handlers.freecad_utils import ensure_freecad_imported
+from src.sketch_handlers.freecad_utils import ensure_freecad_imported, load_freecad_commands
 
 FreeCAD, Part, Sketcher = ensure_freecad_imported()
 from FreeCAD import Vector
@@ -109,44 +109,9 @@ def load_and_extract_from_file(filepath_or_command_list: str | list[str]) -> dic
     """
     指定されたPythonファイルを実行し、生成されたSketchからデータを抽出し、ドキュメントを閉じる
     """
-    if isinstance(filepath_or_command_list, str) and os.path.isfile(filepath_or_command_list):
-        with open(filepath_or_command_list, 'r') as f:
-            script_content = f.read()
-    else:
-        script_content = "\n".join(filepath_or_command_list)
-
-    exec_globals = {
-        "FreeCAD": FreeCAD,
-        "Part": Part,
-        "Sketcher": Sketcher,
-        "Vector": FreeCAD.Vector
-    }
-
-    target_sketch = None
-
+    doc = None
     try:
-        # --- Run the script ---
-        exec(script_content, exec_globals)
-
-        # 1. Find the target sketch from exec_globals
-        for key, val in exec_globals.items():
-            if hasattr(val, "TypeId") and val.TypeId == "Sketcher::SketchObject":
-                target_sketch = val
-                break
-
-        # 2. If not found, search ActiveDocument
-        if target_sketch is None and FreeCAD.ActiveDocument:
-            for obj in FreeCAD.ActiveDocument.Objects:
-                if obj.TypeId == "Sketcher::SketchObject":
-                    target_sketch = obj
-                    break
-
-        if target_sketch is None:
-            print("Error: No Sketch object found after script execution.")
-            # ドキュメントが生成されている可能性があるので念のため閉じる処理を試みる
-            if FreeCAD.ActiveDocument:
-                FreeCAD.closeDocument(FreeCAD.ActiveDocument.Name)
-            return None
+        doc, target_sketch = load_freecad_commands(filepath_or_command_list)
 
         # --- Extract data ---
         extracted_data = export_sketch_to_dict(target_sketch)
@@ -158,9 +123,8 @@ def load_and_extract_from_file(filepath_or_command_list: str | list[str]) -> dic
 
     finally:
         # --- メモリ解放 (closeDocument) ---
-        if target_sketch is not None:
-            doc_name = target_sketch.Document.Name
-            FreeCAD.closeDocument(doc_name)
+        if doc is not None:
+            FreeCAD.closeDocument(doc.Name)
 
 
 # ==========================================
