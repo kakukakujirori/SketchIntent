@@ -45,14 +45,7 @@ def extract_sketches(json_path: str) -> list[dict]:
 def generate_freecad_script(sketch: dict[str, Any], remove_constraints: bool = False) -> list[str]:
     sketch_name = sketch["name"]
     script =[
-        "import sys",
-        "import os",
         "import math",
-        "",
-        "freecad_lib = os.path.expanduser('~/github/FreeCAD/build/release/lib')",
-        "if freecad_lib not in sys.path:",
-        "    sys.path.insert(0, freecad_lib)",
-        "",
         "import FreeCAD",
         "import Part",
         "import Sketcher",
@@ -440,7 +433,36 @@ def generate_freecad_script(sketch: dict[str, Any], remove_constraints: bool = F
         if c_type == "SketchAngularDimension":
             l1 = const['line_one']
             l2 = const['line_two']
-            script.append(f"fc_sketch.addConstraint(Sketcher.Constraint('Angle', {uuid_to_fcid[l1]}, {uuid_to_fcid[l2]}, {value}))")
+
+            # Fusion360 data doesn't hold the angle direction?
+            # So we ignore the value in json and calculate it from the points
+            c1_info = sketch["curves"].get(l1)
+            c2_info = sketch["curves"].get(l2)
+
+            if c1_info is None or c2_info is None:
+                print(f"Warning: SketchAngularDimension curves not found: l1={l1}, l2={l2}")
+                continue
+
+            p1_start = sketch["points"][c1_info["start_point"]]
+            p1_end = sketch["points"][c1_info["end_point"]]
+            p2_start = sketch["points"][c2_info["start_point"]]
+            p2_end = sketch["points"][c2_info["end_point"]]
+
+            v1_x = p1_end['x'] - p1_start['x']
+            v1_y = p1_end['y'] - p1_start['y']
+            v2_x = p2_end['x'] - p2_start['x']
+            v2_y = p2_end['y'] - p2_start['y']
+
+            angle1 = np.arctan2(v1_y, v1_x)
+            angle2 = np.arctan2(v2_y, v2_x)
+
+            diff = float(angle2 - angle1)
+            while diff < 0:
+                diff += 2 * np.pi
+            while diff >= 2 * np.pi:
+                diff -= 2 * np.pi
+
+            script.append(f"fc_sketch.addConstraint(Sketcher.Constraint('Angle', {uuid_to_fcid[l1]}, {uuid_to_fcid[l2]}, {diff}))")
 
         elif c_type == "SketchLinearDimension" or c_type == "SketchOffsetDimension":
             if "entity_one" in const:
@@ -585,9 +607,9 @@ def count_freecad_commands(freecad_script: list[str]) -> tuple[Counter[str], Cou
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data_dir", type=str, default="/disk2/Fusion360Gallery/r1.0.1/reconstruction")
-    parser.add_argument("--out_dir", type=str, default="/disk2/Fusion360Gallery/r1.0.1/freecad_commands")
-    parser.add_argument("--sketch_dump_dir", type=str, default="/disk2/Fusion360Gallery/r1.0.1/freecad_images")
+    parser.add_argument("--data_dir", type=str, default="disk2/Fusion360Gallery/r1.0.1/reconstruction")
+    parser.add_argument("--out_dir", type=str, default="disk2/Fusion360Gallery/r1.0.1/freecad_commands")
+    parser.add_argument("--sketch_dump_dir", type=str, default="disk2/Fusion360Gallery/r1.0.1/freecad_images")
     parser.add_argument("--test_data_only", action='store_true', help="If True, process only test data")
     parser.add_argument("--prim_num_range", type=int, nargs=2, default=(6, 16), help="Only convert sketches with number of primitives in this range")
     parser.add_argument("--cons_num_range", type=int, nargs=2, default=(0, 64),help="Only convert sketches with number of constraints in this range" )
@@ -619,6 +641,7 @@ if __name__ == '__main__':
             try:
 
                 # 1. Convert
+                sketch['name'] = f"{os.path.splitext(os.path.basename(json_path))[0]}_{sketch['name']}"
                 freecad_script = generate_freecad_script(sketch, remove_constraints=False)
 
                 # 2, Filter
@@ -651,7 +674,7 @@ if __name__ == '__main__':
 
             except KeyError:
                 # NOTE: Ellipses are not supported in visualize_sketch_for_vlm, and emit key errors. We skip them.
-                pass
+                continue
             except Exception as e:
                 print(f"Error processing {sketch_id}-th sketch in {json_path}:\n{traceback.format_exc()}")
                 continue
