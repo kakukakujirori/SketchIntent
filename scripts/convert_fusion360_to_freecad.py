@@ -1,4 +1,5 @@
 import argparse
+import csv
 import glob
 import json
 import os
@@ -15,10 +16,14 @@ import rootutils
 
 rootutils.setup_root(__file__, indicator=".project-root", pythonpath=True)
 
-from scripts.draw_constraints import load_and_extract_from_file, visualize_sketch_for_vlm
+from scripts.draw_constraints import export_sketch_to_dict, visualize_sketch_for_vlm
+from src.models.components.solver_feedback import SolverFeedback
 from src.sketch_handlers.context import SketchContext
+from src.sketch_handlers.freecad_utils import ensure_freecad_imported
 from src.sketch_handlers.sketch_freecad_converter import SketchFreecadConverter
 from src.sketch_handlers.sketch_utils import cleanse_sketch_constraints
+
+FreeCAD, _, _ = ensure_freecad_imported()
 
 
 def extract_sketches(json_path: str) -> list[dict]:
@@ -712,6 +717,7 @@ if __name__ == '__main__':
     parser.add_argument("--data_dir", type=str, default="disk2/Fusion360Gallery/r1.0.1/reconstruction")
     parser.add_argument("--out_dir", type=str, default="disk2/Fusion360Gallery/r1.0.1/freecad_commands")
     parser.add_argument("--sketch_dump_dir", type=str, default="disk2/Fusion360Gallery/r1.0.1/freecad_images")
+    parser.add_argument("--log_path", type=str, default="disk2/Fusion360Gallery/r1.0.1/freecad_conversion_log.csv")
     parser.add_argument("--test_data_only", action='store_true', help="If True, process only test data")
     parser.add_argument("--prim_num_range", type=int, nargs=2, default=(6, 16), help="Only convert sketches with number of primitives in this range")
     parser.add_argument("--cons_num_range", type=int, nargs=2, default=(0, 64),help="Only convert sketches with number of constraints in this range" )
@@ -720,6 +726,7 @@ if __name__ == '__main__':
     UNHANDLED_PRIMITIVES = {"Ellipse", "ArcOfEllipse", "BSplineCurve"}
     UNHANDLED_CONSTRAINTS = {"Offset"}
 
+    # Output file/folder organization
     if os.path.isdir(args.out_dir):
         shutil.rmtree(args.out_dir)
     if os.path.isdir(args.sketch_dump_dir):
@@ -728,8 +735,14 @@ if __name__ == '__main__':
     os.makedirs(args.out_dir, exist_ok=True)
     os.makedirs(args.sketch_dump_dir, exist_ok=True)
 
+    with open(args.log_path, "w", newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(["name", "status", "dof", "redundant_constraints"])
+
     context = SketchContext()
     sketch_freecad_converter = SketchFreecadConverter(context)
+    solver_feedback = SolverFeedback(context)
+    solver_summary = Counter()
 
     if args.test_data_only:
         train_test_json = os.path.join(os.path.dirname(args.data_dir), "train_test.json")
@@ -743,8 +756,8 @@ if __name__ == '__main__':
 
     for json_path in tqdm(json_path_list):
         for sketch_id, sketch in enumerate(extract_sketches(json_path)):
+            doc = None
             try:
-
                 # 1. Convert
                 sketch['name'] = f"{os.path.splitext(os.path.basename(json_path))[0]}_{sketch['name']}"
                 freecad_script = generate_freecad_script(sketch, remove_constraints=False)
@@ -760,21 +773,26 @@ if __name__ == '__main__':
                 # 3. Resolve redundancy
                 sg_sketch = sketch_freecad_converter.from_freecad_commands(freecad_script)
                 sg_sketch = cleanse_sketch_constraints(sg_sketch, resolve_redundancy=True)
-                freecad_script = sketch_freecad_converter.to_freecad_commands(sg_sketch)
+                doc, fc_sketch, _, _, _  = sketch_freecad_converter.to_freecad(sg_sketch)
 
                 # 4. Test-run the script
-                sketch_data = load_and_extract_from_file(freecad_script)
+                solver_status = solver_feedback.get_solver_status(sg_sketch)
+                if solver_status.DistortingConstraints:
+                    solver_status.Status = "Distorting"
+                solver_summary[solver_status.Status] += 1
+                with open(args.log_path, "a", newline='') as f:
+                    writer = csv.writer(f)
+                    writer.writerow([sketch['name'], solver_status.Status, solver_status.DoF, str(solver_status.RedundantConstraints)])
 
                 # 5. Export the commands
-                if sketch_data is not None:
-                    command_file_path = os.path.join(args.out_dir, f"{os.path.basename(json_path).replace('.json', f'_sketch{sketch_id:02d}.py')}")
-                    with open(command_file_path, "w", encoding="utf-8") as f:
-                        f.write("\n".join(freecad_script))
+                command_file_path = os.path.join(args.out_dir, f"{os.path.basename(json_path).replace('.json', f'_sketch{sketch_id:02d}.py')}")
+                with open(command_file_path, "w", encoding="utf-8") as f:
+                    f.write("\n".join(freecad_script))
 
                 # 4. Export the sketch
                 # sketch_file_path = os.path.join(args.sketch_dump_dir, f"{os.path.basename(json_path).replace('.json', f'_sketch{sketch_id:02d}.jpg')}")
                 # visualize_sketch_for_vlm(
-                #     sketch_data,
+                #     export_sketch_to_dict(fc_sketch),
                 #     save_path=sketch_file_path,
                 #     title=None,
                 #     icon_fontsize=10,
@@ -788,3 +806,10 @@ if __name__ == '__main__':
             except Exception as e:
                 print(f"Error processing {sketch_id}-th sketch in {json_path}:\n{traceback.format_exc()}")
                 continue
+            finally:
+                FreeCAD.closeDocument(doc.Name) if doc is not None else None
+
+    print("=== Summary ===")
+    total_sketches = sum(solver_summary.values())
+    for key, num in solver_summary.items():
+        print(f"{key}: {num} ({num / total_sketches * 100:.2f}%)")
