@@ -18,61 +18,6 @@ from src.sketch_handlers.sketch_freecad_converter import SketchFreecadConverter
 FreeCAD, Part, Sketcher = ensure_freecad_imported()
 
 
-def exec_freecad(freecad_python_file: str) -> tuple['FreeCAD.Document', 'Sketcher.SketchObject']:
-    doc = None
-    fc_sketch = None
-
-    try:
-        initial_docs = set(FreeCAD.listDocuments().keys())
-
-        exec_globals = {
-            "FreeCAD": FreeCAD,
-            "Part": Part,
-            "Sketcher": Sketcher,
-            "Vector": FreeCAD.Vector,
-        }
-        with open(freecad_python_file, 'r') as f:
-            script_content = f.read()
-        exec(script_content, exec_globals)
-
-        current_docs = set(FreeCAD.listDocuments().keys())
-        new_docs = list(current_docs - initial_docs)
-
-        if not new_docs:
-            if FreeCAD.ActiveDocument:
-                doc = FreeCAD.ActiveDocument
-            else:
-                raise ValueError(f"No active document found for {freecad_python_file}")
-        else:
-            doc = FreeCAD.getDocument(new_docs[0])
-
-        sketches = doc.findObjects(Type="Sketcher::SketchObject")
-        if not sketches:
-            raise ValueError(f"No sketches found in {freecad_python_file}")
-
-        fc_sketch = sketches[0]
-
-    except Exception as e:
-        FreeCAD.closeDocument(doc.Name) if doc else None
-        raise e
-
-    return doc, fc_sketch
-
-
-def freecad_to_sketchgraphs(freecad_python_file: str) -> datalib.Sketch | str:
-    context = SketchContext()  # NOTE: It's configuration doesn't affect the freecad <--> sketchgraphs conversion
-    converter = SketchFreecadConverter(context)
-    doc = None
-    try:
-        doc, fc_sketch = exec_freecad(freecad_python_file)
-        sg_sketch = converter.from_freecad(fc_sketch)
-        return sg_sketch
-    except Exception:
-        return traceback.format_exc()
-    finally:
-        FreeCAD.closeDocument(doc.Name) if doc else None
-
-
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Convert a batch of FreeCAD python command data into a single npy file.")
     parser.add_argument("--data_dir", type=str, help="Path to the folder containing FreeCAD python command data.")
@@ -87,6 +32,9 @@ if __name__ == '__main__':
         raise ValueError(f"{args.out_path} must end with .npy")
     os.makedirs(os.path.dirname(args.out_path), exist_ok=True)
 
+    context = SketchContext()  # NOTE: It's configuration doesn't affect the freecad <--> sketchgraphs conversion
+    converter = SketchFreecadConverter(context)
+
     # Process
     files = sorted([os.path.join(args.data_dir, f) for f in os.listdir(args.data_dir) if f.endswith(".py")])
     sequences = []
@@ -94,11 +42,12 @@ if __name__ == '__main__':
     error_list = []
 
     for i, f in enumerate(tqdm(files)):
-        sketch_or_error = freecad_to_sketchgraphs(f)
-        if isinstance(sketch_or_error, str):
+        try:
+            sketch_or_error = converter.from_freecad_commands(f)
+        except Exception:
             print(f"Error processing {f}:")
-            print(sketch_or_error)
-            error_list.append((f, sketch_or_error))
+            traceback.print_exc()
+            error_list.append((f, traceback.format_exc()))
             continue
 
         try:

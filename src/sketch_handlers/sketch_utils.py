@@ -351,6 +351,10 @@ def cleanse_sketch_constraints(sketch: datalib.Sketch, resolve_redundancy: bool 
       point to the same entity/subnode after dedup (e.g., Coincident(A, A), Tangent(A, 1, A, 1) → removed).
     - Sort Midpoint and Mirror references so that the last entity is the symmetry point or axis.
 
+    If resolve_redundancy is True, it will also handles:
+    - Merge Tangent(edge, ednge) and Coincident(point, point)
+    - Merge PointOnObject(point, edge) and Coincident(point, point)
+
     Parameters
     ----------
     sketch : datalib.Sketch

@@ -1,7 +1,6 @@
 from typing import Any
 import argparse
 import base64
-import glob
 import json
 import math
 import os
@@ -9,8 +8,7 @@ import random
 import re
 import sys
 import traceback
-from dataclasses import dataclass, field
-from io import BytesIO
+from dataclasses import dataclass
 
 import cairosvg
 import rootutils

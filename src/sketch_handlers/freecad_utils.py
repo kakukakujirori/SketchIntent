@@ -1,7 +1,6 @@
 from typing import TYPE_CHECKING, Any
 import sys
 import os
-import typing
 
 
 def ensure_freecad_imported(libpath: str = "~/github/FreeCAD/build/release/lib") -> tuple[Any, Any, Any]:
@@ -36,6 +35,67 @@ if TYPE_CHECKING:
     FreeCAD, Part, Sketcher = ensure_freecad_imported()
 
 
+def load_freecad_commands(commands_or_file: list[str] | str) -> tuple['FreeCAD.Document', 'Sketcher.SketchObject']:
+    """
+    Load freecad commands to create a sketch.
+    """
+    if isinstance(commands_or_file, str):
+        if os.path.isfile(commands_or_file):
+            with open(commands_or_file, 'r') as f:
+                script_content = f.read()
+        else:
+            script_content = commands_or_file
+    else:
+        script_content = "\n".join(commands_or_file)
+
+    FreeCAD, Part, Sketcher = ensure_freecad_imported()
+    exec_globals = {
+        "FreeCAD": FreeCAD,
+        "Part": Part,
+        "Sketcher": Sketcher,
+        "Vector": FreeCAD.Vector,
+    }
+    fc_sketch = None
+    initial_docs = set(FreeCAD.listDocuments().keys())
+
+    try:
+        exec(script_content, exec_globals)
+
+        # 1. Find the target sketch from exec_globals
+        for key, val in exec_globals.items():
+            if hasattr(val, "TypeId") and val.TypeId == "Sketcher::SketchObject":
+                fc_sketch = val
+                break
+
+        # 2. If not found in globals, search newly created documents
+        current_docs = set(FreeCAD.listDocuments().keys())
+        new_docs = list(current_docs - initial_docs)
+
+        if fc_sketch is None and new_docs:
+            for doc_name in new_docs:
+                doc_obj = FreeCAD.getDocument(doc_name)
+                sketches = doc_obj.findObjects(Type="Sketcher::SketchObject")
+                if sketches:
+                    fc_sketch = sketches[0]
+                    break
+
+        if fc_sketch is None:
+            raise ValueError(f"No sketches found in {commands_or_file}")
+
+        doc = fc_sketch.Document
+        if not doc:
+            raise ValueError("Sketch is found but not attached to any document")
+
+        return doc, fc_sketch
+
+    except Exception as e:
+        # Safely clean up ONLY the documents created during this execution
+        current_docs = set(FreeCAD.listDocuments().keys())
+        for doc_name in (current_docs - initial_docs):
+            FreeCAD.closeDocument(doc_name)
+        raise e
+
+
 def dump_freecad_commands(fc_sketch: 'Sketcher.SketchObject', doc_name: str = "MySketch") -> list[str]:
     """
     Dump the freecad commands to reconstruct the sketch.
@@ -51,7 +111,6 @@ def dump_freecad_commands(fc_sketch: 'Sketcher.SketchObject', doc_name: str = "M
     commands.append("import FreeCAD")
     commands.append("import Part")
     commands.append("import Sketcher")
-    commands.append("from FreeCAD import Vector")
     commands.append(f"doc = FreeCAD.newDocument('{doc_name}')")
     commands.append("body = doc.addObject('PartDesign::Body', 'Body')")
     commands.append("fc_sketch = body.newObject('Sketcher::SketchObject', 'Sketch')")
