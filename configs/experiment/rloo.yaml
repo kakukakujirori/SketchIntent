@@ -30,10 +30,13 @@ callbacks:
     auto_insert_metric_name: false
     every_n_train_steps: 100
 
+data:
+  batch_size: 32
+  num_workers: 1  # Less is better since this RL training is compute-bound
+
 model:
   optimizer:
     lr: 1e-5
-  sft_coeff: 0.1  # DEBUG: Beneficial for learning?
 
 trainer:
   check_val_every_n_epoch: null
@@ -41,9 +44,3 @@ trainer:
   devices: 1  # Under a lot of CPU-GPU communication, distributed training slows runs
 
 pretrained_ckpt_path: logs/train/runs/2026-03-26_18-46-25/checkpoints/epoch_29.ckpt
-
-
-# # COMMENT OUT BELOW!!!
-data:
-  batch_size: 32
-  num_workers: 1  # Less is better since this RL training is compute-bound
