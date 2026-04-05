@@ -1,10 +1,10 @@
 import argparse
+import copy
 import csv
 import glob
 import json
 import os
 import shutil
-import sys
 import traceback
 from collections import defaultdict, Counter
 from tqdm import tqdm
@@ -21,7 +21,8 @@ from src.models.components.solver_feedback import SolverFeedback
 from src.sketch_handlers.context import SketchContext
 from src.sketch_handlers.freecad_utils import ensure_freecad_imported
 from src.sketch_handlers.sketch_freecad_converter import SketchFreecadConverter
-from src.sketch_handlers.sketch_utils import cleanse_sketch_constraints
+from src.sketch_handlers.sketch_tokenizer import SketchTokenizer
+from src.sketch_handlers.sketch_utils import cleanse_sketch_constraints, complete_constraint_values, normalize_sketch
 
 FreeCAD, _, _ = ensure_freecad_imported()
 
@@ -735,14 +736,16 @@ if __name__ == '__main__':
     os.makedirs(args.out_dir, exist_ok=True)
     os.makedirs(args.sketch_dump_dir, exist_ok=True)
 
+    context = SketchContext()
+    sketch_freecad_converter = SketchFreecadConverter(context)
+    tokenizer = SketchTokenizer(context)
+    solver_feedback = SolverFeedback(context)
+    solver_summary = Counter()
+    seen_hashes = set()
+
     with open(args.log_path, "w", newline='') as f:
         writer = csv.writer(f)
         writer.writerow(["name", "status", "dof", "redundant_constraints"])
-
-    context = SketchContext()
-    sketch_freecad_converter = SketchFreecadConverter(context)
-    solver_feedback = SolverFeedback(context)
-    solver_summary = Counter()
 
     if args.test_data_only:
         train_test_json = os.path.join(os.path.dirname(args.data_dir), "train_test.json")
@@ -773,6 +776,18 @@ if __name__ == '__main__':
                 # 3. Resolve redundancy
                 sg_sketch = sketch_freecad_converter.from_freecad_commands(freecad_script)
                 sg_sketch = cleanse_sketch_constraints(sg_sketch, resolve_redundancy=True)
+                sg_sketch, _ = complete_constraint_values(sg_sketch, skip_invalid_constraints=True)
+
+                # 3.5 Deduplicate
+                sg_sketch_copy = copy.deepcopy(sg_sketch)
+                _ = normalize_sketch(sg_sketch_copy)
+                tokens = tokenizer.tokenize(sg_sketch_copy, allow_invalid_constraints=True)
+                sketch_hash = (tuple(tokens['p_val']), tuple(tokens['c_val']))
+                if sketch_hash in seen_hashes:
+                    solver_summary["Duplicate"] += 1
+                    continue
+                seen_hashes.add(sketch_hash)
+
                 doc, fc_sketch, _, _, _  = sketch_freecad_converter.to_freecad(sg_sketch)
 
                 # 4. Test-run the script
@@ -784,10 +799,11 @@ if __name__ == '__main__':
                     writer = csv.writer(f)
                     writer.writerow([sketch['name'], solver_status.Status, solver_status.DoF, str(solver_status.RedundantConstraints)])
 
-                # 5. Export the commands
+                # 5. Export the commands and FCStd
                 command_file_path = os.path.join(args.out_dir, f"{os.path.basename(json_path).replace('.json', f'_sketch{sketch_id:02d}.py')}")
                 with open(command_file_path, "w", encoding="utf-8") as f:
                     f.write("\n".join(freecad_script))
+                doc.saveAs(command_file_path.replace('.py', '.FCStd'))
 
                 # 4. Export the sketch
                 # sketch_file_path = os.path.join(args.sketch_dump_dir, f"{os.path.basename(json_path).replace('.json', f'_sketch{sketch_id:02d}.jpg')}")
@@ -810,6 +826,15 @@ if __name__ == '__main__':
                 FreeCAD.closeDocument(doc.Name) if doc is not None else None
 
     print("=== Summary ===")
-    total_sketches = sum(solver_summary.values())
-    for key, num in solver_summary.items():
-        print(f"{key}: {num} ({num / total_sketches * 100:.2f}%)")
+    total_found = sum(solver_summary.values())
+    duplicates = solver_summary.get("Duplicate", 0)
+    total_processed = total_found - duplicates
+
+    if total_processed > 0:
+        for key, num in solver_summary.items():
+            if key == "Duplicate":
+                print(f"{key}: {num} (Excluded from percentages)")
+            else:
+                print(f"{key}: {num} ({num / total_processed * 100:.2f}%)")
+    else:
+        print("No sketches processed.")
