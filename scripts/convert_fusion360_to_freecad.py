@@ -720,6 +720,7 @@ if __name__ == '__main__':
     parser.add_argument("--sketch_dump_dir", type=str, default="disk2/Fusion360Gallery/r1.0.1/freecad_images")
     parser.add_argument("--log_path", type=str, default="disk2/Fusion360Gallery/r1.0.1/freecad_conversion_log.csv")
     parser.add_argument("--test_data_only", action='store_true', help="If True, process only test data")
+    parser.add_argument("--deduplicate", action='store_true', help="If True, deduplicate similar sketches")
     parser.add_argument("--prim_num_range", type=int, nargs=2, default=(6, 16), help="Only convert sketches with number of primitives in this range")
     parser.add_argument("--cons_num_range", type=int, nargs=2, default=(0, 64),help="Only convert sketches with number of constraints in this range" )
     args = parser.parse_args()
@@ -779,14 +780,15 @@ if __name__ == '__main__':
                 sg_sketch, _ = complete_constraint_values(sg_sketch, skip_invalid_constraints=True)
 
                 # 3.5 Deduplicate
-                sg_sketch_copy = copy.deepcopy(sg_sketch)
-                _ = normalize_sketch(sg_sketch_copy)
-                tokens = tokenizer.tokenize(sg_sketch_copy, allow_invalid_constraints=True)
-                sketch_hash = (tuple(tokens['p_val']), tuple(tokens['c_val']))
-                if sketch_hash in seen_hashes:
-                    solver_summary["Duplicate"] += 1
-                    continue
-                seen_hashes.add(sketch_hash)
+                if args.deduplicate:
+                    sg_sketch_copy = copy.deepcopy(sg_sketch)
+                    _ = normalize_sketch(sg_sketch_copy)
+                    tokens = tokenizer.tokenize(sg_sketch_copy, allow_invalid_constraints=True)
+                    sketch_hash = (tuple(tokens['p_val']), tuple(tokens['c_val']))
+                    if sketch_hash in seen_hashes:
+                        solver_summary["Duplicate"] += 1
+                        continue
+                    seen_hashes.add(sketch_hash)
 
                 doc, fc_sketch, _, _, _  = sketch_freecad_converter.to_freecad(sg_sketch)
 
