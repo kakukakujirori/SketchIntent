@@ -271,8 +271,10 @@ class SolverReward(torch.nn.Module):
                 try:
                     res = f.result(timeout=self.worker_timeout)
                 except FutureTimeoutError:
+                    print(f"[SolverReward] Worker timeout ({self.worker_timeout}s) for batch index {i}")
                     res = None
-                except Exception:
+                except Exception as e:
+                    print(f"[SolverReward] Worker failed for batch index {i}: {e}")
                     res = None
 
                 i = handle.indices_to_evaluate[fut_idx]
@@ -281,7 +283,7 @@ class SolverReward(torch.nn.Module):
                 if res is not None:
                     # Only cache successful evaluations
                     prim, cons, _ = handle.args_list[fut_idx]
-                    cache_key = (tuple(prim.tolist()), tuple(cons.tolist()))
+                    cache_key = (prim.tobytes(), cons.tobytes())
                     self._evaluation_cache[cache_key] = res
 
         # Step C: Compute reward scores from evaluation results
