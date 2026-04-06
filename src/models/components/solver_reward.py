@@ -304,8 +304,16 @@ class SolverReward(torch.nn.Module):
 
             solver_status, sketch, constraint_to_token_start, invalid_constraint_block_start = res
 
+            # Categorize status for logging
+            status_name = solver_status.Status
+            if status_name == "Converged":
+                if solver_status.DoF <= self.fully_constrained_dof:
+                    status_name = "FC"
+                else:
+                    status_name = "Under"
+
             solver_dof_counter[solver_status.DoF] += 1
-            solver_status_counter[solver_status.Status] += 1
+            solver_status_counter[status_name] += 1
 
             ################################################################
             # 1. Constraint-wise penalty

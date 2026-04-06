@@ -34,7 +34,7 @@ class LengthHandler(ConstraintHandler):
         refs = self._get_ref_strings(constraint)
         props = self.get_constraint_props(constraint)
 
-        # Length is mapped to FreeCAD's Distance on a single edge
+        # Line/Arc length is mapped to FreeCAD's Distance on a single edge/arc
         if len(refs) == 1:
             res1 = primitive_geoID.get(refs[0])
             assert res1

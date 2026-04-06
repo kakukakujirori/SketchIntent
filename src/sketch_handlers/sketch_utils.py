@@ -9,9 +9,8 @@ from typing import Literal
 import numpy as np
 
 import sketchgraphs.data as datalib
-from sketchgraphs.data import EntityType, BooleanParameter, ConstraintParameter, EnumParameter, QuantityParameter
+from sketchgraphs.data import EntityType, BooleanParameter, ConstraintParameter, EnumParameter, LocalReferenceParameter, QuantityParameter
 from sketchgraphs.data import Arc, Circle, Line, Point
-from sketchgraphs.data._constraint import LocalReferenceParameter
 
 
 # Positional parameters
@@ -215,7 +214,7 @@ def _resolve_tangent(sketch: datalib.Sketch) -> datalib.Sketch:
                 elif isinstance(p, LocalReferenceParameter) and (p.value == str(geo2) or p.value.startswith(f"{geo2}.")):
                     p.value = f"{geo2}.{pt2}"
                 new_param.append(p)
-            sketch.constraints[tangent_cid]._replace(parameters=new_param)
+            sketch.constraints[tangent_cid] = sketch.constraints[tangent_cid]._replace(parameters=new_param)
             sketch.constraints.pop(coincident_cid)
 
     return sketch
@@ -341,7 +340,81 @@ def _resolve_midpoint_mirror_ref_order(sketch: datalib.Sketch) -> datalib.Sketch
     return sketch
 
 
-def cleanse_sketch_constraints(sketch: datalib.Sketch, resolve_redundancy: bool = True) -> datalib.Sketch:
+def _convert_concentric_to_coincident(sketch: datalib.Sketch) -> datalib.Sketch:
+    for cid, constr in list(sketch.constraints.items()):
+        if constr.type == datalib.ConstraintType.Concentric:
+            new_params = []
+            for p in constr.parameters:
+                if isinstance(p, LocalReferenceParameter):
+                    # Concentric(circle/arc1, circle/arc2) -> Coincident(circle/arc1.center, circle/arc2.center)
+                    # 3 is the center subnode
+                    val = p.value
+                    if "." not in val:
+                        val = f"{val}.center"
+                    new_params.append(LocalReferenceParameter(parameterId=p.parameterId, value=val))
+                else:
+                    new_params.append(p)
+            sketch.constraints[cid] = constr._replace(
+                constraint_type=datalib.ConstraintType.Coincident,
+                parameters=new_params
+            )
+    return sketch
+
+
+def _convert_line_length_to_distance(sketch: datalib.Sketch) -> datalib.Sketch:
+    for cid, constr in list(sketch.constraints.items()):
+        if constr.type == datalib.ConstraintType.Length:
+            # check the entity
+            refs = get_refs(constr)
+            if len(refs) == 1:
+                ent_id, _ = refs[0]
+                ent = sketch.entities.get(str(ent_id))
+                if isinstance(ent, datalib.Line):
+                    # Length(line) -> Distance(line.start, line.end)
+                    new_params: list[datalib.ConstraintParameter] = [
+                        LocalReferenceParameter(parameterId='localFirst', value=f"{ent_id}.start"),
+                        LocalReferenceParameter(parameterId='localSecond', value=f"{ent_id}.end"),
+                        EnumParameter(parameterId='direction', value='MINIMUM'),
+                    ]
+                    # preserve other parameters
+                    for p in constr.parameters:
+                        if isinstance(p, EnumParameter) and p.parameterId == 'direction':
+                            assert p.value == "MINIMUM"
+                            continue
+                        if not isinstance(p, LocalReferenceParameter):
+                            new_params.append(p)
+
+                    sketch.constraints[cid] = constr._replace(
+                        constraint_type=datalib.ConstraintType.Distance,
+                        parameters=new_params
+                    )
+    return sketch
+
+
+def _convert_diameter_to_radius(sketch: datalib.Sketch) -> datalib.Sketch:
+    for cid, constr in list(sketch.constraints.items()):
+        if constr.type == datalib.ConstraintType.Diameter:
+            new_params = []
+            for p in constr.parameters:
+                if isinstance(p, QuantityParameter):
+                    # Diameter -> Radius (halve the value)
+                    new_val = p.value / 2.0
+                    new_params.append(QuantityParameter(parameterId='length', value=new_val, expression=p.expression + " / 2"))
+                else:
+                    new_params.append(p)
+
+            sketch.constraints[cid] = constr._replace(
+                constraint_type=datalib.ConstraintType.Radius,
+                parameters=new_params
+            )
+    return sketch
+
+
+def cleanse_sketch_constraints(
+    sketch: datalib.Sketch,
+    resolve_redundancy: bool = True,
+    resolve_synonym: bool = True,
+) -> datalib.Sketch:
     """Remove or fix degenerate constraints from the sketch in-place.
 
     Currently handles:
@@ -354,6 +427,11 @@ def cleanse_sketch_constraints(sketch: datalib.Sketch, resolve_redundancy: bool 
     If resolve_redundancy is True, it will also handles:
     - Merge Tangent(edge, ednge) and Coincident(point, point)
     - Merge PointOnObject(point, edge) and Coincident(point, point)
+
+    If resolve_synonym is True, it will also handle:
+    - Concentric(circle/arc1, circle/arc2) is translated into Coincident(circle/arc1, 3, circle/arc2, 3)
+    - Length(line) is translated into Distance(line, 1, line, 2)
+    - Diameter is translated into Radius
 
     Parameters
     ----------
@@ -402,6 +480,11 @@ def cleanse_sketch_constraints(sketch: datalib.Sketch, resolve_redundancy: bool 
     if resolve_redundancy:
         sketch = _resolve_tangent(sketch)
         sketch = _resolve_redundant_coincident(sketch)
+
+    if resolve_synonym:
+        sketch = _convert_concentric_to_coincident(sketch)
+        sketch = _convert_line_length_to_distance(sketch)
+        sketch = _convert_diameter_to_radius(sketch)
 
     return sketch
 
