@@ -2550,16 +2550,23 @@ def main(args):
 
         # ======== VLM PROCESSING ========
 
-        print("\n--- Qwen3 Generation (Interactive) ---")
-        messages = prepare_prompts(sample_primitives, sample_constraints, output_image_path_original, args.max_turns, args.geo_threshold)
-        print(messages[0]["content"])
-        for msg in messages[1]["content"]:
-            if "text" in msg:
-                print(msg["text"])
-
         predicted_constraints_list = []
+        solver_call_count = 0
 
-        for solver_call_count in range(args.max_turns):
+        if sample_verification.dof == 2:
+            print("\n--- GT DoF is already 2. Skipping Qwen3 Generation. ---")
+            predicted_constraints_list.append(sample_constraints)
+            turn_range = []
+        else:
+            print("\n--- Qwen3 Generation (Interactive) ---")
+            messages = prepare_prompts(sample_primitives, sample_constraints, output_image_path_original, args.max_turns, args.geo_threshold)
+            print(messages[0]["content"])
+            for msg in messages[1]["content"]:
+                if "text" in msg:
+                    print(msg["text"])
+            turn_range = range(args.max_turns)
+
+        for solver_call_count in turn_range:
 
             # Notify remaining turns
             remaining_times_notification = f"Turn {solver_call_count}: You can attempt submission up to {args.max_turns - solver_call_count} more times."
