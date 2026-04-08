@@ -113,7 +113,7 @@ class DistanceHandler(ConstraintHandler):
 
         val = fc_constraint.Value
 
-        # 1 ref = Length, 2 refs = Distance
+        # 1 ref = Arc/Line Length, 2 refs = Distance
         if len(refs) == 1:
             return self.create_constraint("Length", tuple(refs), val, direction="MINIMUM")
         elif len(refs) == 2:

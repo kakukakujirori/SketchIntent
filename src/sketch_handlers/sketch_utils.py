@@ -346,11 +346,12 @@ def _convert_concentric_to_coincident(sketch: datalib.Sketch) -> datalib.Sketch:
             new_params = []
             for p in constr.parameters:
                 if isinstance(p, LocalReferenceParameter):
-                    # Concentric(circle/arc1, circle/arc2) -> Coincident(circle/arc1.center, circle/arc2.center)
-                    # 3 is the center subnode
+                    # Concentric(circle/arc/point1, circle/arc/point2) -> Coincident(point1, point2)
                     val = p.value
                     if "." not in val:
-                        val = f"{val}.center"
+                        ent = sketch.entities.get(val)
+                        if isinstance(ent, (datalib.Circle, datalib.Arc)):
+                            val = f"{val}.center"
                     new_params.append(LocalReferenceParameter(parameterId=p.parameterId, value=val))
                 else:
                     new_params.append(p)
@@ -366,28 +367,38 @@ def _convert_line_length_to_distance(sketch: datalib.Sketch) -> datalib.Sketch:
         if constr.type == datalib.ConstraintType.Length:
             # check the entity
             refs = get_refs(constr)
-            if len(refs) == 1:
-                ent_id, _ = refs[0]
-                ent = sketch.entities.get(str(ent_id))
-                if isinstance(ent, datalib.Line):
-                    # Length(line) -> Distance(line.start, line.end)
-                    new_params: list[datalib.ConstraintParameter] = [
-                        LocalReferenceParameter(parameterId='localFirst', value=f"{ent_id}.start"),
-                        LocalReferenceParameter(parameterId='localSecond', value=f"{ent_id}.end"),
-                        EnumParameter(parameterId='direction', value='MINIMUM'),
-                    ]
-                    # preserve other parameters
-                    for p in constr.parameters:
-                        if isinstance(p, EnumParameter) and p.parameterId == 'direction':
-                            assert p.value == "MINIMUM"
-                            continue
-                        if not isinstance(p, LocalReferenceParameter):
-                            new_params.append(p)
+            refs = list(set(refs))  # deduplication of a corner case: refs = [(x, None), (x, None)]
+            if len(refs) != 1:
+                raise ValueError(f"Length constraint must have one reference: got {refs=}")
 
-                    sketch.constraints[cid] = constr._replace(
-                        constraint_type=datalib.ConstraintType.Distance,
-                        parameters=new_params
-                    )
+            ent_id, _ = refs[0]
+            ent = sketch.entities.get(str(ent_id))
+            if isinstance(ent, datalib.Line):
+                # Length(line) -> Distance(line.start, line.end)
+                direction_val = 'MINIMUM'
+                for p in constr.parameters:
+                    if isinstance(p, EnumParameter) and p.parameterId == 'direction':
+                        direction_val = p.value
+                        break
+                if direction_val != 'MINIMUM':
+                    raise ValueError(f"Length constraint direction must be 'MINIMUM': got {direction_val=}")
+
+                new_params: list[datalib.ConstraintParameter] = [
+                    LocalReferenceParameter(parameterId='localFirst', value=f"{ent_id}.start"),
+                    LocalReferenceParameter(parameterId='localSecond', value=f"{ent_id}.end"),
+                    EnumParameter(parameterId='direction', value=direction_val),
+                ]
+                # preserve other parameters
+                for p in constr.parameters:
+                    if isinstance(p, EnumParameter) and p.parameterId == 'direction':
+                        continue
+                    if not isinstance(p, LocalReferenceParameter):
+                        new_params.append(p)
+
+                sketch.constraints[cid] = constr._replace(
+                    constraint_type=datalib.ConstraintType.Distance,
+                    parameters=new_params
+                )
     return sketch
 
 
@@ -398,8 +409,11 @@ def _convert_diameter_to_radius(sketch: datalib.Sketch) -> datalib.Sketch:
             for p in constr.parameters:
                 if isinstance(p, QuantityParameter):
                     # Diameter -> Radius (halve the value)
-                    new_val = p.value / 2.0
-                    new_params.append(QuantityParameter(parameterId='length', value=new_val, expression=p.expression + " / 2"))
+                    try:
+                        new_val = float(p.value) / 2.0
+                    except ValueError:
+                        new_val = p.value + " / 2"
+                    new_params.append(QuantityParameter(parameterId='length', value=str(new_val), expression=p.expression + " / 2"))
                 else:
                     new_params.append(p)
 

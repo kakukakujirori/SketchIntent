@@ -54,6 +54,8 @@ class DistanceXHandler(ConstraintHandler):
         raise ValueError(f"Invalid references or value for {self.name}: {refs=} ({res1=}, {res2=}), {props=}")
 
     def from_freecad(self, fc_constraint: 'Sketcher.Constraint', fc_primitives: list, geoID_to_primitive: dict[tuple[int, int], str]) -> datalib.Constraint | None:
+        FreeCAD, Part, Sketcher = ensure_freecad_imported()
+
         if fc_constraint.Type != 'DistanceX':
             raise ValueError(f"Invalid constraint type for {self.name}: {fc_constraint.Type}")
 
@@ -75,9 +77,14 @@ class DistanceXHandler(ConstraintHandler):
 
         val = fc_constraint.Value
 
-        # 1 ref = Length, 2 refs = Distance
+        # NOTE: Length in SketchGraphs only accepts direction='MINIMUM', so we use Distance for both len(refs)=1,2
         if len(refs) == 1:
-            return self.create_constraint("Length", tuple(refs), val, direction="HORIZONTAL")
+            assert isinstance(fc_primitives[g1], Part.LineSegment)
+            r_start = geoID_to_primitive.get((g1, 1))
+            r_end = geoID_to_primitive.get((g1, 2))
+            assert r_start is not None and r_end is not None, f"{(g1, 1)=}, {(g1, 2)=}, {geoID_to_primitive=}"
+            refs = (r_start, r_end)
+            return self.create_constraint("Distance", tuple(refs), val, direction="HORIZONTAL")
         elif len(refs) == 2:
             return self.create_constraint("Distance", tuple(refs), val, direction="HORIZONTAL")
 
@@ -131,6 +138,8 @@ class DistanceYHandler(ConstraintHandler):
         raise ValueError(f"Invalid references or value for {self.name}: {refs=} ({res1=}, {res2=}), {props=}")
 
     def from_freecad(self, fc_constraint: 'Sketcher.Constraint', fc_primitives: list, geoID_to_primitive: dict[tuple[int, int], str]) -> datalib.Constraint | None:
+        FreeCAD, Part, Sketcher = ensure_freecad_imported()
+
         if fc_constraint.Type != 'DistanceY':
             raise ValueError(f"Invalid constraint type for {self.name}: {fc_constraint.Type}")
 
@@ -152,9 +161,14 @@ class DistanceYHandler(ConstraintHandler):
 
         val = fc_constraint.Value
 
-        # 1 ref = Length, 2 refs = Distance
+        # NOTE: Length is SketchGraphs only accepts direction='MINIMUM', so we use Distance for both len(refs)=1,2
         if len(refs) == 1:
-            return self.create_constraint("Length", tuple(refs), val, direction="VERTICAL")
+            assert isinstance(fc_primitives[g1], Part.LineSegment)
+            r_start = geoID_to_primitive.get((g1, 1))
+            r_end = geoID_to_primitive.get((g1, 2))
+            assert r_start is not None and r_end is not None, f"{(g1, 1)=}, {(g1, 2)=}, {geoID_to_primitive=}"
+            refs = (r_start, r_end)
+            return self.create_constraint("Distance", tuple(refs), val, direction="VERTICAL")
         elif len(refs) == 2:
             return self.create_constraint("Distance", tuple(refs), val, direction="VERTICAL")
 
