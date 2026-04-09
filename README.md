@@ -80,16 +80,23 @@ wget "https://huggingface.co/Qwen/Qwen3-VL-30B-A3B-Thinking-GGUF/resolve/main/mm
 - Qwen3 Augmented Dataset
   ```bash
   python scripts/qwen3_refine_data_with_solver.py           # `data_qwen3_refined_with_solver` generated
-  python scripts/qwen3_sieve_generated_data.py --fc_only    # `data_qwen3_refined_with_solver/commands_refined_fc` generated
+  python scripts/qwen3_sieve_generated_data.py [--fc_only]    # `data_qwen3_refined_with_solver/commands_refined[_fc]` generated
   python scripts/convert_freecad_to_seq.py \
-    --data_dir ./data_qwen3_refined_with_solver/commands_refined_fc \
-    --out_path ./data_processed/data_qwen3.npy
-  python scripts/cleanse_seq_for_freecad.py data_processed/data_qwen3.npy
+    --data_dir ./data_qwen3_refined_with_solver/commands_refined[_fc] \
+    --out_path ./data_processed/data_qwen3[_fc].npy
+  python scripts/cleanse_seq_for_freecad.py data_processed/data_qwen3[_fc].npy
   ```
-  After the preprocessing, you will obtain `data_processed/data_qwen3_unique_valid.npy`.
+  After the preprocessing, you will obtain `data_processed/data_qwen3[_fc]_unique_valid.npy`.
 
 ## Training
 
 ```bash
+# Pretraining
 python src/train.py
+
+# SFT
+python src/train.py experiment=sft
+
+# RLOO
+python src/train.py experiment=rloo
 ```

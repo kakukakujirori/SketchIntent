@@ -367,8 +367,9 @@ class SolverReward(torch.nn.Module):
                     seq_reward += self.reward_fully_constrained
 
                 # dimension constraints penalty
+                NumTotalPrimiitves = len(sketch.entities)
                 NumTotalConstraints = solver_status.NumRelationalConstraints + solver_status.NumDimensionalConstraints
-                seq_reward += self.penalty_num_total_constraints * NumTotalConstraints
+                seq_reward += self.penalty_num_total_constraints * NumTotalConstraints / NumTotalPrimiitves
                 seq_reward += self.penalty_num_dimensional_constraints * (
                     solver_status.NumDimensionalConstraints / max(1, NumTotalConstraints))
 
