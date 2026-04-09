@@ -240,7 +240,7 @@ class ConstraintARModel(torch.nn.Module):
             sa_out = sa_out.transpose(1, 2).contiguous().view(B, 1, E)
             sa_out = F.linear(sa_out, sa.out_proj.weight, sa.out_proj.bias)
 
-            tgt = layer.norm1(tgt + layer.dropout(sa_out))
+            tgt = layer.norm1(tgt + layer.dropout1(sa_out))  # dropout1: SA residual
 
             # ── Cross-attention (reuses precomputed KV from memory) ───── #
             ca = layer.multihead_attn
@@ -259,10 +259,10 @@ class ConstraintARModel(torch.nn.Module):
             ca_out = ca_out.transpose(1, 2).contiguous().view(B, 1, E)
             ca_out = F.linear(ca_out, ca.out_proj.weight, ca.out_proj.bias)
 
-            tgt = layer.norm2(tgt + layer.dropout(ca_out))
+            tgt = layer.norm2(tgt + layer.dropout2(ca_out))  # dropout2: CA residual
 
             # ── Feed-forward ──────────────────────────────────────────── #
             ff_out = layer.linear2(layer.dropout(layer.activation(layer.linear1(tgt))))
-            tgt = layer.norm3(tgt + layer.dropout(ff_out))
+            tgt = layer.norm3(tgt + layer.dropout3(ff_out))  # dropout3: FFN residual
 
         return tgt  # [B, 1, E]

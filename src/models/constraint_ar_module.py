@@ -7,6 +7,7 @@ import torchmetrics
 from tqdm import tqdm
 
 from src.metrics import ConstraintIoU, TokenAccuracy
+from src.models.components.constraint_ar_model import ConstraintARModel
 from src.models.components.solver_feedback import SolverFeedback
 from src.models.components.token_reordering import TokenReordering
 from src.models.components.token_visualizer import visualize_constraint_sequence
@@ -20,7 +21,7 @@ class ConstraintARModule(L.LightningModule):
     def __init__(
         self,
         context: SketchContext,
-        model: torch.nn.Module,
+        model: ConstraintARModel,
         optimizer: torch.optim.Optimizer,
         scheduler: torch.optim.lr_scheduler._LRScheduler | None,
     ):
@@ -95,55 +96,74 @@ class ConstraintARModule(L.LightningModule):
 
         return loss, preds, target
 
+    @torch.no_grad()
     def generate_sample(
         self,
         batch: dict[str, Any],
         max_len: int,
         dtype: torch.dtype = torch.long,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        # Start with just START token, rest is zeros (will be filled)
+        """Autoregressive token generation using KV cache.
+
+        Complexity: O(L²) total instead of O(L³) (avoids re-running the full
+        sequence through the decoder at every step).
+
+        Cross-attention KV vectors are precomputed once from the fixed primitive
+        memory.  Self-attention KV vectors are accumulated in pre-allocated
+        buffers that are written in-place (no torch.cat allocations).
+        """
         batch_size = batch['p_val'].shape[0]
         generated = torch.full((batch_size, max_len), ConstraintToken.Pad, device=self.device, dtype=dtype)
         generated[:, 0] = ConstraintToken.Start
         logprobs = torch.zeros((batch_size, max_len), device=self.device, dtype=torch.float32)
 
-        # Autoregressive generation
+        # ── Step A: compute primitive memory (done ONCE) ──────────────── #
+        memory = self.model.compute_memory(batch)   # [B, M, E]
+
+        # ── Step B: pre-compute cross-attention KV from memory (ONCE) ─── #
+        # Memory never changes across AR steps → K, V can be cached permanently.
+        cross_kv = self.model.compute_cross_kv_cache(memory)  # list[(k,v)] per layer
+
+        # ── Step C: pre-allocate self-attention KV buffers ────────────── #
+        # Buffers are written in-place at each step; no repeated cat().
+        self_kv = self.model.init_kv_cache(
+            batch_size, max_len, device=self.device, dtype=memory.dtype
+        )
+
+        stopped = torch.zeros(batch_size, dtype=torch.bool, device=self.device)
+
+        # ── AR loop ───────────────────────────────────────────────────── #
         for pos in tqdm(range(max_len - 1), desc="Sampling", leave=False, disable=self.training):
-            # Create batch with current generated tokens
-            gen_batch = {
-                'p_val': batch['p_val'],
-                'p_attr': batch['p_attr'],
-                'p_pos': batch['p_pos'],
-                'c_val': generated,
-            }
+            # Embed current token at position pos: [B, 1, E]
+            new_emb = self.model.embed_token_at_pos(memory, generated[:, pos], pos)
 
-            # Forward pass
-            output = self.model(gen_batch)  # [B, L, V]
+            # One decoder step — writes to self_kv in-place, O(pos) per step
+            dec_out = self.model.decoder_step_cached(new_emb, pos, self_kv, cross_kv)  # [B, 1, E]
 
-            # Sample next token at position pos
-            next_token_logits = output[:, pos, :]  # [B, V]
+            # Pointer logits: [B, 1, E] @ [B, E, M] → [B, M]
+            next_token_logits = torch.matmul(dec_out, memory.transpose(1, 2)).squeeze(1)
             next_token_logits[:, ConstraintToken.Mask] = -torch.inf
+
             dist = torch.distributions.Categorical(logits=next_token_logits)
-            next_token = dist.sample()
+            next_token  = dist.sample()
             next_logprob = dist.log_prob(next_token)
 
-            # Replace with Pad if sequence has already generated STOP
-            already_stopped = (generated[:, :pos+1] == ConstraintToken.Stop).any(dim=1)
+            # Override with Pad for sequences that already stopped
             next_token = torch.where(
-                already_stopped,
+                stopped,
                 torch.tensor(ConstraintToken.Pad, device=self.device, dtype=dtype),
                 next_token,
             )
             next_logprob = torch.where(
-                already_stopped,
+                stopped,
                 torch.tensor(0.0, device=self.device, dtype=torch.float32),
                 next_logprob,
             )
             generated[:, pos + 1] = next_token
-            logprobs[:, pos + 1] = next_logprob
+            logprobs[:, pos + 1]  = next_logprob
 
-            # Early stopping if all sequences have generated STOP
-            if already_stopped.all():
+            stopped = stopped | (next_token == ConstraintToken.Stop)
+            if stopped.all():
                 break
 
         return generated, logprobs
@@ -179,8 +199,8 @@ class ConstraintARModule(L.LightningModule):
         # Evaluate solver constraints and log solver feedback metrics
         try:
             solver_results = self.solver_feedback.evaluate_constraints_batch(
-                batch['p_val'],
-                generated,
+                batch['p_val'].cpu().numpy(),
+                generated.cpu().numpy(),
                 batch['sketch'],
                 fully_constrained_dof=2,
             )
@@ -255,8 +275,8 @@ class ConstraintARModule(L.LightningModule):
         # Evaluate solver constraints and log solver feedback metrics
         try:
             solver_results = self.solver_feedback.evaluate_constraints_batch(
-                batch['p_val'],
-                generated,
+                batch['p_val'].cpu().numpy(),
+                generated.cpu().numpy(),
                 batch['sketch'],
                 fully_constrained_dof=2,
             )
