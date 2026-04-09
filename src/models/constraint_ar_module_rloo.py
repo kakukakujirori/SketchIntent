@@ -2,6 +2,7 @@ import copy
 import inspect
 from typing import Any, cast
 
+import numpy as np
 import lightning as L
 import torch
 import torchmetrics
@@ -32,6 +33,7 @@ class ConstraintARModuleRLOO(L.LightningModule):
         entropy_bonus: float = 0.01,
         kl_coeff: float = 0.01,
         sft_coeff: float = 0.0,
+        gt_reward_coeff: float = 0.0,
     ):
         super().__init__()
         self.save_hyperparameters(ignore=['model', 'reward'], logger=False)
@@ -55,6 +57,9 @@ class ConstraintARModuleRLOO(L.LightningModule):
         self.entropy_bonus = entropy_bonus
         self.kl_coeff = kl_coeff
         self.sft_coeff = sft_coeff
+        self.gt_reward_coeff = gt_reward_coeff
+        self._block_size: int = context.align_constraint_token_length_to  # tokens per constraint
+        self._prefix_len: int = 1  # START token
 
         # losses and metrics
         self.criterion = torch.nn.CrossEntropyLoss(ignore_index=ConstraintToken.Pad)
@@ -109,6 +114,111 @@ class ConstraintARModuleRLOO(L.LightningModule):
         loss = self.criterion(logits.reshape(-1, V), target.reshape(-1))
         return loss, logits, target
 
+    @torch.no_grad()
+    def _compute_gt_match_reward(
+        self,
+        generated: torch.Tensor,
+        gt: torch.Tensor,
+    ) -> torch.Tensor:
+        """Compute per-token GT-match reward for each generated sequence.
+
+        For every constraint block in *generated*, checks whether an identical
+        block exists anywhere in *gt* (after intra-ref canonical sorting on both
+        sides).  If a match is found the reward `gt_reward_coeff` is added at
+        the **last token position of that block**.
+
+        Args:
+            generated: [BK, L] generated token sequences (includes START token at pos 0).
+            gt: [BK, L] ground-truth token sequences (same shape, already expanded K times).
+
+        Returns:
+            reward: [BK, L] float32 tensor (0 everywhere except matched block tails).
+        """
+        BK, L = generated.shape
+        bs = self._block_size
+        prefix = self._prefix_len
+
+        # ── extract body blocks (skip prefix START token) ────────────────────
+        # body region: [prefix, prefix + N*bs)  where N = (L - prefix) // bs
+        N = (L - prefix) // bs
+        body_end = prefix + N * bs
+
+        # gen_blocks: [BK, N, bs]
+        gen_blocks = generated[:, prefix:body_end].reshape(BK, N, bs)
+        # gt_blocks:  [BK, M, bs]  (M may differ from N in theory, but same L → M == N)
+        gt_blocks = gt[:, prefix:body_end].reshape(BK, N, bs)
+
+        # ── intra-ref sort (canonical ordering within each block) ─────────────
+        # We leverage reward.sort_intra_refs on numpy; it's called once per sequence
+        # so the overhead is acceptable.
+        gen_np = generated.cpu().numpy()
+        gt_np  = gt.cpu().numpy()
+
+        gen_sorted_np = np.stack(
+            [self.reward.sort_intra_refs(gen_np[k]) for k in range(BK)], axis=0
+        )  # [BK, L]
+        gt_sorted_np = np.stack(
+            [self.reward.sort_intra_refs(gt_np[k]) for k in range(BK)], axis=0
+        )  # [BK, L]
+
+        gen_sorted = torch.from_numpy(gen_sorted_np).to(generated.device)
+        gt_sorted  = torch.from_numpy(gt_sorted_np).to(gt.device)
+
+        gen_body = gen_sorted[:, prefix:body_end].reshape(BK, N, bs)  # [BK, N, bs]
+        gt_body  = gt_sorted[:, prefix:body_end].reshape(BK, N, bs)   # [BK, M, bs]
+        M = gt_body.shape[1]  # equals N
+
+        # ── valid-block masks ─────────────────────────────────────────────────
+        # A block is invalid (STOP / PAD) if ANY token == Stop or Pad
+        pad_id  = int(ConstraintToken.Pad)
+        stop_id = int(ConstraintToken.Stop)
+
+        # gen_invalid: [BK, N] — True if the generated block is Stop/Pad
+        gen_invalid = (
+            (gen_body == pad_id) | (gen_body == stop_id)
+        ).any(dim=-1)
+
+        # gt_invalid: [BK, M] — True if the GT block is Stop/Pad
+        gt_invalid = (
+            (gt_body == pad_id) | (gt_body == stop_id)
+        ).any(dim=-1)
+
+        # ── set-containment check (vectorised): gen_block ∈ gt_set ───────────
+        # Compare every gen block against every gt block for each sample.
+        # gen_exp: [BK, N, 1, bs]  vs  gt_exp: [BK, 1, M, bs]
+        gen_exp = gen_body.unsqueeze(2)  # [BK, N, 1, bs]
+        gt_exp  = gt_body.unsqueeze(1)   # [BK, 1, M, bs]
+
+        # block_match: [BK, N, M]  — True if whole block matches
+        block_match = (gen_exp == gt_exp).all(dim=-1)
+
+        # Mask out matches involving invalid GT blocks
+        # gt_invalid: [BK, M] → [BK, 1, M]
+        block_match = block_match & (~gt_invalid.unsqueeze(1))
+
+        # matched: [BK, N]  — True if this gen block matches *any* valid GT block
+        matched = block_match.any(dim=-1)  # [BK, N]
+
+        # Also mask out invalid generated blocks (stop/pad blocks never get reward)
+        matched = matched & (~gen_invalid)  # [BK, N]
+
+        # ── assign reward to the LAST token of each matched block ─────────────
+        reward = torch.zeros(BK, L, dtype=torch.float32, device=generated.device)
+        if matched.any():
+            # last position of block n in the full sequence:  prefix + n*bs + (bs-1)
+            block_tail_positions = torch.arange(N, device=generated.device) * bs + (bs - 1) + prefix
+            # [BK, N] positions → scatter into reward
+            # For matched blocks, add gt_reward_coeff at the tail position
+            # We scatter a filled coefficient tensor masked by `matched`
+            reward_to_add = matched.float() * self.gt_reward_coeff  # [BK, N]
+            reward.scatter_add_(
+                dim=1,
+                index=block_tail_positions.unsqueeze(0).expand(BK, -1),
+                src=reward_to_add,
+            )
+
+        return reward  # [BK, L]
+
     def _compute_rloo_loss(self, batch: dict[str, Any]) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         B, K = batch['p_val'].shape[0], self.group_sample_size
         _, max_len = batch['c_val'].shape
@@ -159,6 +269,12 @@ class ConstraintARModuleRLOO(L.LightningModule):
         rewards_cpu, solver_metrics = self.reward.collect_results(solver_handle)
         rewards = rewards_cpu.to(self.device).float()  # [B*K, L]
 
+        # Step 4b: GT-match reward (added on top of solver reward)
+        if self.gt_reward_coeff > 0.0:
+            gt_expanded = cast(torch.Tensor, expanded['c_val'])  # [B*K, L]
+            gt_match_reward = self._compute_gt_match_reward(generated, gt_expanded)
+            rewards = rewards + gt_match_reward
+
         # Parse solver metrics (Counter → scalar)
         parsed_solver_metrics = {}
         if "status" in solver_metrics:
@@ -198,14 +314,21 @@ class ConstraintARModuleRLOO(L.LightningModule):
         loss = pg_loss - self.entropy_bonus * entropy
 
         stop_mask = (generated == ConstraintToken.Stop).float()
+
+        gt_match_reward_metric = torch.tensor(0.0, device=self.device)
+        if self.gt_reward_coeff > 0.0:
+            # gt_match_reward was added into rewards already; recover it for logging
+            gt_match_reward_metric = gt_match_reward.sum() / n_valid  # type: ignore[possibly-undefined]
+
         metrics = {
-            'pg_loss':        pg_loss,
-            'kl_loss':        kl_loss_metric,
-            'reward_mean':    rewards.mean(),
-            'reward_std':     rewards.std(),
-            'reward_at_stop': (rewards * stop_mask).sum() / stop_mask.sum().clamp(min=1),
-            'entropy':        entropy,
-            'ratio':          avg_ratio,
+            'pg_loss':           pg_loss,
+            'kl_loss':           kl_loss_metric,
+            'reward_mean':       rewards.mean(),
+            'reward_std':        rewards.std(),
+            'reward_at_stop':    (rewards * stop_mask).sum() / stop_mask.sum().clamp(min=1),
+            'entropy':           entropy,
+            'ratio':             avg_ratio,
+            'gt_match_reward':   gt_match_reward_metric,
             **parsed_solver_metrics
         }
         return loss, metrics
