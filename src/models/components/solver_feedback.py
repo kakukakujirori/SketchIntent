@@ -38,6 +38,12 @@ class SolverStatus:
     NOTE: DistortingConstraints informs either
         - There is a distorting constraints (bool), or
         - Which constraints are causing distortion (list[str]).
+
+    NOTE: RigidDimensionalConstraints lists dimensional constraints whose
+        value perturbation (x0.5 or x2.0) causes the solver to no longer
+        converge.  Such constraints are considered "rigid" — they encode a
+        specific numeric fact rather than a topological/geometric intent —
+        and are penalised during RL training.
     """
     DoF: int = -1
     Status: str = "Unknown"
@@ -47,6 +53,7 @@ class SolverStatus:
     ConflictingConstraints: list[str] = field(default_factory=list)
     RedundantConstraints: list[str] = field(default_factory=list)
     DistortingConstraints: list[str] | bool = False
+    RigidDimensionalConstraints: list[str] = field(default_factory=list)
 
 
 class SolverFeedback:
@@ -327,6 +334,14 @@ class SolverFeedback:
         if status.MalformedConstraints:
             status.Status = "Malformed"
 
+        # ── Dimensional-constraint robustness check ───────────────────────── #
+        # Only run when the full sequence is Converged; otherwise we cannot
+        # distinguish "rigid" constraints from already-broken ones.
+        if status.Status == "Converged":
+            status.RigidDimensionalConstraints = self._check_rigid_dimensional_constraints(
+                sketchgraphs_sketch
+            )
+
         if check_one_by_one:
             solver_report.DoF = status.DoF if solver_report.Status == "Converged" else -1
             solver_report.NumRelationalConstraints = status.NumRelationalConstraints
@@ -334,6 +349,86 @@ class SolverFeedback:
             return solver_report, sketchgraphs_sketch, constraint_to_token_start, invalid_constraint_block_start
         else:
             return status, sketchgraphs_sketch, constraint_to_token_start, invalid_constraint_block_start
+
+    # ------------------------------------------------------------------ #
+    #  Dimensional-constraint robustness check                           #
+    # ------------------------------------------------------------------ #
+
+    _DIMENSIONAL_CONSTRAINT_TYPES = frozenset({
+        "Diameter", "Distance", "DistanceX", "DistanceY", "Angle", "Radius", "Length",
+    })
+    _RIGIDITY_SCALE_FACTORS = (0.5, 2.0)
+
+    def _check_rigid_dimensional_constraints(
+        self,
+        sketch: "datalib.Sketch",
+    ) -> list[str]:
+        """Return constraint IDs that break the solver when their value is scaled.
+
+        For each dimensional constraint in *sketch* (assumed to be fully-valued
+        after ``complete_constraint_values``), a copy of the sketch is built
+        with that single constraint's QuantityParameter multiplied by each
+        factor in ``_RIGIDITY_SCALE_FACTORS``.  If *any* scale factor causes
+        the solver to return a non-Converged status for the perturbed copy, the
+        constraint is labelled "rigid" and included in the returned list.
+
+        The check is intentionally permissive: only a single constraint is
+        perturbed at a time, and the original sketch already converged.
+        """
+        import copy as _copy
+        from sketchgraphs.data import QuantityParameter as _QP
+
+        rigid: list[str] = []
+
+        for cons_id, cons in sketch.constraints.items():
+            # Only consider dimensional constraints that carry a numeric quantity
+            cons_type_name = cons.constraint_type.name
+            if cons_type_name not in self._DIMENSIONAL_CONSTRAINT_TYPES:
+                continue
+
+            qty_params = [
+                (idx, p) for idx, p in enumerate(cons.parameters)
+                if isinstance(p, _QP)
+            ]
+            if not qty_params:
+                continue
+
+            is_rigid = False
+            for scale in self._RIGIDITY_SCALE_FACTORS:
+                # Build a perturbed copy of the sketch
+                perturbed_sketch = _copy.deepcopy(sketch)
+                perturbed_cons = perturbed_sketch.constraints[cons_id]
+                new_params = list(perturbed_cons.parameters)
+                for idx, p in qty_params:
+                    try:
+                        orig_value = float(p.value)
+                    except (TypeError, ValueError):
+                        # Cannot scale a non-numeric value; skip this constraint
+                        break
+                    scaled_value = orig_value * scale
+                    new_params[idx] = _QP(
+                        parameterId=p.parameterId,
+                        value=scaled_value,
+                        expression=f"RIGIDITY_CHECK:{scaled_value}",
+                    )
+                else:
+                    # All qty_params were successfully scaled
+                    perturbed_sketch.constraints[cons_id] = perturbed_cons._replace(
+                        parameters=new_params
+                    )
+                    try:
+                        perturbed_status = self.get_solver_status(perturbed_sketch)
+                    except Exception:
+                        # Treat solver crashes as non-convergence
+                        perturbed_status = SolverStatus(Status="Error")
+                    if perturbed_status.Status != "Converged":
+                        is_rigid = True
+                        break  # one failing scale is enough
+
+            if is_rigid:
+                rigid.append(cons_id)
+
+        return sorted(rigid)
 
     def evaluate_constraints_batch(
         self,

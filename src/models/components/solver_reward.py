@@ -49,6 +49,7 @@ class SolverReward(torch.nn.Module):
         penalty_per_problematic_constraint: float = -1.0,
         penalty_num_total_constraints: float = -0.01,
         penalty_num_dimensional_constraints: float = -0.2,
+        penalty_rigid_dimensional: float = -0.5,
         fully_constrained_dof: int = 2,
         distortion_threshold: float | None = None,
     ):
@@ -56,8 +57,8 @@ class SolverReward(torch.nn.Module):
         self.sketch_tokenizer = SketchTokenizer(context)
         self.fully_constrained_dof = fully_constrained_dof
 
-        assert all(v <= 0 for v in [penalty_conflicting, penalty_redundant, penalty_malformed, penalty_deformed, penalty_per_problematic_constraint, penalty_num_total_constraints, penalty_num_dimensional_constraints]), \
-            f"{penalty_conflicting=}, {penalty_redundant=}, {penalty_malformed=}, {penalty_deformed=}, {penalty_per_problematic_constraint=}, {penalty_num_total_constraints=}, {penalty_num_dimensional_constraints=}"
+        assert all(v <= 0 for v in [penalty_conflicting, penalty_redundant, penalty_malformed, penalty_deformed, penalty_per_problematic_constraint, penalty_num_total_constraints, penalty_num_dimensional_constraints, penalty_rigid_dimensional]), \
+            f"{penalty_conflicting=}, {penalty_redundant=}, {penalty_malformed=}, {penalty_deformed=}, {penalty_per_problematic_constraint=}, {penalty_num_total_constraints=}, {penalty_num_dimensional_constraints=}, {penalty_rigid_dimensional=}"
 
         self.reward_dof_reduction = reward_dof_reduction
         self.reward_fully_constrained = reward_fully_constrained
@@ -68,6 +69,7 @@ class SolverReward(torch.nn.Module):
         self.penalty_per_problematic_constraint = penalty_per_problematic_constraint
         self.penalty_num_total_constraints = penalty_num_total_constraints
         self.penalty_num_dimensional_constraints = penalty_num_dimensional_constraints
+        self.penalty_rigid_dimensional = penalty_rigid_dimensional
 
         # Execution and caching
         self.context = context
@@ -339,6 +341,23 @@ class SolverReward(torch.nn.Module):
                 raise NotImplementedError("IMPLEMENT IT!!!")
 
             scores[i, problematic_token_ends] += self.penalty_per_problematic_constraint
+
+            # Rigid dimensional constraints: penalised separately (only when converged)
+            if self.penalty_rigid_dimensional != 0.0 and solver_status.RigidDimensionalConstraints:
+                rigid_token_starts = [
+                    constraint_to_token_start[c_id]
+                    for c_id in solver_status.RigidDimensionalConstraints
+                    if c_id in constraint_to_token_start
+                ]
+                if self.sketch_tokenizer.align_constraint_token_length_to > 0:
+                    rigid_token_ends = np.array(
+                        [s + self.sketch_tokenizer.align_constraint_token_length_to - 1
+                         for s in rigid_token_starts],
+                        dtype=np.int64,
+                    )
+                    scores[i, rigid_token_ends] += self.penalty_rigid_dimensional
+                else:
+                    raise NotImplementedError("IMPLEMENT IT!!!")
 
             ################################################################
             # 2. Sequence-wise penalty / reward
