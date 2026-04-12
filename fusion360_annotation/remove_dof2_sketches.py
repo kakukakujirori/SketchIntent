@@ -65,7 +65,12 @@ def main(args):
             if match:
                 full_name = match.group(1)
 
-                if full_name in to_remove:
+                # Count primitives (those that add geometry)
+                prim_count = len(re.findall(r"fc_sketch\.addGeometry\(Part\.", content))
+
+                is_outside_range = not (args.prim_num_range[0] <= prim_count <= args.prim_num_range[1])
+
+                if full_name in to_remove or is_outside_range:
                     # Remove the .py file and corresponding .FCStd file
                     os.remove(py_file)
                     fcstd_file = py_file.replace(".py", ".FCStd")
@@ -76,7 +81,8 @@ def main(args):
                     # Keep track of files that are NOT removed
                     remaining_info.append({
                         'filename': os.path.splitext(filename)[0],
-                        'dof': dof_map.get(full_name, "Unknown")
+                        'dof': dof_map.get(full_name, "Unknown"),
+                        'prim_count': prim_count
                     })
         except Exception as e:
             print(f"Error processing file {py_file}: {e}")
@@ -85,7 +91,7 @@ def main(args):
     if remaining_info:
         csv_out_path = os.path.join(target_dir, "_sketch_dof_info.csv")
         with open(csv_out_path, 'w', newline='', encoding='utf-8') as f:
-            writer = csv.DictWriter(f, fieldnames=['filename', 'dof'])
+            writer = csv.DictWriter(f, fieldnames=['filename', 'dof', 'prim_count'])
             writer.writeheader()
             writer.writerows(remaining_info)
         print(f"Saved remaining sketches info to {csv_out_path}")
@@ -98,5 +104,6 @@ if __name__ == "__main__":
     parser.add_argument("--data_dir", type=str, required=True, help="Path to the directory containing converted .py and .FCStd files")
     parser.add_argument("--out_dir", type=str, default=None, help="If provided, results will be saved here instead of modifying data_dir in place.")
     parser.add_argument("--log_path", type=str, default=None, help="Path to the freecad_conversion_log.csv. Defaults to [data_dir]/../freecad_conversion_log.csv if not provided.")
+    parser.add_argument("--prim_num_range", type=int, nargs=2, default=(6, 16), help="Only convert sketches with number of primitives in this range")
     args = parser.parse_args()
     main(args)
