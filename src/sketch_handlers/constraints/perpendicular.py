@@ -38,24 +38,34 @@ class PerpendicularHandler(ConstraintHandler):
         if not res1 or not res2:
             raise ValueError(f"Invalid geometry IDs for {self.name}: {refs[0]}, {refs[1]}")
 
-        # Perpendicular(e1, e2) — edge-edge only
+        g1, p1 = res1
+        g2, p2 = res2
+
         try:
             props = self.get_constraint_props(constraint)
-            val = props["value"]
+            datum = props["value"]
         except ValueError:
-            val = None
-        if val is not None and val != 0.0:
-            return [('Perpendicular', [res1[0], res2[0]], val)]
-        return [('Perpendicular', [res1[0], res2[0]], None)]
+            datum = None
+
+        if p1 > 0 or p2 > 0:
+            # Perpendicular with point specification: Perpendicular(e1, s1, e2, s2)
+            return [('Perpendicular', [g1, p1, g2, p2], datum)]
+        else:
+            # Edge-Edge perpendicular: Perpendicular(e1, e2)
+            return [('Perpendicular', [g1, g2], datum)]
 
     def from_freecad(self, fc_constraint: 'Sketcher.Constraint', fc_primitives: list, geoID_to_primitive: dict[tuple[int, int], str]) -> datalib.Constraint | None:
         if fc_constraint.Type != 'Perpendicular':
             raise ValueError(f"Invalid constraint type for {self.name}: {fc_constraint.Type}")
 
         g1 = fc_constraint.First
+        p1 = fc_constraint.FirstPos
         g2 = fc_constraint.Second
-        r1 = geoID_to_primitive.get((g1, 0))
-        r2 = geoID_to_primitive.get((g2, 0))
+        p2 = fc_constraint.SecondPos
+
+        r1 = geoID_to_primitive.get((g1, p1 if p1 > 0 else 0))
+        r2 = geoID_to_primitive.get((g2, p2 if p2 > 0 else 0))
+
         if not r1 or not r2:
             raise ValueError(f"Invalid geometry IDs for {self.name}: {g1}, {g2}")
 

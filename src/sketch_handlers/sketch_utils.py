@@ -179,13 +179,17 @@ def get_refs(constr: datalib.Constraint) -> list[tuple[int, str | None]]:
     return sorted(refs, key=lambda x: (x[0], {'start': 1, 'end': 2, 'center': 3}.get(x[1], 0)))
 
 
-def _resolve_tangent(sketch: datalib.Sketch) -> datalib.Sketch:
-    """Resolve Tangent(edge, edge) + Coincident(point, point) pairs to Tangent(edge, point, edge, point).
+def _resolve_tangent_and_perpendicular(sketch: datalib.Sketch) -> datalib.Sketch:
+    """Resolve
+    - Tangent(edge, edge) + Coincident(point, point) pairs to Tangent(edge, point, edge, point).
+    - Perpendicular(edge, edge) + Coincident(point, point) pairs to Perpendicular(edge, point, edge, point).
+
     FreeCAD judges the former as redundant.
     """
     # Store all Point-Point Coincidents and Edge-Edge Tangents
     point_point_coincident_map = defaultdict(list)
     edge_edge_tangent_map = {}
+    edge_edge_perpendicular_map = {}
     for cid, c in sketch.constraints.items():
         if c.constraint_type.name == 'Coincident':
             refs = get_refs(c)
@@ -199,10 +203,16 @@ def _resolve_tangent(sketch: datalib.Sketch) -> datalib.Sketch:
                 (geo1, pt1), (geo2, pt2) = refs
                 if pt1 is None and pt2 is None:  # Edge-Edge
                     edge_edge_tangent_map[(geo1, geo2)] = (cid, refs)
+        if c.constraint_type.name == 'Perpendicular':
+            refs = get_refs(c)
+            if len(refs) == 2:
+                (geo1, pt1), (geo2, pt2) = refs
+                if pt1 is None and pt2 is None:  # Edge-Edge
+                    edge_edge_perpendicular_map[(geo1, geo2)] = (cid, refs)
 
     # Overwrite Tangent(edge, edge) with Tangent(edge, point, edge, point) and drop Coincident(point, point)
-    common_keys = point_point_coincident_map.keys() & edge_edge_tangent_map.keys()
-    for key in common_keys:
+    common_tangent_keys = point_point_coincident_map.keys() & edge_edge_tangent_map.keys()
+    for key in common_tangent_keys:
         tangent_cid, ((geo1, _), (geo2, _)) = edge_edge_tangent_map[key]
         for coincident_cid, ((_geo1, pt1), (_geo2, pt2)) in point_point_coincident_map[key]:
             assert geo1 == _geo1 and geo2 == _geo2
@@ -215,6 +225,23 @@ def _resolve_tangent(sketch: datalib.Sketch) -> datalib.Sketch:
                     p.value = f"{geo2}.{pt2}"
                 new_param.append(p)
             sketch.constraints[tangent_cid] = sketch.constraints[tangent_cid]._replace(parameters=new_param)
+            sketch.constraints.pop(coincident_cid)
+
+    # Overwrite Perpendicular(edge, edge) with Perpendicular(edge, point, edge, point) and drop Coincident(point, point)
+    common_perpendicular_keys = point_point_coincident_map.keys() & edge_edge_perpendicular_map.keys()
+    for key in common_perpendicular_keys:
+        perpendicular_cid, ((geo1, _), (geo2, _)) = edge_edge_perpendicular_map[key]
+        for coincident_cid, ((_geo1, pt1), (_geo2, pt2)) in point_point_coincident_map[key]:
+            assert geo1 == _geo1 and geo2 == _geo2
+            # new params
+            new_param = []
+            for p in sketch.constraints[perpendicular_cid].parameters:
+                if isinstance(p, LocalReferenceParameter) and (p.value == str(geo1) or p.value.startswith(f"{geo1}.")):
+                    p.value = f"{geo1}.{pt1}"
+                elif isinstance(p, LocalReferenceParameter) and (p.value == str(geo2) or p.value.startswith(f"{geo2}.")):
+                    p.value = f"{geo2}.{pt2}"
+                new_param.append(p)
+            sketch.constraints[perpendicular_cid] = sketch.constraints[perpendicular_cid]._replace(parameters=new_param)
             sketch.constraints.pop(coincident_cid)
 
     return sketch
@@ -492,7 +519,7 @@ def cleanse_sketch_constraints(
     sketch = _resolve_midpoint_mirror_ref_order(sketch)
 
     if resolve_redundancy:
-        sketch = _resolve_tangent(sketch)
+        sketch = _resolve_tangent_and_perpendicular(sketch)
         sketch = _resolve_redundant_coincident(sketch)
 
     if resolve_synonym:

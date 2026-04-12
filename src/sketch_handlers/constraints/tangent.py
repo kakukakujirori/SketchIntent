@@ -49,14 +49,10 @@ class TangentHandler(ConstraintHandler):
 
         if p1 > 0 or p2 > 0:
             # Tangent with point specification: Tangent(e1, s1, e2, s2)
-            if datum is not None:
-                return [('Tangent', [g1, p1, g2, p2], datum)]
-            return [('Tangent', [g1, p1, g2, p2], None)]
+            return [('Tangent', [g1, p1, g2, p2], datum)]
         else:
             # Edge-Edge tangent: Tangent(e1, e2)
-            if datum is not None:
-                return [('Tangent', [g1, g2], datum)]
-            return [('Tangent', [g1, g2], None)]
+            return [('Tangent', [g1, g2], datum)]
 
     def from_freecad(self, fc_constraint: 'Sketcher.Constraint', fc_primitives: list, geoID_to_primitive: dict[tuple[int, int], str]) -> datalib.Constraint | None:
         FreeCAD, Part, Sketcher = ensure_freecad_imported()
