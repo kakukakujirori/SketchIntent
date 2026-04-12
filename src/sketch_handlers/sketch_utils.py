@@ -249,8 +249,8 @@ def _resolve_tangent_and_perpendicular(sketch: datalib.Sketch) -> datalib.Sketch
 
 def _resolve_redundant_coincident(sketch: datalib.Sketch) -> datalib.Sketch:
     """When same (geo1, geo2) pair has both types of Coincident:
-        - Point-on-Object (one ref has pt=0, other has pt>0)
-        - Point-Point (both refs have pt>0)
+        - Point-on-Object (one ref has pt=None, the other has pt='start'/'end'/'center')
+        - Point-Point (both refs have pt='start'/'end'/'center')
 
     The Point-on-Object is redundant and should be skipped.
     """
@@ -263,20 +263,22 @@ def _resolve_redundant_coincident(sketch: datalib.Sketch) -> datalib.Sketch:
                 (geo1, pt1), (geo2, pt2) = refs
                 coincident_map[(geo1, geo2)].append((cid, (pt1, pt2)))
 
-    # Remove redundant Point-on-Object
-    for key, cid_pts_list in coincident_map.items():
-        firsts = {pt1 for (cid, (pt1, pt2)) in cid_pts_list if pt1 != 0}
-        seconds = {pt2 for (cid, (pt1, pt2)) in cid_pts_list if pt2 != 0}
+    # Remove redundant Point-on-Object (also represented as Coincident in SketchGraphs)
+    redundant_point_on_object = []
+    for geo_pair, cid_pts_list in coincident_map.items():
+        firsts = {pt1 for (cid, (pt1, pt2)) in cid_pts_list if pt1 is not None and pt2 is not None}
+        seconds = {pt2 for (cid, (pt1, pt2)) in cid_pts_list if pt1 is not None and pt2 is not None}
 
-        redundant_point_on_object = []
         for cid, (pt1, pt2) in cid_pts_list:
-            if pt2 == 0 and pt1 in firsts:
+            if pt1 is not None and pt2 is not None:
+                continue
+            if pt1 in firsts or pt2 in seconds:
                 redundant_point_on_object.append(cid)
-            if pt1 == 0 and pt2 in seconds:
-                redundant_point_on_object.append(cid)
+            # NOTE: Since get_refs returns sorted references,
+            # (pt2 in firsts or pt1 in seconds) check is unnecessary.
 
-        for cid in redundant_point_on_object:
-            del sketch.constraints[cid]
+    for cid in redundant_point_on_object:
+        del sketch.constraints[cid]
 
     return sketch
 
