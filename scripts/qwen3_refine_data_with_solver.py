@@ -943,6 +943,11 @@ def generate_freecad_constraints(primitives: list[dict[str, Any]], constraints: 
             e1, s1 = c.get("entity1"), c.get("subnode1", 0)
             e2, s2 = c.get("entity2"), c.get("subnode2", 0)
             e3, s3 = c.get("entity3"), c.get("subnode3", 0)
+
+            # Safeguard against explicitly 'null' subnodes from LLM output
+            s1 = 0 if s1 is None else s1
+            s2 = 0 if s2 is None else s2
+            s3 = 0 if s3 is None else s3
             prim1 = primitives[e1] if e1 is not None else None
             prim2 = primitives[e2] if e2 is not None else None
             prim3 = primitives[e3] if e3 is not None else None
@@ -978,7 +983,7 @@ def generate_freecad_constraints(primitives: list[dict[str, Any]], constraints: 
                     continue
 
             elif ctype in ["Tangent", "Perpendicular"]:
-                if (s1 == 0 or s1 is None) and (s2 == 0 or s2 is None):
+                if s1 == 0 and s2 == 0:
                     if e1 is not None and e2 is not None:
                         final_args = [int(e1), int(e2)]
                     else:
@@ -986,7 +991,7 @@ def generate_freecad_constraints(primitives: list[dict[str, Any]], constraints: 
                         continue
                 else:
                     if e1 is not None and e2 is not None:
-                        final_args = [int(e1), int(s1 or 0), int(e2), int(s2 or 0)]
+                        final_args = [int(e1), int(s1), int(e2), int(s2)]
                     else:
                         yield idx, ctype, None, f"Missing args for {ctype}"
                         continue
@@ -1042,14 +1047,12 @@ def generate_freecad_constraints(primitives: list[dict[str, Any]], constraints: 
                 if e2 is None:
                     # Line span (e1, value)
                     final_args = [int(e1), value]
-                elif s1 is not None and s2 is not None:
-                    # Point-Point
-                    final_args = [int(e1), int(s1), int(e2), int(s2), value]
-                elif prim1 and prim1["type"] == "LineSegment":
-                    # FreeCAD doesn't accept Line-XXX (XXX = Point/Circle/Arc). XXX-Line is okay.
-                    final_args = [int(e2), int(s2), int(e1), int(s1), value]
                 else:
-                    final_args = [int(e1), int(s1), int(e2), int(s2), value]
+                    if prim1 and prim1["type"] == "LineSegment" and s1 == 0 and s2 > 0:
+                        # FreeCAD doesn't accept Line-XXX (XXX = Point/Circle/Arc). XXX-Line is okay.
+                        final_args = [int(e2), int(s2), int(e1), int(s1), value]
+                    else:
+                        final_args = [int(e1), int(s1), int(e2), int(s2), value]
 
             elif ctype == "Angle":
                 assert value is not None
