@@ -609,18 +609,23 @@ def format_constraint_to_json(ctype: str, args: list) -> dict:
             c_out["entity2"] = get_arg(2)
             c_out["subnode2"] = get_arg(3)
 
-    elif ctype in ["Parallel", "Perpendicular", "Equal"]:
+    elif ctype in ["Parallel", "Equal"]:
         # Parallel(e1, e2) - 2 args
         if len(args) == 2:
             c_out["entity1"] = get_arg(0)
             c_out["entity2"] = get_arg(1)
 
-    elif ctype == "Tangent":
+    elif ctype in ["Tangent", "Perpendicular"]:
         # Tangent(e1, e2) - 2 args (edge-edge)
+        # Tangent(e1, s1, e2) - 3 args (point-endge)
         # Tangent(e1, s1, e2, s2) - 4 args (point-point)
         if len(args) == 2:
             c_out["entity1"] = get_arg(0)
             c_out["entity2"] = get_arg(1)
+        elif len(args) == 3:
+            c_out["entity1"] = get_arg(0)
+            c_out["subnode1"] = get_arg(1)
+            c_out["entity2"] = get_arg(2)
         elif len(args) == 4:
             c_out["entity1"] = get_arg(0)
             c_out["subnode1"] = get_arg(1)
@@ -972,14 +977,19 @@ def generate_freecad_constraints(primitives: list[dict[str, Any]], constraints: 
                     yield idx, ctype, None, "Missing args for Coincident"
                     continue
 
-            elif ctype == "Tangent":
-                if s1 is not None and s2 is not None:
-                    final_args = [int(e1), int(s1), int(e2), int(s2)]
-                elif e1 is not None and e2 is not None:
-                    final_args = [int(e1), int(e2)]
+            elif ctype in ["Tangent", "Perpendicular"]:
+                if (s1 == 0 or s1 is None) and (s2 == 0 or s2 is None):
+                    if e1 is not None and e2 is not None:
+                        final_args = [int(e1), int(e2)]
+                    else:
+                        yield idx, ctype, None, f"Missing args for {ctype}"
+                        continue
                 else:
-                    yield idx, ctype, None, "Missing args for Tangent"
-                    continue
+                    if e1 is not None and e2 is not None:
+                        final_args = [int(e1), int(s1 or 0), int(e2), int(s2 or 0)]
+                    else:
+                        yield idx, ctype, None, f"Missing args for {ctype}"
+                        continue
 
             elif ctype == "TangentViaPoint":
                 if all(v is not None for v in [e1, e2, e3, s3]):
@@ -1004,7 +1014,7 @@ def generate_freecad_constraints(primitives: list[dict[str, Any]], constraints: 
                     yield idx, ctype, None, f"Missing args for {ctype}"
                     continue
 
-            elif ctype in ["Parallel", "Perpendicular", "Equal"]:
+            elif ctype in ["Parallel", "Equal"]:
                 if e1 is not None and e2 is not None:
                     final_args = [int(e1), int(e2)]
                 else:
@@ -1616,6 +1626,11 @@ def static_constraints_diagnosis(
             if p1 is None or p2 is None:
                 warnings.append(f"Constraint {i} ({constraint_name}) is malformed: subnode1 and subnode2 must be >= 1.")
 
+        # Check for malformed Tangent and Perpendicular constraints
+        if c["type"] in ["Tangent", "Perpendicular"]:
+            if (s1 == 0 or s1 is None) and s2 is not None and s2 > 0:
+                warnings.append(f"Constraint {i} ({constraint_name}) is malformed: When combining an edge and a point for {c['type']}, the point must be specified first (Subnode1 > 0) due to CAD solver specifications. Please swap Entity1 and Entity2.")
+
         # Check for malformed/diagonal Distance constraints
         if c["type"] in ["Distance", "DistanceX", "DistanceY"]:
             if (e1 is not None and primitives_list[e1]["type"] == "LineSegment" and p1 is None) and (e2 is not None and primitives_list[e2]["type"] == "LineSegment" and p2 is None):
@@ -2073,12 +2088,19 @@ Strictly adhere to the following signatures for each constraint type. Arguments 
     * Constrains two points to have the same Y coordinate (horizontally aligned).
 - Parallel(Entity1, Entity2)
     * Constrains two lines to be parallel.
-- Perpendicular(Entity1, Entity2)
-    * Constrains two lines to be perpendicular.
+- Perpendicular(Entity1, Subnode1, Entity2, Subnode2)
+    * Perpendicularity between two curves.
+    * If Subnode1 = Subnode2 = 0, the the two curves intersect at a right angle, abbreviate as Perpendicular(Entity1, Entity2).
+    * If Subnode1 > 0, Entity1 and Entity2 are perpendicular at Entity1.Subnode1.
+    * If Subnode1 > 0 and Subnode2 > 0, then it is equivalent to Perpendicular(Entity1, Entity2) and Coincident(Entity1, Subnode1, Entity2, Subnode2).
+    * WARNING: Subnode1 = 0 and Subnode2 > 0 are regarded malformed.
 - Tangent(Entity1, Subnode1, Entity2, Subnode2)
-    * Tangency between two curves or a curve and a line.
-    * If constraining two circles/arcs, use Subnode 0 for both.
-    * If constraining a line end to a circle, specify the point subnode (1 or 2) for the line and subnode 0 for the circle.
+    * Tangency between two curves.
+    * If Subnode1 = Subnode2 = 0, the the two curves are tangent to each other, abbreviate as Tangent(Entity1, Entity2).
+    * If Subnode1 > 0, Entity1 and Entity2 are tangent at Entity1.Subnode1.
+    * If Subnode1 > 0 and Subnode2 > 0, then it is equivalent to Tangent(Entity1, Entity2) and Coincident(Entity1, Subnode1, Entity2, Subnode2).
+    * WARNING: Subnode1 = 0 and Subnode2 > 0 are regarded malformed.
+    * TIPS: If Entity1 and Entity2 are both Lines, then this achieves Collinear.
 - Equal(Entity1, Entity2)
     * Constrains two segments to have equal length, or two circles/arcs to have equal radius.
 - Symmetric(Entity1, Subnode1, Entity2, Subnode2, Entity3, Subnode3)

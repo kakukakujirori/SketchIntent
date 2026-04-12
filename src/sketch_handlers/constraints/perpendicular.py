@@ -47,12 +47,20 @@ class PerpendicularHandler(ConstraintHandler):
         except ValueError:
             datum = None
 
-        if p1 > 0 or p2 > 0:
+        if p1 > 0 and p2 > 0:
             # Perpendicular with point specification: Perpendicular(e1, s1, e2, s2)
             return [('Perpendicular', [g1, p1, g2, p2], datum)]
-        else:
+        elif p1 == 0 and p2 > 0:
+            # Perpendicular with one point specification must decrate the point first
+            return [('Perpendicular', [g2, p2, g1, p1], datum)]
+        elif p2 == 0 and p1 > 0:
+            # Perpendicular with one point specification must decrate the point first
+            return [('Perpendicular', [g1, p1, g2, p2], datum)]
+        elif p1 == 0 and p2 == 0:
             # Edge-Edge perpendicular: Perpendicular(e1, e2)
             return [('Perpendicular', [g1, g2], datum)]
+        else:
+            raise ValueError(f"Invalid point specification for {self.name}: {p1=}, {p2=}")
 
     def from_freecad(self, fc_constraint: 'Sketcher.Constraint', fc_primitives: list, geoID_to_primitive: dict[tuple[int, int], str]) -> datalib.Constraint | None:
         if fc_constraint.Type != 'Perpendicular':

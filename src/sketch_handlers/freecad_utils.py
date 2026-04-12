@@ -167,11 +167,11 @@ def dump_freecad_commands(fc_sketch: 'Sketcher.SketchObject', doc_name: str = "M
                 args.extend([str(c.First)])
             else: # two points
                 args.extend([str(c.First), str(c.FirstPos), str(c.Second), str(c.SecondPos)])
-        elif t in ['Parallel', 'Perpendicular', 'Equal', 'Concentric']:
+        elif t in ['Parallel', 'Equal', 'Concentric']:
             args.extend([str(c.First), str(c.Second)])
         elif t == 'PointOnObject':
             args.extend([str(c.First), str(c.FirstPos), str(c.Second)])
-        elif t == 'Tangent':
+        elif t in ['Tangent', 'Perpendicular']:
             if c.FirstPos == 0 and c.SecondPos == 0:
                 args.extend([str(c.First), str(c.Second)])
             else:
