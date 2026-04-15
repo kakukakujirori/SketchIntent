@@ -8,7 +8,7 @@ import torch
 import torchmetrics
 from tqdm import tqdm
 
-from src.metrics import ConstraintIoU, TokenAccuracy
+from src.metrics import ConstraintBLEU, ConstraintIoU, TokenAccuracy
 from src.models.components.constraint_ar_model import ConstraintARModel
 from src.models.components.solver_feedback import SolverFeedback
 from src.models.components.solver_reward import SolverReward
@@ -16,6 +16,7 @@ from src.models.components.token_reordering import TokenReordering
 from src.models.components.token_visualizer import visualize_constraint_sequence
 from src.sketch_handlers.constants import ConstraintToken
 from src.sketch_handlers.context import SketchContext
+from src.sketch_handlers.sketch_tokenizer import SketchTokenizer
 
 
 class ConstraintARModuleRLOO(L.LightningModule):
@@ -64,7 +65,9 @@ class ConstraintARModuleRLOO(L.LightningModule):
         # losses and metrics
         self.criterion = torch.nn.CrossEntropyLoss(ignore_index=ConstraintToken.Pad)
         self.accuracy_metric = TokenAccuracy(ignore_index=ConstraintToken.Pad)
-        self.iou_metrics = ConstraintIoU(context, prefix_len=1)  # NOTE: prefix_len is important
+        self.iou_metrics = ConstraintIoU(context, prefix_len=1)
+        self.bleu_metrics = ConstraintBLEU()
+        self.tokenizer = SketchTokenizer(context)
         self.token_reordering = TokenReordering(context=context, prefix_len=1)  # NOTE: prefix_len is important
         self.solver_feedback = SolverFeedback(context)
 
@@ -72,6 +75,7 @@ class ConstraintARModuleRLOO(L.LightningModule):
         """Reset all metrics to prevent accumulation across epochs."""
         self.accuracy_metric.reset()
         self.iou_metrics.reset()
+        self.bleu_metrics.reset()
 
     def on_train_epoch_start(self):
         self._reset_metrics()
@@ -411,6 +415,31 @@ class ConstraintARModuleRLOO(L.LightningModule):
 
         return generated, logprobs
 
+    def _evaluate_bleu(self, batch: dict[str, Any], generated: torch.Tensor) -> dict[str, Any]:
+        """Detokenize and update BLEU metrics, returning batch-level results."""
+        B = generated.shape[0]
+        p_vals = batch['p_val'].cpu().numpy()
+        c_vals_gen = generated.cpu().numpy()
+
+        # base_prims and GT sketches are directly in the batch
+        base_prim_dicts = [s.entities for s in batch['sketch']]
+        gt_sketches = batch['sketch']
+
+        pred_sketches = []
+        target_sketches_grouped = []
+
+        for i in range(B):
+            # Detokenize prediction
+            pred_tokens = {'p_val': p_vals[i], 'c_val': c_vals_gen[i]}
+            pred_sketch, _, _ = self.tokenizer.detokenize(pred_tokens, allow_invalid_constraints=True)
+            pred_sketches.append(pred_sketch)
+
+            # Use GT sketch directly from batch
+            target_sketches_grouped.append([gt_sketches[i]])
+
+        # Calling the metric returns batch-level results and updates global state
+        return self.bleu_metrics(base_prim_dicts, pred_sketches, target_sketches_grouped)
+
 
     def training_step(self, batch: dict[str, Any], batch_idx: int):
         rl_loss, rl_metrics = self._compute_rloo_loss(batch)
@@ -452,6 +481,16 @@ class ConstraintARModuleRLOO(L.LightningModule):
         iou_metrics = self.iou_metrics(generated_sorted, target_sorted)
         for metric_name, metric_value in iou_metrics.items():
             self.log(f'validation_gen/{metric_name}', metric_value, add_dataloader_idx=False, sync_dist=True, on_epoch=True)
+
+        # Log BLEU (Batch level)
+        bleu_results = self._evaluate_bleu(batch, generated)
+        for k, v in bleu_results.items():
+            if k == "categories" and isinstance(v, dict):
+                for cat_name, cat_scores in v.items():
+                    for s_name, s_val in cat_scores.items():
+                        self.log(f'validation_gen/bleu_{cat_name}_{s_name}', s_val, add_dataloader_idx=False, sync_dist=True, on_epoch=True)
+            elif isinstance(v, torch.Tensor):
+                self.log(f'validation_gen/bleu_{k}', v, add_dataloader_idx=False, sync_dist=True, on_epoch=True)
 
         # Evaluate solver constraints and log solver feedback metrics
         try:
@@ -530,6 +569,16 @@ class ConstraintARModuleRLOO(L.LightningModule):
         iou_metrics = self.iou_metrics(generated_sorted, target_sorted)
         for metric_name, metric_value in iou_metrics.items():
             self.log(f'test_gen/{metric_name}', metric_value, add_dataloader_idx=False, sync_dist=True, on_epoch=True)
+
+        # Log BLEU (Batch level)
+        bleu_results = self._evaluate_bleu(batch, generated)
+        for k, v in bleu_results.items():
+            if k == "categories" and isinstance(v, dict):
+                for cat_name, cat_scores in v.items():
+                    for s_name, s_val in cat_scores.items():
+                        self.log(f'test_gen/bleu_{cat_name}_{s_name}', s_val, add_dataloader_idx=False, sync_dist=True, on_epoch=True)
+            elif isinstance(v, torch.Tensor):
+                self.log(f'test_gen/bleu_{k}', v, add_dataloader_idx=False, sync_dist=True, on_epoch=True)
 
         # Evaluate solver constraints and log solver feedback metrics
         try:
