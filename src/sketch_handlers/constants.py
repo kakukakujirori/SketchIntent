@@ -82,3 +82,6 @@ class ConstraintAttrToken(enum.IntEnum):
 # Offsets
 PRIMITIVE_VAL_OFFSET = len(PrimitiveToken)
 CONSTRAINT_VAL_OFFSET = len(ConstraintToken)
+
+# FreeCAD constants
+FC_GEO_UNDEF = -2000

@@ -2,6 +2,7 @@
 img2cad.
 """
 import math
+import traceback
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import Literal
@@ -151,7 +152,7 @@ def rescale_sketch(sketch: datalib.Sketch, dst_length: float = 1.0) -> float:
     for ent in sketch.entities.values():
         pos_params = POS_PARAMS.get(ent.type)
         scale_params = SCALE_PARAMS.get(ent.type)
-        if pos_params is None:
+        if pos_params is None or scale_params is None:
             # Skip unsupported entities
             continue
         params = pos_params + scale_params  # rescale both types of params
@@ -283,7 +284,7 @@ def _resolve_redundant_coincident(sketch: datalib.Sketch) -> datalib.Sketch:
     return sketch
 
 
-def _resolve_midpoint_mirror_ref_order(sketch: datalib.Sketch) -> datalib.Sketch:
+def _resolve_midpoint_mirror_ref_order(sketch: datalib.Sketch) -> tuple[datalib.Sketch, dict[str, str]]:
     """Midpoint and Mirror have the following reference ordering: [EntityA, EntityB, SymmetyPoint/Axis]
     However, SketchGraphs format doesn't guarantee this ordering, so we recover it by checking the actual geometry.
     """
@@ -308,13 +309,16 @@ def _resolve_midpoint_mirror_ref_order(sketch: datalib.Sketch) -> datalib.Sketch
                 #     print(f"{i}: {coords[i]=}, {a=}, {b=}")
             raise ValueError(f"Three points are not equidistant collinear: {coord1=}, {coord2=}, {coord3=}")
         elif coord1.size == 0:
-            assert coord2.size == coord3.size == 2
+            if coord2.size != 2 or coord3.size != 2:
+                raise ValueError(f"Remaining references must be points: {coord2.size=}, {coord3.size=}")
             return (refs[1], refs[2], refs[0])
         elif coord2.size == 0:
-            assert coord1.size == coord3.size == 2
+            if coord1.size != 2 or coord3.size != 2:
+                raise ValueError(f"Remaining references must be points: {coord1.size=}, {coord3.size=}")
             return (refs[0], refs[2], refs[1])
         elif coord3.size == 0:
-            assert coord1.size == coord2.size == 2
+            if coord1.size != 2 or coord2.size != 2:
+                raise ValueError(f"Remaining references must be points: {coord1.size=}, {coord2.size=}")
             return (refs[0], refs[1], refs[2])
         else:
             raise ValueError(f"At least two references must be points: got {refs=}")
@@ -324,19 +328,22 @@ def _resolve_midpoint_mirror_ref_order(sketch: datalib.Sketch) -> datalib.Sketch
         entities: dict[str, datalib.Entity],
     ) -> tuple[tuple[int, str | None], tuple[int, str | None]]:
 
-        (geo1, pt1), (geo2, pt2) = local_refs
-        if isinstance(sketch.entities[str(geo1)], datalib.Line) and pt1 is None:
-            assert pt2 or isinstance(sketch.entities[str(geo2)], datalib.Point)
+        (geo1, pt1), (geo2, pt2) = refs
+        if isinstance(entities[str(geo1)], datalib.Line) and pt1 is None:
+            if not (pt2 or isinstance(entities[str(geo2)], datalib.Point)):
+                raise ValueError(f"Second reference must be a Point for Line midpoint: got {refs=}")
             return (refs[0], refs[1])
-        elif isinstance(sketch.entities[str(geo2)], datalib.Line) and pt2 is None:
-            assert pt1 or isinstance(sketch.entities[str(geo1)], datalib.Point)
+        elif isinstance(entities[str(geo2)], datalib.Line) and pt2 is None:
+            if not (pt1 or isinstance(entities[str(geo1)], datalib.Point)):
+                raise ValueError(f"First reference must be a Point for Line midpoint: got {refs=}")
             return (refs[1], refs[0])
-        elif isinstance(sketch.entities[str(geo1)], datalib.Arc) or isinstance(sketch.entities[str(geo2)], datalib.Arc):
+        elif isinstance(entities[str(geo1)], datalib.Arc) or isinstance(entities[str(geo2)], datalib.Arc):
             raise ValueError("Arc midpoint is not supported for FreeCAD.")
         else:
             raise ValueError(f"Refs must consist of a Line and a Point: got {refs=}")
 
 
+    invalid_cids = {}
     for cid, constr in sketch.constraints.items():
         if constr.constraint_type.name not in ('Midpoint', 'Mirror'):
             continue
@@ -346,12 +353,18 @@ def _resolve_midpoint_mirror_ref_order(sketch: datalib.Sketch) -> datalib.Sketch
         local_refs = tuple((int(x[0]), str(x[1]) if (len(x) == 2 and x[1] != "") else None) for x in local_refs)
 
         # sort the refs
-        if len(local_refs) == 3:
-            # [PointA, PointB, PointSym]
-            local_refs_sorted = sort_triplet_refs(local_refs, sketch.entities)
-        elif len(local_refs) == 2:
-            # [Line, Point]
-            local_refs_sorted = sort_line_point_refs(local_refs, sketch.entities)
+        try:
+            if len(local_refs) == 3:
+                # [PointA, PointB, PointSym]
+                local_refs_sorted = sort_triplet_refs(local_refs, sketch.entities)
+            elif len(local_refs) == 2:
+                # [Line, Point]
+                local_refs_sorted = sort_line_point_refs(local_refs, sketch.entities)
+            else:
+                continue
+        except (ValueError, KeyError) as e:
+            invalid_cids[cid] = traceback.format_exc()
+            continue
 
         local_refs_sorted = [f"{ref[0]}.{ref[1]}" if ref[1] is not None else str(ref[0]) for ref in local_refs_sorted]
 
@@ -362,11 +375,11 @@ def _resolve_midpoint_mirror_ref_order(sketch: datalib.Sketch) -> datalib.Sketch
             if isinstance(p, LocalReferenceParameter):
                 ref_params.append(p)
             else:
-                other_params = []
+                other_params.append(p)
         new_params = sorted(ref_params, key=lambda p: local_refs_sorted.index(p.value)) + other_params
         sketch.constraints[cid] = constr._replace(parameters=new_params)
 
-    return sketch
+    return sketch, invalid_cids
 
 
 def _convert_concentric_to_coincident(sketch: datalib.Sketch) -> datalib.Sketch:
@@ -457,6 +470,7 @@ def cleanse_sketch_constraints(
     sketch: datalib.Sketch,
     resolve_redundancy: bool = True,
     resolve_synonym: bool = True,
+    delete_invalid: bool = False,
 ) -> datalib.Sketch:
     """Remove or fix degenerate constraints from the sketch in-place.
 
@@ -514,11 +528,16 @@ def cleanse_sketch_constraints(
         if len(deduped_params) < len(constr.parameters):
             sketch.constraints[cid] = constr._replace(parameters=deduped_params)
 
+    # resolve midpoint/mirror reference ordering
+    sketch, invalid_cids = _resolve_midpoint_mirror_ref_order(sketch)
+    if invalid_cids:
+        if delete_invalid:
+            keys_to_remove.extend(invalid_cids.keys())
+        else:
+            raise ValueError(f"Invalid Midpoint or Mirror found: {invalid_cids}")
+
     for cid in keys_to_remove:
         del sketch.constraints[cid]
-
-    # resolve midpoint/mirror reference ordering
-    sketch = _resolve_midpoint_mirror_ref_order(sketch)
 
     if resolve_redundancy:
         sketch = _resolve_tangent_and_perpendicular(sketch)

@@ -3,7 +3,7 @@ import math
 import numpy as np
 import sketchgraphs.data as datalib
 from .base import ConstraintHandler
-from src.sketch_handlers.constants import ConstraintToken
+from src.sketch_handlers.constants import ConstraintToken, FC_GEO_UNDEF
 from src.sketch_handlers.freecad_utils import ensure_freecad_imported
 from src.sketch_handlers.registry import CONSTRAINT_HANDLERS
 
@@ -64,11 +64,18 @@ class AngleHandler(ConstraintHandler):
 
         refs = []
         g1 = fc_constraint.First
+        p1 = fc_constraint.FirstPos
+        g2 = fc_constraint.Second
+        p2 = fc_constraint.SecondPos
+
+        # Explicitly disallow axis/origin references (geoID < 0)
+        if g1 < 0 or (g2 < 0 and g2 != FC_GEO_UNDEF):
+            raise ValueError(f"{self.name} references to X/Y axes or Origin (geo < 0) are not supported.")
+
         r1 = geoID_to_primitive.get((g1, 0))
         if r1:
             refs.append(r1)
 
-        g2 = fc_constraint.Second
         if g2 >= 0:
             r2 = geoID_to_primitive.get((g2, 0))
             if r2:

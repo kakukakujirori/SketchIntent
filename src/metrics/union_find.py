@@ -30,7 +30,7 @@ class UnionFind:
             implied = self.attr[ry]
             if rx in self.attr:
                 if self.attr[rx] != implied:
-                    raise ValueError(f"Attribute conflict")
+                    raise ValueError(f"Attribute conflict for {rx}: existing {self.attr[rx]}, implied {implied}")
             else:
                 self.attr[rx] = implied
             del self.attr[ry]
@@ -44,7 +44,7 @@ class UnionFind:
     def set_attr(self, x, value: float):
         root = self.find(x)
         if root in self.attr and self.attr[root] != value:
-            raise ValueError(f"Attribute conflict")
+            raise ValueError(f"Attribute conflict for {root}: existing {self.attr[root]}, new {value}")
         self.attr[root] = value
 
 
@@ -97,7 +97,7 @@ class UnionFindWeighted:
         ry, oy = self.find(y)
         if rx == ry:
             if abs(self._mod(oy - ox) - self._mod(diff)) > self.tol:
-                raise ValueError(f"Inconsistent: label({y})-label({x}) is {self._mod(oy-ox)}, expected {self._mod(diff)}")
+                raise ValueError(f"Inconsistent: root {rx}, label({y})-label({x}) is {self._mod(oy-ox)}, expected {self._mod(diff)}")
         if self.rank.get(rx, 0) < self.rank.get(ry, 0):
             rx, ry = ry, rx
             ox, oy = oy, ox
@@ -110,7 +110,7 @@ class UnionFindWeighted:
             implied = self._mod(self.attr[ry] - self.offset[ry])
             if rx in self.attr:
                 if abs(self._mod(self.attr[rx]) - implied) > self.tol:
-                    raise ValueError(f"Attribute conflict")
+                    raise ValueError(f"Attribute conflict for {rx}: existing {self.attr[rx]}, implied {implied}")
             else:
                 self.attr[rx] = implied
             del self.attr[ry]
@@ -125,7 +125,7 @@ class UnionFindWeighted:
         root, offset = self.find(x)
         implied_root_value = self._mod(value - offset)
         if root in self.attr and abs(self._mod(self.attr[root]) - implied_root_value) > self.tol:
-            raise ValueError(f"Attribute conflict")
+            raise ValueError(f"Attribute conflict for {root}: existing {self.attr[root]}, new {implied_root_value}")
         self.attr[root] = implied_root_value
 
 

@@ -33,7 +33,7 @@ if __name__ == '__main__':
     os.makedirs(os.path.dirname(args.out_path), exist_ok=True)
 
     context = SketchContext()  # NOTE: It's configuration doesn't affect the freecad <--> sketchgraphs conversion
-    converter = SketchFreecadConverter(context)
+    converter = SketchFreecadConverter(context, raise_on_error=True)
 
     # Process
     files = sorted([os.path.join(args.data_dir, f) for f in os.listdir(args.data_dir) if f.endswith(".py")])

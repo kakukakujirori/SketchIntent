@@ -73,6 +73,9 @@ def align_constuction_indices(
             # Shift ID to avoid collision with prediction IDs
             keys_modified[target_id] = f"TargetOnly_{target_id}"
 
+    # Validation: Ensure 1-to-1 mapping
+    assert len(set(keys_modified.values())) == len(keys_modified), f"Non-unique ID mapping detected: {keys_modified}"
+
     # Update entities in target_sketch
     new_entities = {}
     for k, v in target_sketch.entities.items():
@@ -105,7 +108,7 @@ def align_constuction_indices(
     return target_sketch
 
 
-def aggregate_constraints(sketch: datalib.Sketch) -> tuple[UnionFind, UnionFind, list[tuple[str, list[tuple[int, ...]]]]]:
+def aggregate_constraints(sketch: datalib.Sketch) -> tuple[UnionFind | None, UnionFind | None, list[tuple[str, tuple[tuple[int, int], ...]]]]:
     """
     Convert a Sketch object into a canonical constraint set.
     - Point-Point coincidents are summarized into one: [Coincident(A,B), Coincident(B,C)] => Coincident{A,B,C}
@@ -114,11 +117,20 @@ def aggregate_constraints(sketch: datalib.Sketch) -> tuple[UnionFind, UnionFind,
     """
 
     # Modified from src/sketch_handlers/sketch_utils.py
-    def _get_refs_and_value(constr: datalib.Constraint) -> tuple[list[tuple[int, int]], float | None]:
+    def _get_refs_and_value(constr: datalib.Constraint) -> tuple[tuple[tuple[int, int], ...], float | None]:
         refs = [p.value.split(".") for p in constr.parameters if isinstance(p, datalib.LocalReferenceParameter)]  # e.g., 1.start
         refs = [(int(x[0]), x[1] if (len(x) == 2 and len(x[1]) > 0) else None) for x in refs]
-        assert all(y in (None, 'start', 'end', 'center') for _, y in refs)
-        refs = [(x[0], {'start': 1, 'end': 2, 'center': 3}.get(x[1], 1 if isinstance(sketch.entities[str(x[0])], datalib.Point) else 0)) for x in refs]
+        if not all(y in (None, "start", "end", "center") for _, y in refs):
+            raise ValueError(f"Invalid reference: {refs}")
+
+        def get_pt_idx(ent_id, pt_name):
+            if pt_name == "start": return 1
+            if pt_name == "end": return 2
+            if pt_name == "center": return 3
+            if isinstance(sketch.entities[str(ent_id)], datalib.Point): return 1
+            return 0  # The whole entity
+
+        refs = [(x[0], get_pt_idx(x[0], x[1])) for x in refs]
 
         value = None
         for p in constr.parameters:
@@ -126,7 +138,7 @@ def aggregate_constraints(sketch: datalib.Sketch) -> tuple[UnionFind, UnionFind,
                 value = p.value
                 break
 
-        return sorted(refs), value
+        return tuple(sorted(refs)), value
 
     def _canonicalize_point_coincidents(sketch: datalib.Sketch) -> tuple[UnionFind, set[str]]:
         uf = UnionFind()
@@ -134,35 +146,30 @@ def aggregate_constraints(sketch: datalib.Sketch) -> tuple[UnionFind, UnionFind,
 
         # register all points
         for ent_id, ent in sketch.entities.items():
+            ent_id_int = int(ent_id)
             if isinstance(ent, datalib.Point):
-                uf.find((ent_id, 1))  # aligned with `_get_refs_and_value``
+                uf.find((ent_id_int, 1))  # aligned with `_get_refs_and_value``
             elif isinstance(ent, datalib.Line):
-                uf.find((ent_id, 1))
-                uf.find((ent_id, 2))
+                uf.find((ent_id_int, 1))
+                uf.find((ent_id_int, 2))
             elif isinstance(ent, datalib.Arc):
-                uf.find((ent_id, 1))
-                uf.find((ent_id, 2))
-                uf.find((ent_id, 3))
+                uf.find((ent_id_int, 1))
+                uf.find((ent_id_int, 2))
+                uf.find((ent_id_int, 3))
             elif isinstance(ent, datalib.Circle):
-                uf.find((ent_id, 3))
+                uf.find((ent_id_int, 3))
 
         # register coincidents
         for constr_id, constr in sketch.constraints.items():
             constr_type = constr.constraint_type.name
             refs, _ = _get_refs_and_value(constr)
-            if constr_type == "Coincident":
-                assert len(refs) == 2
-                assert refs[0][1] > 0 and refs[1][1] > 0
+            if constr_type == "Coincident" and len(refs) == 2 and refs[0][1] > 0 and refs[1][1] > 0:
                 uf.union(refs[0], refs[1])
                 absorbed_constraints.add(constr_id)
-            if constr_type == "Tangent":
-                assert len(refs) == 2
-                if refs[0][1] > 0 and refs[1][1] > 0:
-                    uf.union(refs[0], refs[1])
-            if constr_type == "Perpendicular":
-                assert len(refs) == 2
-                if refs[0][1] > 0 and refs[1][1] > 0:
-                    uf.union(refs[0], refs[1])
+            if constr_type == "Tangent" and len(refs) == 2 and refs[0][1] > 0 and refs[1][1] > 0:
+                uf.union(refs[0], refs[1])
+            if constr_type == "Perpendicular" and len(refs) == 2 and refs[0][1] > 0 and refs[1][1] > 0:
+                uf.union(refs[0], refs[1])
         return uf, absorbed_constraints
 
     def _canonicalize_line_orientations(sketch: datalib.Sketch) -> tuple[UnionFind, set[str]]:
@@ -179,23 +186,20 @@ def aggregate_constraints(sketch: datalib.Sketch) -> tuple[UnionFind, UnionFind,
         # register all lines
         for ent_id, ent in sketch.entities.items():
             if isinstance(ent, datalib.Line):
-                uf_parallel.find((ent_id, 0))
+                uf_parallel.find(int(ent_id))
 
         # register parallel constraints
         for constr_id, constr in sketch.constraints.items():
             constr_type = constr.constraint_type.name
             refs, _ = _get_refs_and_value(constr)
 
-            if constr_type == "Horizontal":
-                assert len(refs) == 1 and refs[0][1] == 0
+            if constr_type == "Horizontal" and len(refs) == 1 and refs[0][1] == 0:
                 uf_parallel.union(refs[0][0], X)
                 absorbed_constraints.add(constr_id)
-            if constr_type == "Vertical":
-                assert len(refs) == 1 and refs[0][1] == 0
+            if constr_type == "Vertical" and len(refs) == 1 and refs[0][1] == 0:
                 uf_parallel.union(refs[0][0], Y)
                 absorbed_constraints.add(constr_id)
-            if constr_type == "Parallel":
-                assert len(refs) == 2 and refs[0][1] == refs[1][1] == 0
+            if constr_type == "Parallel" and len(refs) == 2 and refs[0][1] == 0 and refs[1][1] == 0:
                 uf_parallel.union(refs[0][0], refs[1][0])
                 absorbed_constraints.add(constr_id)
 
@@ -209,14 +213,12 @@ def aggregate_constraints(sketch: datalib.Sketch) -> tuple[UnionFind, UnionFind,
             refs, value = _get_refs_and_value(constr)
 
             # # NOTE: Angle is too specific, so shouldn't be integrated into an equivalence?
-            # if constr_type == "Angle":
-            #     assert len(refs) == 2
+            # if constr_type == "Angle" and len(refs) == 2:
             #     assert value is not None
             #     (e1, s1), (e2, s2) = refs
             #     root1, root2 = uf_parallel.find(e1), uf_parallel.find(e2)
             #     uf_angle.union(root1, root2, value % math.pi)
-            if constr_type == "Perpendicular":
-                assert len(refs) == 2
+            if constr_type == "Perpendicular" and len(refs) == 2:
                 (e1, s1), (e2, s2) = refs
                 root1, root2 = uf_parallel.find(e1), uf_parallel.find(e2)
                 if isinstance(sketch.entities[str(e1)], datalib.Line) and isinstance(sketch.entities[str(e2)], datalib.Line):
@@ -235,15 +237,9 @@ def aggregate_constraints(sketch: datalib.Sketch) -> tuple[UnionFind, UnionFind,
 
 
     # Aggregate
-    uf_points, absorbed_points = None, set()
-    uf_lines, absorbed_lines = None, set()
-    try:
-        uf_points, absorbed_points = _canonicalize_point_coincidents(sketch)
-        uf_lines, absorbed_lines = _canonicalize_line_orientations(sketch)
-        assert len(absorbed_points & absorbed_lines) == 0
-    except ValueError as e:
-        print(f"Error: {e}", flush=True)
-        pass
+    uf_points, absorbed_points = _canonicalize_point_coincidents(sketch)
+    uf_lines, absorbed_lines = _canonicalize_line_orientations(sketch)
+    assert len(absorbed_points & absorbed_lines) == 0
 
     constraints_rest = [
         (constr.constraint_type.name, _get_refs_and_value(constr)[0])
@@ -267,8 +263,10 @@ class ConstraintBLEU(torchmetrics.Metric):
         num_samples: Total number of samples processed.
         num_invalid_preds: Number of invalid predictions.
     """
-    def __init__(self):
+    def __init__(self, verbose: bool = False):
         super().__init__()
+        self.verbose = verbose
+
         # Category-specific accumulated scores (Macro-average approach)
         # We track the sum of scores (0.0-1.0) and the number of samples that had that category.
         for cat in ["points", "lines", "others"]:
@@ -285,6 +283,7 @@ class ConstraintBLEU(torchmetrics.Metric):
         base_prims: dict[str, datalib.Entity] | list[dict[str, datalib.Entity]],
         preds: datalib.Sketch | list[datalib.Sketch],
         targets: list[datalib.Sketch] | list[list[datalib.Sketch]],
+        sketch_indices: list[int] | None = None,  # NOTE: FOR DEBUG
     ):
         """
         Update the metric state with predictions and multiple references.
@@ -304,12 +303,15 @@ class ConstraintBLEU(torchmetrics.Metric):
         if isinstance(targets[0], datalib.Sketch):
             targets = [targets]
 
+        if sketch_indices is None:
+            sketch_indices = [None] * len(preds)
+
         # Cleanse
-        preds = [cleanse_sketch_constraints(sketch) for sketch in preds]
-        targets = [[cleanse_sketch_constraints(sketch) for sketch in sketch_pool] for sketch_pool in targets]
+        preds = [cleanse_sketch_constraints(sketch, delete_invalid=True) for sketch in preds]
+        targets = [[cleanse_sketch_constraints(sketch, delete_invalid=False) for sketch in sketch_pool] for sketch_pool in targets]
 
         # Iterate over batch dimension
-        for base_prim_dict, pred_sketch, target_pool in zip(base_prims, preds, targets):
+        for base_prim_dict, pred_sketch, target_pool, s_idx in zip(base_prims, preds, targets, sketch_indices):
 
             # Align indices of added constructions
             target_pool = [
@@ -317,7 +319,15 @@ class ConstraintBLEU(torchmetrics.Metric):
                 for target_sketch in target_pool]
 
             # Extract categorized constraints for pred
-            pred_uf_points, pred_uf_lines, pred_constraints_rest = aggregate_constraints(pred_sketch)
+            try:
+                pred_uf_points, pred_uf_lines, pred_constraints_rest = aggregate_constraints(pred_sketch)
+            except ValueError as e:
+                # Prediction is inconsistent, count as invalid and skip
+                self.num_invalid_preds += 1
+                if self.verbose:
+                    print(f"Warning: Invalid pred sketch at index {s_idx} ignored: {e}")
+                continue
+
             if pred_uf_points is None or pred_uf_lines is None:
                 # Invalid pred sketch
                 self.num_invalid_preds += 1
@@ -332,7 +342,15 @@ class ConstraintBLEU(torchmetrics.Metric):
 
             for target_sketch in target_pool:
                 # Extract categorized constraints for target
-                target_uf_points, target_uf_lines, target_constraints_rest = aggregate_constraints(target_sketch)
+                try:
+                    target_uf_points, target_uf_lines, target_constraints_rest = aggregate_constraints(target_sketch)
+                except ValueError as e:
+                    print(f"--- GT Constraint Aggregation Failure (Sketch Index: {s_idx}) ---")
+                    raise ValueError(f"Invalid target sketch at index {s_idx}: {e}") from e
+
+                if target_uf_points is None or target_uf_lines is None:
+                    raise ValueError(f"Invalid target sketch at index {s_idx}: {target_sketch}")
+
                 target_point_items = list(target_uf_points.parent.keys())
                 target_line_items = list(target_uf_lines.parent.keys())
                 set_target = set(target_constraints_rest)
@@ -370,7 +388,7 @@ class ConstraintBLEU(torchmetrics.Metric):
                     getattr(self, f"{cat}_samples").add_(1)
                 self.num_samples += 1
 
-    def compute(self) -> dict[str, torch.Tensor]:
+    def compute(self) -> dict[str, torch.Tensor | dict[str, dict[str, torch.Tensor]]]:
         """
         Computes the final aggregated score (Macro-averaged across Samples and Categories).
         """
@@ -378,7 +396,7 @@ class ConstraintBLEU(torchmetrics.Metric):
         recall_list = []
         f1_list = []
 
-        cat_results = {}
+        cat_results: dict[str, dict[str, torch.Tensor]] = {}
         for cat in ["points", "lines", "others"]:
             samples = getattr(self, f"{cat}_samples")
             if samples > 0:
@@ -389,13 +407,13 @@ class ConstraintBLEU(torchmetrics.Metric):
                 precision_list.append(p)
                 recall_list.append(r)
                 f1_list.append(f1)
-                cat_results[cat] = {"precision": p, "recall": r, "f1": f1}
+                cat_results[cat] = {"precision": torch.tensor(p), "recall": torch.tensor(r), "f1": torch.tensor(f1)}
 
         return {
             "precision": sum(precision_list) / len(precision_list) if precision_list else torch.tensor(0.0),
             "recall": sum(recall_list) / len(recall_list) if recall_list else torch.tensor(0.0),
             "f1": sum(f1_list) / len(f1_list) if f1_list else torch.tensor(0.0),
             "categories": cat_results,
-            "num_samples": self.num_samples,
-            "num_invalid_preds": self.num_invalid_preds
+            "num_samples": torch.tensor(self.num_samples),
+            "num_invalid_preds": torch.tensor(self.num_invalid_preds)
         }

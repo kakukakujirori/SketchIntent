@@ -32,12 +32,13 @@ class SketchFreecadConverter:
     """
     Data converter between FreeCAD and SketchGraphs.
     """
-    def __init__(self, context: SketchContext, verbose: bool = True):
+    def __init__(self, context: SketchContext, verbose: bool = True, raise_on_error: bool = False):
         # Lazy import
         FreeCAD, Part, Sketcher = ensure_freecad_imported()
 
         self.context = context
         self.verbose = verbose
+        self.raise_on_error = raise_on_error
         self.dprint = lambda msg: print(msg) if self.verbose else None
         self.freecad_to_sketch_type_mapping = {
             Part.LineSegment: 'Line',
@@ -107,13 +108,12 @@ class SketchFreecadConverter:
 
             # FreeCAD internal axes: GeoID -1 = X-axis (HAxis), -2 = Y-axis (VAxis)
             # These are used by constraints that reference the Origin or axes
-            primitive_freecad_mapping['xaxis'] = (-1, 0)       # X-axis edge
-            primitive_freecad_mapping['xaxis.start'] = (-1, 1) # Origin (start of X-axis)
-            primitive_freecad_mapping['xaxis.end'] = (-1, 2)   # end of X-axis
-            primitive_freecad_mapping['yaxis'] = (-2, 0)       # Y-axis edge
-            primitive_freecad_mapping['yaxis.start'] = (-2, 1) # Origin (start of Y-axis)
-            primitive_freecad_mapping['yaxis.end'] = (-2, 2)   # end of Y-axis
-            primitive_freecad_mapping['origin'] = (-1, 1)      # Origin point (same as xaxis.start)
+            primitive_freecad_mapping['-1'] = (-1, 0)       # X-axis edge
+            primitive_freecad_mapping['-1.start'] = (-1, 1) # Origin (start of X-axis)
+            primitive_freecad_mapping['-1.end'] = (-1, 2)   # end of X-axis
+            primitive_freecad_mapping['-2'] = (-2, 0)       # Y-axis edge
+            primitive_freecad_mapping['-2.start'] = (-2, 1) # Origin (start of Y-axis)
+            primitive_freecad_mapping['-2.end'] = (-2, 2)   # end of Y-axis
 
             doc.recompute()
 
@@ -243,14 +243,16 @@ class SketchFreecadConverter:
 
                 except Exception as e:
                     self.dprint(f"Error converting geometry {i} ({freecad_geo_type}): {e}")
+                    if self.raise_on_error:
+                        raise e
 
         # FreeCAD internal axes: GeoID -1 = X-axis (HAxis), -2 = Y-axis (VAxis)
-        geoID_to_primitive[(-1, 0)] = 'xaxis'        # X-axis edge
-        geoID_to_primitive[(-1, 1)] = 'xaxis.start'  # Origin
-        geoID_to_primitive[(-1, 2)] = 'xaxis.end'
-        geoID_to_primitive[(-2, 0)] = 'yaxis'        # Y-axis edge
-        geoID_to_primitive[(-2, 1)] = 'yaxis.start'   # Origin
-        geoID_to_primitive[(-2, 2)] = 'yaxis.end'
+        geoID_to_primitive[(-1, 0)] = '-1'        # X-axis edge
+        geoID_to_primitive[(-1, 1)] = '-1.start'  # Origin
+        geoID_to_primitive[(-1, 2)] = '-1.end'
+        geoID_to_primitive[(-2, 0)] = '-2'        # Y-axis edge
+        geoID_to_primitive[(-2, 1)] = '-2.start'   # Origin
+        geoID_to_primitive[(-2, 2)] = '-2.end'
 
         return entities, geoID_to_primitive
 
@@ -291,6 +293,8 @@ class SketchFreecadConverter:
                         # If there are multiple candidates, intermediate failures are false positives
                         if handler_idx == len(candidates) - 1:
                             self.dprint(f"Error in {handler_name}.from_freecad for constraint {i} ({c_type}): {traceback.format_exc()}")
+                            if self.raise_on_error:
+                                raise e
 
             if sg_constr:
                 c_id = f"c_{i}"
