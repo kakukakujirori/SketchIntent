@@ -497,14 +497,16 @@ def _convert_concentric_to_coincident(sketch: datalib.Sketch) -> datalib.Sketch:
     return sketch
 
 
-def _convert_line_length_to_distance(sketch: datalib.Sketch) -> datalib.Sketch:
+def _convert_line_length_to_distance(sketch: datalib.Sketch) -> tuple[datalib.Sketch, dict[str, str]]:
+    invalid_cids = {}
     for cid, constr in list(sketch.constraints.items()):
         if constr.type == datalib.ConstraintType.Length:
             # check the entity
             refs = get_refs(constr)
             refs = list(set(refs))  # deduplication of a corner case: refs = [(x, None), (x, None)]
             if len(refs) != 1:
-                raise ValueError(f"Length constraint must have one reference: got {refs=}")
+                invalid_cids[cid] = f"Length constraint must have one reference: got {refs=}"
+                continue
 
             ent_id, _ = refs[0]
             ent = sketch.entities.get(str(ent_id))
@@ -516,7 +518,8 @@ def _convert_line_length_to_distance(sketch: datalib.Sketch) -> datalib.Sketch:
                         direction_val = p.value
                         break
                 if direction_val != 'MINIMUM':
-                    raise ValueError(f"Length constraint direction must be 'MINIMUM': got {direction_val=}")
+                    invalid_cids[cid] = f"Length constraint direction must be 'MINIMUM': got {direction_val=}"
+                    continue
 
                 new_params: list[datalib.ConstraintParameter] = [
                     LocalReferenceParameter(parameterId='localFirst', value=f"{ent_id}.start"),
@@ -534,7 +537,8 @@ def _convert_line_length_to_distance(sketch: datalib.Sketch) -> datalib.Sketch:
                     constraint_type=datalib.ConstraintType.Distance,
                     parameters=new_params
                 )
-    return sketch
+
+    return sketch, invalid_cids
 
 
 def _convert_diameter_to_radius(sketch: datalib.Sketch) -> datalib.Sketch:
@@ -556,6 +560,27 @@ def _convert_diameter_to_radius(sketch: datalib.Sketch) -> datalib.Sketch:
                 constraint_type=datalib.ConstraintType.Radius,
                 parameters=new_params
             )
+    return sketch
+
+
+def _convert_horizontal_vertical_on_points_to_line(sketch: datalib.Sketch) -> datalib.Sketch:
+    """Canonicalize Horizontal/Vertical constraints:
+    Horizontal(Line.start, Line.end) -> Horizontal(Line)
+    Vertical(Line.start, Line.end) -> Vertical(Line)
+    """
+    for cid, constr in list(sketch.constraints.items()):
+        if constr.type in (datalib.ConstraintType.Horizontal, datalib.ConstraintType.Vertical):
+            refs = get_refs(constr)
+            if len(refs) == 2:
+                (g1, pt1), (g2, pt2) = refs
+                # Check if it's the same line and both endpoints
+                if g1 == g2 and (pt1, pt2) in [('start', 'end'), ('end', 'start')]:
+                    ent = sketch.entities.get(str(g1))
+                    if isinstance(ent, datalib.Line):
+                        # Convert to line-based constraint
+                        new_params = [LocalReferenceParameter(parameterId='localFirst', value=str(g1))] + \
+                                     [p for p in constr.parameters if not isinstance(p, LocalReferenceParameter)]
+                        sketch.constraints[cid] = constr._replace(parameters=new_params)
     return sketch
 
 
@@ -621,16 +646,23 @@ def cleanse_sketch_constraints(
         if len(deduped_params) < len(constr.parameters):
             sketch.constraints[cid] = constr._replace(parameters=deduped_params)
 
-    # resolve midpoint/mirror reference ordering
-    sketch, invalid_cids = _resolve_midpoint_mirror_ref_order(sketch)
-    if invalid_cids:
-        if delete_invalid:
-            keys_to_remove.extend(invalid_cids.keys())
-        else:
-            raise ValueError(f"Invalid Midpoint or Mirror found: {invalid_cids}")
-
     for cid in keys_to_remove:
         del sketch.constraints[cid]
+
+    ################################################################
+
+    def maybe_delete_invalid_constraints(sketch: datalib.Sketch, invalid_cids: dict[str, str]) -> datalib.Sketch:
+        if invalid_cids:
+            if delete_invalid:
+                for cid in invalid_cids.keys():
+                    del sketch.constraints[cid]
+            else:
+                raise ValueError(f"Invalid constraints found: {invalid_cids}")
+        return sketch
+
+    # resolve midpoint/mirror reference ordering
+    sketch, invalid_cids = _resolve_midpoint_mirror_ref_order(sketch)
+    sketch = maybe_delete_invalid_constraints(sketch, invalid_cids)
 
     if resolve_redundancy:
         sketch = _resolve_concentric_of_circle_forming_arcs(sketch)
@@ -639,8 +671,10 @@ def cleanse_sketch_constraints(
 
     if resolve_synonym:
         sketch = _convert_concentric_to_coincident(sketch)
-        sketch = _convert_line_length_to_distance(sketch)
+        sketch, invalid_cids = _convert_line_length_to_distance(sketch)
+        sketch = maybe_delete_invalid_constraints(sketch, invalid_cids)
         sketch = _convert_diameter_to_radius(sketch)
+        sketch = _convert_horizontal_vertical_on_points_to_line(sketch)
 
     return sketch
 
