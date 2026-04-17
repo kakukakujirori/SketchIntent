@@ -36,7 +36,6 @@ import itertools
 import math
 import os
 import re
-import shutil
 import uuid
 from collections import defaultdict
 from tqdm import tqdm
@@ -287,7 +286,12 @@ def _arc_canonical(arc: Arc) -> tuple:
     ep = tuple(np.round(arc.end_point, 9))
     cp = (round(arc.xCenter, 9), round(arc.yCenter, 9))
     r = round(arc.radius, 9)
-    return (min(sp, ep), max(sp, ep), cp, r)
+    # Include the arc midpoint so that complementary arcs (same endpoints,
+    # center and radius but tracing the opposite half of the circle) are NOT
+    # considered duplicates.  Without this, e.g. two semicircular arcs that
+    # together form a full circle would be incorrectly deduplicated.
+    mp = tuple(np.round(arc.mid_point, 9))
+    return (min(sp, ep), max(sp, ep), cp, r, mp)
 
 
 def _point_canonical(point: Point) -> tuple:
@@ -328,6 +332,44 @@ def remove_duplicate_primitives(sketch: datalib.Sketch) -> datalib.Sketch:
                 seen[key] = eid
             else:
                 to_remove.append(eid)
+
+    for eid in to_remove:
+        _remove_entity(sketch, eid)
+
+    return sketch
+
+
+def remove_redundant_points(sketch: datalib.Sketch, eps: float = EPS) -> datalib.Sketch:
+    """Remove independent Point primitives that coincide with a curve endpoint.
+
+    An independent ``Part.Point`` that sits exactly on the start or end of a Line
+    or Arc carries no independent geometric information once the pipeline has added
+    the corresponding Coincident constraints.  Keeping such points clutters the
+    output and prevents FreeCAD from being fully constrained.
+
+    A Point is removed when its coordinate is within *eps* of **any** endpoint of
+    any non-Point entity (Line, Arc) in the sketch.
+    """
+    # Collect all curve-endpoint coordinates
+    curve_endpoints: list[np.ndarray] = []
+    for ent in sketch.entities.values():
+        if isinstance(ent, Line):
+            curve_endpoints.append(ent.start_point)
+            curve_endpoints.append(ent.end_point)
+        elif isinstance(ent, Arc):
+            curve_endpoints.append(ent.start_point)
+            curve_endpoints.append(ent.end_point)
+
+    if not curve_endpoints:
+        return sketch
+
+    to_remove: list[str] = []
+    for eid, ent in list(sketch.entities.items()):
+        if not isinstance(ent, Point):
+            continue
+        pt = np.array([ent.x, ent.y])
+        if any(np.linalg.norm(pt - ep) <= eps for ep in curve_endpoints):
+            to_remove.append(eid)
 
     for eid in to_remove:
         _remove_entity(sketch, eid)
@@ -676,6 +718,7 @@ def cleanup_sketch(
     """
     sketch = remove_duplicate_primitives(sketch)
     sketch = remove_degenerate_primitives(sketch, eps=eps)
+    sketch = remove_redundant_points(sketch, eps=eps)
     sketch = merge_micro_gaps(sketch, eps=eps)
     sketch = add_point_on_object_constraints(sketch, eps=eps)
     sketch = rewrite_redundant_constraints(sketch)
@@ -946,6 +989,48 @@ def _build_output_script(
 
 
 # ---------------------------------------------------------------------------
+# FCStd export helper
+# ---------------------------------------------------------------------------
+
+def _save_cleaned_fcstd(
+    sketch: datalib.Sketch,
+    converter: 'SketchFreecadConverter',
+    out_fcstd_path: str,
+) -> None:
+    """Save *sketch* as a FreeCAD .FCStd file at *out_fcstd_path*.
+
+    Runs ``converter.to_freecad()`` on the **cleaned** datalib.Sketch so the
+    saved document reflects all cleanup changes (duplicate removal, micro-gap
+    merging, constraint rewriting, etc.).  On success the document is closed
+    immediately to avoid memory leaks.
+
+    Parameters
+    ----------
+    sketch : datalib.Sketch
+        Cleaned sketch to export.
+    converter : SketchFreecadConverter
+        Converter instance (already initialised with a SketchContext).
+    out_fcstd_path : str
+        Absolute path where the .FCStd file should be written.
+    """
+    from src.sketch_handlers.freecad_utils import ensure_freecad_imported as _efi
+    FreeCAD, _, _ = _efi()
+
+    doc = None
+    try:
+        doc, _fc_sketch, _prim_map, _, _ = converter.to_freecad(sketch, skip_invalid=True)
+        doc.saveAs(out_fcstd_path)
+    except Exception as e:
+        print(f"  [WARN] FCStd save failed for {os.path.basename(out_fcstd_path)}: {e}")
+    finally:
+        if doc is not None:
+            try:
+                FreeCAD.closeDocument(doc.Name)
+            except Exception:
+                pass
+
+
+# ---------------------------------------------------------------------------
 # Script entry-point
 # ---------------------------------------------------------------------------
 
@@ -991,11 +1076,9 @@ def main(args):
             with open(out_py, 'w', encoding='utf-8') as f:
                 f.write(output_script)
 
-            # Copy accompanying .FCStd if writing to a new dir
-            if out_dir != in_dir:
-                fcstd_src = py_path.replace('.py', '.FCStd')
-                if os.path.isfile(fcstd_src):
-                    shutil.copy2(fcstd_src, os.path.join(out_dir, os.path.basename(fcstd_src)))
+            # Save .FCStd reflecting the cleaned sketch
+            out_fcstd = out_py.replace('.py', '.FCStd')
+            _save_cleaned_fcstd(sketch, converter, out_fcstd)
 
             n_ok += 1
 

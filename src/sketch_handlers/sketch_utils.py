@@ -284,6 +284,99 @@ def _resolve_redundant_coincident(sketch: datalib.Sketch) -> datalib.Sketch:
     return sketch
 
 
+def _resolve_concentric_of_circle_forming_arcs(sketch: datalib.Sketch) -> datalib.Sketch:
+    """Fix the over-constrained pattern that arises when two arcs together form
+    a closed circle (or any configuration where they share *both* endpoints and
+    are concentric).
+
+    **Why this is over-constrained**
+
+    Two arcs whose start/end endpoints are pairwise Coincident already share the
+    same chord.  The perpendicular bisector of that chord passes through both
+    circle centres.  Adding a Coincident (or Concentric) on the *centres* further
+    fixes the centre to a single point – that is 2 DoF removed for a constraint
+    that is geometrically only 1 DoF free (the centre can still slide along the
+    bisector).  FreeCAD therefore flags the centre constraint as redundant.
+
+    **Fix strategy**
+
+    1. Remove the centre–centre Coincident constraint.
+    2. Replace one of the endpoint Coincident(pt_a, pt_b) constraints with
+       Tangent(arc_a, pt_a, arc_b, pt_b), which encodes the same contact point
+       information while also enforcing tangency (arcs of equal radius forming a
+       circle are always tangent at the junction).  This is the representation
+       that FreeCAD itself generates for such geometry.
+    """
+    # ------------------------------------------------------------------ #
+    # 1. Collect point-point Coincident constraints for Arc pairs          #
+    # ------------------------------------------------------------------ #
+    # Map (arc_id_a, arc_id_b) -> list of (cid, pt_a, pt_b)
+    arc_endpoint_coin: dict[tuple[int, int], list[tuple[str, str, str]]] = defaultdict(list)
+    # Map (arc_id_a, arc_id_b) -> cid  for centre-centre Coincident
+    center_coin: dict[tuple[int, int], str] = {}
+
+    for cid, c in sketch.constraints.items():
+        if c.constraint_type.name not in ('Coincident', 'Concentric'):
+            continue
+        refs = get_refs(c)
+        if len(refs) != 2:
+            continue
+        (g1, pt1), (g2, pt2) = refs
+
+        ent1 = sketch.entities.get(str(g1))
+        ent2 = sketch.entities.get(str(g2))
+        if not (isinstance(ent1, Arc) and isinstance(ent2, Arc)):
+            continue
+
+        # Centre–centre: both refs point to 'center' (or bare ID for Concentric)
+        if (pt1 in ('center', None)) and (pt2 in ('center', None)):
+            key = (min(g1, g2), max(g1, g2))
+            if key not in center_coin:  # keep first occurrence
+                center_coin[key] = cid
+            continue
+
+        # Endpoint–endpoint
+        if pt1 in ('start', 'end') and pt2 in ('start', 'end'):
+            key = (min(g1, g2), max(g1, g2))
+            arc_endpoint_coin[key].append((cid, f"{g1}.{pt1}", f"{g2}.{pt2}"))
+
+    # ------------------------------------------------------------------ #
+    # 2. For each arc pair that has both ≥2 endpoint Coincidents AND a    #
+    #    centre Coincident, apply the fix.                                #
+    # ------------------------------------------------------------------ #
+    for key, ep_list in arc_endpoint_coin.items():
+        if key not in center_coin:
+            continue
+        if len(ep_list) < 2:
+            # Only one shared endpoint – not the closed-circle pattern
+            continue
+
+        centre_cid = center_coin[key]
+        # Pick the first endpoint Coincident to convert to Tangent
+        coin_cid_to_convert, ref_a, ref_b = ep_list[0]
+        ga = int(ref_a.split('.')[0])
+        pt_a = ref_a.split('.')[1]
+        gb = int(ref_b.split('.')[0])
+        pt_b = ref_b.split('.')[1]
+
+        # Remove the centre–centre Coincident
+        sketch.constraints.pop(centre_cid, None)
+
+        # Replace the chosen endpoint Coincident with Tangent(arc_a.pt_a, arc_b.pt_b)
+        existing_constr = sketch.constraints.get(coin_cid_to_convert)
+        if existing_constr is not None:
+            new_params = [
+                LocalReferenceParameter(parameterId='localFirst',  value=f"{ga}.{pt_a}"),
+                LocalReferenceParameter(parameterId='localSecond', value=f"{gb}.{pt_b}"),
+            ]
+            sketch.constraints[coin_cid_to_convert] = existing_constr._replace(
+                constraint_type=datalib.ConstraintType.Tangent,
+                parameters=new_params,
+            )
+
+    return sketch
+
+
 def _resolve_midpoint_mirror_ref_order(sketch: datalib.Sketch) -> tuple[datalib.Sketch, dict[str, str]]:
     """Midpoint and Mirror have the following reference ordering: [EntityA, EntityB, SymmetyPoint/Axis]
     However, SketchGraphs format doesn't guarantee this ordering, so we recover it by checking the actual geometry.
@@ -540,6 +633,7 @@ def cleanse_sketch_constraints(
         del sketch.constraints[cid]
 
     if resolve_redundancy:
+        sketch = _resolve_concentric_of_circle_forming_arcs(sketch)
         sketch = _resolve_tangent_and_perpendicular(sketch)
         sketch = _resolve_redundant_coincident(sketch)
 
