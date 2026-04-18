@@ -35,7 +35,26 @@ python fusion360_annotation/split_outsourcing.py \
 - `fusion360_annotation/split_outsourcing.py` splits the sketches into multiple folders for annotators while maintaining DoF distribution.
 
 
-## Annotators
+## Annotators (New)
+
+| Filename | Annotator1  |  Annotator2  |  Annotator3 |
+| :--- | :--- | :--- | :--- |
+| 0.zip |
+| 1.zip |
+| 2.zip |
+| 3.zip |
+| 4.zip |
+| 5.zip |
+| 6.zip | Eko |  |  |
+| 7.zip | Eko |  |  |
+| 8.zip | Eko |  |  |
+| 9.zip | Eko |  |  |
+| 10.zip | Eko |  |  |
+| 11.zip | Eko |  |  |
+| 12.zip | Eko |  |  |
+
+
+## Annotators (Initial Test)
 
 | Filename | Spare Filename | Worker Name | Time (min) | Skip Count | Reject Count  |
 | :--- | :--- | :--- | :--- | :--- | :--- |
@@ -44,60 +63,5 @@ python fusion360_annotation/split_outsourcing.py \
 | 2.zip | 59.zip | Eko Wahyudi | 5h | 0 | MyFix |
 | 3.zip | 58.zip | av9525 | 20h | 0 | MANY |
 | 4.zip | | | | | |
-| 5.zip | 57.zip | Volodymyr R | | | |
+| 5.zip | 57.zip | Volodymyr R | 5h | ? | So-so |
 | 6.zip | 56.zip | Johnny Web | | | |
-| 7.zip | | | | | |
-| 8.zip | | | | | |
-| 9.zip | | | | | |
-| 10.zip | | | | | |
-| 11.zip | | | | | |
-| 12.zip | | | | | |
-| 13.zip | | | | | |
-| 14.zip | | | | | |
-| 15.zip | | | | | |
-| 16.zip | | | | | |
-| 17.zip | | | | | |
-| 18.zip | | | | | |
-| 19.zip | | | | | |
-| 20.zip | | | | | |
-| 21.zip | | | | | |
-| 22.zip | | | | | |
-| 23.zip | | | | | |
-| 24.zip | | | | | |
-| 25.zip | | | | | |
-| 26.zip | | | | | |
-| 27.zip | | | | | |
-| 28.zip | | | | | |
-| 29.zip | | | | | |
-| 30.zip | | | | | |
-| 31.zip | | | | | |
-| 32.zip | | | | | |
-| 33.zip | | | | | |
-| 34.zip | | | | | |
-| 35.zip | | | | | |
-| 36.zip | | | | | |
-| 37.zip | | | | | |
-| 38.zip | | | | | |
-| 39.zip | | | | | |
-| 40.zip | | | | | |
-| 41.zip | | | | | |
-| 42.zip | | | | | |
-| 43.zip | | | | | |
-| 44.zip | | | | | |
-| 45.zip | | | | | |
-| 46.zip | | | | | |
-| 47.zip | | | | | |
-| 48.zip | | | | | |
-| 49.zip | | | | | |
-| 50.zip | | | | | |
-| 51.zip | | | | | |
-| 52.zip | | | | | |
-| 53.zip | | | | | |
-| 54.zip | | | | | |
-| 55.zip | | | | | |
-| 56.zip | | | | | |
-| 57.zip | | | | | |
-| 58.zip | | | | | |
-| 59.zip | | | | | |
-| 60.zip | | | | | |
-| 61.zip | | | | | |
