@@ -120,13 +120,14 @@ def aggregate_constraints(sketch: datalib.Sketch) -> tuple[UnionFind | None, Uni
     def _get_refs_and_value(constr: datalib.Constraint) -> tuple[tuple[tuple[int, int], ...], float | None]:
         refs = [p.value.split(".") for p in constr.parameters if isinstance(p, datalib.LocalReferenceParameter)]  # e.g., 1.start
         refs = [(int(x[0]), x[1] if (len(x) == 2 and len(x[1]) > 0) else None) for x in refs]
-        if not all(y in (None, "start", "end", "center") for _, y in refs):
+        if not all(y in (None, "start", "end", "center", "mid") for _, y in refs):
             raise ValueError(f"Invalid reference: {refs}")
 
         def get_pt_idx(ent_id, pt_name):
             if pt_name == "start": return 1
             if pt_name == "end": return 2
             if pt_name == "center": return 3
+            if pt_name == "mid": return 4
             if isinstance(sketch.entities[str(ent_id)], datalib.Point): return 1
             return 0  # The whole entity
 
@@ -156,6 +157,7 @@ def aggregate_constraints(sketch: datalib.Sketch) -> tuple[UnionFind | None, Uni
                 uf.find((ent_id_int, 1))
                 uf.find((ent_id_int, 2))
                 uf.find((ent_id_int, 3))
+                uf.find((ent_id_int, 4))
             elif isinstance(ent, datalib.Circle):
                 uf.find((ent_id_int, 3))
 

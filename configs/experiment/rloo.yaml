@@ -37,6 +37,7 @@ data:
 model:
   optimizer:
     lr: 1e-5
+  gt_reward_coeff: 1.0
 
 trainer:
   check_val_every_n_epoch: null

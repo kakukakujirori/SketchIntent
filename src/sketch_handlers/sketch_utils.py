@@ -176,8 +176,9 @@ def normalize_sketch(sketch: datalib.Sketch, dst_length: float = 1.0) -> float:
 def get_refs(constr: datalib.Constraint) -> list[tuple[int, str | None]]:
     refs = [p.value.split(".") for p in constr.parameters if isinstance(p, LocalReferenceParameter)]  # e.g., 1.start
     refs = [(int(x[0]), x[1] if (len(x) == 2 and len(x[1]) > 0) else None) for x in refs]
-    assert all(y in (None, 'start', 'end', 'center') for _, y in refs)
-    return sorted(refs, key=lambda x: (x[0], {'start': 1, 'end': 2, 'center': 3}.get(x[1], 0)))
+    if not all(y in (None, 'start', 'end', 'center', 'mid') for _, y in refs):
+        raise ValueError(f"Invalid ref subnodes: {refs}")
+    return sorted(refs, key=lambda x: (x[0], {'start': 1, 'end': 2, 'center': 3, 'mid': 4}.get(x[1], 0)))
 
 
 def _resolve_tangent_and_perpendicular(sketch: datalib.Sketch) -> datalib.Sketch:
@@ -430,8 +431,14 @@ def _resolve_midpoint_mirror_ref_order(sketch: datalib.Sketch) -> tuple[datalib.
             if not (pt1 or isinstance(entities[str(geo1)], datalib.Point)):
                 raise ValueError(f"First reference must be a Point for Line midpoint: got {refs=}")
             return (refs[1], refs[0])
-        elif isinstance(entities[str(geo1)], datalib.Arc) or isinstance(entities[str(geo2)], datalib.Arc):
-            raise ValueError("Arc midpoint is not supported for FreeCAD.")
+        elif isinstance(entities[str(geo1)], datalib.Arc) and pt1 is None:
+            if not (pt2 or isinstance(entities[str(geo2)], datalib.Point)):
+                raise ValueError(f"Second reference must be a Point for Arc midpoint: got {refs=}")
+            return (refs[0], refs[1])
+        elif isinstance(entities[str(geo2)], datalib.Arc) and pt2 is None:
+            if not (pt1 or isinstance(entities[str(geo1)], datalib.Point)):
+                raise ValueError(f"First reference must be a Point for Arc midpoint: got {refs=}")
+            return (refs[1], refs[0])
         else:
             raise ValueError(f"Refs must consist of a Line and a Point: got {refs=}")
 
@@ -724,6 +731,8 @@ def get_entity_point(entity: datalib.Entity, subnode: str | None = None) -> tupl
             return entity.end_point.tolist()
         elif subnode == 'center':
             return entity.center_point.tolist()
+        elif subnode == 'mid':
+            return entity.mid_point.tolist()
     return None
 
 
