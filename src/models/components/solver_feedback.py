@@ -59,7 +59,7 @@ class SolverStatus:
 class SolverFeedback:
     def __init__(self, context: SketchContext, distortion_threshold: float | None = None):
         self.sketch_tokenizer = SketchTokenizer(context)
-        self.sketch_freecad_converter = SketchFreecadConverter(context)
+        self.sketch_freecad_converter = SketchFreecadConverter(context, raise_on_error=False)
         self.distortion_threshold = distortion_threshold or 1 / context.num_quantization_bins
         assert self.distortion_threshold > 0, f"{self.distortion_threshold=}"
 

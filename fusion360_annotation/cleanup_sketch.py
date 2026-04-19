@@ -1040,7 +1040,7 @@ def main(args):
     FreeCAD, _, _ = ensure_freecad_imported()
 
     context = SketchContext()
-    converter = SketchFreecadConverter(context, verbose=False)
+    converter = SketchFreecadConverter(context, verbose=False, raise_on_error=False)
 
     in_dir = args.data_dir
     out_dir = args.out_dir if args.out_dir else in_dir

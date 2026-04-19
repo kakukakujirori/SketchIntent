@@ -97,7 +97,7 @@ if __name__ == '__main__':
 
     context = SketchContext(num_quantization_bins=args.num_quantization_bins, max_token_length=None)
     tokenizer = SketchTokenizer(context)
-    converter = SketchFreecadConverter(context)
+    converter = SketchFreecadConverter(context, raise_on_error=False)
 
     sequence_data = flat_array.load_dictionary_flat(args.sequence_file)
 

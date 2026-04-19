@@ -2470,7 +2470,7 @@ def main(args):
 
     # initialize a converter
     context = SketchContext()  # NOTE: No context attributes are used, so arguments can be blank
-    converter = SketchFreecadConverter(context)
+    converter = SketchFreecadConverter(context, raise_on_error=False)
 
     # load data
     seq_data = flat_array.load_dictionary_flat(args.sequence_path)

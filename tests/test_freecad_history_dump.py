@@ -83,7 +83,7 @@ def compare_sketches(sk1: 'Sketcher.SketchObject', sk2: 'Sketcher.SketchObject',
 
 def test_robust(data_npy: str, num_tests: int = -1):
     seq_data = flat_array.load_dictionary_flat(data_npy)
-    converter = SketchFreecadConverter(context=SketchContext(), verbose=False)
+    converter = SketchFreecadConverter(context=SketchContext(), verbose=False, raise_on_error=True)
 
     if num_tests < 0:
         num_tests = len(seq_data['sequences'])

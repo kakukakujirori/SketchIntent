@@ -32,7 +32,7 @@ class SketchFreecadConverter:
     """
     Data converter between FreeCAD and SketchGraphs.
     """
-    def __init__(self, context: SketchContext, verbose: bool = True, raise_on_error: bool = False):
+    def __init__(self, context: SketchContext, verbose: bool = True, raise_on_error: bool = True):
         # Lazy import
         FreeCAD, Part, Sketcher = ensure_freecad_imported()
 

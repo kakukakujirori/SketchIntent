@@ -738,7 +738,7 @@ if __name__ == '__main__':
     os.makedirs(args.sketch_dump_dir, exist_ok=True)
 
     context = SketchContext()
-    sketch_freecad_converter = SketchFreecadConverter(context)
+    sketch_freecad_converter = SketchFreecadConverter(context, raise_on_error=False)
     tokenizer = SketchTokenizer(context)
     solver_feedback = SolverFeedback(context)
     solver_summary = Counter()

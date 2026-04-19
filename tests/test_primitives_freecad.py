@@ -249,7 +249,7 @@ def verify_primitives_freecad(directory: str, limit: int = 10000):
     print(f"Found {len(py_files)} files. Testing {num_files}...")
 
     context = SketchContext()
-    converter = SketchFreecadConverter(context)
+    converter = SketchFreecadConverter(context, raise_on_error=True)
 
     passed_files = 0
 

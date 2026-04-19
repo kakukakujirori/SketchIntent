@@ -135,7 +135,7 @@ def compare_constraints(
 # Dataset Verification (matches verify_primitives_freecad.py style)
 # ============================================================
 
-def verify_constraints_freecad(directory: str = 'gt_completed_prim5_py', start_idx: int = 0, process_num: int = 1, verbose: bool = False):
+def verify_constraints_freecad(directory: str = 'gt_completed_prim5_py', start_idx: int = 0, process_num: int = -1, verbose: bool = False):
     """
     Load real .py sketch scripts, do FC -> SG -> FC roundtrip,
     and verify constraint preservation.
@@ -148,10 +148,12 @@ def verify_constraints_freecad(directory: str = 'gt_completed_prim5_py', start_i
         return False
 
     print(f"Found {len(py_files)} files.")
+    if process_num < 0:
+        process_num = len(py_files)
     end_idx = min(start_idx + process_num, len(py_files))
 
     context = SketchContext()
-    converter = SketchFreecadConverter(context)
+    converter = SketchFreecadConverter(context, raise_on_error=True)
 
     passed_files = 0
     failed_files = 0
@@ -348,7 +350,7 @@ class TestConstraintRoundTrip(unittest.TestCase):
         setup_func(sketch_orig)
         doc.recompute()
 
-        converter = SketchFreecadConverter(self.context)
+        converter = SketchFreecadConverter(self.context, raise_on_error=True)
 
         # 1. FC -> SG
         sg_sketch = converter.from_freecad(sketch_orig)
@@ -452,7 +454,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Constraint roundtrip verification')
     parser.add_argument('--dir', default='data_ryotaro_prim5', help='Directory with .py sketch scripts')
     parser.add_argument('--start_idx', type=int, default=0, help='Start index')
-    parser.add_argument('--process_num', type=int, default=1, help='Number of files to process')
+    parser.add_argument('--process_num', type=int, default=-1, help='Number of files to process')
     parser.add_argument('--unit', action='store_true', help='Run unit tests only')
     parser.add_argument('--verbose', action='store_true')
     args = parser.parse_args()
