@@ -59,9 +59,9 @@ python fusion360_annotation/split_outsourcing.py \
 | Filename | Spare Filename | Worker Name | Time (min) | Skip Count | Reject Count  |
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | 0.zip | 61.zip | Sam @abdusslaamajid | | | |
-| 1.zip | 60.zip | sagar_poojary | 2h20m | 0 | MyFix |
-| 2.zip | 59.zip | Eko Wahyudi | 5h | 0 | MyFix |
-| 3.zip | 58.zip | av9525 | 20h | 0 | MANY |
+| 1.zip | 60.zip | sagar_poojary | 2h20m | 0 | Moderate (Fixed) |
+| 2.zip | 59.zip | Eko Wahyudi | 5h | 0 | Minor (Fixed) |
+| 3.zip | 58.zip | av9525 | 20h | 0 | MANY (Fixed) |
 | 4.zip | | | | | |
-| 5.zip | 57.zip | Volodymyr R | 5h | ? | So-so |
+| 5.zip | 57.zip | Volodymyr R | 5h | ? | So-so (Not Yet Fixed) |
 | 6.zip | 56.zip | Johnny Web | | | |

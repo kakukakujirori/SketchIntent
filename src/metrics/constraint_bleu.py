@@ -108,7 +108,7 @@ def align_constuction_indices(
     return target_sketch
 
 
-def aggregate_constraints(sketch: datalib.Sketch) -> tuple[UnionFind | None, UnionFind | None, list[tuple[str, tuple[tuple[int, int], ...]]]]:
+def aggregate_constraints(sketch: datalib.Sketch) -> tuple[UnionFind | None, UnionFind | None, list[tuple[str, tuple[tuple[str, int], ...]]]]:
     """
     Convert a Sketch object into a canonical constraint set.
     - Point-Point coincidents are summarized into one: [Coincident(A,B), Coincident(B,C)] => Coincident{A,B,C}
@@ -117,18 +117,18 @@ def aggregate_constraints(sketch: datalib.Sketch) -> tuple[UnionFind | None, Uni
     """
 
     # Modified from src/sketch_handlers/sketch_utils.py
-    def _get_refs_and_value(constr: datalib.Constraint) -> tuple[tuple[tuple[int, int], ...], float | None]:
+    def _get_refs_and_value(constr: datalib.Constraint) -> tuple[tuple[tuple[str, int], ...], float | None]:
         refs = [p.value.split(".") for p in constr.parameters if isinstance(p, datalib.LocalReferenceParameter)]  # e.g., 1.start
-        refs = [(int(x[0]), x[1] if (len(x) == 2 and len(x[1]) > 0) else None) for x in refs]
+        refs = [(x[0], x[1] if (len(x) == 2 and len(x[1]) > 0) else None) for x in refs]
         if not all(y in (None, "start", "end", "center", "mid") for _, y in refs):
             raise ValueError(f"Invalid reference: {refs}")
 
-        def get_pt_idx(ent_id, pt_name):
+        def get_pt_idx(ent_id: str, pt_name: str | None) -> int:
             if pt_name == "start": return 1
             if pt_name == "end": return 2
             if pt_name == "center": return 3
             if pt_name == "mid": return 4
-            if isinstance(sketch.entities[str(ent_id)], datalib.Point): return 1
+            if isinstance(sketch.entities[ent_id], datalib.Point): return 1
             return 0  # The whole entity
 
         refs = [(x[0], get_pt_idx(x[0], x[1])) for x in refs]
@@ -147,19 +147,18 @@ def aggregate_constraints(sketch: datalib.Sketch) -> tuple[UnionFind | None, Uni
 
         # register all points
         for ent_id, ent in sketch.entities.items():
-            ent_id_int = int(ent_id)
             if isinstance(ent, datalib.Point):
-                uf.find((ent_id_int, 1))  # aligned with `_get_refs_and_value``
+                uf.find((ent_id, 1))  # aligned with `_get_refs_and_value``
             elif isinstance(ent, datalib.Line):
-                uf.find((ent_id_int, 1))
-                uf.find((ent_id_int, 2))
+                uf.find((ent_id, 1))
+                uf.find((ent_id, 2))
             elif isinstance(ent, datalib.Arc):
-                uf.find((ent_id_int, 1))
-                uf.find((ent_id_int, 2))
-                uf.find((ent_id_int, 3))
-                uf.find((ent_id_int, 4))
+                uf.find((ent_id, 1))
+                uf.find((ent_id, 2))
+                uf.find((ent_id, 3))
+                uf.find((ent_id, 4))
             elif isinstance(ent, datalib.Circle):
-                uf.find((ent_id_int, 3))
+                uf.find((ent_id, 3))
 
         # register coincidents
         for constr_id, constr in sketch.constraints.items():
@@ -181,14 +180,14 @@ def aggregate_constraints(sketch: datalib.Sketch) -> tuple[UnionFind | None, Uni
         absorbed_constraints = set()
 
         # register x/y axes
-        X, Y = -1, -2
+        X, Y = "-1", "-2"
         uf_parallel.find(X)
         uf_parallel.find(Y)
 
         # register all lines
         for ent_id, ent in sketch.entities.items():
             if isinstance(ent, datalib.Line):
-                uf_parallel.find(int(ent_id))
+                uf_parallel.find(ent_id)
 
         # register parallel constraints
         for constr_id, constr in sketch.constraints.items():
@@ -409,13 +408,13 @@ class ConstraintBLEU(torchmetrics.Metric):
                 precision_list.append(p)
                 recall_list.append(r)
                 f1_list.append(f1)
-                cat_results[cat] = {"precision": torch.tensor(p), "recall": torch.tensor(r), "f1": torch.tensor(f1)}
+                cat_results[cat] = {"precision": p, "recall": r, "f1": f1}
 
         return {
             "precision": sum(precision_list) / len(precision_list) if precision_list else torch.tensor(0.0),
             "recall": sum(recall_list) / len(recall_list) if recall_list else torch.tensor(0.0),
             "f1": sum(f1_list) / len(f1_list) if f1_list else torch.tensor(0.0),
             "categories": cat_results,
-            "num_samples": torch.tensor(self.num_samples),
-            "num_invalid_preds": torch.tensor(self.num_invalid_preds)
+            "num_samples": self.num_samples,
+            "num_invalid_preds": self.num_invalid_preds,
         }

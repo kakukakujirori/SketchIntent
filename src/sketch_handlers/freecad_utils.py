@@ -199,3 +199,40 @@ def dump_freecad_commands(fc_sketch: 'Sketcher.SketchObject', doc_name: str = "M
 
     commands.append("doc.recompute()")
     return commands
+
+
+def load_FCStd_sketch(filepath: str, sketch_name: str = "Sketch") -> tuple['FreeCAD.Document', 'Sketcher.SketchObject']:
+    """
+    Load a .FCStd file and return the document and the sketch named 'Sketch'.
+    If multiple sketches exist, it prioritizes the one named 'Sketch'.
+    """
+    FreeCAD, _, _ = ensure_freecad_imported()
+
+    if not os.path.isfile(filepath):
+        raise FileNotFoundError(f"File not found: {filepath}")
+    if not filepath.endswith(".FCStd"):
+        raise ValueError(f"File is not a .FCStd file: {filepath}")
+
+    doc = None
+    fc_sketch = None
+
+    try:
+        doc = FreeCAD.openDocument(filepath)
+        sketches = doc.findObjects(Type="Sketcher::SketchObject")
+
+        if not sketches:
+            raise ValueError(f"No sketches found in {filepath}")
+
+        for s in sketches:
+            if s.Name == "Sketch" or s.Label == "Sketch":
+                fc_sketch = s
+                break
+
+        if fc_sketch is None:
+            raise ValueError(f"No sketch named '{sketch_name}' found in {filepath}")
+
+    finally:
+        if fc_sketch is None:
+            FreeCAD.closeDocument(doc)
+
+    return doc, fc_sketch

@@ -16,11 +16,9 @@ Usage:
                        --data data_ryotaro_prim5.npy --n_iter 5 --batch_size 8
 """
 import argparse
-import itertools
 import json
 import os
 from pathlib import Path
-from typing import Any
 
 import hydra
 import lightning as L
@@ -28,12 +26,9 @@ import numpy as np
 import rootutils
 import torch
 from omegaconf import OmegaConf
-from tqdm import tqdm
 
 rootutils.setup_root(__file__, indicator=".project-root", pythonpath=True)
 
-import sketchgraphs.data as datalib
-from sketchgraphs.data import flat_array
 from src.data.components.constraint_dataset import ConstraintDataset
 from src.data.constraint_datamodule import sketch_collate_fn
 from src.data.components.primitive_noise import PrimitiveNoise
@@ -291,7 +286,7 @@ def main():
     parser.add_argument("--ckpt", type=str, required=True,
                         help="Path to model checkpoint")
     parser.add_argument("--data", type=str, required=True,
-                        help="Path to input data (.npy)")
+                        help="Path to input data (.npy / .py / .FCStd)")
     parser.add_argument("--n_iter", type=int, default=5,
                         help="Max solver intervention iterations")
     parser.add_argument("--batch_size", type=int, default=32,
@@ -304,9 +299,6 @@ def main():
                         help="If True, solver checks constraints one by one")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     args = parser.parse_args()
-
-    output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
 
     device = torch.device(args.device)
 
@@ -341,45 +333,48 @@ def main():
     print(f"Solved: {solved_count} ({100*solved_count/len(results):.1f}%)")
     print(f"Unsolved: {len(results) - solved_count}")
 
-    # # Save results
-    # results_path = output_dir / "results.json"
-    # # Convert numpy arrays to lists for JSON serialization
-    # results_serializable = []
-    # for r in results:
-    #     r_clean = {
-    #         'sample_idx': r['sample_idx'],
-    #         'solved': r['solved'],
-    #         'final_commands': r['final_commands'],
-    #     }
-    #     if isinstance(r.get('final_tokens'), np.ndarray):
-    #         r_clean['final_tokens'] = r['final_tokens'].tolist()
-    #     else:
-    #         r_clean['final_tokens'] = r.get('final_tokens')
-    #     r_clean['iterations'] = [
-    #         {
-    #             'status': it['status'],
-    #             'dof': it['dof'],
-    #             'malformed': it['malformed'],
-    #             'conflicting': it['conflicting'],
-    #             'redundant': it['redundant'],
-    #         }
-    #         for it in r['iterations']
-    #     ]
-    #     results_serializable.append(r_clean)
+    # Save results
+    if args.output_dir:
+        output_dir = Path(args.output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        results_path = output_dir / "results.json"
+        # Convert numpy arrays to lists for JSON serialization
+        results_serializable = []
+        for r in results:
+            r_clean = {
+                'sample_idx': r['sample_idx'],
+                'solved': r['solved'],
+                'final_commands': r['final_commands'],
+            }
+            if isinstance(r.get('final_tokens'), np.ndarray):
+                r_clean['final_tokens'] = r['final_tokens'].tolist()
+            else:
+                r_clean['final_tokens'] = r.get('final_tokens')
+            r_clean['iterations'] = [
+                {
+                    'status': it['status'],
+                    'dof': it['dof'],
+                    'malformed': it['malformed'],
+                    'conflicting': it['conflicting'],
+                    'redundant': it['redundant'],
+                }
+                for it in r['iterations']
+            ]
+            results_serializable.append(r_clean)
 
-    # with open(results_path, "w") as f:
-    #     json.dump(results_serializable, f, indent=2)
-    # print(f"\nResults saved to {results_path}")
+        with open(results_path, "w") as f:
+            json.dump(results_serializable, f, indent=2)
+        print(f"\nResults saved to {results_path}")
 
-    # # Save FreeCAD command scripts
-    # for r in results:
-    #     if r['final_commands']:
-    #         fc_path = output_dir / f"sample_{r['sample_idx']:04d}.py"
-    #         with open(fc_path, "w") as f:
-    #             f.write("# Sample {:04d} | Solved: {}\n".format(r['sample_idx'], r['solved']))
-    #             for cmd in r['final_commands']:
-    #                 f.write(cmd + "\n")
-    # print(f"FreeCAD scripts saved to {output_dir}/sample_*.py")
+        # Save FreeCAD command scripts
+        for r in results:
+            if r['final_commands']:
+                fc_path = output_dir / f"sample_{r['sample_idx']:04d}.py"
+                with open(fc_path, "w") as f:
+                    f.write("# Sample {:04d} | Solved: {}\n".format(r['sample_idx'], r['solved']))
+                    for cmd in r['final_commands']:
+                        f.write(cmd + "\n")
+        print(f"FreeCAD scripts saved to {output_dir}/sample_*.py")
 
 
 if __name__ == "__main__":

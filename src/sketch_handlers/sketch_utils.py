@@ -173,9 +173,9 @@ def normalize_sketch(sketch: datalib.Sketch, dst_length: float = 1.0) -> float:
 ################################################################
 
 
-def get_refs(constr: datalib.Constraint) -> list[tuple[int, str | None]]:
+def get_refs(constr: datalib.Constraint) -> list[tuple[str, str | None]]:
     refs = [p.value.split(".") for p in constr.parameters if isinstance(p, LocalReferenceParameter)]  # e.g., 1.start
-    refs = [(int(x[0]), x[1] if (len(x) == 2 and len(x[1]) > 0) else None) for x in refs]
+    refs = [(x[0], x[1] if (len(x) == 2 and len(x[1]) > 0) else None) for x in refs]
     if not all(y in (None, 'start', 'end', 'center', 'mid') for _, y in refs):
         raise ValueError(f"Invalid ref subnodes: {refs}")
     return sorted(refs, key=lambda x: (x[0], {'start': 1, 'end': 2, 'center': 3, 'mid': 4}.get(x[1], 0)))
@@ -285,7 +285,7 @@ def _resolve_redundant_coincident(sketch: datalib.Sketch) -> datalib.Sketch:
     return sketch
 
 
-def _resolve_concentric_of_circle_forming_arcs(sketch: datalib.Sketch) -> datalib.Sketch:
+def _resolve_concentric_of_arcs_forming_circle(sketch: datalib.Sketch) -> datalib.Sketch:
     """Fix the over-constrained pattern that arises when two arcs together form
     a closed circle (or any configuration where they share *both* endpoints and
     are concentric).
@@ -311,10 +311,10 @@ def _resolve_concentric_of_circle_forming_arcs(sketch: datalib.Sketch) -> datali
     # ------------------------------------------------------------------ #
     # 1. Collect point-point Coincident constraints for Arc pairs          #
     # ------------------------------------------------------------------ #
-    # Map (arc_id_a, arc_id_b) -> list of (cid, pt_a, pt_b)
-    arc_endpoint_coin: dict[tuple[int, int], list[tuple[str, str, str]]] = defaultdict(list)
-    # Map (arc_id_a, arc_id_b) -> cid  for centre-centre Coincident
-    center_coin: dict[tuple[int, int], str] = {}
+    # Step 1: Identify all arcs and their endpoint Coincidents
+    arc_endpoint_coin: dict[tuple[str, str], list[tuple[str, str, str]]] = defaultdict(list)
+    # Step 2: Identify all center-to-center Coincidents
+    center_coin: dict[tuple[str, str], str] = {}
 
     for cid, c in sketch.constraints.items():
         if c.constraint_type.name not in ('Coincident', 'Concentric'):
@@ -355,10 +355,8 @@ def _resolve_concentric_of_circle_forming_arcs(sketch: datalib.Sketch) -> datali
         centre_cid = center_coin[key]
         # Pick the first endpoint Coincident to convert to Tangent
         coin_cid_to_convert, ref_a, ref_b = ep_list[0]
-        ga = int(ref_a.split('.')[0])
-        pt_a = ref_a.split('.')[1]
-        gb = int(ref_b.split('.')[0])
-        pt_b = ref_b.split('.')[1]
+        ga, pt_a = ref_a.split('.')
+        gb, pt_b = ref_b.split('.')
 
         # Remove the centre–centre Coincident
         sketch.constraints.pop(centre_cid, None)
@@ -384,9 +382,9 @@ def _resolve_midpoint_mirror_ref_order(sketch: datalib.Sketch) -> tuple[datalib.
     """
 
     def sort_triplet_refs(
-        refs: tuple[tuple[int, str | None], tuple[int, str | None], tuple[int, str | None]],
+        refs: tuple[tuple[str, str | None], tuple[str, str | None], tuple[str, str | None]],
         entities: dict[str, datalib.Entity],
-    ) -> tuple[tuple[int, str | None], tuple[int, str | None], tuple[int, str | None]]:
+    ) -> tuple[tuple[str, str | None], tuple[str, str | None], tuple[str, str | None]]:
 
         (geo1, pt1), (geo2, pt2), (geo3, pt3) = refs
         coord1 = np.array(get_entity_point(entities[str(geo1)], pt1) or [])
@@ -418,9 +416,9 @@ def _resolve_midpoint_mirror_ref_order(sketch: datalib.Sketch) -> tuple[datalib.
             raise ValueError(f"At least two references must be points: got {refs=}")
 
     def sort_line_point_refs(
-        refs: tuple[tuple[int, str | None], tuple[int, str | None]],
+        refs: tuple[tuple[str, str | None], tuple[str, str | None]],
         entities: dict[str, datalib.Entity],
-    ) -> tuple[tuple[int, str | None], tuple[int, str | None]]:
+    ) -> tuple[tuple[str, str | None], tuple[str, str | None]]:
 
         (geo1, pt1), (geo2, pt2) = refs
         if isinstance(entities[str(geo1)], datalib.Line) and pt1 is None:
@@ -450,7 +448,7 @@ def _resolve_midpoint_mirror_ref_order(sketch: datalib.Sketch) -> tuple[datalib.
 
         # gather ref params
         local_refs = [p.value.split(".") for p in constr.parameters if isinstance(p, LocalReferenceParameter)]
-        local_refs = tuple((int(x[0]), str(x[1]) if (len(x) == 2 and x[1] != "") else None) for x in local_refs)
+        local_refs = tuple((x[0], str(x[1]) if (len(x) == 2 and x[1] != "") else None) for x in local_refs)
 
         # sort the refs
         try:
@@ -672,7 +670,7 @@ def cleanse_sketch_constraints(
     sketch = maybe_delete_invalid_constraints(sketch, invalid_cids)
 
     if resolve_redundancy:
-        sketch = _resolve_concentric_of_circle_forming_arcs(sketch)
+        sketch = _resolve_concentric_of_arcs_forming_circle(sketch)
         sketch = _resolve_tangent_and_perpendicular(sketch)
         sketch = _resolve_redundant_coincident(sketch)
 
