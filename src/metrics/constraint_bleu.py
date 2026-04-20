@@ -1,5 +1,6 @@
 import math
 from itertools import combinations
+from typing import Any
 
 import numpy as np
 import torch
@@ -7,6 +8,7 @@ import torchmetrics
 
 import sketchgraphs.data as datalib
 from src.metrics.union_find import BCubedF1, UnionFind, UnionFindWeighted
+from src.sketch_handlers.sketch_tokenizer import SketchTokenizer
 from src.sketch_handlers.sketch_utils import cleanse_sketch_constraints
 
 
@@ -264,8 +266,9 @@ class ConstraintBLEU(torchmetrics.Metric):
         num_samples: Total number of samples processed.
         num_invalid_preds: Number of invalid predictions.
     """
-    def __init__(self, verbose: bool = False):
+    def __init__(self, tokenizer: SketchTokenizer | None = None, verbose: bool = False):
         super().__init__()
+        self.tokenizer = tokenizer
         self.verbose = verbose
 
         # Category-specific accumulated scores (Macro-average approach)
@@ -278,6 +281,66 @@ class ConstraintBLEU(torchmetrics.Metric):
 
         self.add_state("num_samples", default=torch.tensor(0), dist_reduce_fx="sum")
         self.add_state("num_invalid_preds", default=torch.tensor(0), dist_reduce_fx="sum")
+
+    def evaluate_batch(self, batch: dict[str, Any], generated: torch.Tensor) -> dict[str, Any]:
+        """Detokenize and update BLEU metrics, returning batch-level results."""
+        if self.tokenizer is None:
+            raise ValueError("Tokenizer must be provided to evaluate_batch.")
+
+        B = generated.shape[0]
+        p_vals = batch['p_val'].cpu().numpy()
+        c_vals_gen = generated.cpu().numpy()
+
+        gt_sketches = batch['sketch']
+        sketch_indices = batch.get('sketch_index')
+
+        pred_sketches = []
+        target_sketches_grouped = []
+
+        for i in range(B):
+            # Reindex GT sketch for sequential IDs
+            gt_sketch = gt_sketches[i]
+            id_map = {old_id: str(j) for j, old_id in enumerate(gt_sketch.entities.keys())}
+
+            reindexed_entities = {}
+            for old_id, ent in gt_sketch.entities.items():
+                new_id = id_map[old_id]
+                if hasattr(ent, "_replace"):
+                    ent = ent._replace(entityId=new_id)
+                reindexed_entities[new_id] = ent
+
+            reindexed_constraints = {}
+            for cid, constr in gt_sketch.constraints.items():
+                new_params = []
+                for p in constr.parameters:
+                    if isinstance(p, datalib.LocalReferenceParameter):
+                        parts = p.value.split(".")
+                        old_ent_id = parts[0]
+                        if old_ent_id in id_map:
+                            parts[0] = id_map[old_ent_id]
+                            new_params.append(datalib.LocalReferenceParameter(parameterId=p.parameterId, value=".".join(parts)))
+                        else:
+                            new_params.append(p)
+                    else:
+                        new_params.append(p)
+                reindexed_constraints[cid] = constr._replace(parameters=new_params)
+
+            reindexed_gt_sketch = datalib.Sketch(entities=reindexed_entities, constraints=reindexed_constraints)
+
+            # Detokenize prediction
+            pred_tokens = {'p_val': p_vals[i], 'c_val': c_vals_gen[i]}
+            pred_sketch, _, _ = self.tokenizer.detokenize(pred_tokens, allow_invalid_constraints=True)
+
+            # Use the precisely indexed entities from GT
+            pred_sketch.entities = reindexed_entities
+            pred_sketches.append(pred_sketch)
+
+            # Use normalized GT sketch
+            target_sketches_grouped.append([reindexed_gt_sketch])
+
+        # Calling the metric returns batch-level results and updates global state
+        base_prim_dicts = [s[0].entities for s in target_sketches_grouped]
+        return self(base_prim_dicts, pred_sketches, target_sketches_grouped, sketch_indices=sketch_indices)
 
     def update(
         self,

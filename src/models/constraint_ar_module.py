@@ -1,11 +1,9 @@
 import inspect
+from tqdm import tqdm
 from typing import Any
 
 import lightning as L
 import torch
-import torchmetrics
-import sketchgraphs.data as datalib
-from tqdm import tqdm
 
 from src.metrics import ConstraintBLEU, ConstraintIoU, TokenAccuracy
 from src.models.components.constraint_ar_model import ConstraintARModel
@@ -35,8 +33,8 @@ class ConstraintARModule(L.LightningModule):
 
         self.accuracy_metric = TokenAccuracy(ignore_index=ConstraintToken.Pad)
         self.iou_metrics = ConstraintIoU(context, prefix_len=1)
-        self.bleu_metrics = ConstraintBLEU()
         self.tokenizer = SketchTokenizer(context)
+        self.bleu_metrics = ConstraintBLEU(tokenizer=self.tokenizer)
         self.token_reordering = TokenReordering(context=context, prefix_len=1)  # NOTE: prefix_len is important
         self.solver_feedback = SolverFeedback(context)
 
@@ -173,63 +171,7 @@ class ConstraintARModule(L.LightningModule):
 
         return generated, logprobs
 
-    def _evaluate_bleu(self, batch: dict[str, Any], generated: torch.Tensor) -> dict[str, Any]:
-        """Detokenize and update BLEU metrics, returning batch-level results."""
-        B = generated.shape[0]
-        p_vals = batch['p_val'].cpu().numpy()
-        c_vals_gen = generated.cpu().numpy()
 
-        # base_prims and GT sketches are directly in the batch
-        gt_sketches = batch['sketch']
-        sketch_indices = batch.get('sketch_index')
-
-        pred_sketches = []
-        target_sketches_grouped = []
-
-        for i in range(B):
-            # Reindex GT sketch for sequential IDs
-            gt_sketch = gt_sketches[i]
-            id_map = {old_id: str(j) for j, old_id in enumerate(gt_sketch.entities.keys())}
-
-            reindexed_entities = {}
-            for old_id, ent in gt_sketch.entities.items():
-                new_id = id_map[old_id]
-                if hasattr(ent, "_replace"):
-                    ent = ent._replace(entityId=new_id)
-                reindexed_entities[new_id] = ent
-
-            reindexed_constraints = {}
-            for cid, constr in gt_sketch.constraints.items():
-                new_params = []
-                for p in constr.parameters:
-                    if isinstance(p, datalib.LocalReferenceParameter):
-                        parts = p.value.split(".")
-                        old_ent_id = parts[0]
-                        if old_ent_id in id_map:
-                            parts[0] = id_map[old_ent_id]
-                            new_params.append(datalib.LocalReferenceParameter(parameterId=p.parameterId, value=".".join(parts)))
-                        else:
-                            new_params.append(p)
-                    else:
-                        new_params.append(p)
-                reindexed_constraints[cid] = constr._replace(parameters=new_params)
-
-            reindexed_gt_sketch = datalib.Sketch(entities=reindexed_entities, constraints=reindexed_constraints)
-
-            # Detokenize prediction
-            pred_tokens = {'p_val': p_vals[i], 'c_val': c_vals_gen[i]}
-            pred_sketch, _, _ = self.tokenizer.detokenize(pred_tokens, allow_invalid_constraints=True)
-
-            # Use the precisely indexed entities from GT
-            pred_sketch.entities = reindexed_entities
-            pred_sketches.append(pred_sketch)
-
-            # Use normalized GT sketch
-            target_sketches_grouped.append([reindexed_gt_sketch])
-
-        # Calling the metric returns batch-level results and updates global state
-        base_prim_dicts = [s[0].entities for s in target_sketches_grouped]
-        return self.bleu_metrics(base_prim_dicts, pred_sketches, target_sketches_grouped, sketch_indices=sketch_indices)
 
     def training_step(self, batch: dict[str, Any], batch_idx: int):
         loss, preds, target = self._compute_loss(batch)
@@ -260,7 +202,7 @@ class ConstraintARModule(L.LightningModule):
             self.log(f'validation_gen/{metric_name}', metric_value, add_dataloader_idx=False, sync_dist=True, on_epoch=True)
 
         # Log BLEU (Batch level returned by __call__, aggregated by Lightning if on_epoch=True)
-        bleu_results = self._evaluate_bleu(batch, generated)
+        bleu_results = self.bleu_metrics.evaluate_batch(batch, generated)
         for k, v in bleu_results.items():
             if k == "categories" and isinstance(v, dict):
                 for cat_name, cat_scores in v.items():
@@ -346,7 +288,7 @@ class ConstraintARModule(L.LightningModule):
             self.log(f'test_gen/{metric_name}', metric_value, add_dataloader_idx=False, sync_dist=True, on_epoch=True)
 
         # Log BLEU (Batch level returned by __call__, aggregated by Lightning if on_epoch=True)
-        bleu_results = self._evaluate_bleu(batch, generated)
+        bleu_results = self.bleu_metrics.evaluate_batch(batch, generated)
         for k, v in bleu_results.items():
             if k == "categories" and isinstance(v, dict):
                 for cat_name, cat_scores in v.items():

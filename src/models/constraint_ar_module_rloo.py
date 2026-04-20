@@ -5,7 +5,6 @@ from typing import Any, cast
 import numpy as np
 import lightning as L
 import torch
-import torchmetrics
 from tqdm import tqdm
 
 from src.metrics import ConstraintBLEU, ConstraintIoU, TokenAccuracy
@@ -66,8 +65,8 @@ class ConstraintARModuleRLOO(L.LightningModule):
         self.criterion = torch.nn.CrossEntropyLoss(ignore_index=ConstraintToken.Pad)
         self.accuracy_metric = TokenAccuracy(ignore_index=ConstraintToken.Pad)
         self.iou_metrics = ConstraintIoU(context, prefix_len=1)
-        self.bleu_metrics = ConstraintBLEU()
         self.tokenizer = SketchTokenizer(context)
+        self.bleu_metrics = ConstraintBLEU(tokenizer=self.tokenizer)
         self.token_reordering = TokenReordering(context=context, prefix_len=1)  # NOTE: prefix_len is important
         self.solver_feedback = SolverFeedback(context)
 
@@ -415,32 +414,6 @@ class ConstraintARModuleRLOO(L.LightningModule):
 
         return generated, logprobs
 
-    def _evaluate_bleu(self, batch: dict[str, Any], generated: torch.Tensor) -> dict[str, Any]:
-        """Detokenize and update BLEU metrics, returning batch-level results."""
-        B = generated.shape[0]
-        p_vals = batch['p_val'].cpu().numpy()
-        c_vals_gen = generated.cpu().numpy()
-
-        # base_prims and GT sketches are directly in the batch
-        base_prim_dicts = [s.entities for s in batch['sketch']]
-        gt_sketches = batch['sketch']
-
-        pred_sketches = []
-        target_sketches_grouped = []
-
-        for i in range(B):
-            # Detokenize prediction
-            pred_tokens = {'p_val': p_vals[i], 'c_val': c_vals_gen[i]}
-            pred_sketch, _, _ = self.tokenizer.detokenize(pred_tokens, allow_invalid_constraints=True)
-            pred_sketches.append(pred_sketch)
-
-            # Use GT sketch directly from batch
-            target_sketches_grouped.append([gt_sketches[i]])
-
-        # Calling the metric returns batch-level results and updates global state
-        return self.bleu_metrics(base_prim_dicts, pred_sketches, target_sketches_grouped)
-
-
     def training_step(self, batch: dict[str, Any], batch_idx: int):
         rl_loss, rl_metrics = self._compute_rloo_loss(batch)
 
@@ -483,7 +456,7 @@ class ConstraintARModuleRLOO(L.LightningModule):
             self.log(f'validation_gen/{metric_name}', metric_value, add_dataloader_idx=False, sync_dist=True, on_epoch=True)
 
         # Log BLEU (Batch level)
-        bleu_results = self._evaluate_bleu(batch, generated)
+        bleu_results = self.bleu_metrics.evaluate_batch(batch, generated)
         for k, v in bleu_results.items():
             if k == "categories" and isinstance(v, dict):
                 for cat_name, cat_scores in v.items():
@@ -571,7 +544,7 @@ class ConstraintARModuleRLOO(L.LightningModule):
             self.log(f'test_gen/{metric_name}', metric_value, add_dataloader_idx=False, sync_dist=True, on_epoch=True)
 
         # Log BLEU (Batch level)
-        bleu_results = self._evaluate_bleu(batch, generated)
+        bleu_results = self.bleu_metrics.evaluate_batch(batch, generated)
         for k, v in bleu_results.items():
             if k == "categories" and isinstance(v, dict):
                 for cat_name, cat_scores in v.items():
