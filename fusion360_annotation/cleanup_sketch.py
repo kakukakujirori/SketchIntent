@@ -35,8 +35,9 @@ import glob
 import itertools
 import math
 import os
+import random
+import string
 import re
-import uuid
 from collections import defaultdict
 from tqdm import tqdm
 from typing import Optional
@@ -93,10 +94,13 @@ class UnionFind(dict):
 # ---------------------------------------------------------------------------
 
 def _new_constraint_id(sketch: datalib.Sketch) -> str:
-    """Generate a unique constraint identifier that does not clash with existing ones."""
+    """Generate a unique constraint identifier that does not clash with existing ones.
+    Uses the global random state which can be seeded for reproducibility.
+    """
     existing = set(sketch.constraints.keys())
     while True:
-        cid = f"cleanup_{uuid.uuid4().hex[:8]}"
+        suffix = "".join(random.choices(string.ascii_lowercase + string.digits, k=8))
+        cid = f"cleanup_{suffix}"
         if cid not in existing:
             return cid
 
@@ -410,7 +414,7 @@ def merge_micro_gaps(sketch: datalib.Sketch, eps: float = EPS) -> datalib.Sketch
 
     for i, j in itertools.combinations(range(n), 2):
         dist = np.linalg.norm(coords[i][0] - coords[j][0])
-        if 0 < dist < eps:
+        if dist < eps:
             union(i, j)
 
     clusters: dict[int, list[int]] = defaultdict(list)
@@ -1105,5 +1109,11 @@ if __name__ == '__main__':
                         help=f'Tolerance for micro-gap merging (default {EPS}).')
     parser.add_argument('--verbose', action='store_true',
                         help='Print full tracebacks for errors.')
+    parser.add_argument('--seed', type=int, default=0,
+                        help='Random seed for reproducibility.')
     args = parser.parse_args()
+
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+
     main(args)

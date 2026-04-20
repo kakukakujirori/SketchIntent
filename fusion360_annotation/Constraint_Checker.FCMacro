@@ -1,0 +1,56 @@
+import FreeCAD as App
+import FreeCADGui as Gui
+import Sketcher
+
+def test_constraints():
+    sk = None
+    try:
+        sk = Gui.ActiveDocument.getInEdit().Object
+    except:
+        pass
+
+    if sk is None:
+        print("Error: sketch is not selected. Open the sketch and try again.")
+        return
+    print(f"Sketch: {sk.Name}, DoF: {sk.solve()}")
+
+    errors = []
+
+    # 1. Tautology Detection (e.g., Equal(A,A))
+    for i, c in enumerate(sk.Constraints):
+        if c.Type in ["Equal"] and c.First == c.Second and c.First != -2000:
+            errors.append(f"[TAUTOLOGY] #{i + 1} {c.Type}(Edge{c.First + 1}, Edge{c.Second + 1})")
+
+    # 2. External Reference Detection (e.g., -1=X-axis, -2=Y-axis)
+    for i, c in enumerate(sk.Constraints):
+        for r in [c.First, c.Second, c.Third]:
+            if r in (-1, -2):
+                errors.append(f"[EXT REF] #{i + 1} {c.Type} references {'X-axis' if r == -1 else 'Y-axis'}")
+                break
+
+    # 3. Check if there is only one Block constraint, and if removing it results in DoF=2
+    blocks = [(i, c) for i, c in enumerate(sk.Constraints) if c.Type == "Block"]
+    if len(blocks) != 1:
+        errors.append(f"[BLOCK] Block constraint count = {len(blocks)} (expected 1)")
+    else:
+        bi, bc = blocks[0]
+        sk.delConstraint(bi)
+        App.ActiveDocument.recompute()
+        dof_without_block = sk.DoF
+        sk.addConstraint(Sketcher.Constraint("Block", bc.First))
+        App.ActiveDocument.recompute()
+        if dof_without_block != 2:
+            errors.append(f"[BLOCK] DoF without Block = {dof_without_block} (expected 2)")
+        else:
+            print("[BLOCK] OK: DoF without Block = 2")
+
+    # --- Outputs ---
+    if errors:
+        print("\n=== ERRORS FOUND ===")
+        for e in errors: print(e)
+        print("*** Delete constraints from '''BOTTOM to TOP''', as the indices change by deletion. ***")
+    else:
+        print("\nAll checks passed.")
+
+
+test_constraints()

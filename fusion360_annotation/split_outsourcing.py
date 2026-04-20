@@ -12,6 +12,7 @@ def price_model(dof: int) -> float:
 
 
 def main(args):
+    random.seed(args.seed)
     csv_path = os.path.join(args.data_dir, "_sketch_dof_info.csv")
     if not os.path.isfile(csv_path):
         print(f"Error: CSV file not found at {csv_path}")
@@ -27,7 +28,7 @@ def main(args):
             fname = row['filename']
             dof = int(float(row['dof']))
             prim_count = row.get('prim_count', 'Unknown')
-            
+
             filename_info[fname] = {
                 'dof': dof,
                 'prim_count': prim_count
@@ -51,7 +52,7 @@ def main(args):
     # Flatten all filenames into a single list sorted by DoF
     all_filenames_sorted = []
     for dof in sorted(dof_groups.keys()):
-        # We already shuffled inside each DoF group if we wanted, 
+        # We already shuffled inside each DoF group if we wanted,
         # but let's just use the order we have.
         filenames = dof_groups[dof]
         random.shuffle(filenames)
@@ -60,11 +61,11 @@ def main(args):
     # Distribute files in chunks of num_annotators, shuffling the destination for each chunk
     for i in range(0, len(all_filenames_sorted), num_annotators):
         chunk = all_filenames_sorted[i : i + num_annotators]
-        
+
         # Shuffle the target annotator indices for this specific chunk
         dest_indices = list(range(num_annotators))
         random.shuffle(dest_indices)
-        
+
         for j, fname in enumerate(chunk):
             annotator_files[dest_indices[j]].append(fname)
 
@@ -82,7 +83,7 @@ def main(args):
     for i, files in enumerate(annotator_files):
         if not files:
             continue
-        
+
         # Sort files within the folder by DoF for better readability
         files.sort(key=lambda f: filename_info[f]['dof'])
 
@@ -91,7 +92,7 @@ def main(args):
         os.makedirs(anno_dir, exist_ok=True)
 
         print(f"Processing {len(files)} sketches for package {folder_name}...")
-        
+
         local_info = []
         dofs = []
         total_price = 0.0
@@ -111,7 +112,7 @@ def main(args):
             info = filename_info[fname]
             dof = info['dof']
             price = price_model(dof)
-            
+
             local_info.append({
                 'filename': fname,
                 'dof': dof,
@@ -138,7 +139,7 @@ def main(args):
         mean_dof = sum(dofs) / count if count > 0 else 0
         var_dof = sum((x - mean_dof)**2 for x in dofs) / count if count > 0 else 0
         max_dof = max(dofs) if dofs else 0
-        
+
         summary_data.append({
             'folder': folder_name,
             'num_files': count,
@@ -159,12 +160,12 @@ def main(args):
     print(f"Summary saved to {summary_csv_path}")
 
 
-
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Split sketches into multiple folders for annotators while maintaining DoF distribution.")
     parser.add_argument("--data_dir", type=str, required=True, help="Path to the directory containing .FCStd files and _sketch_dof_info.csv")
     parser.add_argument("--out_dir", type=str, required=True, help="Path to the output directory")
     parser.add_argument("--num_sketches_per_annotator", type=int, default=50, help="Target number of sketches to outsource per annotator")
+    parser.add_argument("--seed", type=int, default=0, help="Random seed for reproducibility")
     args = parser.parse_args()
 
     main(args)

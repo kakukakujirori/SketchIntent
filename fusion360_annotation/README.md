@@ -34,6 +34,19 @@ python fusion360_annotation/split_outsourcing.py \
 - `fusion360_annotation/add_reference.py` copies existing primitives in a different sketch so that annotators can refer to the primitive configulation before adding new constraints.
 - `fusion360_annotation/split_outsourcing.py` splits the sketches into multiple folders for annotators while maintaining DoF distribution.
 
+## Annotation Check
+
+The following checks whether:
+- Equal(A,A) bugs are not present
+- X/Y axes are not used
+- Block constraint count = 1, and removing it results in DoF=2.
+- All existing primitives are present
+
+`xxxxxx_mid.FCStd` files are not checked.
+
+```bash
+python fusion360_annotation/check_submission.py --dir path_to_annotated_folder
+```
 
 ## Annotators (New)
 
