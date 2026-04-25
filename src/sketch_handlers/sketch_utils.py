@@ -376,9 +376,17 @@ def _resolve_concentric_of_arcs_forming_circle(sketch: datalib.Sketch) -> datali
     return sketch
 
 
-def _resolve_midpoint_mirror_ref_order(sketch: datalib.Sketch) -> tuple[datalib.Sketch, dict[str, str]]:
+def _resolve_midpoint_mirror_ref_order(sketch: datalib.Sketch, midpoint_tol: float = 1e-6) -> tuple[datalib.Sketch, dict[str, str]]:
     """Midpoint and Mirror have the following reference ordering: [EntityA, EntityB, SymmetyPoint/Axis]
     However, SketchGraphs format doesn't guarantee this ordering, so we recover it by checking the actual geometry.
+
+    Parameters
+    ----------
+    midpoint_tol : float
+        Absolute tolerance for the midpoint collinearity check (np.allclose atol).
+        The default (1e-6) is appropriate for raw sketch data.  After coordinate
+        transformations such as align_sketch the alignment error can be O(1e-2),
+        so a larger value (e.g. 0.05) may be required.
     """
 
     def sort_triplet_refs(
@@ -395,7 +403,7 @@ def _resolve_midpoint_mirror_ref_order(sketch: datalib.Sketch) -> tuple[datalib.
             coords = [coord1, coord2, coord3]
             for i in range(3):
                 a, b = coords[(i+1) % 3], coords[(i+2) % 3]
-                if np.allclose(2*coords[i], a+b, atol=1e-6):
+                if np.allclose(2*coords[i], a+b, atol=midpoint_tol):
                     return (refs[(i+1) % 3], refs[(i+2) % 3], refs[i])
                 # else:
                 #     print(f"{i}: {coords[i]=}, {a=}, {b=}")
@@ -594,6 +602,7 @@ def cleanse_sketch_constraints(
     resolve_redundancy: bool = True,
     resolve_synonym: bool = True,
     delete_invalid: bool = False,
+    midpoint_tol: float = 1e-6,
 ) -> datalib.Sketch:
     """Remove or fix degenerate constraints from the sketch in-place.
 
@@ -666,7 +675,7 @@ def cleanse_sketch_constraints(
         return sketch
 
     # resolve midpoint/mirror reference ordering
-    sketch, invalid_cids = _resolve_midpoint_mirror_ref_order(sketch)
+    sketch, invalid_cids = _resolve_midpoint_mirror_ref_order(sketch, midpoint_tol=midpoint_tol)
     sketch = maybe_delete_invalid_constraints(sketch, invalid_cids)
 
     if resolve_redundancy:

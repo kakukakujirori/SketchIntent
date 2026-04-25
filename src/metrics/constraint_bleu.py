@@ -266,10 +266,11 @@ class ConstraintBLEU(torchmetrics.Metric):
         num_samples: Total number of samples processed.
         num_invalid_preds: Number of invalid predictions.
     """
-    def __init__(self, tokenizer: SketchTokenizer | None = None, verbose: bool = False):
+    def __init__(self, tokenizer: SketchTokenizer | None = None, verbose: bool = False, midpoint_tol: float = 1e-6):
         super().__init__()
         self.tokenizer = tokenizer
         self.verbose = verbose
+        self.midpoint_tol = midpoint_tol
 
         # Category-specific accumulated scores (Macro-average approach)
         # We track the sum of scores (0.0-1.0) and the number of samples that had that category.
@@ -371,8 +372,8 @@ class ConstraintBLEU(torchmetrics.Metric):
             sketch_indices = [None] * len(preds)
 
         # Cleanse
-        preds = [cleanse_sketch_constraints(sketch, delete_invalid=True) for sketch in preds]
-        targets = [[cleanse_sketch_constraints(sketch, delete_invalid=False) for sketch in sketch_pool] for sketch_pool in targets]
+        preds = [cleanse_sketch_constraints(sketch, delete_invalid=True, midpoint_tol=self.midpoint_tol) for sketch in preds]
+        targets = [[cleanse_sketch_constraints(sketch, delete_invalid=False, midpoint_tol=self.midpoint_tol) for sketch in sketch_pool] for sketch_pool in targets]
 
         # Iterate over batch dimension
         for base_prim_dict, pred_sketch, target_pool, s_idx in zip(base_prims, preds, targets, sketch_indices):
