@@ -1,3 +1,5 @@
+import os
+import re
 import FreeCAD as App
 import FreeCADGui as Gui
 import Sketcher
@@ -43,6 +45,51 @@ def test_constraints():
             errors.append(f"[BLOCK] DoF without Block = {dof_without_block} (expected 2)")
         else:
             print("[BLOCK] OK: DoF without Block = 2")
+
+    # 4. Check primitive deletion/reordering
+    fc_file = App.ActiveDocument.FileName
+    if fc_file:
+        py_file = os.path.splitext(fc_file)[0] + ".py"
+        if os.path.exists(py_file):
+            try:
+                with open(py_file, 'r', encoding='utf-8') as f:
+                    lines = f.readlines()
+
+                ori_geos_info = []
+                for line in lines:
+                    m = re.search(r"addGeometry\(Part\.([A-Za-z]+).*?,\s*(True|False)\)", line)
+                    if m:
+                        ori_geos_info.append({
+                            "type": m.group(1),
+                            "const": (m.group(2) == 'True')
+                        })
+
+                tgt_geos = sk.Geometry
+
+                if len(tgt_geos) < len(ori_geos_info):
+                    errors.append(f"[PRIMITIVE] Count mismatch: original has {len(ori_geos_info)}, but current has only {len(tgt_geos)}. You cannot delete original primitives.")
+                
+                for idx in range(len(tgt_geos)):
+                    tg = tgt_geos[idx]
+                    tg_type = tg.__class__.__name__
+                    is_const = sk.getConstruction(idx)
+                    
+                    if idx < len(ori_geos_info):
+                        ori = ori_geos_info[idx]
+                        if ori["type"] != tg_type:
+                            errors.append(f"[PRIMITIVE] Type mismatch at index {idx}: original is {ori['type']}, current is {tg_type}.")
+                        elif ori["const"] != is_const:
+                            errors.append(f"[PRIMITIVE] Construction mismatch at index {idx}. You cannot change the construction state of original primitives.")
+                    else:
+                        if not is_const:
+                            errors.append(f"[PRIMITIVE] Added primitive at index {idx} ({tg_type}) must be a construction geometry.")
+
+            except Exception as e:
+                print(f"Warning: Failed to verify primitives: {e}")
+        else:
+            print(f"Warning: Original script not found: {py_file}")
+    else:
+        print("Warning: Document not saved to a file, skipping primitive check.")
 
     # --- Outputs ---
     if errors:

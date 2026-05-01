@@ -55,7 +55,6 @@ def align_sketch(target_sketch, base_entities_dict):
     共通のエンティティを基準に、target_sketch 全体を異方性スケーリング・平行移動して整列させる。
     """
     from src.sketch_handlers.sketch_utils import get_sketch_bbox, complete_constraint_values
-    from src.metrics.constraint_bleu import is_same_entity
 
     new_sketch = copy.deepcopy(target_sketch)
     base_ids = set(base_entities_dict.keys())
@@ -81,6 +80,17 @@ def align_sketch(target_sketch, base_entities_dict):
     fx = bw / tw if tw > 1e-9 else 1.0
     fy = bh / th if th > 1e-9 else 1.0
 
+    # [Check] 異方性スケーリング比が極端すぎないか確認
+    # 縦横スケーリング比が極端に異なる場合は幾何構造が変化している可能性がある
+    SCALE_RATIO_TOL = 1.10  # 縦横スケーリング比の許容範囲 (10%)
+    scale_ratio = fx / fy if fy > 1e-9 else float('inf')
+    if not (1.0 / SCALE_RATIO_TOL <= scale_ratio <= SCALE_RATIO_TOL):
+        raise ValueError(
+            f"Anisotropic scale ratio fx/fy={scale_ratio:.4f} exceeds tolerance "
+            f"(allowed: {1/SCALE_RATIO_TOL:.2f}–{SCALE_RATIO_TOL:.2f}). "
+            f"Sketch geometry may have been distorted."
+        )
+
     # 2. スケッチ全体に変換を適用
     for ent in new_sketch.entities.values():
         for px in ['pntX', 'xCenter', 'x']:
@@ -95,28 +105,54 @@ def align_sketch(target_sketch, base_entities_dict):
         if hasattr(ent, 'radius'):
             ent.radius = ent.radius * (fx + fy) / 2.0
 
-    # 3. 共通エンティティを base_entities_dict で上書きして完全に一致させる
-    for eid, base_ent in base_entities_dict.items():
-        if eid in new_sketch.entities:
-            new_ent = copy.deepcopy(base_ent)
+    # 3. 共通エンティティを base_entities_dict で上書きして完全に一致させる、および追加エンティティの検証
+    missing_ids = base_ids - set(new_sketch.entities.keys())
+    if missing_ids:
+        raise ValueError(f"Original primitive(s) missing in target sketch: {missing_ids}. Primitives cannot be deleted.")
+
+    # [Check] 変換後の各共通エンティティが元のエンティティと整合しているか確認する。
+    # NOTE: この検証は必ずオーバーライド（下記）の前に行う必要がある。
+    #       オーバーライド後に比較すると base_ent のコピーと base_ent を比較することになり、
+    #       常にパスする空検証（vacuous validation）になってしまうため。
+    bbox_size = max(bw, bh) if max(bw, bh) > 1e-9 else 1.0
+    POS_TOL_NORMALIZED = 0.015  # BBoxサイズに対する位置誤差の許容割合 (1.5%)
+    pos_tol_abs = POS_TOL_NORMALIZED * bbox_size
+
+    for eid in base_ids:
+        tgt_ent = new_sketch.entities[eid]
+        base_ent = base_entities_dict[eid]
+        if type(tgt_ent) != type(base_ent):
+            raise ValueError(f"Entity type changed for ID '{eid}': {type(base_ent).__name__} => {type(tgt_ent).__name__}")
+        for attr in ['pntX', 'pntY', 'xCenter', 'yCenter', 'x', 'y']:
+            if hasattr(tgt_ent, attr) and hasattr(base_ent, attr):
+                err = abs(getattr(tgt_ent, attr) - getattr(base_ent, attr))
+                if err > pos_tol_abs:
+                    raise ValueError(
+                        f"Relative structure drift detected for entity '{eid}' attribute '{attr}': "
+                        f"error={err:.6f} exceeds tolerance={pos_tol_abs:.6f} "
+                        f"(={POS_TOL_NORMALIZED*100:.1f}% of bbox size={bbox_size:.4f}). "
+                        f"Internal proportions or relative positions must be preserved."
+                    )
+
+    for eid, ent in list(new_sketch.entities.items()):
+        if eid in base_ids:
+            new_ent = copy.deepcopy(base_entities_dict[eid])
             new_ent.entityId = eid
             new_sketch.entities[eid] = new_ent
+        else:
+            # Newly added geometries must be construction
+            if not eid.startswith('-') and getattr(ent, 'isConstruction', False) == False:
+                raise ValueError(f"Added primitive ID '{eid}' ({type(ent).__name__}) must be a construction geometry.")
 
     # 4. 寸法制約の再計算
     new_sketch, _ = complete_constraint_values(new_sketch)
-
-    # 5. [Test] 共通エンティティが一致しているか確認
-    for eid in base_ids:
-        if eid in new_sketch.entities:
-            if not is_same_entity(new_sketch.entities[eid], base_entities_dict[eid]):
-                raise ValueError(f"Alignment Test Failed: Entity '{eid}' does not match base reference.")
 
     return new_sketch
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument("--dir", type=str, required=True)
+    parser.add_argument("dir", type=str)
     args = parser.parse_args()
 
     context = SketchContext()
