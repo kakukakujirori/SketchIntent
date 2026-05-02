@@ -22,9 +22,92 @@ from src.sketch_handlers.context import SketchContext
 from src.sketch_handlers.freecad_utils import ensure_freecad_imported
 from src.sketch_handlers.sketch_freecad_converter import SketchFreecadConverter
 from src.sketch_handlers.sketch_tokenizer import SketchTokenizer
-from src.sketch_handlers.sketch_utils import cleanse_sketch_constraints, complete_constraint_values, normalize_sketch
+from src.sketch_handlers.sketch_utils import cleanse_sketch_constraints, complete_constraint_values, normalize_sketch, _get_entity_bbox, rotate_sketch, normalize_sketch_circumradius
+from sketchgraphs.data import EntityType
 
 FreeCAD, _, _ = ensure_freecad_imported()
+
+
+def get_sketch_hash(sketch, n_bins=5):
+    """
+    Robust geometric hash (Finalized v3):
+    1. Filter construction/points
+    2. Centroid-based canonical orientation
+    3. Max-dim square grid quantization
+    4. Aspect ratio stabilization (<1.3 -> 1.0)
+    """
+    all_pts = []
+    primitive_types = []
+    # Filter out construction
+    to_delete_ids = [eid for eid, ent in sketch.entities.items()
+                     if getattr(ent, 'is_construction', False) or ent.type == EntityType.Point]
+
+    for eid, ent in sketch.entities.items():
+        if eid in to_delete_ids: continue
+        primitive_types.append(ent.type.name)
+        if ent.type == EntityType.Line:
+            p, d = np.array([ent.pntX, ent.pntY]), np.array([ent.dirX, ent.dirY])
+            all_pts.extend([p + ent.startParam * d, p + ent.endParam * d])
+        elif ent.type in (EntityType.Circle, EntityType.Arc):
+            all_pts.append(np.array([ent.xCenter, ent.yCenter]))
+            r = ent.radius
+            all_pts.append(np.array([ent.xCenter + r, ent.yCenter]))
+            if ent.type == EntityType.Arc:
+                all_pts.append(np.array([ent.xCenter + r*np.cos(ent.startAngle), ent.yCenter + r*np.sin(ent.startAngle)]))
+                all_pts.append(np.array([ent.xCenter + r*np.cos(ent.endAngle), ent.yCenter + r*np.sin(ent.endAngle)]))
+
+    if not all_pts: return None
+    all_pts = np.array(all_pts)
+
+    # 1. Translation Invariance (Centroid)
+    centroid = np.mean(all_pts, axis=0)
+    all_pts -= centroid
+
+    # 2. Rotation Invariant Aspect Ratio using PCA
+    if len(all_pts) > 1:
+        cov = np.cov(all_pts.T)
+        eigvals = np.linalg.eigvals(cov)
+        raw_aspect = np.sqrt(max(eigvals) / max(1e-9, min(eigvals)))
+    else:
+        raw_aspect = 1.0
+
+    # Stabilize nearly-regular polygons (hexagons, etc. -> 1.0)
+    aspect = 1.0 if raw_aspect < 1.3 else round(raw_aspect, 1)
+
+    # 3. Canonical Orientation (all vertices)
+    possible_hashes = []
+    for idx in range(len(all_pts)):
+        angle = np.arctan2(all_pts[idx, 1], all_pts[idx, 0])
+        cos_a, sin_a = np.cos(-angle), np.sin(-angle)
+
+        rot_pts = []
+        for p in all_pts:
+            rx = p[0] * cos_a - p[1] * sin_a
+            ry = p[0] * sin_a + p[1] * cos_a
+            rot_pts.append(np.array([rx, ry]))
+        rot_pts = np.array(rot_pts)
+
+        # Scale isotropically so that max dimension is 1.0
+        min_p, max_p = np.min(rot_pts, axis=0), np.max(rot_pts, axis=0)
+        W, H = max_p[0] - min_p[0], max_p[1] - min_p[1]
+        max_dim = max(1e-6, W, H)
+        rot_pts /= max_dim
+
+        # Re-center perfectly in the [-0.5, 0.5] grid
+        min_p, max_p = np.min(rot_pts, axis=0), np.max(rot_pts, axis=0)
+        rot_pts -= (min_p + max_p) / 2.0
+
+        q_pts = []
+        for p in rot_pts:
+            qx = int(round((p[0] + 0.5) * (n_bins - 1)))
+            qy = int(round((p[1] + 0.5) * (n_bins - 1)))
+            q_pts.append((qx, qy))
+
+        possible_hashes.append(tuple(sorted(list(set(q_pts)))))
+
+    canonical_pts = min(possible_hashes)
+    type_counts = tuple(sorted(Counter(primitive_types).items()))
+    return ((canonical_pts, aspect), type_counts)
 
 
 def extract_sketches(json_path: str) -> list[dict]:
@@ -720,7 +803,7 @@ if __name__ == '__main__':
     parser.add_argument("--sketch_dump_dir", type=str, default="disk2/Fusion360Gallery/r1.0.1/freecad_images")
     parser.add_argument("--log_path", type=str, default="disk2/Fusion360Gallery/r1.0.1/freecad_conversion_log.csv")
     parser.add_argument("--test_data_only", action='store_true', help="If True, process only test data")
-    parser.add_argument("--deduplicate", action='store_true', help="If True, deduplicate similar sketches")
+    parser.add_argument("--deduplicate_bins", type=int, default=5, help="If set, deduplicate sketches using this number of quantization bins")
     parser.add_argument("--prim_num_range", type=int, nargs=2, default=(6, 16), help="Only convert sketches with number of primitives in this range")
     parser.add_argument("--cons_num_range", type=int, nargs=2, default=(0, 64),help="Only convert sketches with number of constraints in this range" )
     args = parser.parse_args()
@@ -737,7 +820,11 @@ if __name__ == '__main__':
     os.makedirs(args.out_dir, exist_ok=True)
     os.makedirs(args.sketch_dump_dir, exist_ok=True)
 
-    context = SketchContext()
+    # Use specified deduplicate bins if provided
+    ctx_kwargs = {}
+    if args.deduplicate_bins:
+        ctx_kwargs['num_quantization_bins'] = args.deduplicate_bins
+    context = SketchContext(**ctx_kwargs)
     sketch_freecad_converter = SketchFreecadConverter(context, raise_on_error=False)
     tokenizer = SketchTokenizer(context)
     solver_feedback = SolverFeedback(context)
@@ -780,11 +867,9 @@ if __name__ == '__main__':
                 sg_sketch, _ = complete_constraint_values(sg_sketch, skip_invalid_constraints=True)
 
                 # 3.5 Deduplicate
-                if args.deduplicate:
-                    sg_sketch_copy = copy.deepcopy(sg_sketch)
-                    _ = normalize_sketch(sg_sketch_copy)
-                    tokens = tokenizer.tokenize(sg_sketch_copy, allow_invalid_constraints=True)
-                    sketch_hash = (tuple(tokens['p_val']), tuple(tokens['c_val']))
+                if args.deduplicate_bins is not None:
+                    sketch_hash = get_sketch_hash(sg_sketch, n_bins=args.deduplicate_bins)
+
                     if sketch_hash in seen_hashes:
                         solver_summary["Duplicate"] += 1
                         continue

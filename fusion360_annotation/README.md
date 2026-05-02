@@ -11,7 +11,7 @@ FREECAD_CMD_CLEAN_DIR="disk2/Fusion360Gallery/r1.0.1/freecad_commands_cleanup"
 OUTSOURCE_DIR="disk2/Fusion360Gallery/r1.0.1/freecad_commands_outsource"
 OUTSOURCE_DIR_SPLIT="disk2/Fusion360Gallery/r1.0.1/freecad_commands_outsource_split"
 
-python scripts/convert_fusion360_to_freecad.py --test_data_only --deduplicate \
+python scripts/convert_fusion360_to_freecad.py --test_data_only --deduplicate_bins 8 \
     --data_dir $FUSION360_DIR \
     --out_dir $FREECAD_CMD_DIR
 python fusion360_annotation/cleanup_sketch.py \
