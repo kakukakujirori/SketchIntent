@@ -30,6 +30,16 @@ class RadiusHandler(ConstraintHandler):
         val = float(params[0]) if len(params) > 0 else 0.0
         return self.create_constraint(self.name, refs, val)
 
+    def residual(self, constraint: datalib.Constraint, state: 'SketchState') -> 'torch.Tensor':
+        import torch
+        refs = self._get_ref_strings(constraint)
+        if len(refs) < 1:
+            return torch.zeros(1, dtype=state.dtype)
+        eid = refs[0].split('.')[0]
+        r = state.get_radius(eid)
+        r0 = float(r.detach())
+        return (r - r0).unsqueeze(0)
+
     def to_freecad(self, constraint: datalib.Constraint, primitives: dict[str, datalib.Entity], primitive_geoID: dict[str, tuple[int, int]]) -> list[tuple[str, list, float | None]]:
         refs = self._get_ref_strings(constraint)
         props = self.get_constraint_props(constraint)

@@ -30,6 +30,18 @@ class LengthHandler(ConstraintHandler):
         val = float(params[0]) if len(params) > 0 else 0.0
         return self.create_constraint(self.name, refs, val, direction="MINIMUM")
 
+    def residual(self, constraint: datalib.Constraint, state: 'SketchState') -> 'torch.Tensor':
+        import torch
+        refs = self._get_ref_strings(constraint)
+        if len(refs) < 1:
+            return torch.zeros(1, dtype=state.dtype)
+        eid = refs[0].split('.')[0]
+        s = state.get_point(eid + '.start')
+        e = state.get_point(eid + '.end')
+        length = torch.linalg.norm(e - s)
+        l0 = float(length.detach())
+        return (length - l0).unsqueeze(0)
+
     def to_freecad(self, constraint: datalib.Constraint, primitives: dict[str, datalib.Entity], primitive_geoID: dict[str, tuple[int, int]]) -> list[tuple[str, list, float | None]]:
         refs = self._get_ref_strings(constraint)
         props = self.get_constraint_props(constraint)

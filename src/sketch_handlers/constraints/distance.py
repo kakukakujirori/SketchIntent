@@ -42,6 +42,52 @@ class DistanceHandler(ConstraintHandler):
         val = float(params[0]) if len(params) > 0 else 0.0
         return self.create_constraint(self.name, refs, val, direction="MINIMUM")
 
+    def residual(self, constraint: datalib.Constraint, state: 'SketchState') -> 'torch.Tensor':
+        """
+        Distance/DistanceX/DistanceY residual.
+        Value is taken from current geometry at q₀ (residual=0 at q₀, Jacobian≠0).
+        direction is read from constraint parameters.
+        """
+        import torch
+        import numpy as np
+        from sketchgraphs.data._constraint import DirectionValue
+        refs = self._get_ref_strings(constraint)
+
+        # Determine direction
+        direction = 'MINIMUM'
+        for param in constraint.parameters:
+            if getattr(param, 'parameterId', None) == 'direction':
+                direction = getattr(param, 'value', 'MINIMUM')
+
+        if len(refs) == 1:
+            # Line / arc length: ‖end - start‖
+            eid = refs[0].split('.')[0]
+            s = state.get_point(eid + '.start')
+            e = state.get_point(eid + '.end')
+            if direction in ('HORIZONTAL', DirectionValue.HORIZONTAL):
+                val0 = float(abs((e - s)[0].detach()))
+                return (torch.abs(e[0] - s[0]) - val0).unsqueeze(0)
+            elif direction in ('VERTICAL', DirectionValue.VERTICAL):
+                val0 = float(abs((e - s)[1].detach()))
+                return (torch.abs(e[1] - s[1]) - val0).unsqueeze(0)
+            else:
+                val0 = float(torch.linalg.norm((e - s).detach()))
+                return (torch.linalg.norm(e - s) - val0).unsqueeze(0)
+        elif len(refs) == 2:
+            p1 = state.get_point(refs[0])
+            p2 = state.get_point(refs[1])
+            diff = p1 - p2
+            if direction in ('HORIZONTAL', DirectionValue.HORIZONTAL):
+                val0 = float(abs(diff[0].detach()))
+                return (torch.abs(diff[0]) - val0).unsqueeze(0)
+            elif direction in ('VERTICAL', DirectionValue.VERTICAL):
+                val0 = float(abs(diff[1].detach()))
+                return (torch.abs(diff[1]) - val0).unsqueeze(0)
+            else:
+                val0 = float(torch.linalg.norm(diff.detach()))
+                return (torch.linalg.norm(diff) - val0).unsqueeze(0)
+        return torch.zeros(1, dtype=state.dtype)
+
     def to_freecad(self, constraint: datalib.Constraint, primitives: dict[str, datalib.Entity], primitive_geoID: dict[str, tuple[int, int]]) -> list[tuple[str, list, float | None]]:
         refs = self._get_ref_strings(constraint)
         props = self.get_constraint_props(constraint)

@@ -28,6 +28,29 @@ class EqualHandler(ConstraintHandler):
         refs = tuple(tokenpos_to_primitive[idx] for idx in ref_indices)
         return self.create_constraint(self.name, refs)
 
+    def residual(self, constraint: datalib.Constraint, state: 'SketchState') -> 'torch.Tensor':
+        import torch
+        refs = self._get_ref_strings(constraint)
+        if len(refs) < 2:
+            return torch.zeros(1, dtype=state.dtype)
+        eid1 = refs[0].split('.')[0]
+        eid2 = refs[1].split('.')[0]
+        e1 = state.sketch.entities.get(eid1)
+        e2 = state.sketch.entities.get(eid2)
+        if isinstance(e1, (datalib.Circle, datalib.Arc)) and isinstance(e2, (datalib.Circle, datalib.Arc)):
+            r1 = state.get_radius(eid1)
+            r2 = state.get_radius(eid2)
+            return (r1 - r2).unsqueeze(0)
+        else:
+            # Line lengths: ‖end - start‖ difference
+            s1 = state.get_point(eid1 + '.start')
+            e1p = state.get_point(eid1 + '.end')
+            s2 = state.get_point(eid2 + '.start')
+            e2p = state.get_point(eid2 + '.end')
+            len1 = torch.linalg.norm(e1p - s1)
+            len2 = torch.linalg.norm(e2p - s2)
+            return (len1 - len2).unsqueeze(0)
+
     def to_freecad(self, constraint: datalib.Constraint, primitives: dict[str, datalib.Entity], primitive_geoID: dict[str, tuple[int, int]]) -> list[tuple[str, list, float | None]]:
         refs = self._get_ref_strings(constraint)
         if not self.validate_refs(refs):

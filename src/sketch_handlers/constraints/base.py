@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 from typing import Any, TYPE_CHECKING
 import numpy as np
+import torch
 import sketchgraphs.data as datalib
 from sketchgraphs.data._constraint import (
     Constraint,
@@ -95,6 +96,24 @@ class ConstraintHandler(ABC):
             fc_primitives: List of FreeCAD Geometry objects.
             geoID_to_primitive: Dictionary mapping (GeoID, PointID) tuple -> reference string
                                 (e.g. "0", "0.start", "0.center").
+        """
+        pass
+
+    @abstractmethod
+    def residual(self, constraint: datalib.Constraint, state: 'SketchState') -> torch.Tensor:
+        """
+        Compute a differentiable residual vector r(q) for this constraint at the current sketch state.
+
+        The residual is zero (or near-zero) when the constraint is exactly satisfied.
+        For the null-space metric, the Jacobian dr/dq at q₀ is what matters;
+        the residual value itself is not used.
+
+        Args:
+            constraint: The SketchGraphs Constraint object (with values already filled).
+            state: A SketchState providing differentiable parameter tensors for each entity.
+
+        Returns:
+            torch.Tensor of shape (k,) where k >= 1.
         """
         pass
 

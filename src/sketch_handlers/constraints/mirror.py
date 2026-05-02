@@ -50,6 +50,42 @@ class MirrorHandler(ConstraintHandler):
         refs = tuple(tokenpos_to_primitive[idx] for idx in ref_indices)
         return self.create_constraint(self.name, refs)
 
+    def residual(self, constraint: datalib.Constraint, state: 'SketchState') -> 'torch.Tensor':
+        """
+        Mirror(p1, p2, axis): p1 and p2 are symmetric about axis.
+        Residual = midpoint(p1, p2) - projection_onto_axis(midpoint(p1, p2))
+        which equals:  midpoint - proj  (2-element vector, zero when symmetric)
+
+        Axis is a Line (edge ref, p=0) or a Point (subnode ref with p>0).
+        """
+        import torch
+        refs = self._get_ref_strings(constraint)
+        if len(refs) < 3:
+            return torch.zeros(2, dtype=state.dtype)
+
+        p1 = state.get_point(refs[0])
+        p2 = state.get_point(refs[1])
+        mid = (p1 + p2) * 0.5
+
+        # Determine axis type: edge (no '.') or point ('.')
+        axis_ref = refs[2]
+        axis_eid = axis_ref.split('.')[0]
+        axis_entity = state.sketch.entities.get(axis_eid)
+
+        if isinstance(axis_entity, datalib.Line) and '.' not in axis_ref:
+            # Axis is a line: project mid onto the line
+            s = state.get_point(axis_eid + '.start')
+            e = state.get_point(axis_eid + '.end')
+            d = e - s
+            d_norm_sq = d[0] ** 2 + d[1] ** 2 + 1e-30
+            t = ((mid[0] - s[0]) * d[0] + (mid[1] - s[1]) * d[1]) / d_norm_sq
+            proj = s + t * d
+            return mid - proj  # (2,)
+        else:
+            # Axis is a point: mid must equal that point
+            axis_pt = state.get_point(axis_ref)
+            return mid - axis_pt  # (2,)
+
     def to_freecad(self, constraint: datalib.Constraint, primitives: dict[str, datalib.Entity], primitive_geoID: dict[str, tuple[int, int]]) -> list[tuple[str, list, float | None]]:
         refs = self._get_ref_strings(constraint)
         if not self.validate_refs(refs):

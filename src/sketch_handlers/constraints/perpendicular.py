@@ -28,6 +28,23 @@ class PerpendicularHandler(ConstraintHandler):
         refs = tuple(tokenpos_to_primitive[idx] for idx in ref_indices)
         return self.create_constraint(self.name, refs)
 
+    def residual(self, constraint: datalib.Constraint, state: 'SketchState') -> 'torch.Tensor':
+        import torch
+        refs = self._get_ref_strings(constraint)
+        if len(refs) < 2:
+            return torch.zeros(1, dtype=state.dtype)
+        eid1 = refs[0].split('.')[0]
+        eid2 = refs[1].split('.')[0]
+        s1 = state.get_point(eid1 + '.start')
+        e1 = state.get_point(eid1 + '.end')
+        s2 = state.get_point(eid2 + '.start')
+        e2 = state.get_point(eid2 + '.end')
+        d1 = e1 - s1
+        d2 = e2 - s2
+        # Dot product: zero when perpendicular
+        dot = d1[0] * d2[0] + d1[1] * d2[1]
+        return dot.unsqueeze(0)
+
     def to_freecad(self, constraint: datalib.Constraint, primitives: dict[str, datalib.Entity], primitive_geoID: dict[str, tuple[int, int]]) -> list[tuple[str, list, float | None]]:
         refs = self._get_ref_strings(constraint)
         if not self.validate_refs(refs):

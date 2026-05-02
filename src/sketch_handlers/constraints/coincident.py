@@ -28,6 +28,15 @@ class CoincidentHandler(ConstraintHandler):
         refs = tuple(tokenpos_to_primitive[idx] for idx in ref_indices)
         return self.create_constraint(self.name, refs)
 
+    def residual(self, constraint: datalib.Constraint, state: 'SketchState') -> 'torch.Tensor':
+        import torch
+        refs = self._get_ref_strings(constraint)
+        if len(refs) < 2:
+            return torch.zeros(2, dtype=state.dtype)
+        p1 = state.get_point(refs[0])
+        p2 = state.get_point(refs[1])
+        return p1 - p2  # (2,): zero when coincident
+
     def to_freecad(self, constraint: datalib.Constraint, primitives: dict[str, datalib.Entity], primitive_geoID: dict[str, tuple[int, int]]) -> list[tuple[str, list, float | None]]:
         refs = self._get_ref_strings(constraint)
         if not self.validate_refs(refs):

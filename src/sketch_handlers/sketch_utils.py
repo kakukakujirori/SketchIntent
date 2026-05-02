@@ -162,6 +162,89 @@ def rescale_sketch(sketch: datalib.Sketch, dst_length: float = 1.0) -> float:
     return factor
 
 
+def rotate_sketch(sketch: datalib.Sketch, angle_rad: float):
+    """Rotate the sketch by the given angle in radians around the origin.
+    """
+    cos_a = math.cos(angle_rad)
+    sin_a = math.sin(angle_rad)
+
+    for ent in sketch.entities.values():
+        if ent.type == EntityType.Line:
+            x, y = ent.pntX, ent.pntY
+            ent.pntX = x * cos_a - y * sin_a
+            ent.pntY = x * sin_a + y * cos_a
+            dx, dy = ent.dirX, ent.dirY
+            ent.dirX = dx * cos_a - dy * sin_a
+            ent.dirY = dx * sin_a + dy * cos_a
+        elif ent.type in (EntityType.Circle, EntityType.Arc):
+            x, y = ent.xCenter, ent.yCenter
+            ent.xCenter = x * cos_a - y * sin_a
+            ent.yCenter = x * sin_a + y * cos_a
+            if ent.type == EntityType.Arc:
+                ent.startAngle += angle_rad
+                ent.endAngle += angle_rad
+        elif ent.type == EntityType.Point:
+            x, y = ent.x, ent.y
+            ent.x = x * cos_a - y * sin_a
+            ent.y = x * sin_a + y * cos_a
+
+
+
+def normalize_sketch_circumradius(sketch: datalib.Sketch) -> float:
+    """Center and rescale the sketch based on its circumradius (max distance from center).
+    This is more robust to rotation than BBox-based normalization.
+    """
+    all_pts = []
+    for ent in sketch.entities.values():
+        if ent.type == EntityType.Line:
+            p, d = np.array([ent.pntX, ent.pntY]), np.array([ent.dirX, ent.dirY])
+            all_pts.extend([p + ent.startParam * d, p + ent.endParam * d])
+        elif ent.type in (EntityType.Circle, EntityType.Arc):
+            all_pts.append(np.array([ent.xCenter, ent.yCenter]))
+            r = ent.radius
+            all_pts.append(np.array([ent.xCenter + r, ent.yCenter]))
+            if ent.type == EntityType.Arc:
+                all_pts.append(np.array([ent.xCenter + r*math.cos(ent.startAngle), ent.yCenter + r*math.sin(ent.startAngle)]))
+                all_pts.append(np.array([ent.xCenter + r*math.cos(ent.endAngle), ent.yCenter + r*math.sin(ent.endAngle)]))
+        elif ent.type == EntityType.Point:
+            all_pts.append(np.array([ent.x, ent.y]))
+
+    if not all_pts: return 0.0
+
+    all_pts = np.array(all_pts)
+    # Use BBox center for better stability against redundant points/gaps
+    min_pt = np.min(all_pts, axis=0)
+    max_pt = np.max(all_pts, axis=0)
+    center = (min_pt + max_pt) / 2.0
+
+    # Apply translation
+    for ent in sketch.entities.values():
+        if ent.type == EntityType.Line:
+            ent.pntX -= center[0]; ent.pntY -= center[1]
+        elif ent.type in (EntityType.Circle, EntityType.Arc):
+            ent.xCenter -= center[0]; ent.yCenter -= center[1]
+        elif ent.type == EntityType.Point:
+            ent.x -= center[0]; ent.y -= center[1]
+
+    all_pts -= center
+    max_dist = np.max(np.linalg.norm(all_pts, axis=1))
+
+    # Apply scaling
+    if max_dist > 1e-6:
+        for ent in sketch.entities.values():
+            if ent.type == EntityType.Line:
+                ent.pntX /= max_dist; ent.pntY /= max_dist
+                ent.startParam /= max_dist
+                ent.endParam /= max_dist
+            elif ent.type in (EntityType.Circle, EntityType.Arc):
+                ent.xCenter /= max_dist; ent.yCenter /= max_dist
+                ent.radius /= max_dist
+            elif ent.type == EntityType.Point:
+                ent.x /= max_dist; ent.y /= max_dist
+
+    return max_dist
+
+
 def normalize_sketch(sketch: datalib.Sketch, dst_length: float = 1.0) -> float:
     """Helper function that both centers and rescales the given sketch in place.
     """

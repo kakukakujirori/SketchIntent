@@ -56,6 +56,36 @@ class MidpointHandler(ConstraintHandler):
         refs = tuple(tokenpos_to_primitive[idx] for idx in ref_indices)
         return self.create_constraint(self.name, refs)
 
+    def residual(self, constraint: datalib.Constraint, state: 'SketchState') -> 'torch.Tensor':
+        """
+        Midpoint residual.
+        2-ref form (point, line): p - (line.start + line.end) / 2
+        3-ref form (pt1, pt2, mid): mid - (pt1 + pt2) / 2
+        """
+        import torch
+        refs = self._get_ref_strings(constraint)
+        if len(refs) == 2:
+            # Determine which is the point and which is the line
+            ref_a, ref_b = refs[0], refs[1]
+            eid_a = ref_a.split('.')[0]
+            eid_b = ref_b.split('.')[0]
+            ent_a = state.sketch.entities.get(eid_a)
+            ent_b = state.sketch.entities.get(eid_b)
+            if isinstance(ent_a, datalib.Line):
+                line_eid, pt_ref = eid_a, ref_b
+            else:
+                line_eid, pt_ref = eid_b, ref_a
+            mid_pt = state.get_point(pt_ref)
+            s = state.get_point(line_eid + '.start')
+            e = state.get_point(line_eid + '.end')
+            return mid_pt - (s + e) * 0.5  # (2,)
+        elif len(refs) == 3:
+            p1 = state.get_point(refs[0])
+            p2 = state.get_point(refs[1])
+            mid = state.get_point(refs[2])
+            return mid - (p1 + p2) * 0.5  # (2,)
+        return torch.zeros(2, dtype=state.dtype)
+
     def to_freecad(self, constraint: datalib.Constraint, primitives: dict[str, datalib.Entity], primitive_geoID: dict[str, tuple[int, int]]) -> list[tuple[str, list, float | None]]:
         refs = self._get_ref_strings(constraint)
 

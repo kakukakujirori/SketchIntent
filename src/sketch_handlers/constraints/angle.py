@@ -31,6 +31,40 @@ class AngleHandler(ConstraintHandler):
         val = float(params[0]) if len(params) > 0 else 0.0
         return self.create_constraint(self.name, refs, val)
 
+    def residual(self, constraint: datalib.Constraint, state: 'SketchState') -> 'torch.Tensor':
+        """
+        Angle residual = atan2(cross, dot) - θ₀
+        where θ₀ is computed from current geometry (so residual=0 at q₀ but Jacobian ≠ 0).
+        For 1-ref: angle of line direction w.r.t. X-axis.
+        For 2-ref: angle between two line directions.
+        """
+        import torch
+        refs = self._get_ref_strings(constraint)
+        if len(refs) == 1:
+            eid = refs[0].split('.')[0]
+            s = state.get_point(eid + '.start')
+            e = state.get_point(eid + '.end')
+            d = e - s
+            angle = torch.atan2(d[1], d[0])
+            theta0 = float(torch.atan2(d[1].detach(), d[0].detach()))
+            return (angle - theta0).unsqueeze(0)
+        elif len(refs) == 2:
+            eid1 = refs[0].split('.')[0]
+            eid2 = refs[1].split('.')[0]
+            s1 = state.get_point(eid1 + '.start')
+            e1 = state.get_point(eid1 + '.end')
+            s2 = state.get_point(eid2 + '.start')
+            e2 = state.get_point(eid2 + '.end')
+            d1 = e1 - s1
+            d2 = e2 - s2
+            cross = d1[0] * d2[1] - d1[1] * d2[0]
+            dot = d1[0] * d2[0] + d1[1] * d2[1]
+            angle = torch.atan2(cross, dot)
+            theta0 = float(torch.atan2(cross.detach(), dot.detach()))
+            return (angle - theta0).unsqueeze(0)
+        import torch as _t
+        return _t.zeros(1, dtype=state.dtype)
+
     def to_freecad(self, constraint: datalib.Constraint, primitives: dict[str, datalib.Entity], primitive_geoID: dict[str, tuple[int, int]]) -> list[tuple[str, list, float | None]]:
         refs = self._get_ref_strings(constraint)
         props = self.get_constraint_props(constraint)
