@@ -74,18 +74,56 @@ class DistanceHandler(ConstraintHandler):
                 val0 = float(torch.linalg.norm((e - s).detach()))
                 return (torch.linalg.norm(e - s) - val0).unsqueeze(0)
         elif len(refs) == 2:
-            p1 = state.get_point(refs[0])
-            p2 = state.get_point(refs[1])
-            diff = p1 - p2
-            if direction in ('HORIZONTAL', DirectionValue.HORIZONTAL):
-                val0 = float(abs(diff[0].detach()))
-                return (torch.abs(diff[0]) - val0).unsqueeze(0)
-            elif direction in ('VERTICAL', DirectionValue.VERTICAL):
-                val0 = float(abs(diff[1].detach()))
-                return (torch.abs(diff[1]) - val0).unsqueeze(0)
+            ref0, ref1 = refs[0], refs[1]
+            eid0 = ref0.split('.')[0]
+            eid1 = ref1.split('.')[0]
+            ent0 = state.sketch.entities.get(eid0)
+            ent1 = state.sketch.entities.get(eid1)
+            # Check if one ref is a bare Line edge (no '.') and the other is a sub-point
+            is_bare_line0 = ('.' not in ref0) and isinstance(ent0, datalib.Line)
+            is_bare_line1 = ('.' not in ref1) and isinstance(ent1, datalib.Line)
+
+            if is_bare_line0 and not is_bare_line1:
+                # Point-to-Line distance: perpendicular distance from p1 to line0
+                # This is gauge-invariant (sliding/scaling line0 doesn't change distance)
+                pt = state.get_point(ref1)
+                s0 = state.get_point(eid0 + '.start')
+                e0 = state.get_point(eid0 + '.end')
+                d0 = e0 - s0
+                # Signed perpendicular distance = cross(d0, pt - s0) / ||d0||
+                # where cross2d(a, b) = a[0]*b[1] - a[1]*b[0]
+                dp = pt - s0
+                cross = d0[0] * dp[1] - d0[1] * dp[0]
+                dist = cross / (torch.linalg.norm(d0) + 1e-15)
+                val0 = float(dist.detach())
+                return (dist - val0).unsqueeze(0)
+
+            elif is_bare_line1 and not is_bare_line0:
+                # Point-to-Line distance: perpendicular distance from pt to line1
+                pt = state.get_point(ref0)
+                s1 = state.get_point(eid1 + '.start')
+                e1 = state.get_point(eid1 + '.end')
+                d1 = e1 - s1
+                dp = pt - s1
+                cross = d1[0] * dp[1] - d1[1] * dp[0]
+                dist = cross / (torch.linalg.norm(d1) + 1e-15)
+                val0 = float(dist.detach())
+                return (dist - val0).unsqueeze(0)
+
             else:
-                val0 = float(torch.linalg.norm(diff.detach()))
-                return (torch.linalg.norm(diff) - val0).unsqueeze(0)
+                # Point-to-Point distance (or line center to line center)
+                p1 = state.get_point(ref0)
+                p2 = state.get_point(ref1)
+                diff = p1 - p2
+                if direction in ('HORIZONTAL', DirectionValue.HORIZONTAL):
+                    val0 = float(abs(diff[0].detach()))
+                    return (torch.abs(diff[0]) - val0).unsqueeze(0)
+                elif direction in ('VERTICAL', DirectionValue.VERTICAL):
+                    val0 = float(abs(diff[1].detach()))
+                    return (torch.abs(diff[1]) - val0).unsqueeze(0)
+                else:
+                    val0 = float(torch.linalg.norm(diff.detach()))
+                    return (torch.linalg.norm(diff) - val0).unsqueeze(0)
         return torch.zeros(1, dtype=state.dtype)
 
     def to_freecad(self, constraint: datalib.Constraint, primitives: dict[str, datalib.Entity], primitive_geoID: dict[str, tuple[int, int]]) -> list[tuple[str, list, float | None]]:

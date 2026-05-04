@@ -109,28 +109,125 @@ class TangentHandler(ConstraintHandler):
                 return torch.zeros(1, dtype=state.dtype)
 
         # ---- Point-specified case ----
-        # Most common: arc endpoint tangent to line
-        # The point constraint enforces that the arc end is on the line;
-        # here we enforce tangency: dot(center - point, line_dir) = 0
+        # In FreeCAD, Tangent(Point1, Point2) or Tangent(Point1, Edge2) 
+        # implies Coincidence/PointOnObject PLUS Tangency.
+        
+        if has_sub1 and has_sub2:
+            pt1 = state.get_point(ref1)
+            pt2 = state.get_point(ref2)
+            # 1. Coincidence (2 residuals)
+            res_coinc = pt1 - pt2
+            
+            # 2. Tangency (1 residual)
+            # For Arc-Line or Arc-Arc, tangency at a shared point means 
+            # the radial vector is perpendicular to the line/tangent.
+            if isinstance(e1, (datalib.Circle, datalib.Arc)) and isinstance(e2, datalib.Line):
+                arc_center = state.get_point(eid1 + '.center')
+                s2 = state.get_point(eid2 + '.start')
+                e2 = state.get_point(eid2 + '.end')
+                d2 = e2 - s2
+                radial = arc_center - pt1
+                dot = radial[0] * d2[0] + radial[1] * d2[1]
+                return torch.cat([res_coinc, dot.unsqueeze(0)])
+            elif isinstance(e1, datalib.Line) and isinstance(e2, (datalib.Circle, datalib.Arc)):
+                arc_center = state.get_point(eid2 + '.center')
+                s1 = state.get_point(eid1 + '.start')
+                e1_p = state.get_point(eid1 + '.end')
+                d1 = e1_p - s1
+                radial = arc_center - pt2
+                dot = radial[0] * d1[0] + radial[1] * d1[1]
+                return torch.cat([res_coinc, dot.unsqueeze(0)])
+            elif isinstance(e1, (datalib.Circle, datalib.Arc)) and isinstance(e2, (datalib.Circle, datalib.Arc)):
+                c1 = state.get_point(eid1 + '.center')
+                c2 = state.get_point(eid2 + '.center')
+                # Tangency at shared point P means C1, P, C2 are collinear.
+                # Cross product of (C1-P) and (C2-P) should be 0.
+                v1 = c1 - pt1
+                v2 = c2 - pt2
+                cross = v1[0] * v2[1] - v1[1] * v2[0]
+                return torch.cat([res_coinc, cross.unsqueeze(0)])
+            return res_coinc
+
         if has_sub1:
-            pt = state.get_point(ref1)  # arc endpoint
-            arc_center = state.get_point(eid1 + '.center')
-            # eid2 should be a line
-            s = state.get_point(eid2 + '.start')
-            e = state.get_point(eid2 + '.end')
-            d = e - s
-            radial = arc_center - pt
-            dot = radial[0] * d[0] + radial[1] * d[1]
-            return dot.unsqueeze(0)
-        else:
-            pt = state.get_point(ref2)
-            arc_center = state.get_point(eid2 + '.center')
-            s = state.get_point(eid1 + '.start')
-            e = state.get_point(eid1 + '.end')
-            d = e - s
-            radial = arc_center - pt
-            dot = radial[0] * d[0] + radial[1] * d[1]
-            return dot.unsqueeze(0)
+            pt1 = state.get_point(ref1)
+            # 1. PointOnObject (1 residual: distance to edge2)
+            if isinstance(e2, datalib.Line):
+                s2 = state.get_point(eid2 + '.start')
+                e2_p = state.get_point(eid2 + '.end')
+                d2 = e2_p - s2
+                n2 = torch.stack([-d2[1], d2[0]])
+                dist = torch.dot(pt1 - s2, n2) / (torch.linalg.norm(d2) + 1e-15)
+                
+                # 2. Tangency (1 residual)
+                if isinstance(e1, (datalib.Circle, datalib.Arc)):
+                    arc_center = state.get_point(eid1 + '.center')
+                    radial = arc_center - pt1
+                    dot = radial[0] * d2[0] + radial[1] * d2[1]
+                    return torch.stack([dist, dot])
+                return dist.unsqueeze(0)
+            elif isinstance(e2, (datalib.Circle, datalib.Arc)):
+                # PointOnObject: dist(pt1, center2) - r2
+                c2 = state.get_point(eid2 + '.center')
+                r2 = state.get_radius(eid2)
+                dist_pc = torch.linalg.norm(pt1 - c2)
+                res_dist = dist_pc - r2
+                
+                # Tangency: If e1 is also a circle, their centers and pt1 must be collinear
+                if isinstance(e1, (datalib.Circle, datalib.Arc)):
+                    c1 = state.get_point(eid1 + '.center')
+                    v1 = pt1 - c1
+                    v2 = pt1 - c2
+                    cross = v1[0] * v2[1] - v1[1] * v2[0]
+                    return torch.stack([res_dist, cross])
+                elif isinstance(e1, datalib.Line):
+                    # Point pt1 (on line1) is tangent to circle2
+                    s1 = state.get_point(eid1 + '.start')
+                    e1_p = state.get_point(eid1 + '.end')
+                    d1 = e1_p - s1
+                    radial = pt1 - c2
+                    dot = radial[0] * d1[0] + radial[1] * d1[1]
+                    return torch.stack([res_dist, dot])
+                return res_dist.unsqueeze(0)
+            return torch.zeros(1, dtype=state.dtype)
+
+        if has_sub2:
+            pt2 = state.get_point(ref2)
+            if isinstance(e1, datalib.Line):
+                s1 = state.get_point(eid1 + '.start')
+                e1_p = state.get_point(eid1 + '.end')
+                d1 = e1_p - s1
+                n1 = torch.stack([-d1[1], d1[0]])
+                dist = torch.dot(pt2 - s1, n1) / (torch.linalg.norm(d1) + 1e-15)
+                
+                if isinstance(e2, (datalib.Circle, datalib.Arc)):
+                    arc_center = state.get_point(eid2 + '.center')
+                    radial = arc_center - pt2
+                    dot = radial[0] * d1[0] + radial[1] * d1[1]
+                    return torch.stack([dist, dot])
+                return dist.unsqueeze(0)
+            elif isinstance(e1, (datalib.Circle, datalib.Arc)):
+                c1 = state.get_point(eid1 + '.center')
+                r1 = state.get_radius(eid1)
+                dist_pc = torch.linalg.norm(pt2 - c1)
+                res_dist = dist_pc - r1
+                
+                if isinstance(e2, (datalib.Circle, datalib.Arc)):
+                    c2 = state.get_point(eid2 + '.center')
+                    v1 = pt2 - c1
+                    v2 = pt2 - c2
+                    cross = v1[0] * v2[1] - v1[1] * v2[0]
+                    return torch.stack([res_dist, cross])
+                elif isinstance(e2, datalib.Line):
+                    s2 = state.get_point(eid2 + '.start')
+                    e2_p = state.get_point(eid2 + '.end')
+                    d2 = e2_p - s2
+                    radial = pt2 - c1
+                    dot = radial[0] * d2[0] + radial[1] * d2[1]
+                    return torch.stack([res_dist, dot])
+                return res_dist.unsqueeze(0)
+            return torch.zeros(1, dtype=state.dtype)
+
+        return torch.zeros(1, dtype=state.dtype)
 
     def to_freecad(self, constraint: datalib.Constraint, primitives: dict[str, datalib.Entity], primitive_geoID: dict[str, tuple[int, int]]) -> list[tuple[str, list, float | None]]:
         refs = self._get_ref_strings(constraint)

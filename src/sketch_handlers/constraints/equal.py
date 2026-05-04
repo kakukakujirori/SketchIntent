@@ -37,19 +37,26 @@ class EqualHandler(ConstraintHandler):
         eid2 = refs[1].split('.')[0]
         e1 = state.sketch.entities.get(eid1)
         e2 = state.sketch.entities.get(eid2)
-        if isinstance(e1, (datalib.Circle, datalib.Arc)) and isinstance(e2, (datalib.Circle, datalib.Arc)):
+        is_curve1 = isinstance(e1, (datalib.Circle, datalib.Arc))
+        is_curve2 = isinstance(e2, (datalib.Circle, datalib.Arc))
+        is_line1 = isinstance(e1, datalib.Line)
+        is_line2 = isinstance(e2, datalib.Line)
+
+        if is_curve1 and is_curve2:
             r1 = state.get_radius(eid1)
             r2 = state.get_radius(eid2)
             return (r1 - r2).unsqueeze(0)
-        else:
-            # Line lengths: ‖end - start‖ difference
+        elif is_line1 and is_line2:
+            # Line lengths: stabilized norm difference
             s1 = state.get_point(eid1 + '.start')
             e1p = state.get_point(eid1 + '.end')
             s2 = state.get_point(eid2 + '.start')
             e2p = state.get_point(eid2 + '.end')
-            len1 = torch.linalg.norm(e1p - s1)
-            len2 = torch.linalg.norm(e2p - s2)
+            len1 = torch.sqrt(torch.sum((e1p - s1)**2) + 1e-12)
+            len2 = torch.sqrt(torch.sum((e2p - s2)**2) + 1e-12)
             return (len1 - len2).unsqueeze(0)
+        else:
+            raise ValueError(f"Equal constraint between incompatible types: {type(e1)} and {type(e2)}")
 
     def to_freecad(self, constraint: datalib.Constraint, primitives: dict[str, datalib.Entity], primitive_geoID: dict[str, tuple[int, int]]) -> list[tuple[str, list, float | None]]:
         refs = self._get_ref_strings(constraint)

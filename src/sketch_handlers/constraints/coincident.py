@@ -33,6 +33,56 @@ class CoincidentHandler(ConstraintHandler):
         refs = self._get_ref_strings(constraint)
         if len(refs) < 2:
             return torch.zeros(2, dtype=state.dtype)
+
+        ref1, ref2 = refs[0], refs[1]
+        eid1 = ref1.split('.')[0]
+        eid2 = ref2.split('.')[0]
+        e1 = state.sketch.entities.get(eid1)
+        e2 = state.sketch.entities.get(eid2)
+
+        # Case: Both are edges (Collinear)
+        # An "edge" or "object" ref is just the eid (e.g. '4'), not '4.start' or '4.center'.
+        is_edge1 = (ref1 == eid1) and not isinstance(e1, datalib.Point)
+        is_edge2 = (ref2 == eid2) and not isinstance(e2, datalib.Point)
+
+        if is_edge1 and is_edge2:
+            if isinstance(e1, datalib.Line) and isinstance(e2, datalib.Line):
+                p1 = state.get_point(ref1) # anchor of line 1
+                p2 = state.get_point(ref2) # anchor of line 2
+                _, d1, _, _ = state.get_line_params(eid1)
+                _, d2, _, _ = state.get_line_params(eid2)
+                
+                # 1. Parallel (1 DoF): cross product of dirs
+                cross = d1[0] * d2[1] - d1[1] * d2[0]
+                
+                # 2. On the same line (1 DoF): distance from p1 to line 2
+                n2 = torch.stack([-d2[1], d2[0]])
+                dist = torch.dot(p1 - p2, n2) / (torch.linalg.norm(d2) + 1e-15)
+                
+                return torch.stack([cross, dist])
+
+        # Case: One is an edge, the other is a point (PointOnObject)
+        elif is_edge1 or is_edge2:
+            pt_ref = ref2 if is_edge1 else ref1
+            edge_ref = ref1 if is_edge1 else ref2
+            edge_eid = edge_ref.split('.')[0]
+            edge_ent = state.sketch.entities[edge_eid]
+            pt = state.get_point(pt_ref)
+
+            if isinstance(edge_ent, datalib.Line):
+                s, d, _, _ = state.get_line_params(edge_eid)
+                n = torch.stack([-d[1], d[0]])
+                dist = torch.dot(pt - s, n) / (torch.linalg.norm(d) + 1e-15)
+                return dist.unsqueeze(0)
+            elif isinstance(edge_ent, (datalib.Circle, datalib.Arc)):
+                if isinstance(edge_ent, datalib.Arc):
+                    c, r, _, _ = state.get_arc_params(edge_eid)
+                else:
+                    c, r = state.get_circle_params(edge_eid)
+                dist = torch.linalg.norm(pt - c) - r
+                return dist.unsqueeze(0)
+
+        # Default point-to-point case
         p1 = state.get_point(refs[0])
         p2 = state.get_point(refs[1])
         return p1 - p2  # (2,): zero when coincident

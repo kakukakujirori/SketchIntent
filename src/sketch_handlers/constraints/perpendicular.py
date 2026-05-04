@@ -29,21 +29,43 @@ class PerpendicularHandler(ConstraintHandler):
         return self.create_constraint(self.name, refs)
 
     def residual(self, constraint: datalib.Constraint, state: 'SketchState') -> 'torch.Tensor':
+        """
+        Perpendicular residual.
+
+        FreeCAD distinguishes two forms:
+          - Edge-Edge (FirstPos==0, SecondPos==0): lines are perpendicular in direction only.
+            → 1 equation: d1 · d2 == 0
+          - Endpoint-Endpoint (FirstPos>0 or SecondPos>0): lines meet at specific endpoints
+            AND are perpendicular.
+            → 3 equations: [endpoint_coincidence_x, endpoint_coincidence_y, d1 · d2]
+        """
         import torch
         refs = self._get_ref_strings(constraint)
         if len(refs) < 2:
             return torch.zeros(1, dtype=state.dtype)
-        eid1 = refs[0].split('.')[0]
-        eid2 = refs[1].split('.')[0]
+
+        ref1, ref2 = refs[0], refs[1]
+        eid1 = ref1.split('.')[0]
+        eid2 = ref2.split('.')[0]
+        sub1 = ref1.split('.')[1] if '.' in ref1 else None
+        sub2 = ref2.split('.')[1] if '.' in ref2 else None
+
         s1 = state.get_point(eid1 + '.start')
         e1 = state.get_point(eid1 + '.end')
         s2 = state.get_point(eid2 + '.start')
         e2 = state.get_point(eid2 + '.end')
         d1 = e1 - s1
         d2 = e2 - s2
-        # Dot product: zero when perpendicular
         dot = d1[0] * d2[0] + d1[1] * d2[1]
-        return dot.unsqueeze(0)
+
+        # Endpoint form: also enforce that the referenced endpoints coincide
+        if sub1 is not None and sub2 is not None:
+            pt1 = state.get_point(ref1)
+            pt2 = state.get_point(ref2)
+            diff = pt1 - pt2  # (2,): [dx, dy]
+            return torch.cat([diff, dot.unsqueeze(0)])  # 3 equations
+
+        return dot.unsqueeze(0)  # 1 equation (edge-edge form)
 
     def to_freecad(self, constraint: datalib.Constraint, primitives: dict[str, datalib.Entity], primitive_geoID: dict[str, tuple[int, int]]) -> list[tuple[str, list, float | None]]:
         refs = self._get_ref_strings(constraint)

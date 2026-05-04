@@ -65,13 +65,21 @@ class MidpointHandler(ConstraintHandler):
         import torch
         refs = self._get_ref_strings(constraint)
         if len(refs) == 2:
-            # Determine which is the point and which is the line
+            # Determine which is the point/sub-point and which is the bare Line edge.
+            # A "bare edge" ref has NO '.' sub-specifier AND its entity is a Line.
+            # A "point" ref either has a '.' (e.g. 'L.start') or is a Point entity.
             ref_a, ref_b = refs[0], refs[1]
             eid_a = ref_a.split('.')[0]
             eid_b = ref_b.split('.')[0]
             ent_a = state.sketch.entities.get(eid_a)
             ent_b = state.sketch.entities.get(eid_b)
-            if isinstance(ent_a, datalib.Line):
+            is_edge_a = ('.' not in ref_a) and isinstance(ent_a, datalib.Line)
+            is_edge_b = ('.' not in ref_b) and isinstance(ent_b, datalib.Line)
+            if is_edge_a and not is_edge_b:
+                line_eid, pt_ref = eid_a, ref_b
+            elif is_edge_b and not is_edge_a:
+                line_eid, pt_ref = eid_b, ref_a
+            elif isinstance(ent_a, datalib.Line) and not isinstance(ent_b, datalib.Line):
                 line_eid, pt_ref = eid_a, ref_b
             else:
                 line_eid, pt_ref = eid_b, ref_a

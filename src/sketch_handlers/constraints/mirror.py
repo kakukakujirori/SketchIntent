@@ -9,7 +9,6 @@ from src.sketch_handlers.registry import CONSTRAINT_HANDLERS
 if TYPE_CHECKING:
     FreeCAD, Part, Sketcher = ensure_freecad_imported()
 
-
 @CONSTRAINT_HANDLERS.register_module()
 class MirrorHandler(ConstraintHandler):
     """
@@ -32,14 +31,9 @@ class MirrorHandler(ConstraintHandler):
         return "Mirror"
 
     def _sort_ref_tokens(self, ref_tokens: tuple[int, ...]) -> tuple[int, ...]:
-        """
-        NOTE: This function isused in _get_sorted_ref_tokens.
-        """
         if len(ref_tokens) == 3:
             sorted_refs = sorted(ref_tokens[:2]) + [ref_tokens[2]]
             return tuple(sorted_refs)
-
-        # NOTE: We don't emit an error here to ease error handling in the solver reward calculation.
         return tuple(sorted(ref_tokens))
 
     def encode(self, constraint: datalib.Constraint, primitive_tokenpos: dict[str, int]) -> tuple[int, tuple[int, ...], np.ndarray, tuple[int, ...]]:
@@ -51,40 +45,37 @@ class MirrorHandler(ConstraintHandler):
         return self.create_constraint(self.name, refs)
 
     def residual(self, constraint: datalib.Constraint, state: 'SketchState') -> 'torch.Tensor':
-        """
-        Mirror(p1, p2, axis): p1 and p2 are symmetric about axis.
-        Residual = midpoint(p1, p2) - projection_onto_axis(midpoint(p1, p2))
-        which equals:  midpoint - proj  (2-element vector, zero when symmetric)
-
-        Axis is a Line (edge ref, p=0) or a Point (subnode ref with p>0).
-        """
         import torch
         refs = self._get_ref_strings(constraint)
         if len(refs) < 3:
             return torch.zeros(2, dtype=state.dtype)
 
-        p1 = state.get_point(refs[0])
-        p2 = state.get_point(refs[1])
-        mid = (p1 + p2) * 0.5
-
-        # Determine axis type: edge (no '.') or point ('.')
+        # Determine axis parameters
         axis_ref = refs[2]
         axis_eid = axis_ref.split('.')[0]
         axis_entity = state.sketch.entities.get(axis_eid)
 
-        if isinstance(axis_entity, datalib.Line) and '.' not in axis_ref:
-            # Axis is a line: project mid onto the line
-            s = state.get_point(axis_eid + '.start')
-            e = state.get_point(axis_eid + '.end')
-            d = e - s
-            d_norm_sq = d[0] ** 2 + d[1] ** 2 + 1e-30
-            t = ((mid[0] - s[0]) * d[0] + (mid[1] - s[1]) * d[1]) / d_norm_sq
-            proj = s + t * d
-            return mid - proj  # (2,)
-        else:
-            # Axis is a point: mid must equal that point
-            axis_pt = state.get_point(axis_ref)
-            return mid - axis_pt  # (2,)
+        if not isinstance(axis_entity, datalib.Line) or '.' in axis_ref:
+            raise ValueError(f"Mirror axis must be a Line (edge), but got {axis_ref}. For point symmetry, use Midpoint.")
+
+        s_axis = state.get_point(axis_eid + '.start')
+        e_axis = state.get_point(axis_eid + '.end')
+        d_axis = e_axis - s_axis
+        d_axis = d_axis / (torch.linalg.norm(d_axis) + 1e-15)
+        n_axis = torch.stack([-d_axis[1], d_axis[0]])
+
+        # Point-point symmetry (2 DoF)
+        p1 = state.get_point(refs[0])
+        p2 = state.get_point(refs[1])
+
+        # 1. Midpoint must lie on the axis (1 DoF)
+        mid = (p1 + p2) * 0.5
+        dist = torch.dot(mid - s_axis, n_axis)
+
+        # 2. Vector p2-p1 must be parallel to axis normal (perpendicular to axis direction) (1 DoF)
+        para = torch.dot(p2 - p1, d_axis)
+
+        return torch.stack([dist, para])
 
     def to_freecad(self, constraint: datalib.Constraint, primitives: dict[str, datalib.Entity], primitive_geoID: dict[str, tuple[int, int]]) -> list[tuple[str, list, float | None]]:
         refs = self._get_ref_strings(constraint)

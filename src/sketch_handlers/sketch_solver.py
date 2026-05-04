@@ -357,6 +357,7 @@ def compute_null_space(
 def compute_row_space(
     J: torch.Tensor,
     eps: float = 1e-8,
+    base_indices: list[int] | None = None,
 ) -> torch.Tensor:
     """
     Compute the row space (range) of J via SVD.
@@ -364,22 +365,66 @@ def compute_row_space(
     The row space is the orthogonal complement of the null space.
     It represents the set of directions that the constraints actively restrict.
 
+    If `base_indices` is provided, computes the effective row space 
+    restricted to the specified subset of parameter indices.
+
     Parameters
     ----------
     J : (m, n)
     eps : singular value threshold for rank determination
+    base_indices : optional subset of parameter indices to restrict to
 
     Returns
     -------
     R : (n, r)  orthonormal basis of row(J), r = rank(J)
-        Returns (n, 0) empty tensor if J has no rows or rank 0.
+        If base_indices is provided, R is (len(base_indices), r).
+        Returns empty tensor if J has no rows or rank 0.
     """
+    if base_indices is None:
+        if J.shape[0] == 0:
+            # No constraints -> row space is trivial (zero-dimensional)
+            return torch.zeros(J.shape[1], 0, dtype=J.dtype)
+
+        _, S, Vh = torch.linalg.svd(J, full_matrices=True)
+        row_mask = torch.cat([S >= eps, torch.zeros(Vh.shape[0] - len(S), dtype=torch.bool)])
+        R = Vh[row_mask].T  # (n, r)
+        return R
+
+    # Compute effective row space for base_indices
+    n_base = len(base_indices)
+    
     if J.shape[0] == 0:
-        # No constraints -> row space is trivial (zero-dimensional)
-        return torch.zeros(J.shape[1], 0, dtype=J.dtype)
-
+        return torch.zeros(n_base, 0, dtype=J.dtype)
+        
     _, S, Vh = torch.linalg.svd(J, full_matrices=True)
-    row_mask = torch.cat([S >= eps, torch.zeros(Vh.shape[0] - len(S), dtype=torch.bool)])
-    R = Vh[row_mask].T  # (n, r)
-    return R
+    null_mask = torch.cat([S < eps, torch.ones(Vh.shape[0] - len(S), dtype=torch.bool, device=S.device)])
+    N = Vh[null_mask].T  # (n_total, k)
+    
+    if N.shape[1] == 0:
+        return torch.eye(n_base, dtype=J.dtype)
+        
+    N_base = N[base_indices, :]  # (n_base, k)
+    
+    U, S2, _ = torch.linalg.svd(N_base, full_matrices=False)
+    U_base = U[:, S2 >= eps]  # (n_base, k_base)
+    
+    if U_base.shape[1] == 0:
+        return torch.eye(n_base, dtype=J.dtype)
+        
+    if U_base.shape[1] == n_base:
+        return torch.zeros(n_base, 0, dtype=J.dtype)
+        
+    _, S3, Vh3 = torch.linalg.svd(U_base.T, full_matrices=True)
+    mask3 = torch.cat([S3 < eps, torch.ones(Vh3.shape[0] - len(S3), dtype=torch.bool, device=S3.device)])
+    R_base = Vh3[mask3].T  # (n_base, r_base)
+    
+    return R_base
 
+def get_entity_indices(state: SketchState, eids: list[str]) -> list[int]:
+    """Get the flat parameter indices for a list of entity IDs."""
+    indices = []
+    for eid in eids:
+        sl = state.slices.get(eid)
+        if sl is not None:
+            indices.extend(range(sl.start, sl.stop))
+    return indices

@@ -45,6 +45,7 @@ from src.sketch_handlers.sketch_solver import (
     compute_jacobian,
     compute_null_space,
     compute_row_space,
+    get_entity_indices,
 )
 
 
@@ -185,6 +186,7 @@ def compute_null_space_distance(
     eps_rank: float = 1e-8,
     dtype: torch.dtype = torch.float64,
     skip_pred_primary_extraction: bool = False,
+    base_eids: list[str] | None = None,
 ) -> dict:
     """
     Compute the row-space Grassmann distance between GT and Pred design intent.
@@ -201,6 +203,9 @@ def compute_null_space_distance(
                                   pred_primary_sketch (i.e. all its constraints are already primary).
                                   In this case pred_primary_ids = list(pred_sketch.constraints.keys())
                                   and pred_auxiliary_ids = [].
+    base_eids                   : if provided, restricts the null space / row space to the parameters
+                                  belonging only to these entity IDs (e.g., ignoring construction geometry).
+
 
     Returns
     -------
@@ -217,12 +222,18 @@ def compute_null_space_distance(
     """
     # --- Step 1: GT row space (= directions GT primary constraints restrict) ---
     gt_constraint_ids = list(gt_primary_sketch.constraints.keys())
-    J_gt, _ = compute_jacobian(gt_primary_sketch, gt_constraint_ids, context, dtype=dtype)
-    R_gt = compute_row_space(J_gt, eps=eps_rank)
-    N_gt = compute_null_space(J_gt, eps=eps_rank)
+    J_gt, state_gt = compute_jacobian(gt_primary_sketch, gt_constraint_ids, context, dtype=dtype)
+    
+    if base_eids is not None:
+        gt_base_indices = get_entity_indices(state_gt, base_eids)
+        R_gt = compute_row_space(J_gt, eps=eps_rank, base_indices=gt_base_indices)
+        gt_null_dim = len(gt_base_indices) - R_gt.shape[1]
+    else:
+        R_gt = compute_row_space(J_gt, eps=eps_rank)
+        N_gt = compute_null_space(J_gt, eps=eps_rank)
+        gt_null_dim = N_gt.shape[1]
 
     gt_row_dim = R_gt.shape[1]
-    gt_null_dim = N_gt.shape[1]
 
     # --- Step 2: Classify Pred constraints w.r.t. GT row space ---
     if skip_pred_primary_extraction:
@@ -230,17 +241,25 @@ def compute_null_space_distance(
         pred_primary_ids = list(pred_sketch.constraints.keys())
         pred_auxiliary_ids = []
     else:
+        if base_eids is not None:
+            raise NotImplementedError("classify_pred_constraints with base_eids is not implemented yet.")
         pred_primary_ids, pred_auxiliary_ids = classify_pred_constraints(
             pred_sketch, R_gt, context, eps=eps_preserve, dtype=dtype
         )
 
     # --- Step 3: Pred row space (primary constraints only) ---
-    J_pred, _ = compute_jacobian(pred_sketch, pred_primary_ids, context, dtype=dtype)
-    R_pred = compute_row_space(J_pred, eps=eps_rank)
-    N_pred = compute_null_space(J_pred, eps=eps_rank)
+    J_pred, state_pred = compute_jacobian(pred_sketch, pred_primary_ids, context, dtype=dtype)
+    
+    if base_eids is not None:
+        pred_base_indices = get_entity_indices(state_pred, base_eids)
+        R_pred = compute_row_space(J_pred, eps=eps_rank, base_indices=pred_base_indices)
+        pred_null_dim = len(pred_base_indices) - R_pred.shape[1]
+    else:
+        R_pred = compute_row_space(J_pred, eps=eps_rank)
+        N_pred = compute_null_space(J_pred, eps=eps_rank)
+        pred_null_dim = N_pred.shape[1]
 
     pred_row_dim = R_pred.shape[1]
-    pred_null_dim = N_pred.shape[1]
 
     # --- Step 4: Intent Recall ---
     recall = intent_recall(R_gt, R_pred)
