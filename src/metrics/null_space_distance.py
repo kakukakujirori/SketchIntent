@@ -43,6 +43,7 @@ import sketchgraphs.data as datalib
 from src.sketch_handlers.sketch_solver import (
     SketchState,
     compute_jacobian,
+    compute_jacobian_hessians,
     compute_null_space,
     compute_row_space,
     get_entity_indices,
@@ -91,6 +92,134 @@ def intent_recall(R_gt: torch.Tensor, R_pred: torch.Tensor) -> float:
     # d_pred < d_gt のとき S のサイズは d_pred < d_gt であり、
     # 不足分は和に寄与しない (σ=0 と等価)
     return float(S.sum()) / d_gt
+
+
+# ---------------------------------------------------------------------------
+# Quadratic intent signatures
+# ---------------------------------------------------------------------------
+
+def symmetric_vectorize(Q: torch.Tensor) -> torch.Tensor:
+    """
+    Vectorize a symmetric matrix while preserving the Frobenius inner product.
+
+    The upper triangle is returned. Off-diagonal entries are multiplied by
+    sqrt(2), so dot(symmetric_vectorize(A), symmetric_vectorize(B)) equals
+    trace(A @ B) for symmetric A and B.
+    """
+    if Q.ndim != 2 or Q.shape[0] != Q.shape[1]:
+        raise ValueError(f"symmetric_vectorize expects a square matrix, got {tuple(Q.shape)}")
+
+    n = Q.shape[0]
+    if n == 0:
+        return torch.zeros(0, dtype=Q.dtype, device=Q.device)
+
+    rows, cols = torch.triu_indices(n, n, device=Q.device)
+    vec = Q[rows, cols].clone()
+    off_diag = rows != cols
+    vec[off_diag] *= torch.sqrt(torch.tensor(2.0, dtype=Q.dtype, device=Q.device))
+    return vec
+
+
+def _left_null_space(J: torch.Tensor, eps: float) -> torch.Tensor:
+    """Return an orthonormal basis for {lambda | lambda^T J = 0} as columns."""
+    m = J.shape[0]
+    if m == 0:
+        return torch.zeros(0, 0, dtype=J.dtype, device=J.device)
+
+    U, S, _ = torch.linalg.svd(J, full_matrices=True)
+    rank = int((S >= eps).sum().item())
+    if rank >= m:
+        return torch.zeros(m, 0, dtype=J.dtype, device=J.device)
+    return U[:, rank:]
+
+
+def _restrict_derivatives(
+    J: torch.Tensor,
+    H: torch.Tensor,
+    variable_indices: list[int] | None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if variable_indices is None:
+        return J, H
+
+    idx = torch.tensor(variable_indices, dtype=torch.long, device=J.device)
+    return J[:, idx], H[:, idx, :][:, :, idx]
+
+
+def compute_quadratic_signature(
+    J: torch.Tensor,
+    H: torch.Tensor,
+    variable_indices: list[int] | None = None,
+    domain_basis: torch.Tensor | None = None,
+    eps_linear: float = 1e-8,
+    eps_quad: float = 1e-10,
+) -> torch.Tensor:
+    """
+    Compute the second-order intent signature as a row-space basis in Sym^2(T*).
+
+    Only second-order terms whose first-order component vanishes are included.
+    Concretely, for each left-null vector lambda with lambda^T J = 0, we form
+    Q_lambda = sum_i lambda_i H_i, restrict it to the first-order tangent domain
+    T, vectorize the resulting symmetric form, and take the row space spanned by
+    those vectors.
+
+    Parameters
+    ----------
+    J : (m, n)
+        Constraint Jacobian.
+    H : (m, n, n)
+        Hessian for each residual row.
+    variable_indices : optional list[int]
+        Restrict derivatives to these coordinates before computing signatures.
+    domain_basis : optional (n_restricted, k)
+        Basis for the domain T on which quadratic forms are compared. If omitted,
+        T = ker(J_restricted).
+    eps_linear : float
+        SVD threshold for first-order rank / null-space decisions.
+    eps_quad : float
+        SVD threshold for the quadratic signature row space.
+
+    Returns
+    -------
+    Q : (k * (k + 1) / 2, r)
+        Orthonormal basis of the quadratic signature row space.
+    """
+    J_restricted, H_restricted = _restrict_derivatives(J, H, variable_indices)
+    n = J_restricted.shape[1]
+
+    if domain_basis is None:
+        T = compute_null_space(J_restricted, eps=eps_linear)
+    else:
+        T = domain_basis.to(dtype=J.dtype, device=J.device)
+
+    if T.shape[0] != n:
+        raise ValueError(
+            f"domain_basis has incompatible shape {tuple(T.shape)} for {n} variables"
+        )
+
+    k = T.shape[1]
+    feature_dim = k * (k + 1) // 2
+    if k == 0 or J_restricted.shape[0] == 0:
+        return torch.zeros(feature_dim, 0, dtype=J.dtype, device=J.device)
+
+    left_null = _left_null_space(J_restricted, eps=eps_linear)
+    if left_null.shape[1] == 0:
+        return torch.zeros(feature_dim, 0, dtype=J.dtype, device=J.device)
+
+    rows: list[torch.Tensor] = []
+    for i in range(left_null.shape[1]):
+        lam = left_null[:, i]
+        Q = torch.einsum("m,mij->ij", lam, H_restricted)
+        Q = 0.5 * (Q + Q.T)
+        Q_on_T = T.T @ Q @ T
+        vec = symmetric_vectorize(Q_on_T)
+        if float(vec.norm()) >= eps_quad:
+            rows.append(vec)
+
+    if not rows:
+        return torch.zeros(feature_dim, 0, dtype=J.dtype, device=J.device)
+
+    Q_rows = torch.stack(rows, dim=0)
+    return compute_row_space(Q_rows, eps=eps_quad)
 
 
 # ---------------------------------------------------------------------------
@@ -184,9 +313,11 @@ def compute_null_space_distance(
     context,
     eps_preserve: float = 1e-3,
     eps_rank: float = 1e-8,
+    eps_quad: float = 1e-10,
     dtype: torch.dtype = torch.float64,
     skip_pred_primary_extraction: bool = False,
     base_eids: list[str] | None = None,
+    include_quadratic: bool = False,
 ) -> dict:
     """
     Compute the row-space Grassmann distance between GT and Pred design intent.
@@ -198,6 +329,7 @@ def compute_null_space_distance(
     context                     : SketchContext providing constraint handlers
     eps_preserve                : threshold for Jacobian-projection-based preservability test
     eps_rank                    : singular value threshold for rank / row-space computation
+    eps_quad                    : singular value threshold for quadratic signature rank
     dtype                       : floating type for all tensors
     skip_pred_primary_extraction: if True, skip classify_pred_constraints and treat pred_sketch as
                                   pred_primary_sketch (i.e. all its constraints are already primary).
@@ -205,14 +337,19 @@ def compute_null_space_distance(
                                   and pred_auxiliary_ids = [].
     base_eids                   : if provided, restricts the null space / row space to the parameters
                                   belonging only to these entity IDs (e.g., ignoring construction geometry).
+    include_quadratic           : if True, also compare second-order intent signatures in Sym^2(T_gt*).
 
 
     Returns
     -------
     dict with keys:
         "intent_recall"         : float  — Intent Recall in [0, 1] (higher = better)
+        "linear_intent_recall"  : float  — same as intent_recall, for explicit reporting
+        "quadratic_intent_recall": float | None — second-order recall, if requested
         "gt_row_dim"            : int    — dimension of GT row space (= rank of J_GT)
         "pred_row_dim"          : int    — dimension of Pred primary row space
+        "gt_quadratic_dim"      : int    — dimension of GT second-order signature
+        "pred_quadratic_dim"    : int    — dimension of Pred second-order signature
         "gt_null_dim"           : int    — GT null space dimension (= DoF remaining)
         "pred_null_dim"         : int    — Pred null space dimension
         "pred_primary_ids"      : list[str]
@@ -222,7 +359,13 @@ def compute_null_space_distance(
     """
     # --- Step 1: GT row space (= directions GT primary constraints restrict) ---
     gt_constraint_ids = list(gt_primary_sketch.constraints.keys())
-    J_gt, state_gt = compute_jacobian(gt_primary_sketch, gt_constraint_ids, context, dtype=dtype)
+    if include_quadratic:
+        J_gt, H_gt, state_gt = compute_jacobian_hessians(
+            gt_primary_sketch, gt_constraint_ids, context, dtype=dtype
+        )
+    else:
+        J_gt, state_gt = compute_jacobian(gt_primary_sketch, gt_constraint_ids, context, dtype=dtype)
+        H_gt = None
     
     if base_eids is not None:
         gt_base_indices = get_entity_indices(state_gt, base_eids)
@@ -248,7 +391,13 @@ def compute_null_space_distance(
         )
 
     # --- Step 3: Pred row space (primary constraints only) ---
-    J_pred, state_pred = compute_jacobian(pred_sketch, pred_primary_ids, context, dtype=dtype)
+    if include_quadratic:
+        J_pred, H_pred, state_pred = compute_jacobian_hessians(
+            pred_sketch, pred_primary_ids, context, dtype=dtype
+        )
+    else:
+        J_pred, state_pred = compute_jacobian(pred_sketch, pred_primary_ids, context, dtype=dtype)
+        H_pred = None
     
     if base_eids is not None:
         pred_base_indices = get_entity_indices(state_pred, base_eids)
@@ -264,10 +413,62 @@ def compute_null_space_distance(
     # --- Step 4: Intent Recall ---
     recall = intent_recall(R_gt, R_pred)
 
+    # --- Step 5: Optional second-order Intent Recall ---
+    quadratic_recall: float | None = None
+    gt_quadratic_dim = 0
+    pred_quadratic_dim = 0
+
+    if include_quadratic:
+        assert H_gt is not None and H_pred is not None
+
+        if base_eids is not None:
+            J_gt_domain = J_gt[:, gt_base_indices]
+            domain_basis = compute_null_space(J_gt_domain, eps=eps_rank)
+            Q_gt = compute_quadratic_signature(
+                J_gt,
+                H_gt,
+                variable_indices=gt_base_indices,
+                domain_basis=domain_basis,
+                eps_linear=eps_rank,
+                eps_quad=eps_quad,
+            )
+            Q_pred = compute_quadratic_signature(
+                J_pred,
+                H_pred,
+                variable_indices=pred_base_indices,
+                domain_basis=domain_basis,
+                eps_linear=eps_rank,
+                eps_quad=eps_quad,
+            )
+        else:
+            domain_basis = compute_null_space(J_gt, eps=eps_rank)
+            Q_gt = compute_quadratic_signature(
+                J_gt,
+                H_gt,
+                domain_basis=domain_basis,
+                eps_linear=eps_rank,
+                eps_quad=eps_quad,
+            )
+            Q_pred = compute_quadratic_signature(
+                J_pred,
+                H_pred,
+                domain_basis=domain_basis,
+                eps_linear=eps_rank,
+                eps_quad=eps_quad,
+            )
+
+        gt_quadratic_dim = Q_gt.shape[1]
+        pred_quadratic_dim = Q_pred.shape[1]
+        quadratic_recall = intent_recall(Q_gt, Q_pred)
+
     return {
         "intent_recall": recall,
+        "linear_intent_recall": recall,
+        "quadratic_intent_recall": quadratic_recall,
         "gt_row_dim": gt_row_dim,
         "pred_row_dim": pred_row_dim,
+        "gt_quadratic_dim": gt_quadratic_dim,
+        "pred_quadratic_dim": pred_quadratic_dim,
         "gt_null_dim": gt_null_dim,
         "pred_null_dim": pred_null_dim,
         "pred_primary_ids": pred_primary_ids,

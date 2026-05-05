@@ -306,6 +306,84 @@ def compute_jacobian(
     return J, state
 
 
+def compute_jacobian_hessians(
+    sketch: datalib.Sketch,
+    constraint_ids: list[str],
+    context,
+    dtype: torch.dtype = torch.float64,
+) -> tuple[torch.Tensor, torch.Tensor, SketchState]:
+    """
+    Compute first- and second-order derivatives of all constraint residuals.
+
+    The residual row ordering matches `compute_jacobian`: constraints are visited
+    in `constraint_ids` order and multi-row residuals keep their native order.
+
+    Returns
+    -------
+    J : torch.Tensor, shape (num_residuals, num_dof)
+        Jacobian of stacked residuals w.r.t. q at q0.
+    H : torch.Tensor, shape (num_residuals, num_dof, num_dof)
+        Hessian for each residual row w.r.t. q at q0.
+    state : SketchState
+        The state used for computation.
+    """
+    state = SketchState(sketch, dtype=dtype)
+    n_dof = state.num_dof()
+
+    if n_dof == 0:
+        return (
+            torch.zeros(0, 0, dtype=dtype),
+            torch.zeros(0, 0, 0, dtype=dtype),
+            state,
+        )
+
+    jac_rows: list[torch.Tensor] = []
+    hess_rows: list[torch.Tensor] = []
+    q0 = state.q.detach()
+
+    for cid in constraint_ids:
+        constraint = sketch.constraints.get(cid)
+        if constraint is None:
+            continue
+        handler_name = constraint.constraint_type.name
+        handler: ConstraintHandler | None = context.get_constraint_handler(handler_name)
+        if handler is None:
+            continue
+
+        def _residual_fn(q: torch.Tensor) -> torch.Tensor:
+            s = _StateWithQ(state, q)
+            try:
+                residual = handler.residual(constraint, s)
+                return residual.reshape(-1)
+            except Exception:
+                return torch.zeros(1, dtype=q.dtype, device=q.device)
+
+        try:
+            jac = torch.func.jacfwd(_residual_fn)(q0)
+            if jac.ndim == 1:
+                jac = jac.unsqueeze(0)
+
+            hess = torch.func.jacfwd(torch.func.jacrev(_residual_fn))(q0)
+            if hess.ndim == 2:
+                hess = hess.unsqueeze(0)
+
+            jac_rows.append(jac)
+            hess_rows.append(hess)
+        except Exception:
+            continue
+
+    if not jac_rows:
+        return (
+            torch.zeros(0, n_dof, dtype=dtype),
+            torch.zeros(0, n_dof, n_dof, dtype=dtype),
+            state,
+        )
+
+    J = torch.cat(jac_rows, dim=0)
+    H = torch.cat(hess_rows, dim=0)
+    return J, H, state
+
+
 # ---------------------------------------------------------------------------
 # Helper class: SketchState with a substituted q vector (for jacfwd)
 # ---------------------------------------------------------------------------
