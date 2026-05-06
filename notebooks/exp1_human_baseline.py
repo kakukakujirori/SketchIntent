@@ -1,4 +1,5 @@
 import argparse
+import csv
 import os
 import sys
 import copy
@@ -89,6 +90,36 @@ def _print_results(title, bucket):
             )
 
 
+def _print_perfile_diff(rows):
+    """Print per-file signed diff: linear[Pred=A, GT=X] - linear[Pred=B, GT=X] for key pairs."""
+    comparisons = [
+        ('Eko', 'Sagar', 'Ryotaro'),
+        ('Eko', 'Ryotaro', 'Sagar'),
+        ('Sagar', 'Ryotaro', 'Eko'),
+    ]
+    idx = {(r['pred'], r['gt'], r['filename']): r['linear'] for r in rows if r['match'] == 'match'}
+    for pred_a, pred_b, gt in comparisons:
+        files = sorted({r['filename'] for r in rows if r['match'] == 'match'})
+        diffs = []
+        for fn in files:
+            a = idx.get((pred_a, gt, fn))
+            b = idx.get((pred_b, gt, fn))
+            if a is not None and b is not None:
+                diffs.append((fn, a - b))
+        if not diffs:
+            continue
+        vals = [d for _, d in diffs]
+        n_pos = sum(1 for d in vals if d > 0)
+        print(f"\n--- Per-file diff: Pred={pred_a} minus Pred={pred_b} (GT={gt}) ---")
+        print(f"{'File':<35} {'diff (A-B)':>12}  {'A':>8}  {'B':>8}")
+        for fn, d in diffs:
+            a = idx[(pred_a, gt, fn)]
+            b = idx[(pred_b, gt, fn)]
+            sign = '+' if d > 0 else '-' if d < 0 else ' '
+            print(f"  {fn:<33} {sign}{abs(d):.6f}   {a:.6f}  {b:.6f}")
+        print(f"  Mean diff = {np.mean(vals):+.6f}  ({n_pos}/{len(vals)} files: Pred={pred_a} > Pred={pred_b})")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Human baseline for linear/quadratic intent recall.")
     parser.add_argument("--eko", default=EKO)
@@ -98,6 +129,16 @@ def main():
         "--include-mismatch",
         action="store_true",
         help="Also print primitive-mismatch cases. By default only Primitives Identical cases are reported.",
+    )
+    parser.add_argument(
+        "--output-csv",
+        default=os.path.join(os.path.dirname(__file__), '..', 'artifacts', 'exp1_per_file.csv'),
+        help="Path for per-file metrics CSV output.",
+    )
+    parser.add_argument(
+        "--dump-sigmas",
+        action="store_true",
+        help="Include σ_i (principal angle cosines) in per-file CSV for row-space alignment analysis.",
     )
     args = parser.parse_args()
 
@@ -126,6 +167,7 @@ def main():
             'Ryotaro': defaultdict(list)
         }
     }
+    per_file_rows = []
 
     for filename in common:
         sketches_full = {}
@@ -167,8 +209,23 @@ def main():
                     skip_pred_primary_extraction=True,
                     base_eids=base_eids,
                     include_quadratic=True,
+                    return_sigmas=args.dump_sigmas,
                 )
                 scores[match_key][pred_ann][gt_ann].append(res)
+                per_file_rows.append({
+                    'filename': filename,
+                    'match': match_key,
+                    'pred': pred_ann,
+                    'gt': gt_ann,
+                    'linear': res['linear_intent_recall'],
+                    'quadratic': res['quadratic_intent_recall'],
+                    'two_jet': res['two_jet_intent_recall'],
+                    'gt_row_dim': res['gt_row_dim'],
+                    'pred_row_dim': res['pred_row_dim'],
+                    'gt_quad_dim': res['gt_quadratic_dim'],
+                    'pred_quad_dim': res['pred_quadratic_dim'],
+                    'sigmas': ','.join(f'{s:.6f}' for s in res['linear_sigmas']) if res.get('linear_sigmas') else '',
+                })
 
             # ---- Pred = Eko ----
             pred_ann = 'Eko'
@@ -198,6 +255,20 @@ def main():
     _print_results("Match Results (Primitives Identical)", scores['match'])
     if args.include_mismatch:
         _print_results("Mismatch Results (Primitives Differ)", scores['mismatch'])
+
+    # --- Per-file CSV ---
+    if per_file_rows and args.output_csv:
+        os.makedirs(os.path.dirname(os.path.abspath(args.output_csv)), exist_ok=True)
+        fieldnames = ['filename', 'match', 'pred', 'gt', 'linear', 'quadratic', 'two_jet',
+                      'gt_row_dim', 'pred_row_dim', 'gt_quad_dim', 'pred_quad_dim', 'sigmas']
+        with open(args.output_csv, 'w', newline='') as f:
+            w = csv.DictWriter(f, fieldnames=fieldnames)
+            w.writeheader()
+            w.writerows(per_file_rows)
+        print(f"\nPer-file metrics saved to: {args.output_csv}")
+
+    # --- Per-file signed diff for key pairs (GT fixed, Pred varies) ---
+    _print_perfile_diff(per_file_rows)
 
 
 if __name__ == "__main__":

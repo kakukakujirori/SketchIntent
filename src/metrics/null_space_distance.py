@@ -361,6 +361,7 @@ def compute_null_space_distance(
     skip_pred_primary_extraction: bool = False,
     base_eids: list[str] | None = None,
     include_quadratic: bool = False,
+    return_sigmas: bool = False,
 ) -> dict:
     """
     Compute the row-space Grassmann distance between GT and Pred design intent.
@@ -457,6 +458,12 @@ def compute_null_space_distance(
     # --- Step 4: Intent Recall ---
     recall = intent_recall(R_gt, R_pred)
 
+    linear_sigmas: list[float] | None = None
+    if return_sigmas and R_gt.shape[1] > 0 and R_pred.shape[1] > 0:
+        M = R_gt.T @ R_pred
+        _, S, _ = torch.linalg.svd(M, full_matrices=False)
+        linear_sigmas = S.clamp(0.0, 1.0).tolist()
+
     # --- Step 5: Optional second-order Intent Recall ---
     quadratic_recall: float | None = None
     gt_quadratic_dim = 0
@@ -527,4 +534,5 @@ def compute_null_space_distance(
         "pred_auxiliary_ids": pred_auxiliary_ids,
         "pred_primary_count": len(pred_primary_ids),
         "pred_auxiliary_count": len(pred_auxiliary_ids),
+        "linear_sigmas": linear_sigmas,
     }

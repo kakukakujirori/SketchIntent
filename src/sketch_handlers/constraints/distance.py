@@ -11,6 +11,24 @@ if TYPE_CHECKING:
     FreeCAD, Part, Sketcher = ensure_freecad_imported()
 
 
+def _point_to_edge_dist(pt, edge_eid: str, edge_ent: datalib.Entity, state):
+    """Signed distance from pt to a bare edge (Line: perpendicular; Arc/Circle: radial)."""
+    import torch
+    if isinstance(edge_ent, datalib.Line):
+        s = state.get_point(edge_eid + '.start')
+        e = state.get_point(edge_eid + '.end')
+        d = e - s
+        dp = pt - s
+        cross = d[0] * dp[1] - d[1] * dp[0]
+        return cross / (torch.linalg.norm(d) + 1e-15)
+    elif isinstance(edge_ent, (datalib.Circle, datalib.Arc)):
+        c = state.get_point(edge_eid + '.center')
+        r = state.get_radius(edge_eid)
+        return torch.sqrt(torch.sum((pt - c) ** 2) + 1e-30) - r
+    else:
+        raise ValueError(f"Unsupported edge type for Distance: {type(edge_ent)}")
+
+
 @CONSTRAINT_HANDLERS.register_module()
 class DistanceHandler(ConstraintHandler):
     @property
@@ -79,34 +97,19 @@ class DistanceHandler(ConstraintHandler):
             eid1 = ref1.split('.')[0]
             ent0 = state.sketch.entities.get(eid0)
             ent1 = state.sketch.entities.get(eid1)
-            # Check if one ref is a bare Line edge (no '.') and the other is a sub-point
-            is_bare_line0 = ('.' not in ref0) and isinstance(ent0, datalib.Line)
-            is_bare_line1 = ('.' not in ref1) and isinstance(ent1, datalib.Line)
+            # Check if one ref is a bare edge (no '.', not a Point entity)
+            is_bare_edge0 = ('.' not in ref0) and not isinstance(ent0, datalib.Point)
+            is_bare_edge1 = ('.' not in ref1) and not isinstance(ent1, datalib.Point)
 
-            if is_bare_line0 and not is_bare_line1:
-                # Point-to-Line distance: perpendicular distance from p1 to line0
-                # This is gauge-invariant (sliding/scaling line0 doesn't change distance)
+            if is_bare_edge0 and not is_bare_edge1:
                 pt = state.get_point(ref1)
-                s0 = state.get_point(eid0 + '.start')
-                e0 = state.get_point(eid0 + '.end')
-                d0 = e0 - s0
-                # Signed perpendicular distance = cross(d0, pt - s0) / ||d0||
-                # where cross2d(a, b) = a[0]*b[1] - a[1]*b[0]
-                dp = pt - s0
-                cross = d0[0] * dp[1] - d0[1] * dp[0]
-                dist = cross / (torch.linalg.norm(d0) + 1e-15)
+                dist = _point_to_edge_dist(pt, eid0, ent0, state)
                 val0 = float(dist.detach())
                 return (dist - val0).unsqueeze(0)
 
-            elif is_bare_line1 and not is_bare_line0:
-                # Point-to-Line distance: perpendicular distance from pt to line1
+            elif is_bare_edge1 and not is_bare_edge0:
                 pt = state.get_point(ref0)
-                s1 = state.get_point(eid1 + '.start')
-                e1 = state.get_point(eid1 + '.end')
-                d1 = e1 - s1
-                dp = pt - s1
-                cross = d1[0] * dp[1] - d1[1] * dp[0]
-                dist = cross / (torch.linalg.norm(d1) + 1e-15)
+                dist = _point_to_edge_dist(pt, eid1, ent1, state)
                 val0 = float(dist.detach())
                 return (dist - val0).unsqueeze(0)
 
