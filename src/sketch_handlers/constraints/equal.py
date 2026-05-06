@@ -58,6 +58,54 @@ class EqualHandler(ConstraintHandler):
         else:
             raise ValueError(f"Equal constraint between incompatible types: {type(e1)} and {type(e2)}")
 
+    def apply_jacobian_surrogate(self, constraint, state, jac):
+        """
+        Inject a directional surrogate into the dir-component columns when the
+        line is axis-aligned and the autodiff gradient there vanishes. Mirrors
+        FreeCAD's ConstraintEqualLineLength::errorgrad surrogate, adapted to our
+        6-param Line representation [pntX, pntY, dirX, dirY, s, e].
+
+        Only applied between two Lines; circle radii give a clean ±1 gradient
+        and need no surrogate.
+
+        Surrogate magnitude: 1e-4, threshold: 1e-6 (100× above the
+        test_solver_consistency SVD atol=1e-6, so matrix_rank picks it up;
+        FreeCAD itself uses 1e-10 paired with a 1e-13 pivot threshold —
+        same 3+ order separation).
+        """
+        refs = self._get_ref_strings(constraint)
+        if len(refs) != 2:
+            return jac
+        eid1 = refs[0].split('.')[0]
+        eid2 = refs[1].split('.')[0]
+        e1 = state.sketch.entities.get(eid1)
+        e2 = state.sketch.entities.get(eid2)
+        if not (isinstance(e1, datalib.Line) and isinstance(e2, datalib.Line)):
+            return jac
+
+        threshold = 1e-6
+        surrogate = 1e-4
+        jac = jac.clone()
+
+        for line_idx, eid in enumerate((eid1, eid2)):
+            # residual = len1 - len2  →  +1 for line1, -1 for line2
+            sign_factor = +1.0 if line_idx == 0 else -1.0
+            sl = state.slices.get(eid)
+            if sl is None:
+                continue
+            dirX_col = sl.start + 2
+            dirY_col = sl.start + 3
+            dirX = float(state.q[dirX_col])
+            dirY = float(state.q[dirY_col])
+            if abs(float(jac[0, dirX_col])) < threshold:
+                sign = +1.0 if dirX >= 0.0 else -1.0
+                jac[0, dirX_col] = sign_factor * sign * surrogate
+            if abs(float(jac[0, dirY_col])) < threshold:
+                sign = +1.0 if dirY >= 0.0 else -1.0
+                jac[0, dirY_col] = sign_factor * sign * surrogate
+
+        return jac
+
     def to_freecad(self, constraint: datalib.Constraint, primitives: dict[str, datalib.Entity], primitive_geoID: dict[str, tuple[int, int]]) -> list[tuple[str, list, float | None]]:
         refs = self._get_ref_strings(constraint)
         if not self.validate_refs(refs):

@@ -48,6 +48,7 @@ def get_files(d):
 def _summarize_pair(results):
     linear = np.array([r['linear_intent_recall'] for r in results], dtype=float)
     quadratic = np.array([r['quadratic_intent_recall'] for r in results], dtype=float)
+    two_jet = np.array([r['two_jet_intent_recall'] for r in results], dtype=float)
     gt_linear_dim = np.array([r['gt_row_dim'] for r in results], dtype=float)
     pred_linear_dim = np.array([r['pred_row_dim'] for r in results], dtype=float)
     gt_quad_dim = np.array([r['gt_quadratic_dim'] for r in results], dtype=float)
@@ -58,6 +59,8 @@ def _summarize_pair(results):
         'linear_std': float(np.std(linear)),
         'quadratic_mean': float(np.mean(quadratic)),
         'quadratic_std': float(np.std(quadratic)),
+        'two_jet_mean': float(np.mean(two_jet)),
+        'two_jet_std': float(np.std(two_jet)),
         'gt_linear_dim': float(np.mean(gt_linear_dim)),
         'pred_linear_dim': float(np.mean(pred_linear_dim)),
         'gt_quad_dim': float(np.mean(gt_quad_dim)),
@@ -79,6 +82,7 @@ def _print_results(title, bucket):
                 f"Pred: {pred_ann:7s} | GT: {gt_ann:7s} | "
                 f"Linear = {s['linear_mean']:.4f} (±{s['linear_std']:.4f}) | "
                 f"Quadratic = {s['quadratic_mean']:.4f} (±{s['quadratic_std']:.4f}) | "
+                f"2-Jet = {s['two_jet_mean']:.4f} (±{s['two_jet_std']:.4f}) | "
                 f"d_lin GT/Pred = {s['gt_linear_dim']:.1f}/{s['pred_linear_dim']:.1f} | "
                 f"d_quad GT/Pred = {s['gt_quad_dim']:.1f}/{s['pred_quad_dim']:.1f} | "
                 f"n = {s['n']:2d}"

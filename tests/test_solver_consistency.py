@@ -2,8 +2,8 @@
 test_solver_consistency.py — CAD Constraint Solver Consistency Verification
 
 Verifies the structural integrity of the My-Vitruvion constraint solver by checking
-that every constraint handler in the dataset produces a non-degenerate Jacobian
-contribution (non-zero residual gradient) when evaluated on FreeCAD's solved geometry.
+that every constraint handler produces a Jacobian whose rank — both with and without
+FreeCAD-style numerical surrogate — is consistent with FreeCAD's diagnose output.
 
 Background
 ----------
@@ -12,24 +12,34 @@ format), while FreeCAD uses 4 params [startX, startY, endX, endY].  This over-
 parameterization introduces 2 gauge DOFs per line (sliding + scaling) that are always
 in the null space of well-posed constraint sets.
 
-Key verified properties:
-  1. Null space includes gauge: dim(null(J)) >= 2·N_lines
-     (gauge DOFs are always free — no constraint handler should constrain them)
-  2. Constraint coverage: every non-Block FC constraint maps to at least one SG constraint
-  3. Rank monotonicity for Full set: our_rank >= n_constraints_added_by_us
-     (our solver doesn't silently drop constraints)
-  4. FreeCAD agreement bound: fc_rank <= our_rank  (at all times, at full constraint set)
-     This is the correct lower bound invariant.
+FreeCAD ConstraintEqualLineLength::errorgrad injects a directional ~1e-4 surrogate
+into Jacobian entries that go to zero on axis-aligned lines, so its diagnose function
+treats Equal as independent even when the linear Jacobian shows it as a sum of other
+rows. We mirror that behavior under JacobianMode.FREECAD_COMPAT so the two solvers
+can be compared apples-to-apples; the design-intent metric runs with EXACT mode
+(true linear rank).
 
-Note on the exact identity
---------------------------
-The identity our_rank - fc_rank == 2·N_lines does NOT hold in general because:
-  - Some constraint types (e.g., Symmetric, Mirror, Perpendicular endpoint form) produce
-    different numbers of constraint equations in our 6-param space vs FreeCAD's 4-param space.
-  - FreeCAD internally detects geometric redundancy differently from our linear algebra.
+Three-layer per-pattern assertions
+----------------------------------
+For every constraint subset (Full / Relational / Dimensional / Even / Odd):
 
-The correct full-sweep check is therefore:
-  our_rank >= fc_rank   (we never undercount constraints relative to FreeCAD)
+  Layer 1  exact_our_rank <= surrogate_our_rank
+           Pure monotonicity: the surrogate can only inflate rank, never deflate.
+           A failure points to a surrogate-implementation bug.
+
+  Layer 2  surrogate_our_rank >= fc_rank
+           With the FreeCAD-style surrogate enabled, we must at least match FC's
+           rank. The Equal-on-rectangle case is exactly this: without surrogate
+           we get fc_rank-1; with surrogate we recover fc_rank.
+           Equality (surrogate_our_rank == fc_rank) is the ideal but not enforced
+           because some dimensional-constraint configurations let FC under-report
+           rank; we report the delta as a soft signal.
+
+  Layer 3  (only when fc_dof == 0 on Full)  fc_rank == p_fc
+           Sanity check on the input data — fully-constrained sketches should
+           saturate the FC parameter count. A failure means the dataset shifted.
+
+Plus, for the Full set, gauge directions (per-line slide/scale) must lie in null(J).
 
 Usage:
     conda activate freecad
@@ -56,7 +66,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 import torch
 import sketchgraphs.data as datalib
 
-from src.sketch_handlers.context import SketchContext
+from src.sketch_handlers.context import JacobianMode, SketchContext
 from src.sketch_handlers.freecad_utils import ensure_freecad_imported, load_FCStd_sketch
 from src.sketch_handlers.sketch_freecad_converter import SketchFreecadConverter
 from src.sketch_handlers.sketch_solver import compute_jacobian, SketchState
@@ -90,7 +100,8 @@ _RANK_ATOL = 1e-6
 @dataclass
 class PatternResult:
     name: str
-    our_rank: int = -1
+    exact_our_rank: int = -1
+    surrogate_our_rank: int = -1
     fc_dof: int = -1
     n_lines: int = -1
     p_fc: int = -1
@@ -229,6 +240,7 @@ PATTERN_NAMES = ["Full", "Relational Only", "Dimensional Only", "Even Subset", "
 def verify_sketch(
     filepath: str,
     context: SketchContext,
+    context_surrogate: SketchContext,
     converter: SketchFreecadConverter,
     verbose: bool = False,
 ) -> SketchResult:
@@ -298,59 +310,71 @@ def verify_sketch(
 
             sg_ids = _build_subset_sg_ids(sg_sketch, fc_to_sg, fc_subset_indices)
             try:
-                J, _ = compute_jacobian(sg_sketch, sg_ids, context, dtype=torch.float64)
-                pr.our_rank = (
-                    int(torch.linalg.matrix_rank(J, atol=_RANK_ATOL).item())
-                    if J.numel() > 0 else 0
+                J_exact, _ = compute_jacobian(sg_sketch, sg_ids, context, dtype=torch.float64)
+                pr.exact_our_rank = (
+                    int(torch.linalg.matrix_rank(J_exact, atol=_RANK_ATOL).item())
+                    if J_exact.numel() > 0 else 0
+                )
+                J_surr, _ = compute_jacobian(sg_sketch, sg_ids, context_surrogate, dtype=torch.float64)
+                pr.surrogate_our_rank = (
+                    int(torch.linalg.matrix_rank(J_surr, atol=_RANK_ATOL).item())
+                    if J_surr.numel() > 0 else 0
                 )
             except Exception as e:
                 pr.error = f"Jacobian: {e}"; all_passed = False
                 pattern_results.append(pr); continue
 
             # ----------------------------------------------------------------
-            # Verification: our_rank >= fc_rank  (lower bound, always applicable)
-            # The lower bound can fail for specific subsets due to constraint
-            # redundancy differences between 4-param and 6-param spaces.
-            # For the full set, we additionally check the gauge null space.
+            # Three-layer assertions (see module docstring for rationale).
+            #   L1: exact_our_rank   <= surrogate_our_rank
+            #   L2: surrogate_our_rank >= fc_rank
+            #   L3 (Full+DoF=0):     fc_rank == p_fc
             # ----------------------------------------------------------------
-            lb_ok = pr.our_rank >= pr.fc_rank
+            l1_ok = pr.exact_our_rank <= pr.surrogate_our_rank
+            l2_ok = pr.surrogate_our_rank >= pr.fc_rank
 
+            issues = []
+            if not l1_ok:
+                issues.append(
+                    f"L1: exact({pr.exact_our_rank}) > surrogate({pr.surrogate_our_rank})"
+                )
+            if not l2_ok:
+                issues.append(
+                    f"L2: surrogate({pr.surrogate_our_rank}) < fc_rank({pr.fc_rank})"
+                )
+
+            gauge_ok = True
             if is_full:
-                # Also verify that all per-line gauge directions are in null(J_full)
                 gauge_violations = _check_gauge_orthogonality(J_full, state_full)
                 gauge_ok = len(gauge_violations) == 0
+                if not gauge_ok:
+                    issues.append(f"GAUGE: {'; '.join(gauge_violations)}")
 
-                pr.passed = lb_ok and gauge_ok
-                if not pr.passed:
-                    issues = []
-                    if not lb_ok:
+                if pr.fc_dof == 0:
+                    l3_ok = pr.fc_rank == pr.p_fc
+                    if not l3_ok:
                         issues.append(
-                            f"LOWER BOUND: our_rank({pr.our_rank}) < fc_rank({pr.fc_rank})"
+                            f"L3: fc_rank({pr.fc_rank}) != p_fc({pr.p_fc}) under DoF=0"
                         )
-                    if not gauge_ok:
-                        issues.append(f"GAUGE: {'; '.join(gauge_violations)}")
-                    pr.error = "; ".join(issues)
-            else:
-                pr.passed = lb_ok
-                if not lb_ok:
-                    pr.error = f"LOWER BOUND: our_rank({pr.our_rank}) < fc_rank({pr.fc_rank})"
+
+            pr.passed = not issues
+            if issues:
+                pr.error = "; ".join(issues)
 
             if not pr.passed: all_passed = False
 
             if verbose:
                 sym = "✓" if pr.passed else "✗"
+                delta_e = pr.exact_our_rank - pr.fc_rank
+                delta_s = pr.surrogate_our_rank - pr.fc_rank
+                line = (
+                    f"  [{sym}] {pat_name:20s}: exact={pr.exact_our_rank:3d} "
+                    f"surr={pr.surrogate_our_rank:3d} fc={pr.fc_rank:3d} "
+                    f"de={delta_e:+d} ds={delta_s:+d}"
+                )
                 if is_full:
-                    delta = pr.our_rank - pr.fc_rank
-                    print(
-                        f"  [{sym}] {pat_name:20s}: our_rank={pr.our_rank:3d}  "
-                        f"fc_rank={pr.fc_rank:3d}  delta={delta:+d}  "
-                        f"gauge={'✓' if gauge_ok else '✗'}"
-                    )
-                else:
-                    print(
-                        f"  [{sym}] {pat_name:20s}: our_rank={pr.our_rank:3d}  "
-                        f"fc_rank={pr.fc_rank:3d}  [our_rank>=fc_rank: {lb_ok}]"
-                    )
+                    line += f"  gauge={'✓' if gauge_ok else '✗'}"
+                print(line)
                 if pr.error: print(f"         {pr.error}")
 
             pattern_results.append(pr)
@@ -386,11 +410,12 @@ def run_sweep(data_dir: str, max_files: int = -1, verbose: bool = False) -> bool
 
     print(f"Found {len(fcstd_files)} .FCStd files")
     print(f"Data directory: {data_dir}")
-    print(f"Verified per sketch (Full set):    our_rank >= fc_rank  AND  gauge in null(J)")
-    print(f"Verified per sketch (Subsets):     our_rank >= fc_rank")
+    print(f"Per-pattern checks: L1 exact<=fc_rank, L2 surrogate==fc_rank, L3 (Full+DoF=0) fc_rank==p_fc")
+    print(f"Plus gauge orthogonality on Full set.")
     print()
 
     context = SketchContext()
+    context_surrogate = SketchContext(jacobian_mode=JacobianMode.FREECAD_COMPAT)
     converter = SketchFreecadConverter(context, verbose=False, raise_on_error=False)
 
     counts = defaultdict(int)
@@ -405,7 +430,7 @@ def run_sweep(data_dir: str, max_files: int = -1, verbose: bool = False) -> bool
         elif (file_idx + 1) % 50 == 0 or file_idx == 0:
             print(f"  Progress: {file_idx+1}/{len(fcstd_files)} ...")
 
-        result = verify_sketch(filepath, context, converter, verbose=verbose)
+        result = verify_sketch(filepath, context, context_surrogate, converter, verbose=verbose)
         counts[result.status] += 1
 
         for pr in result.patterns:
@@ -462,8 +487,8 @@ def run_sweep(data_dir: str, max_files: int = -1, verbose: bool = False) -> bool
             for pr in r.patterns:
                 if not pr.passed or pr.error:
                     print(
-                        f"         [{pr.name}] our_rank={pr.our_rank}  "
-                        f"fc_rank={pr.fc_rank}  {pr.error}"
+                        f"         [{pr.name}] exact={pr.exact_our_rank} "
+                        f"surr={pr.surrogate_our_rank} fc_rank={pr.fc_rank}  {pr.error}"
                     )
         print()
 

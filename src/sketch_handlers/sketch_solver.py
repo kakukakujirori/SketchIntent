@@ -18,6 +18,8 @@ from typing import TYPE_CHECKING
 import torch
 import sketchgraphs.data as datalib
 
+from src.sketch_handlers.context import JacobianMode
+
 if TYPE_CHECKING:
     from src.sketch_handlers.constraints.base import ConstraintHandler
 
@@ -295,6 +297,8 @@ def compute_jacobian(
             # jac: (k, n_dof) where k = residual size
             if jac.ndim == 1:
                 jac = jac.unsqueeze(0)
+            if getattr(context, "jacobian_mode", JacobianMode.EXACT) is JacobianMode.FREECAD_COMPAT:
+                jac = handler.apply_jacobian_surrogate(constraint, state, jac)
             rows.append(jac)
         except Exception:
             continue

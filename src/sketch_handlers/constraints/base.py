@@ -117,6 +117,35 @@ class ConstraintHandler(ABC):
         """
         pass
 
+    def apply_jacobian_surrogate(
+        self,
+        constraint: datalib.Constraint,
+        state: 'SketchState',
+        jac: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Optional FreeCAD-style surrogate hook for Jacobian computation.
+
+        Default implementation is a no-op (returns jac unchanged).
+
+        Subclasses (e.g. EqualHandler) override this to inject ~1e-4 directional
+        values into Jacobian columns whose autodiff gradient happens to be zero
+        because of geometric alignment (e.g. Equal-length on axis-aligned lines).
+        Mirrors the "surrogate" branch of FreeCAD's
+        ConstraintEqualLineLength::errorgrad — see JacobianMode.FREECAD_COMPAT.
+
+        Args:
+            constraint: The SketchGraphs Constraint object.
+            state: SketchState at q0 (the same one used to compute jac).
+            jac: torch.Tensor of shape (k, n_dof). The autodiff Jacobian for this
+                 constraint's residual at q0.
+
+        Returns:
+            torch.Tensor of shape (k, n_dof). The (possibly surrogate-corrected)
+            Jacobian rows.
+        """
+        return jac
+
     def get_constraint_props(self, constraint: datalib.Constraint, expr_watermark: str = "VALUE_ASSIGNED:") -> dict[str, Any]:
         """Helper to extract a value and other properties from constraint parameters."""
         props: dict[str, Any] = {"value": None, "direction": "", "aligned": True}

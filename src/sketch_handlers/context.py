@@ -12,6 +12,24 @@ if TYPE_CHECKING:
     from .constraints.base import ConstraintHandler
 
 
+class JacobianMode(enum.Enum):
+    """Controls how the constraint Jacobian is computed.
+
+    EXACT
+        Pure autodiff — no gradient inflation. Use this for all
+        design-intent evaluation (Grassmannian / row-space metrics).
+
+    FREECAD_COMPAT
+        Injects a small directional surrogate (~1e-4) into Jacobian columns
+        whose autodiff gradient vanishes due to geometric alignment (e.g.
+        Equal on axis-aligned lines), mirroring FreeCAD's
+        ConstraintEqualLineLength::errorgrad behaviour. Use only for
+        solver-consistency tests against FreeCAD.
+    """
+    EXACT = "exact"
+    FREECAD_COMPAT = "freecad_compat"
+
+
 @dataclass
 class SketchContext:
     """
@@ -23,6 +41,8 @@ class SketchContext:
     align_constraint_token_length_to: int | None = None
     use_stop_padding: bool = False
     constraint_order: Literal["sort_by_ref_id", "random_shuffle", "original"] = "sort_by_ref_id"
+
+    jacobian_mode: JacobianMode = JacobianMode.EXACT
 
     # Registry maps (Instantiated Handlers)
     _primitive_handlers: dict[str, 'PrimitiveHandler'] = field(default_factory=dict, init=False)

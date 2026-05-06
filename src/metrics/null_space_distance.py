@@ -94,6 +94,32 @@ def intent_recall(R_gt: torch.Tensor, R_pred: torch.Tensor) -> float:
     return float(S.sum()) / d_gt
 
 
+def combine_two_jet_recall(
+    linear_recall: float,
+    quadratic_recall: float | None,
+    gt_row_dim: int,
+    gt_quadratic_dim: int,
+) -> float:
+    """
+    Combine first- and second-order recall by counting independent GT intent dims.
+
+    The quadratic signature is constructed only from constraints whose first-order
+    component vanishes, so gt_quadratic_dim is treated as additional 2-jet intent
+    dimension rather than a reweighting knob. If no quadratic intent is present,
+    this reduces exactly to the linear recall.
+    """
+    if gt_row_dim < 0 or gt_quadratic_dim < 0:
+        raise ValueError("GT intent dimensions must be non-negative")
+
+    total_dim = gt_row_dim + gt_quadratic_dim
+    if total_dim == 0:
+        return 1.0
+
+    q_recall = 1.0 if quadratic_recall is None else quadratic_recall
+    score = (gt_row_dim * linear_recall + gt_quadratic_dim * q_recall) / total_dim
+    return float(score)
+
+
 # ---------------------------------------------------------------------------
 # Quadratic intent signatures
 # ---------------------------------------------------------------------------
@@ -162,6 +188,23 @@ def compute_quadratic_signature(
     T, vectorize the resulting symmetric form, and take the row space spanned by
     those vectors.
 
+    Recall semantics
+    ----------------
+    When this function is called from compute_null_space_distance with
+    include_quadratic=True, the caller passes domain_basis = ker(J_GT) to BOTH
+    the GT and Pred invocations. This makes the comparison "Recall in
+    Sym^2(T_GT*)": how much of GT's quadratic intent (measured on GT's tangent
+    domain) does Pred reproduce. Pred-only quadratic structure that lives on
+    directions GT already pins linearly is invisible in this metric — that is
+    intentional, mirroring the linear Intent Recall convention.
+
+    Numerical note
+    --------------
+    eps_quad is an absolute threshold on |vec(Q_λ|_T)|. For sketches with large
+    coordinate magnitudes, the second-order entries scale as O(coord^2), so
+    floating-point noise can cross 1e-10 and produce spurious quadratic rank.
+    Either pre-normalize coordinates to O(1) or pass a larger eps_quad.
+
     Parameters
     ----------
     J : (m, n)
@@ -176,7 +219,7 @@ def compute_quadratic_signature(
     eps_linear : float
         SVD threshold for first-order rank / null-space decisions.
     eps_quad : float
-        SVD threshold for the quadratic signature row space.
+        SVD threshold for the quadratic signature row space (absolute).
 
     Returns
     -------
@@ -346,6 +389,7 @@ def compute_null_space_distance(
         "intent_recall"         : float  — Intent Recall in [0, 1] (higher = better)
         "linear_intent_recall"  : float  — same as intent_recall, for explicit reporting
         "quadratic_intent_recall": float | None — second-order recall, if requested
+        "two_jet_intent_recall" : float  — dimension-weighted linear + quadratic recall
         "gt_row_dim"            : int    — dimension of GT row space (= rank of J_GT)
         "pred_row_dim"          : int    — dimension of Pred primary row space
         "gt_quadratic_dim"      : int    — dimension of GT second-order signature
@@ -461,10 +505,18 @@ def compute_null_space_distance(
         pred_quadratic_dim = Q_pred.shape[1]
         quadratic_recall = intent_recall(Q_gt, Q_pred)
 
+    two_jet_recall = combine_two_jet_recall(
+        linear_recall=recall,
+        quadratic_recall=quadratic_recall,
+        gt_row_dim=gt_row_dim,
+        gt_quadratic_dim=gt_quadratic_dim,
+    )
+
     return {
         "intent_recall": recall,
         "linear_intent_recall": recall,
         "quadratic_intent_recall": quadratic_recall,
+        "two_jet_intent_recall": two_jet_recall,
         "gt_row_dim": gt_row_dim,
         "pred_row_dim": pred_row_dim,
         "gt_quadratic_dim": gt_quadratic_dim,

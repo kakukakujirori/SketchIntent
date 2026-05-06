@@ -60,9 +60,18 @@ def test_quadratic_recall_detects_equal_length_missing_from_linear_row_space():
     )
 
     assert result["linear_intent_recall"] == pytest.approx(1.0, abs=1e-8)
-    assert result["gt_quadratic_dim"] >= 1
+    # The square + Coincident + 2×Vertical + Horizontal + Equal(L0,L2) sketch has
+    # exactly one linearly-redundant-but-quadratically-independent constraint
+    # (the Equal row). Hence dim = 1 in Sym^2(T_GT*), not just >= 1.
+    assert result["gt_quadratic_dim"] == 1
     assert result["pred_quadratic_dim"] == 0
     assert result["quadratic_intent_recall"] == pytest.approx(0.0, abs=1e-8)
+    expected_two_jet = (
+        result["gt_row_dim"] * result["linear_intent_recall"]
+        + result["gt_quadratic_dim"] * result["quadratic_intent_recall"]
+    ) / (result["gt_row_dim"] + result["gt_quadratic_dim"])
+    assert result["two_jet_intent_recall"] == pytest.approx(expected_two_jet, abs=1e-8)
+    assert result["two_jet_intent_recall"] == pytest.approx(11.0 / 12.0, abs=1e-8)
 
 
 def test_quadratic_recall_matches_when_equal_length_is_present():
@@ -79,9 +88,10 @@ def test_quadratic_recall_matches_when_equal_length_is_present():
     )
 
     assert result["linear_intent_recall"] == pytest.approx(1.0, abs=1e-8)
-    assert result["gt_quadratic_dim"] >= 1
-    assert result["pred_quadratic_dim"] == result["gt_quadratic_dim"]
+    assert result["gt_quadratic_dim"] == 1
+    assert result["pred_quadratic_dim"] == 1
     assert result["quadratic_intent_recall"] == pytest.approx(1.0, abs=1e-8)
+    assert result["two_jet_intent_recall"] == pytest.approx(1.0, abs=1e-8)
 
 
 def test_linear_constraints_have_empty_quadratic_signature():
@@ -100,3 +110,4 @@ def test_linear_constraints_have_empty_quadratic_signature():
     assert result["gt_quadratic_dim"] == 0
     assert result["pred_quadratic_dim"] == 0
     assert result["quadratic_intent_recall"] == pytest.approx(1.0, abs=1e-8)
+    assert result["two_jet_intent_recall"] == pytest.approx(1.0, abs=1e-8)
