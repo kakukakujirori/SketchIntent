@@ -273,18 +273,18 @@ def classify_pred_constraints(
     pred_sketch: datalib.Sketch,
     gt_row_space: torch.Tensor,
     context,
-    eps: float = 1e-3,
+    thresh: float = 0.95,
     dtype: torch.dtype = torch.float64,
 ) -> tuple[list[str], list[str]]:
     """
     Classify each Pred constraint as 'primary' or 'auxiliary' w.r.t. GT row space.
 
     A constraint is **primary** if at least one of its Jacobian rows
-    has a non-negligible projection onto the GT row space R_gt:
+    is strongly aligned with the GT row space R_gt:
 
-        ‖R_gt @ R_gt.T @ j‖ / ‖j‖ >= eps
+        ‖R_gt @ R_gt.T @ j‖ / ‖j‖ >= thresh
 
-    つまり制約の勾配方向が GT が束縛する方向空間と重なる場合 = primary.
+    つまり制約の勾配方向が GT が束縛する方向空間と十分に揃う場合 = primary.
     重ならない（GT の null space 内にある）場合 = auxiliary.
 
     Parameters
@@ -292,7 +292,7 @@ def classify_pred_constraints(
     pred_sketch : Sketch whose constraints are to be classified
     gt_row_space : (n, r) orthonormal basis of GT primary row space
     context : SketchContext
-    eps : threshold for projection ratio
+    thresh : threshold for projection ratio
     dtype : floating type
 
     Returns
@@ -334,7 +334,7 @@ def classify_pred_constraints(
                 # 射影: R @ R.T @ j (GT row space への投影)
                 proj = R @ (R.T @ row)
                 proj_ratio = float(proj.norm()) / j_norm
-                if proj_ratio >= eps:
+                if proj_ratio >= thresh:
                     is_primary = True
                     break
 
@@ -354,7 +354,7 @@ def compute_null_space_distance(
     gt_primary_sketch: datalib.Sketch,
     pred_sketch: datalib.Sketch,
     context,
-    eps_preserve: float = 1e-3,
+    eps_preserve: float = 0.95,
     eps_rank: float = 1e-8,
     eps_quad: float = 1e-10,
     dtype: torch.dtype = torch.float64,
@@ -432,7 +432,7 @@ def compute_null_space_distance(
         if base_eids is not None:
             raise NotImplementedError("classify_pred_constraints with base_eids is not implemented yet.")
         pred_primary_ids, pred_auxiliary_ids = classify_pred_constraints(
-            pred_sketch, R_gt, context, eps=eps_preserve, dtype=dtype
+            pred_sketch, R_gt, context, thresh=eps_preserve, dtype=dtype
         )
 
     # --- Step 3: Pred row space (primary constraints only) ---
