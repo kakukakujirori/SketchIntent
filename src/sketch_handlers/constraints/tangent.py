@@ -55,6 +55,11 @@ class TangentHandler(ConstraintHandler):
         has_sub1 = '.' in ref1  # point-specified if True
         has_sub2 = '.' in ref2
 
+        def _line_direction_cross(line_eid1: str, line_eid2: str) -> torch.Tensor:
+            _, d1, _, _ = state.get_line_params(line_eid1)
+            _, d2, _, _ = state.get_line_params(line_eid2)
+            return d1[0] * d2[1] - d1[1] * d2[0]
+
         # ---- Edge-Edge case ----
         if not has_sub1 and not has_sub2:
             is_line1 = isinstance(e1, datalib.Line)
@@ -121,7 +126,10 @@ class TangentHandler(ConstraintHandler):
             # 2. Tangency (1 residual)
             # For Arc-Line or Arc-Arc, tangency at a shared point means 
             # the radial vector is perpendicular to the line/tangent.
-            if isinstance(e1, (datalib.Circle, datalib.Arc)) and isinstance(e2, datalib.Line):
+            if isinstance(e1, datalib.Line) and isinstance(e2, datalib.Line):
+                cross = _line_direction_cross(eid1, eid2)
+                return torch.cat([res_coinc, cross.unsqueeze(0)])
+            elif isinstance(e1, (datalib.Circle, datalib.Arc)) and isinstance(e2, datalib.Line):
                 arc_center = state.get_point(eid1 + '.center')
                 s2 = state.get_point(eid2 + '.start')
                 e2 = state.get_point(eid2 + '.end')
@@ -164,6 +172,9 @@ class TangentHandler(ConstraintHandler):
                     radial = arc_center - pt1
                     dot = radial[0] * d2[0] + radial[1] * d2[1]
                     return torch.stack([dist, dot])
+                if isinstance(e1, datalib.Line):
+                    cross = _line_direction_cross(eid1, eid2)
+                    return torch.stack([dist, cross])
                 return dist.unsqueeze(0)
             elif isinstance(e2, (datalib.Circle, datalib.Arc)):
                 # PointOnObject: dist(pt1, center2) - r2
@@ -204,6 +215,9 @@ class TangentHandler(ConstraintHandler):
                     radial = arc_center - pt2
                     dot = radial[0] * d1[0] + radial[1] * d1[1]
                     return torch.stack([dist, dot])
+                if isinstance(e2, datalib.Line):
+                    cross = _line_direction_cross(eid1, eid2)
+                    return torch.stack([dist, cross])
                 return dist.unsqueeze(0)
             elif isinstance(e1, (datalib.Circle, datalib.Arc)):
                 c1 = state.get_point(eid1 + '.center')
