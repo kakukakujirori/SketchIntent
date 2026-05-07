@@ -102,14 +102,19 @@ class ConstraintHandler(ABC):
     @abstractmethod
     def residual(self, constraint: datalib.Constraint, state: 'SketchState') -> torch.Tensor:
         """
-        Compute a differentiable residual vector r(q) for this constraint at the current sketch state.
+        Compute a differentiable signed residual vector r(q) for this constraint at the current sketch state.
 
-        The residual is zero (or near-zero) when the constraint is exactly satisfied.
-        For the null-space metric, the Jacobian dr/dq at q₀ is what matters;
-        the residual value itself is not used.
+        r(q) = 0 iff the constraint is satisfied. For dimensional constraints,
+        target is read from constraint.value (`get_constraint_props(constraint)["value"]`);
+        for structural constraints (Coincident, Parallel, ...) the target is implicit zero.
+
+        Suitable for both:
+          - Jacobian extraction (compute_jacobian / null-space metrics): only ∂r/∂q at q₀ is used.
+          - Newton / Gauss-Newton solving: r(q) measures the actual gap from the target.
 
         Args:
-            constraint: The SketchGraphs Constraint object (with values already filled).
+            constraint: The SketchGraphs Constraint object (with values already filled
+                        via sketch_utils.complete_constraint_values()).
             state: A SketchState providing differentiable parameter tensors for each entity.
 
         Returns:

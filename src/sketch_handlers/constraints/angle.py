@@ -33,21 +33,27 @@ class AngleHandler(ConstraintHandler):
 
     def residual(self, constraint: datalib.Constraint, state: 'SketchState') -> 'torch.Tensor':
         """
-        Angle residual = atan2(cross, dot) - θ₀
-        where θ₀ is computed from current geometry (so residual=0 at q₀ but Jacobian ≠ 0).
-        For 1-ref: angle of line direction w.r.t. X-axis.
-        For 2-ref: angle between two line directions.
+        Angle residual = angle - target  (target = constraint.value, radians).
+        For 1-ref Line: angle of line direction w.r.t. X-axis.
+        For 1-ref Arc: arc opening angle (endParam - startParam).
+        For 2-ref: signed angle from line1 to line2.
         """
         import torch
         refs = self._get_ref_strings(constraint)
+        target = self.get_constraint_props(constraint)["value"]
         if len(refs) == 1:
             eid = refs[0].split('.')[0]
-            s = state.get_point(eid + '.start')
-            e = state.get_point(eid + '.end')
-            d = e - s
-            angle = torch.atan2(d[1], d[0])
-            theta0 = float(torch.atan2(d[1].detach(), d[0].detach()))
-            return (angle - theta0).unsqueeze(0)
+            entity = state.sketch.entities.get(eid)
+            if isinstance(entity, datalib.Arc):
+                _, _, start_param, end_param = state.get_arc_params(eid)
+                angle = end_param - start_param
+                return (angle - target).unsqueeze(0)
+            else:  # Line
+                s = state.get_point(eid + '.start')
+                e = state.get_point(eid + '.end')
+                d = e - s
+                angle = torch.atan2(d[1], d[0])
+                return (angle - target).unsqueeze(0)
         elif len(refs) == 2:
             eid1 = refs[0].split('.')[0]
             eid2 = refs[1].split('.')[0]
@@ -60,10 +66,8 @@ class AngleHandler(ConstraintHandler):
             cross = d1[0] * d2[1] - d1[1] * d2[0]
             dot = d1[0] * d2[0] + d1[1] * d2[1]
             angle = torch.atan2(cross, dot)
-            theta0 = float(torch.atan2(cross.detach(), dot.detach()))
-            return (angle - theta0).unsqueeze(0)
-        import torch as _t
-        return _t.zeros(1, dtype=state.dtype)
+            return (angle - target).unsqueeze(0)
+        return torch.zeros(1, dtype=state.dtype)
 
     def to_freecad(self, constraint: datalib.Constraint, primitives: dict[str, datalib.Entity], primitive_geoID: dict[str, tuple[int, int]]) -> list[tuple[str, list, float | None]]:
         refs = self._get_ref_strings(constraint)

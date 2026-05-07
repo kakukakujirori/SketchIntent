@@ -988,12 +988,20 @@ def complete_constraint_values(sketch: datalib.Sketch, expr_watermark: str = "VA
                     ent1 = sketch.entities.get(ent1_id)
 
                     if isinstance(ent1, datalib.Line):
-                        x_axis = datalib.Line(entityId=-1, pntX=0, pntY=0, dirX=1, dirY=0, startParam=-0.5, endParam=0.5)
-                        angle = compute_angle_between_lines(ent1, x_axis)
+                        # FreeCAD constrains the angle of the actual StartPoint→EndPoint vector.
+                        # Using ent1.dirX/dirY directly is wrong when startParam > endParam
+                        # (actual direction is -dir in that case), so compute from real coordinates.
+                        start = get_entity_point(ent1, 'start')
+                        end = get_entity_point(ent1, 'end')
+                        assert start is not None and end is not None
+                        angle = math.atan2(end[1] - start[1], end[0] - start[0])
                         new_constr = assign_value(constr, angle, 'angle', expr_watermark)
                         new_constr = assign_boolean(new_constr, True, 'aligned')
                         sketch.constraints[constr_id] = new_constr
                     elif isinstance(ent1, datalib.Arc):
+                        # FreeCAD interprets Angle(Arc, v) as span = v mod 2π.
+                        # compute_angle_arc returns a2-a1 ∈ (-2π, 2π), which maps correctly:
+                        # e.g. -60° → 300° arc, -340° → 20° arc.  No abs() needed.
                         angle = compute_angle_arc(ent1)
                         new_constr = assign_value(constr, angle, 'angle', expr_watermark)
                         new_constr = assign_boolean(new_constr, True, 'aligned')

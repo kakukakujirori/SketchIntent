@@ -62,14 +62,18 @@ class DistanceHandler(ConstraintHandler):
 
     def residual(self, constraint: datalib.Constraint, state: 'SketchState') -> 'torch.Tensor':
         """
-        Distance/DistanceX/DistanceY residual.
-        Value is taken from current geometry at q₀ (residual=0 at q₀, Jacobian≠0).
-        direction is read from constraint parameters.
+        Distance/DistanceX/DistanceY residual = current_distance - target.
+        target is read from constraint.value; direction from constraint.parameters.
+
+        Sign conventions (matching sketch_utils.complete_constraint_values):
+          - MINIMUM: target ≥ 0, residual = ‖p2 - p1‖ - target
+          - HORIZONTAL: target signed, residual = (p2[0] - p1[0]) - target
+          - VERTICAL: target signed, residual = (p2[1] - p1[1]) - target
         """
         import torch
-        import numpy as np
         from sketchgraphs.data._constraint import DirectionValue
         refs = self._get_ref_strings(constraint)
+        target = self.get_constraint_props(constraint)["value"]
 
         # Determine direction
         direction = 'MINIMUM'
@@ -78,19 +82,16 @@ class DistanceHandler(ConstraintHandler):
                 direction = getattr(param, 'value', 'MINIMUM')
 
         if len(refs) == 1:
-            # Line / arc length: ‖end - start‖
+            # Line length: signed (e - s) for X/Y, ‖e - s‖ for MINIMUM
             eid = refs[0].split('.')[0]
             s = state.get_point(eid + '.start')
             e = state.get_point(eid + '.end')
             if direction in ('HORIZONTAL', DirectionValue.HORIZONTAL):
-                val0 = float(abs((e - s)[0].detach()))
-                return (torch.abs(e[0] - s[0]) - val0).unsqueeze(0)
+                return (e[0] - s[0] - target).unsqueeze(0)
             elif direction in ('VERTICAL', DirectionValue.VERTICAL):
-                val0 = float(abs((e - s)[1].detach()))
-                return (torch.abs(e[1] - s[1]) - val0).unsqueeze(0)
+                return (e[1] - s[1] - target).unsqueeze(0)
             else:
-                val0 = float(torch.linalg.norm((e - s).detach()))
-                return (torch.linalg.norm(e - s) - val0).unsqueeze(0)
+                return (torch.linalg.norm(e - s) - target).unsqueeze(0)
         elif len(refs) == 2:
             ref0, ref1 = refs[0], refs[1]
             eid0 = ref0.split('.')[0]
@@ -104,29 +105,23 @@ class DistanceHandler(ConstraintHandler):
             if is_bare_edge0 and not is_bare_edge1:
                 pt = state.get_point(ref1)
                 dist = _point_to_edge_dist(pt, eid0, ent0, state)
-                val0 = float(dist.detach())
-                return (dist - val0).unsqueeze(0)
+                return (dist - target).unsqueeze(0)
 
             elif is_bare_edge1 and not is_bare_edge0:
                 pt = state.get_point(ref0)
                 dist = _point_to_edge_dist(pt, eid1, ent1, state)
-                val0 = float(dist.detach())
-                return (dist - val0).unsqueeze(0)
+                return (dist - target).unsqueeze(0)
 
             else:
-                # Point-to-Point distance (or line center to line center)
+                # Point-to-Point: target signed for X/Y (= p2 - p1), unsigned for MINIMUM
                 p1 = state.get_point(ref0)
                 p2 = state.get_point(ref1)
-                diff = p1 - p2
                 if direction in ('HORIZONTAL', DirectionValue.HORIZONTAL):
-                    val0 = float(abs(diff[0].detach()))
-                    return (torch.abs(diff[0]) - val0).unsqueeze(0)
+                    return (p2[0] - p1[0] - target).unsqueeze(0)
                 elif direction in ('VERTICAL', DirectionValue.VERTICAL):
-                    val0 = float(abs(diff[1].detach()))
-                    return (torch.abs(diff[1]) - val0).unsqueeze(0)
+                    return (p2[1] - p1[1] - target).unsqueeze(0)
                 else:
-                    val0 = float(torch.linalg.norm(diff.detach()))
-                    return (torch.linalg.norm(diff) - val0).unsqueeze(0)
+                    return (torch.linalg.norm(p1 - p2) - target).unsqueeze(0)
         return torch.zeros(1, dtype=state.dtype)
 
     def to_freecad(self, constraint: datalib.Constraint, primitives: dict[str, datalib.Entity], primitive_geoID: dict[str, tuple[int, int]]) -> list[tuple[str, list, float | None]]:

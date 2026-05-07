@@ -33,17 +33,17 @@ class DistanceXHandler(ConstraintHandler):
     def residual(self, constraint: datalib.Constraint, state: 'SketchState') -> 'torch.Tensor':
         import torch
         refs = self._get_ref_strings(constraint)
+        # target is signed: sketch_utils stores p2[0] - p1[0] (or end[0] - start[0]).
+        target = self.get_constraint_props(constraint)["value"]
         if len(refs) == 2:
             p1 = state.get_point(refs[0])
             p2 = state.get_point(refs[1])
-            val0 = float((p1[0] - p2[0]).detach())
-            return (p1[0] - p2[0] - val0).unsqueeze(0)
+            return (p2[0] - p1[0] - target).unsqueeze(0)
         elif len(refs) == 1:
             eid = refs[0].split('.')[0]
             s = state.get_point(eid + '.start')
             e = state.get_point(eid + '.end')
-            val0 = float((e[0] - s[0]).detach())
-            return (e[0] - s[0] - val0).unsqueeze(0)
+            return (e[0] - s[0] - target).unsqueeze(0)
         return torch.zeros(1, dtype=state.dtype)
 
     def to_freecad(self, constraint: datalib.Constraint, primitives: dict[str, datalib.Entity], primitive_geoID: dict[str, tuple[int, int]]) -> list[tuple[str, list, float | None]]:
@@ -138,17 +138,17 @@ class DistanceYHandler(ConstraintHandler):
     def residual(self, constraint: datalib.Constraint, state: 'SketchState') -> 'torch.Tensor':
         import torch
         refs = self._get_ref_strings(constraint)
+        # target is signed: sketch_utils stores p2[1] - p1[1] (or end[1] - start[1]).
+        target = self.get_constraint_props(constraint)["value"]
         if len(refs) == 2:
             p1 = state.get_point(refs[0])
             p2 = state.get_point(refs[1])
-            val0 = float((p1[1] - p2[1]).detach())
-            return (p1[1] - p2[1] - val0).unsqueeze(0)
+            return (p2[1] - p1[1] - target).unsqueeze(0)
         elif len(refs) == 1:
             eid = refs[0].split('.')[0]
             s = state.get_point(eid + '.start')
             e = state.get_point(eid + '.end')
-            val0 = float((e[1] - s[1]).detach())
-            return (e[1] - s[1] - val0).unsqueeze(0)
+            return (e[1] - s[1] - target).unsqueeze(0)
         return torch.zeros(1, dtype=state.dtype)
 
     def to_freecad(self, constraint: datalib.Constraint, primitives: dict[str, datalib.Entity], primitive_geoID: dict[str, tuple[int, int]]) -> list[tuple[str, list, float | None]]:

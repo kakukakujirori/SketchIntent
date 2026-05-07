@@ -35,10 +35,10 @@ class DiameterHandler(ConstraintHandler):
         refs = self._get_ref_strings(constraint)
         if len(refs) < 1:
             return torch.zeros(1, dtype=state.dtype)
+        target = self.get_constraint_props(constraint)["value"]  # diameter
         eid = refs[0].split('.')[0]
         r = state.get_radius(eid)
-        r0 = float(r.detach())
-        return (2 * r - 2 * r0).unsqueeze(0)
+        return (2 * r - target).unsqueeze(0)
 
     def to_freecad(self, constraint: datalib.Constraint, primitives: dict[str, datalib.Entity], primitive_geoID: dict[str, tuple[int, int]]) -> list[tuple[str, list, float | None]]:
         refs = self._get_ref_strings(constraint)
