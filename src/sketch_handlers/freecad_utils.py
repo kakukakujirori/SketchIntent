@@ -224,15 +224,16 @@ def load_FCStd_sketch(filepath: str, sketch_name: str = "Sketch") -> tuple['Free
             raise ValueError(f"No sketches found in {filepath}")
 
         for s in sketches:
-            if s.Name == "Sketch" or s.Label == "Sketch":
+            if s.Name.strip() == sketch_name or s.Label.strip() == sketch_name:
                 fc_sketch = s
                 break
 
         if fc_sketch is None:
-            raise ValueError(f"No sketch named '{sketch_name}' found in {filepath}")
+            available = [f"{s.Name} (Label: {s.Label})" for s in sketches]
+            raise ValueError(f"No sketch named '{sketch_name}' found in {filepath}. Available sketches: {available}")
 
     finally:
-        if fc_sketch is None:
-            FreeCAD.closeDocument(doc)
+        if fc_sketch is None and doc is not None:
+            FreeCAD.closeDocument(doc.Name)
 
     return doc, fc_sketch

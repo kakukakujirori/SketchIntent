@@ -171,6 +171,81 @@ def _restrict_derivatives(
     return J[:, idx], H[:, idx, :][:, :, idx]
 
 
+def _matrix_pinv(A: torch.Tensor, eps: float) -> torch.Tensor:
+    """Compute a numerical pseudo-inverse using the same absolute eps convention."""
+    if A.numel() == 0:
+        return torch.zeros(A.shape[1], A.shape[0], dtype=A.dtype, device=A.device)
+
+    U, S, Vh = torch.linalg.svd(A, full_matrices=False)
+    keep = S >= eps
+    if not bool(keep.any()):
+        return torch.zeros(A.shape[1], A.shape[0], dtype=A.dtype, device=A.device)
+
+    V = Vh.T[:, keep]
+    U_keep = U[:, keep]
+    S_inv = torch.diag(1.0 / S[keep])
+    return V @ S_inv @ U_keep.T
+
+
+def _effective_base_derivatives(
+    J: torch.Tensor,
+    H: torch.Tensor,
+    base_indices: list[int],
+    eps_linear: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Eliminate non-base variables to obtain derivatives on base coordinates.
+
+    For variables split as q = (b, h), first-order feasibility of a base velocity
+    u means there exists hidden velocity w with J_b u + J_h w = 0. Equivalently,
+    L_h^T J_b u = 0, where columns of L_h span the left null space of J_h.
+
+    The quadratic term is evaluated along the minimum-norm hidden lift
+    w = -J_h^+ J_b u, giving an effective Hessian
+    L_h^T H[(u, w), (u, w)]. This is the second-order analogue of the projected
+    full-null-space row-space computation used for the linear metric.
+    """
+    n_total = J.shape[1]
+    n_base = len(base_indices)
+    if n_base == 0:
+        return (
+            torch.zeros(0, 0, dtype=J.dtype, device=J.device),
+            torch.zeros(0, 0, 0, dtype=J.dtype, device=J.device),
+        )
+
+    base_set = set(base_indices)
+    hidden_indices = [i for i in range(n_total) if i not in base_set]
+    idx_base = torch.tensor(base_indices, dtype=torch.long, device=J.device)
+    J_base = J[:, idx_base]
+
+    if not hidden_indices:
+        H_base = H[:, idx_base, :][:, :, idx_base]
+        return J_base, H_base
+
+    idx_hidden = torch.tensor(hidden_indices, dtype=torch.long, device=J.device)
+    J_hidden = J[:, idx_hidden]
+    left_hidden = _left_null_space(J_hidden, eps=eps_linear)
+    n_effective = left_hidden.shape[1]
+
+    if n_effective == 0:
+        return (
+            torch.zeros(0, n_base, dtype=J.dtype, device=J.device),
+            torch.zeros(0, n_base, n_base, dtype=J.dtype, device=J.device),
+        )
+
+    J_effective = left_hidden.T @ J_base
+    hidden_lift = -_matrix_pinv(J_hidden, eps_linear) @ J_base
+
+    lift = torch.zeros(n_total, n_base, dtype=J.dtype, device=J.device)
+    lift[idx_base, :] = torch.eye(n_base, dtype=J.dtype, device=J.device)
+    lift[idx_hidden, :] = hidden_lift
+
+    H_left = torch.einsum("mc,mij->cij", left_hidden, H)
+    H_effective = torch.einsum("ia,cij,jb->cab", lift, H_left, lift)
+    H_effective = 0.5 * (H_effective + H_effective.transpose(1, 2))
+    return J_effective, H_effective
+
+
 def compute_quadratic_signature(
     J: torch.Tensor,
     H: torch.Tensor,
@@ -381,6 +456,8 @@ def compute_null_space_distance(
                                   and pred_auxiliary_ids = [].
     base_eids                   : if provided, restricts the null space / row space to the parameters
                                   belonging only to these entity IDs (e.g., ignoring construction geometry).
+                                  Quadratic signatures eliminate non-base coordinates as hidden variables
+                                  instead of dropping their Hessian columns.
     include_quadratic           : if True, also compare second-order intent signatures in Sym^2(T_gt*).
 
 
@@ -473,20 +550,29 @@ def compute_null_space_distance(
         assert H_gt is not None and H_pred is not None
 
         if base_eids is not None:
-            J_gt_domain = J_gt[:, gt_base_indices]
-            domain_basis = compute_null_space(J_gt_domain, eps=eps_rank)
-            Q_gt = compute_quadratic_signature(
+            J_gt_effective, H_gt_effective = _effective_base_derivatives(
                 J_gt,
                 H_gt,
-                variable_indices=gt_base_indices,
+                gt_base_indices,
+                eps_linear=eps_rank,
+            )
+            J_pred_effective, H_pred_effective = _effective_base_derivatives(
+                J_pred,
+                H_pred,
+                pred_base_indices,
+                eps_linear=eps_rank,
+            )
+            domain_basis = compute_null_space(J_gt_effective, eps=eps_rank)
+            Q_gt = compute_quadratic_signature(
+                J_gt_effective,
+                H_gt_effective,
                 domain_basis=domain_basis,
                 eps_linear=eps_rank,
                 eps_quad=eps_quad,
             )
             Q_pred = compute_quadratic_signature(
-                J_pred,
-                H_pred,
-                variable_indices=pred_base_indices,
+                J_pred_effective,
+                H_pred_effective,
                 domain_basis=domain_basis,
                 eps_linear=eps_rank,
                 eps_quad=eps_quad,
