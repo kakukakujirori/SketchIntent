@@ -144,6 +144,12 @@ class SketchFreecadConverter:
         invalid_constraints = []
 
         for c_id, constr in sketch.constraints.items():
+            if constr.constraint_type == datalib.ConstraintType.Unknown:
+                if skip_invalid_constraints:
+                    invalid_constraints.append(c_id)
+                    continue
+                raise ValueError(f"Unknown constraint cannot be converted to FreeCAD: {c_id}")
+
             handler_name = constr.constraint_type.name
             handler = self.context.get_constraint_handler(handler_name)
             if not handler:
@@ -179,10 +185,14 @@ class SketchFreecadConverter:
         """
         Full conversion: Primitives + Constraints.
         """
-        sketch, _ = complete_constraint_values(sketch)
+        sketch, invalid_value_constraints = complete_constraint_values(
+            sketch,
+            skip_invalid_constraints=skip_invalid,
+        )
         doc, fc_sketch, primitive_freecad_mapping = self.to_freecad_primitives(sketch, doc_name, skip_invalid)
         constraint_freecad_mapping, invalid_constraints = self.to_freecad_constraints(sketch, fc_sketch, primitive_freecad_mapping, skip_invalid)
         doc.recompute()
+        invalid_constraints = sorted(set(invalid_value_constraints) | set(invalid_constraints))
         return doc, fc_sketch, primitive_freecad_mapping, constraint_freecad_mapping, invalid_constraints
 
     def to_freecad_commands(self, sketch: datalib.Sketch, skip_invalid: bool = False) -> list[str]:

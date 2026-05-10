@@ -40,8 +40,8 @@ class ConstraintType(enum.IntEnum):
     Minor_Diameter = 26
     Major_Diameter = 27
     Rho = 28
-    Unknown = 29
     Subnode = 101
+    Unknown = 102  # Pseudo-constraint used for malformed constraints.
 
     @property
     def _numeric_schemas(self):

@@ -1,4 +1,3 @@
-from typing import Literal
 import random
 import torch
 
@@ -13,6 +12,24 @@ from src.sketch_handlers.sketch_utils import cleanse_sketch_primitives, cleanse_
 
 class ConstraintDataset(torch.utils.data.Dataset):
     """Constraint generation dataset."""
+
+    @staticmethod
+    def _metadata_to_str(value) -> str:
+        if hasattr(value, "item"):
+            value = value.item()
+        if isinstance(value, bytes):
+            return value.decode("utf-8", errors="replace").rstrip("\x00")
+        return str(value)
+
+    @classmethod
+    def _format_sketch_id(cls, sketch_id) -> str:
+        try:
+            document_id = cls._metadata_to_str(sketch_id["document_id"])
+            part_idx = int(sketch_id["part_idx"])
+            sketch_idx = int(sketch_id["sketch_idx"])
+            return f"{document_id}:{part_idx}:{sketch_idx}"
+        except Exception:
+            return cls._metadata_to_str(sketch_id)
 
     def __init__(
         self,
@@ -37,6 +54,8 @@ class ConstraintDataset(torch.utils.data.Dataset):
 
         sequence_array = flat_array.load_dictionary_flat(sequence_file)
         self.sequences = sequence_array['sequences']
+        self.source_files = sequence_array.get('source_files')
+        self.sketch_ids = sequence_array.get('sketch_ids')
 
     def __getitem__(self, index: int) -> dict[str, int | datalib.Sketch | torch.Tensor]:
         seq = self.sequences[index]
@@ -55,7 +74,11 @@ class ConstraintDataset(torch.utils.data.Dataset):
 
         result_tokens = self.tokenizer.tokenize(sketch_noisy)
 
-        result: dict[str, int | datalib.Sketch | torch.Tensor] = {"sketch_index": index, "sketch": sketch}
+        result: dict[str, int | str | datalib.Sketch | torch.Tensor] = {"sketch_index": index, "sketch": sketch}
+        if self.source_files is not None:
+            result["source_file"] = self._metadata_to_str(self.source_files[index])
+        if self.sketch_ids is not None:
+            result["sketch_id"] = self._format_sketch_id(self.sketch_ids[index])
         for key, val in result_tokens.items():
             result[key] = torch.from_numpy(val)
 

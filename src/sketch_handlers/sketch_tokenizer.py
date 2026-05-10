@@ -423,6 +423,9 @@ class SketchTokenizer:
             constraints: Decoded constraint dict keyed by ``c_N`` identifiers.
             c_id_to_token_start: Maps each ``c_N`` to its start index in ``val_tokens``.
             invalid_block_start: Start index in ``val_tokens`` for each invalid block.
+                In ``allow_invalid_constraints`` mode, malformed blocks are also
+                represented as placeholder constraints and included in
+                ``constraints`` / ``c_id_to_token_start``.
         """
         constraints: dict[str, datalib.Constraint] = {}
         c_id_to_token_start: dict[str, int] = {}
@@ -430,9 +433,23 @@ class SketchTokenizer:
 
         parsed_valid, parsed_malformed = self.parse_constraint_tokens(val_tokens)
 
+        def add_constraint(constr: datalib.Constraint, start_index: int) -> None:
+            unique_id = f"c_{len(constraints)}"
+            constraints[unique_id] = constr._replace(identifier=unique_id)
+            c_id_to_token_start[unique_id] = start_index
+
+        def make_malformed_constraint() -> datalib.Constraint:
+            return datalib.Constraint(
+                identifier="malformed",
+                constraint_type=datalib.ConstraintType.Unknown,
+                parameters=[],
+            )
+
         # Structurally malformed blocks (e.g. non-ref token in ref slot)
         for _, _, token_block, start_index in parsed_malformed:
             invalid_block_start[start_index] = token_block
+            if allow_invalid_constraints:
+                add_constraint(make_malformed_constraint(), start_index)
 
         for type_id, ref_positions, token_block, start_index in parsed_valid:
             try:
@@ -442,19 +459,21 @@ class SketchTokenizer:
                 assert handler is not None
 
                 # Validation check (NOTE: handlers don't check refs in decode to allow invalid constraints)
-                if not allow_invalid_constraints and not handler.validate_refs(ref_positions):
+                if not handler.validate_refs(ref_positions):
+                    if allow_invalid_constraints:
+                        invalid_block_start[start_index] = token_block
+                        add_constraint(make_malformed_constraint(), start_index)
+                        continue
                     raise ValueError(f"Invalid refs for constraint {c_name}: {ref_positions=} ({visualize_constraint_sequence(val_tokens)=})")
 
                 # Pass empty array for params as they are not tokenized
                 constr = handler.decode(ref_positions, np.array([]), tokenpos_to_primitive)
                 assert constr is not None
-                unique_id = f"c_{len(constraints)}"
-                constr = constr._replace(identifier=unique_id)
-                constraints[unique_id] = constr
-                c_id_to_token_start[unique_id] = start_index
+                add_constraint(constr, start_index)
             except Exception as e:
                 if allow_invalid_constraints:
                     invalid_block_start[start_index] = token_block
+                    add_constraint(make_malformed_constraint(), start_index)
                     continue
                 else:
                     raise e

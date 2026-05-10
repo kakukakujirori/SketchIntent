@@ -19,6 +19,10 @@ import argparse
 import json
 import os
 from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
 
 import hydra
 import lightning as L
@@ -141,7 +145,7 @@ def remove_invalid_tokens(
         # Variable-length mode
         for pos in invalid_positions:
             offset = 0
-            while tokens[pos + offset] >= CONSTRAINT_VAL_OFFSET:
+            while pos + offset < len(tokens) and tokens[pos + offset] >= CONSTRAINT_VAL_OFFSET:
                 offset += 1
             valid_mask[pos : pos + offset + 1] = False
 
@@ -149,6 +153,66 @@ def remove_invalid_tokens(
     result = np.full_like(tokens, ConstraintToken.Pad)
     result[:len(valid_tokens)] = valid_tokens
     return result
+
+
+def finalize_constraint_tokens(tokens: np.ndarray) -> np.ndarray:
+    """Restore a Stop token before final decoding if the retry loop ended on Pads."""
+    result = tokens.copy()
+    if (result == ConstraintToken.Stop).any():
+        return result
+
+    pad_positions = np.flatnonzero(result == ConstraintToken.Pad)
+    if len(pad_positions) > 0:
+        result[pad_positions[0]] = ConstraintToken.Stop
+    return result
+
+
+def batch_item(batch: dict, key: str, index: int, default=None):
+    if key not in batch:
+        return default
+
+    value = batch[key]
+    if isinstance(value, torch.Tensor):
+        item = value[index]
+        if item.numel() == 1:
+            return item.item()
+        return item.detach().cpu().tolist()
+    if isinstance(value, np.ndarray):
+        item = value[index]
+        return item.item() if hasattr(item, "item") else item
+    if isinstance(value, (list, tuple)):
+        return value[index]
+    return value
+
+
+def sample_metadata(batch: dict, batch_idx: int, batch_size: int, sample_idx: int) -> dict:
+    dataset_index = batch_item(batch, "sketch_index", sample_idx, batch_idx * batch_size + sample_idx)
+    source_file = batch_item(batch, "source_file", sample_idx)
+    sketch_id = batch_item(batch, "sketch_id", sample_idx)
+    return {
+        "dataset_index": int(dataset_index) if isinstance(dataset_index, (int, np.integer)) else dataset_index,
+        "source_file": str(source_file) if source_file is not None else None,
+        "sketch_id": str(sketch_id) if sketch_id is not None else None,
+    }
+
+
+def sample_display_name(metadata: dict) -> str:
+    if metadata.get("source_file"):
+        return Path(metadata["source_file"]).name
+    if metadata.get("sketch_id"):
+        return metadata["sketch_id"]
+    return f"idx={metadata['dataset_index']}"
+
+
+def data_directory(data_path: str) -> Path:
+    path = Path(data_path).expanduser()
+    return path if path.is_dir() else path.parent
+
+
+def result_script_name(result: dict) -> str:
+    if result.get("source_file"):
+        return Path(result["source_file"]).name
+    return f"{result['sample_idx']:04d}.py"
 
 
 @torch.no_grad()
@@ -212,10 +276,12 @@ def run_test_inference(
 
             # Evaluate generated samples with solver
             for local_idx, global_idx in enumerate(incomplete):
+                metadata = sample_metadata(batch, batch_idx, batch_size, global_idx)
+                display_name = sample_display_name(metadata)
                 prim_tokens = batch['p_val'][global_idx].cpu().numpy()
                 cons_tokens = generated_part[local_idx].cpu().numpy()
 
-                status, sg_sketch, constraint_to_token_start, invalid_block_start = \
+                status, sg_sketch, constraint_to_token_start, _ = \
                     solver_feedback.evaluate_constraints(
                         prim_tokens, cons_tokens,
                         batch['sketch'][global_idx],
@@ -245,18 +311,19 @@ def run_test_inference(
                     if fully_constrained or max_len_reached:
                         is_valid[global_idx] = True
                         current_tokens[global_idx] = cons_tokens
-                        print(f"  Batch {batch_idx}, sample {global_idx}: "
+                        print(f"  Batch {batch_idx}, sample {global_idx} [{display_name}]: "
                               f"SOLVED at iter {iter_idx} (DoF={status.DoF})")
                         continue
 
                 # Collect invalid positions from all error types
-                invalid_positions = set(invalid_block_start.keys())
+                invalid_positions = set()
                 problematic_constraints = status.MalformedConstraints + status.ConflictingConstraints + status.RedundantConstraints
                 if status.Status == "Failed" and len(problematic_constraints) == 0:
                     problematic_constraints = sg_sketch.constraints.keys()
                 for c_id in problematic_constraints:
-                    start = constraint_to_token_start[c_id]
-                    invalid_positions.add(start)
+                    start = constraint_to_token_start.get(c_id)
+                    if start is not None:
+                        invalid_positions.add(start)
 
                 # Remove invalid tokens
                 current_tokens[global_idx] = remove_invalid_tokens(
@@ -265,17 +332,39 @@ def run_test_inference(
                     context.align_constraint_token_length_to,
                 )
 
-                print(f"  Batch {batch_idx}, sample {global_idx}: "
+                print(f"  Batch {batch_idx}, sample {global_idx} [{display_name}]: "
                       f"iter {iter_idx}: {status.Status} (DoF={status.DoF}), "
                       f"removed {len(invalid_positions)} blocks, regenerating...")
 
         # Store final results
         for global_idx in range(batch_size):
+            metadata = sample_metadata(batch, batch_idx, batch_size, global_idx)
+            # Convert final tokens to FreeCAD commands
+            prim_tokens = batch['p_val'][global_idx].cpu().numpy()
+            cons_tokens = finalize_constraint_tokens(current_tokens[global_idx])
+            final_decode_error = None
+            final_commands = []
+
+            # Tokens -> SketchGraphs -> FreeCAD commands
+            try:
+                sg_sketch, _, _ = solver_feedback.sketch_tokenizer.detokenize(
+                    {"p_val": prim_tokens, "c_val": cons_tokens},
+                    allow_invalid_constraints=True,
+                )
+                if is_valid[global_idx]:
+                    sg_sketch, _ = complete_constraint_values(sg_sketch, skip_invalid_constraints=True)
+                    final_commands = solver_feedback.sketch_freecad_converter.to_freecad_commands(sg_sketch)
+            except Exception as e:
+                final_decode_error = repr(e)
+
             results.append({
                 'sample_idx': batch_idx * batch_size + global_idx,
+                **metadata,
                 'iterations': iteration_results[global_idx] or [],
-                'final_tokens': current_tokens[global_idx].tolist(),
+                'final_tokens': cons_tokens.tolist(),
+                'final_decode_error': final_decode_error,
                 'solved': is_valid[global_idx],
+                'final_commands': final_commands,
             })
 
     return results
@@ -286,19 +375,68 @@ def main():
     parser.add_argument("--ckpt", type=str, required=True,
                         help="Path to model checkpoint")
     parser.add_argument("--data", type=str, required=True,
-                        help="Path to input data (.npy / .py / .FCStd)")
+                        help="Path to input data (.npy or directory/file of .py)")
+    parser.add_argument("--outdir", type=str, required=True,
+                        help="Output directory")
     parser.add_argument("--n_iter", type=int, default=5,
                         help="Max solver intervention iterations")
     parser.add_argument("--batch_size", type=int, default=32,
                         help="Batch size for generation")
-    parser.add_argument("--output_dir", type=str, default="test_output",
-                        help="Output directory")
     parser.add_argument("--fully_constrained_dof", type=int, default=2,
                         help="DoF threshold for fully constrained")
     parser.add_argument("--solver_check_one_by_one", action='store_true',
                         help="If True, solver checks constraints one by one")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--seed", type=int, default=42,
+                        help="Random seed for reproducible sampling")
     args = parser.parse_args()
+
+    L.seed_everything(args.seed, workers=True)
+
+    input_data_dir = data_directory(args.data).resolve()
+    output_dir = Path(args.outdir).expanduser().resolve()
+    if output_dir == input_data_dir:
+        print(
+            f"Error: --outdir must differ from the input data directory: {input_data_dir}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    # Pre-processing if input is python data
+    input_is_python_data = args.data.endswith(".py") or os.path.isdir(args.data)
+    if input_is_python_data:
+        input_data_dir = args.data
+        temp_dir_obj = None
+
+        # If single .py file, wrap it in a temporary directory
+        if os.path.isfile(args.data) and args.data.endswith(".py"):
+            temp_dir_obj = tempfile.TemporaryDirectory(prefix="test_py_")
+            input_data_dir = temp_dir_obj.name
+            shutil.copy(args.data, input_data_dir)
+            print(f"Wrapped single python file in {input_data_dir}")
+
+        print(f"Pre-processing python data from {input_data_dir}...")
+        tmp_npy = "/tmp/test_data.npy"
+        try:
+            # 1. Sieve
+            subprocess.run([sys.executable, "scripts/qwen3_sieve_generated_data.py"], check=False)
+            # 2. Convert to npy
+            subprocess.run([sys.executable, "scripts/convert_freecad_to_seq.py",
+                            "--data_dir", input_data_dir,
+                            "--out_path", tmp_npy], check=True)
+            # 3. Cleanse
+            subprocess.run([sys.executable, "scripts/cleanse_seq_for_freecad.py", tmp_npy], check=True)
+
+            # Update args.data to the cleansed npy
+            args.data = tmp_npy.replace(".npy", "_unique_valid.npy")
+            print(f"Pre-processing finished. Using: {args.data}")
+
+        except subprocess.CalledProcessError as e:
+            print(f"Error during pre-processing: {e}")
+            sys.exit(1)
+        finally:
+            if temp_dir_obj:
+                temp_dir_obj.cleanup()
 
     device = torch.device(args.device)
 
@@ -334,47 +472,51 @@ def main():
     print(f"Unsolved: {len(results) - solved_count}")
 
     # Save results
-    if args.output_dir:
-        output_dir = Path(args.output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
-        results_path = output_dir / "results.json"
-        # Convert numpy arrays to lists for JSON serialization
-        results_serializable = []
-        for r in results:
-            r_clean = {
-                'sample_idx': r['sample_idx'],
-                'solved': r['solved'],
-                'final_commands': r['final_commands'],
+    output_dir.mkdir(parents=True, exist_ok=True)
+    results_path = output_dir / "results.json"
+    # Convert numpy arrays to lists for JSON serialization
+    results_serializable = []
+    for r in results:
+        r_clean = {
+            'sample_idx': r['sample_idx'],
+            'dataset_index': r.get('dataset_index'),
+            'source_file': r.get('source_file'),
+            'sketch_id': r.get('sketch_id'),
+            'solved': r['solved'],
+            'final_decode_error': r.get('final_decode_error'),
+            'final_commands': r['final_commands'],
+        }
+        if isinstance(r.get('final_tokens'), np.ndarray):
+            r_clean['final_tokens'] = r['final_tokens'].tolist()
+        else:
+            r_clean['final_tokens'] = r.get('final_tokens')
+        r_clean['iterations'] = [
+            {
+                'status': it['status'],
+                'dof': it['dof'],
+                'malformed': it['malformed'],
+                'conflicting': it['conflicting'],
+                'redundant': it['redundant'],
             }
-            if isinstance(r.get('final_tokens'), np.ndarray):
-                r_clean['final_tokens'] = r['final_tokens'].tolist()
-            else:
-                r_clean['final_tokens'] = r.get('final_tokens')
-            r_clean['iterations'] = [
-                {
-                    'status': it['status'],
-                    'dof': it['dof'],
-                    'malformed': it['malformed'],
-                    'conflicting': it['conflicting'],
-                    'redundant': it['redundant'],
-                }
-                for it in r['iterations']
-            ]
-            results_serializable.append(r_clean)
+            for it in r['iterations']
+        ]
+        results_serializable.append(r_clean)
 
-        with open(results_path, "w") as f:
-            json.dump(results_serializable, f, indent=2)
-        print(f"\nResults saved to {results_path}")
+    with open(results_path, "w") as f:
+        json.dump(results_serializable, f, indent=2)
+    print(f"\nResults saved to {results_path}")
 
-        # Save FreeCAD command scripts
-        for r in results:
-            if r['final_commands']:
-                fc_path = output_dir / f"sample_{r['sample_idx']:04d}.py"
-                with open(fc_path, "w") as f:
-                    f.write("# Sample {:04d} | Solved: {}\n".format(r['sample_idx'], r['solved']))
-                    for cmd in r['final_commands']:
-                        f.write(cmd + "\n")
-        print(f"FreeCAD scripts saved to {output_dir}/sample_*.py")
+    # Save FreeCAD command scripts
+    for r in results:
+        if r['final_commands']:
+            fc_path = output_dir / result_script_name(r)
+            with open(fc_path, "w") as f:
+                f.write("# Sample {:04d} | Solved: {}\n".format(r['sample_idx'], r['solved']))
+                if r.get('source_file'):
+                    f.write("# Source: {}\n".format(r['source_file']))
+                for cmd in r['final_commands']:
+                    f.write(cmd + "\n")
+    print(f"FreeCAD scripts saved to {output_dir}/*.py")
 
 
 if __name__ == "__main__":

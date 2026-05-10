@@ -966,6 +966,12 @@ def complete_constraint_values(sketch: datalib.Sketch, expr_watermark: str = "VA
 
     invalid_constraints = []
     for constr_id, constr in sketch.constraints.items():
+        if constr.type == datalib.ConstraintType.Unknown:
+            if skip_invalid_constraints:
+                invalid_constraints.append(constr_id)
+                continue
+            raise ValueError(f"ERROR: Unknown constraint type for {constr_id}: {constr}")
+
         # Extract entity references
         entity_refs = []
         for param in constr.parameters:

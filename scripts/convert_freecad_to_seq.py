@@ -39,6 +39,7 @@ if __name__ == '__main__':
     files = sorted([os.path.join(args.data_dir, f) for f in os.listdir(args.data_dir) if f.endswith(".py")])
     sequences = []
     sketch_ids = []
+    source_files = []
     error_list = []
 
     for i, f in enumerate(tqdm(files)):
@@ -53,6 +54,7 @@ if __name__ == '__main__':
         try:
             seq = datalib.sequence.sketch_to_sequence(sketch_or_error)
             sequences.append(seq)
+            source_files.append(os.path.abspath(f))
             # NOTE: (doc_id, part_id, sketch_id), where part_id and sketch_id are dummy
             # Ref: sketchgraphs/pipeline/make_sequence_dataset.py
             doc_id = os.path.basename(f)[:24].encode('utf-8')
@@ -67,6 +69,10 @@ if __name__ == '__main__':
     sequence_lengths = np.array([len(seq) for seq in sequences], dtype=np.int64)
     sketch_ids_arr = np.array(
         sketch_ids, dtype=[('document_id', 'S24'), ('part_idx', '<i4'), ('sketch_idx', '<i4')])
+    source_files_arr = np.asarray(
+        source_files,
+        dtype=f"<U{max(1, max((len(path) for path in source_files), default=1))}",
+    )
 
     offsets, sequence_data = flat_array.raw_list_flat(sequences)
     flat_data = flat_array.pack_list_flat(offsets, sequence_data)
@@ -75,6 +81,7 @@ if __name__ == '__main__':
         'sequences': flat_data,
         'sequence_lengths': sequence_lengths,
         'sketch_ids': sketch_ids_arr,
+        'source_files': source_files_arr,
     })
 
     # Save

@@ -73,20 +73,22 @@ def _offsets_from_counts(counts: np.ndarray):
 
 
 def subsample_sequences(sequence_data, idx: list[int]) -> np.ndarray:
-    sketch_ids = sequence_data['sketch_ids'][idx]
-    sequence_lengths = sequence_data['sequence_lengths'][idx]
-
     sequences: flat_array.FlatSerializedArray = sequence_data['sequences']
     idx_sequences_data = [sequences.get_raw_bytes(i) for i in idx]
     counts = np.array([len(x) for x in idx_sequences_data], dtype=np.int64)
 
     sequences = flat_array.pack_list_flat(_offsets_from_counts(counts), np.concatenate(idx_sequences_data))
 
-    return flat_array.pack_dictionary_flat({
-        'sequences': sequences,
-        'sketch_ids': sketch_ids,
-        'sequence_lengths': sequence_lengths
-    })
+    subsampled = {'sequences': sequences}
+    for key, value in sequence_data.items():
+        if key == 'sequences':
+            continue
+        if isinstance(value, np.ndarray):
+            subsampled[key] = value[idx]
+        else:
+            subsampled[key] = [value[i] for i in idx]
+
+    return flat_array.pack_dictionary_flat(subsampled)
 
 
 if __name__ == '__main__':
