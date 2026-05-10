@@ -39,6 +39,7 @@ from src.data.components.primitive_noise import PrimitiveNoise
 from src.models.components.solver_feedback import SolverFeedback
 from src.models.components.token_visualizer import visualize_constraint_sequence
 from src.sketch_handlers.constants import ConstraintToken, CONSTRAINT_VAL_OFFSET
+from src.sketch_handlers.freecad_utils import ensure_freecad_imported, load_freecad_commands
 from src.sketch_handlers.sketch_utils import (
     cleanse_sketch_primitives, cleanse_sketch_constraints,
     complete_constraint_values, normalize_sketch)
@@ -215,6 +216,47 @@ def result_script_name(result: dict) -> str:
     return f"{result['sample_idx']:04d}.py"
 
 
+def load_source_primitives_sketch(source_path: str, solver_feedback: SolverFeedback):
+    with open(source_path, "r") as f:
+        script_lines = f.read().splitlines()
+
+    primitive_only_lines = []
+    for line in script_lines:
+        stripped = line.strip()
+        if "fc_sketch.addConstraint(" in stripped:
+            continue
+        if stripped in {"doc.recompute()", "FreeCAD.ActiveDocument.recompute()"}:
+            continue
+        primitive_only_lines.append(line)
+
+    doc = None
+    try:
+        doc, fc_sketch = load_freecad_commands(primitive_only_lines)
+        return solver_feedback.sketch_freecad_converter.from_freecad(fc_sketch)
+    finally:
+        FreeCAD, _, _ = ensure_freecad_imported()
+        FreeCAD.closeDocument(doc.Name) if doc else None
+
+
+def output_primitive_source_sketch(
+    batch: dict,
+    sample_idx: int,
+    metadata: dict,
+    solver_feedback: SolverFeedback,
+    source_sketch_cache: dict[str, object],
+):
+    source_file = metadata.get("source_file")
+    if not source_file:
+        return batch['sketch'][sample_idx]
+
+    source_path = str(Path(source_file).expanduser())
+    if source_path not in source_sketch_cache:
+        raw_sketch = load_source_primitives_sketch(source_path, solver_feedback)
+        raw_sketch = cleanse_sketch_primitives(raw_sketch)
+        source_sketch_cache[source_path] = raw_sketch
+    return source_sketch_cache[source_path]
+
+
 @torch.no_grad()
 def run_test_inference(
     module: L.LightningModule,
@@ -242,6 +284,7 @@ def run_test_inference(
     solver_feedback = SolverFeedback(context)
 
     results = []
+    source_sketch_cache = {}
 
     for batch_idx, batch in enumerate(loader):
 
@@ -352,6 +395,17 @@ def run_test_inference(
                     allow_invalid_constraints=True,
                 )
                 if is_valid[global_idx]:
+                    primitive_source_sketch = output_primitive_source_sketch(
+                        batch,
+                        global_idx,
+                        metadata,
+                        solver_feedback,
+                        source_sketch_cache,
+                    )
+                    sg_sketch = solver_feedback.overwrite_primitives_with_original(
+                        sg_sketch,
+                        primitive_source_sketch,
+                    )
                     sg_sketch, _ = complete_constraint_values(sg_sketch, skip_invalid_constraints=True)
                     final_commands = solver_feedback.sketch_freecad_converter.to_freecad_commands(sg_sketch)
             except Exception as e:

@@ -6,6 +6,7 @@ This module provides functionality to:
 3. Return solver status (DoF, conflicts, redundancies, ...)
 """
 from __future__ import annotations
+import copy
 import math
 import os
 import sys
@@ -62,6 +63,41 @@ class SolverFeedback:
         self.sketch_freecad_converter = SketchFreecadConverter(context, raise_on_error=False)
         self.distortion_threshold = distortion_threshold or 1 / context.num_quantization_bins
         assert self.distortion_threshold > 0, f"{self.distortion_threshold=}"
+
+    @staticmethod
+    def overwrite_primitives_with_original(
+        sketchgraphs_sketch: datalib.Sketch,
+        sketch_original: datalib.Sketch,
+    ) -> datalib.Sketch:
+        """Overwrite decoded primitive geometry with the original sketch geometry.
+
+        The model predicts constraints from quantized primitive tokens, so the
+        decoded primitive coordinates can drift slightly from the input sketch.
+        Constraint ids/refs still come from the decoded sketch; only entity
+        geometry is restored here.
+        """
+        # Sanity check (NOTE: Due to max_token_length, the number of primitives may be less than the original number of primitives)
+        if len(sketchgraphs_sketch.entities) > len(sketch_original.entities):
+            error_msg = f"Number of entities mismatch:\n"
+            error_msg += "[sketch_original]\n"
+            for e_id, e in sketch_original.entities.items():
+                error_msg += f"    {e_id}: {e}\n"
+            error_msg += "[sketchgraphs_sketch]\n"
+            for e_id, e in sketchgraphs_sketch.entities.items():
+                error_msg += f"    {e_id}: {e}\n"
+            raise ValueError(error_msg)
+
+        for ent_gen, ent_ori in zip(sketchgraphs_sketch.entities.values(), sketch_original.entities.values()):
+            if type(ent_gen) != type(ent_ori):
+                raise ValueError(f"Entity type mismatch: {type(ent_gen)=} vs {type(ent_ori)=}")
+
+        sketch_original_entities_reversed = list(sketch_original.entities.values())[::-1]
+        for ent_id, ent_gen in sketchgraphs_sketch.entities.items():
+            ent_ori = copy.deepcopy(sketch_original_entities_reversed.pop())
+            ent_ori.entityId = ent_gen.entityId
+            sketchgraphs_sketch.entities[ent_id] = ent_ori
+
+        return sketchgraphs_sketch
 
     @classmethod
     def count_relational_and_dimensional_constraints(cls, fc_sketch: "Sketcher.SketchObject",) -> tuple[int, int]:
@@ -247,35 +283,8 @@ class SolverFeedback:
             {"p_val": prim_tokens, "c_val": cons_tokens},
             allow_invalid_constraints=True,
         )
-        if sketch_original:
-            # Sanity check (NOTE: Due to max_token_length, the number of primitives may be less than the original number of primitives)
-            if len(sketchgraphs_sketch.entities) > len(sketch_original.entities):
-                error_msg = f"Number of entities mismatch:\n"
-                error_msg += "[sketch_original]\n"
-                for e_id, e in sketch_original.entities.items():
-                    error_msg += f"    {e_id}: {e}\n"
-                error_msg += "[sketchgraphs_sketch]\n"
-                for e_id, e in sketchgraphs_sketch.entities.items():
-                    error_msg += f"    {e_id}: {e}\n"
-
-                # import os, pickle
-                # os.makedirs("dump", exist_ok=True)
-                # pickle.dump(sketchgraphs_sketch, open("dump/sketchgraphs_sketch.pkl", "wb"))
-                # pickle.dump(prim_tokens, open("dump/prim_tokens.pkl", "wb"))
-                # pickle.dump(cons_tokens, open("dump/cons_tokens.pkl", "wb"))
-                # pickle.dump(sketch_original, open("dump/sketch_original.pkl", "wb"))
-                # error_msg += "==> Artifacts dumped to `dump/`"
-
-                raise ValueError(error_msg)
-            for ent_gen, ent_ori in zip(sketchgraphs_sketch.entities.values(), sketch_original.entities.values()):
-                if type(ent_gen) != type(ent_ori):
-                    raise ValueError(f"Entity type mismatch: {type(ent_gen)=} vs {type(ent_ori)=}")
-            # overwrite
-            sketch_original_entities_reversed = list(sketch_original.entities.values())[::-1]
-            for ent_id, ent in sketchgraphs_sketch.entities.items():
-                ent_ori = sketch_original_entities_reversed.pop()
-                ent_ori.entityId = ent.entityId
-                sketchgraphs_sketch.entities[ent_id] = ent_ori
+        if sketch_original is not None:
+            sketchgraphs_sketch = self.overwrite_primitives_with_original(sketchgraphs_sketch, sketch_original)
 
         # Assign dimensional values (since the model doesn't infer dimensional contraint values)
         sketchgraphs_sketch, invalid_constraints = complete_constraint_values(sketchgraphs_sketch, skip_invalid_constraints=True)
