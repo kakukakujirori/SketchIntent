@@ -7,11 +7,67 @@ __all__ = [
     "ConstraintIoU",
     "ConstraintBLEU",
     "compute_null_space_distance",
+    "compute_edit_response_distance",
+    "compute_edit_invariant_relation_distance",
+    "collect_probes",
+    "pairwise_distance_observable",
+    "nearest_gt",
+    "human_human_variation",
+    "normalized_distance",
+    "pairwise_distances",
+    "discover_per_annotator_dirs",
+    "discover_combined_gt_dir",
+    "compute_histcad_2d",
+    "compute_histcad_2d_pair",
+    "select_preserved_relations",
+    "HistCADConfig",
+    "HistCADResult",
+    "HistCADProbeResult",
 ]
 
-# Lazy import to avoid torchmetrics dependency when only null_space_distance is needed
+
+_LAZY = {
+    "compute_null_space_distance":
+        ("src.metrics.null_space_distance", "compute_null_space_distance"),
+    "compute_edit_response_distance":
+        ("src.metrics.edit_response_distance", "compute_edit_response_distance"),
+    "compute_edit_invariant_relation_distance":
+        ("src.metrics.edit_invariant_relation", "compute_edit_invariant_relation_distance"),
+    "collect_probes":
+        ("src.metrics.edit_response_distance", "collect_probes"),
+    "pairwise_distance_observable":
+        ("src.metrics.edit_response_distance", "pairwise_distance_observable"),
+    "nearest_gt":
+        ("src.metrics.multi_gt_aggregation", "nearest_gt"),
+    "human_human_variation":
+        ("src.metrics.multi_gt_aggregation", "human_human_variation"),
+    "normalized_distance":
+        ("src.metrics.multi_gt_aggregation", "normalized_distance"),
+    "pairwise_distances":
+        ("src.metrics.multi_gt_aggregation", "pairwise_distances"),
+    "discover_per_annotator_dirs":
+        ("src.metrics.multi_gt_aggregation", "discover_per_annotator_dirs"),
+    "discover_combined_gt_dir":
+        ("src.metrics.multi_gt_aggregation", "discover_combined_gt_dir"),
+    "compute_histcad_2d":
+        ("src.metrics.histcad_2d", "compute_histcad_2d"),
+    "compute_histcad_2d_pair":
+        ("src.metrics.histcad_2d", "compute_histcad_2d_pair"),
+    "select_preserved_relations":
+        ("src.metrics.histcad_2d", "select_preserved_relations"),
+    "HistCADConfig":
+        ("src.metrics.histcad_2d", "HistCADConfig"),
+    "HistCADResult":
+        ("src.metrics.histcad_2d", "HistCADResult"),
+    "HistCADProbeResult":
+        ("src.metrics.histcad_2d", "HistCADProbeResult"),
+}
+
+
 def __getattr__(name):
-    if name == "compute_null_space_distance":
-        from .null_space_distance import compute_null_space_distance
-        return compute_null_space_distance
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    spec = _LAZY.get(name)
+    if spec is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    module_path, attr = spec
+    import importlib
+    return getattr(importlib.import_module(module_path), attr)

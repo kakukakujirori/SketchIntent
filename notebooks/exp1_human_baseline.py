@@ -16,6 +16,7 @@ from src.sketch_handlers.sketch_freecad_converter import SketchFreecadConverter 
 
 from canonical_sketch import (  # noqa: E402
     CANONICAL_METRICS,
+    CONSTRAINT_SETS,
     build_canonical_comparison_sketches,
     metric_base_eids,
     metric_include_quadratic,
@@ -113,7 +114,8 @@ def print_geometry_audit(audit_rows: list[dict], valid_rows: list[dict], filewis
             f"extra solid files={sum(r['extra_solid'] > 0 for r in rows):2d} | "
             f"extra construction files={sum(r['extra_construction'] > 0 for r in rows):2d} | "
             f"flag changes={sum(r['construction_flag_changed'] for r in rows):2d} | "
-            f"dropped constraints={sum(r['dropped_constraints'] for r in rows):2d}"
+            f"dropped constraints rel/self={sum(r['dropped_constraints'] for r in rows):2d}/"
+            f"{sum(r.get('dropped_self_dimensioning_constraints', 0) for r in rows):2d}"
         )
 
     for metric in CANONICAL_METRICS:
@@ -137,7 +139,7 @@ def print_geometry_audit(audit_rows: list[dict], valid_rows: list[dict], filewis
         print(f"\n{filename} | {valid_text}")
         print(
             f"{'Ann':<8} {'match':>5} {'miss S/C':>9} {'extra S/C':>9} "
-            f"{'flag':>5} {'drop':>5} {'align dx/dy':>17} "
+            f"{'flag':>5} {'drop R/S':>8} {'align dx/dy':>17} "
             f"{'missing IDs':<20} {'extra IDs':<20}"
         )
         for row in sorted(rows_by_file[filename], key=lambda r: ANNOTATORS.index(r["annotator"])):
@@ -145,7 +147,8 @@ def print_geometry_audit(audit_rows: list[dict], valid_rows: list[dict], filewis
                 f"{row['annotator']:<8} {row['matched']:>5d} "
                 f"{row['missing_solid']:>3d}/{row['missing_construction']:<3d} "
                 f"{row['extra_solid']:>3d}/{row['extra_construction']:<3d} "
-                f"{row['construction_flag_changed']:>5d} {row['dropped_constraints']:>5d} "
+                f"{row['construction_flag_changed']:>5d} "
+                f"{row['dropped_constraints']:>3d}/{row.get('dropped_self_dimensioning_constraints', 0):<3d} "
                 f"{row['alignment_dx']:>8.3f}/{row['alignment_dy']:<8.3f} "
                 f"{row['missing_ids'][:20]:<20} {row['extra_ids'][:20]:<20}"
             )
@@ -157,71 +160,76 @@ def print_filewise_results(rows: list[dict]) -> None:
 
     print("\n--- Filewise Results ---")
     ann_order = {ann: i for i, ann in enumerate(ANNOTATORS)}
-    rows_by_metric_file = defaultdict(lambda: defaultdict(list))
+    rows_by_set_metric_file = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
     for row in rows:
-        rows_by_metric_file[row["metric"]][row["filename"]].append(row)
+        rows_by_set_metric_file[row["constraint_set"]][row["metric"]][row["filename"]].append(row)
 
-    for metric in CANONICAL_METRICS:
-        print(f"\n[{metric}]")
-        for filename in sorted(rows_by_metric_file.get(metric, {})):
-            file_rows = sorted(
-                rows_by_metric_file[metric][filename],
-                key=lambda r: (ann_order[r["pred"]], ann_order[r["gt"]]),
-            )
-            print(f"\n{filename}")
-            print(
-                f"{'Pred':<8} {'GT':<8} {'Dim(P/G)':>8} "
-                f"{'Linear':>10} {'Quadratic':>10} {'2-Jet':>10} "
-                f"{'d_lin(G/P)':>12} {'d_quad(G/P)':>13} {'Status':<48}"
-            )
-            for row in file_rows:
-                status = "OK" if not row.get("error") else f"ERR: {row['error']}"
-                if len(status) > 48:
-                    status = status[:45] + "..."
-                quadratic = row.get("quadratic") if (row.get("gt_quad_dim") or 0) > 0 else None
-                print(
-                    f"{row['pred']:<8} {row['gt']:<8} "
-                    f"{format_int_pair(row.get('pred_dimensional_constraints'), row.get('gt_dimensional_constraints'))} "
-                    f"{format_score(row.get('linear')):>10} "
-                    f"{format_score(quadratic):>10} "
-                    f"{format_score(row.get('two_jet')):>10} "
-                    f"{format_int_pair(row.get('gt_row_dim'), row.get('pred_row_dim'), width=5)} "
-                    f"{format_int_pair(row.get('gt_quad_dim'), row.get('pred_quad_dim'), width=6)} "
-                    f"{status:<48}"
+    for constraint_set in CONSTRAINT_SETS:
+        print(f"\n=== {constraint_set} ===")
+        for metric in CANONICAL_METRICS:
+            print(f"\n[{metric}]")
+            for filename in sorted(rows_by_set_metric_file.get(constraint_set, {}).get(metric, {})):
+                file_rows = sorted(
+                    rows_by_set_metric_file[constraint_set][metric][filename],
+                    key=lambda r: (ann_order[r["pred"]], ann_order[r["gt"]]),
                 )
+                print(f"\n{filename}")
+                print(
+                    f"{'Pred':<8} {'GT':<8} {'Dim(P/G)':>8} {'Self(P/G)':>9} "
+                    f"{'Linear':>10} {'Quadratic':>10} {'2-Jet':>10} "
+                    f"{'d_lin(G/P)':>12} {'d_quad(G/P)':>13} {'Status':<48}"
+                )
+                for row in file_rows:
+                    status = "OK" if not row.get("error") else f"ERR: {row['error']}"
+                    if len(status) > 48:
+                        status = status[:45] + "..."
+                    quadratic = row.get("quadratic") if (row.get("gt_quad_dim") or 0) > 0 else None
+                    print(
+                        f"{row['pred']:<8} {row['gt']:<8} "
+                        f"{format_int_pair(row.get('pred_dimensional_constraints'), row.get('gt_dimensional_constraints'))} "
+                        f"{format_int_pair(row.get('pred_self_dimensioning_constraints'), row.get('gt_self_dimensioning_constraints'))} "
+                        f"{format_score(row.get('linear')):>10} "
+                        f"{format_score(quadratic):>10} "
+                        f"{format_score(row.get('two_jet')):>10} "
+                        f"{format_int_pair(row.get('gt_row_dim'), row.get('pred_row_dim'), width=5)} "
+                        f"{format_int_pair(row.get('gt_quad_dim'), row.get('pred_quad_dim'), width=6)} "
+                        f"{status:<48}"
+                    )
 
 
 def print_aggregate_results(rows: list[dict]):
     print("\n--- Aggregate Results ---")
-    rows_by_metric = defaultdict(list)
+    rows_by_set_metric = defaultdict(lambda: defaultdict(list))
     for row in rows:
-        rows_by_metric[row["metric"]].append(row)
+        rows_by_set_metric[row["constraint_set"]][row["metric"]].append(row)
 
-    for metric in CANONICAL_METRICS:
-        print(f"\n[{metric}]")
-        metric_rows = rows_by_metric.get(metric, [])
-        for pred_ann in ANNOTATORS:
-            for gt_ann in ANNOTATORS:
-                if pred_ann == gt_ann:
-                    continue
-                pair_rows = [
-                    r
-                    for r in metric_rows
-                    if r["pred"] == pred_ann and r["gt"] == gt_ann
-                ]
-                summary = summarize_metric_rows(pair_rows)
-                if summary is None:
-                    continue
-                print(
-                    f"Pred: {pred_ann:7s} | GT: {gt_ann:7s} | "
-                    f"Linear = {format_mean_std(summary['linear_mean'], summary['linear_std'])} | "
-                    f"Quadratic = {format_mean_std(summary['quadratic_mean'], summary['quadratic_std'])} "
-                    f"[n={summary['quadratic_n']}] | "
-                    f"2-Jet = {format_mean_std(summary['two_jet_mean'], summary['two_jet_std'])} | "
-                    f"d_lin GT/Pred = {summary['gt_row_dim']:.1f}/{summary['pred_row_dim']:.1f} | "
-                    f"d_quad GT/Pred = {format_int_pair(summary['gt_quad_dim'], summary['pred_quad_dim'], width=1)} | "
-                    f"n = {summary['n']:2d}"
-                )
+    for constraint_set in CONSTRAINT_SETS:
+        print(f"\n=== {constraint_set} ===")
+        for metric in CANONICAL_METRICS:
+            print(f"\n[{metric}]")
+            metric_rows = rows_by_set_metric.get(constraint_set, {}).get(metric, [])
+            for pred_ann in ANNOTATORS:
+                for gt_ann in ANNOTATORS:
+                    if pred_ann == gt_ann:
+                        continue
+                    pair_rows = [
+                        r
+                        for r in metric_rows
+                        if r["pred"] == pred_ann and r["gt"] == gt_ann
+                    ]
+                    summary = summarize_metric_rows(pair_rows)
+                    if summary is None:
+                        continue
+                    print(
+                        f"Pred: {pred_ann:7s} | GT: {gt_ann:7s} | "
+                        f"Linear = {format_mean_std(summary['linear_mean'], summary['linear_std'])} | "
+                        f"Quadratic = {format_mean_std(summary['quadratic_mean'], summary['quadratic_std'])} "
+                        f"[n={summary['quadratic_n']}] | "
+                        f"2-Jet = {format_mean_std(summary['two_jet_mean'], summary['two_jet_std'])} | "
+                        f"d_lin GT/Pred = {summary['gt_row_dim']:.1f}/{summary['pred_row_dim']:.1f} | "
+                        f"d_quad GT/Pred = {format_int_pair(summary['gt_quad_dim'], summary['pred_quad_dim'], width=1)} | "
+                        f"n = {summary['n']:2d}"
+                    )
 
 
 def write_csv(path, fieldnames, rows):
@@ -238,6 +246,7 @@ def write_csv(path, fieldnames, rows):
 def compute_pair_metric(
     bundle,
     metric,
+    constraint_set,
     pred_ann,
     gt_ann,
     base_eids,
@@ -248,18 +257,21 @@ def compute_pair_metric(
     row = {
         "filename": bundle.filename,
         "metric": metric,
+        "constraint_set": constraint_set,
         "pred": pred_ann,
         "gt": gt_ann,
         "include_quadratic": include_quadratic,
         "gt_dimensional_constraints": bundle.dimensional_counts[gt_ann],
         "pred_dimensional_constraints": bundle.dimensional_counts[pred_ann],
+        "gt_self_dimensioning_constraints": bundle.self_dimensioning_counts[gt_ann],
+        "pred_self_dimensioning_constraints": bundle.self_dimensioning_counts[pred_ann],
         "error": "",
     }
 
     try:
         res = compute_null_space_distance(
-            gt_primary_sketch=bundle.remapped_relational_sketches[gt_ann],
-            pred_sketch=bundle.remapped_relational_sketches[pred_ann],
+            gt_primary_sketch=bundle.remapped_constraint_sketches[constraint_set][gt_ann],
+            pred_sketch=bundle.remapped_constraint_sketches[constraint_set][pred_ann],
             context=context,
             skip_pred_primary_extraction=True,
             base_eids=base_eids,
@@ -281,7 +293,10 @@ def compute_pair_metric(
             }
         )
     except Exception as exc:
-        print(f"Error processing {bundle.filename} [{metric}] Pred={pred_ann} GT={gt_ann}: {exc}")
+        print(
+            f"Error processing {bundle.filename} [{metric}/{constraint_set}] "
+            f"Pred={pred_ann} GT={gt_ann}: {exc}"
+        )
         row.update(
             {
                 "linear": None,
@@ -376,22 +391,24 @@ def main():
                 continue
 
             base_eids = metric_base_eids(metric, bundle.canonical_sketch)
-            for pred_ann in ANNOTATORS:
-                for gt_ann in ANNOTATORS:
-                    if pred_ann == gt_ann:
-                        continue
-                    metric_rows.append(
-                        compute_pair_metric(
-                            bundle=bundle,
-                            metric=metric,
-                            pred_ann=pred_ann,
-                            gt_ann=gt_ann,
-                            base_eids=base_eids,
-                            include_quadratic=include_quadratic,
-                            context=context,
-                            dump_sigmas=args.dump_sigmas,
+            for constraint_set in CONSTRAINT_SETS:
+                for pred_ann in ANNOTATORS:
+                    for gt_ann in ANNOTATORS:
+                        if pred_ann == gt_ann:
+                            continue
+                        metric_rows.append(
+                            compute_pair_metric(
+                                bundle=bundle,
+                                metric=metric,
+                                constraint_set=constraint_set,
+                                pred_ann=pred_ann,
+                                gt_ann=gt_ann,
+                                base_eids=base_eids,
+                                include_quadratic=include_quadratic,
+                                context=context,
+                                dump_sigmas=args.dump_sigmas,
+                            )
                         )
-                    )
 
     print_geometry_audit(audit_rows, valid_rows, args.filewise)
     if args.filewise:
@@ -401,6 +418,7 @@ def main():
     metric_fieldnames = [
         "filename",
         "metric",
+        "constraint_set",
         "pred",
         "gt",
         "include_quadratic",
@@ -413,6 +431,8 @@ def main():
         "pred_quad_dim",
         "gt_dimensional_constraints",
         "pred_dimensional_constraints",
+        "gt_self_dimensioning_constraints",
+        "pred_self_dimensioning_constraints",
         "sigmas",
         "error",
     ]
@@ -426,6 +446,7 @@ def main():
         "extra_construction",
         "construction_flag_changed",
         "dropped_constraints",
+        "dropped_self_dimensioning_constraints",
         "alignment_dx",
         "alignment_dy",
         "missing_ids",
