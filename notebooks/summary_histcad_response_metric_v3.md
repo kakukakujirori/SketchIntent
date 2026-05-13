@@ -518,6 +518,210 @@ S_P^(q; R_G)
 見つかってしまうため、むしろ Vitruvion が良く見える方向に動いた。
 paired comparison でも反対方向に有意であり、不採用とした。
 
+## Appendix: 追加検証 2/3/4
+
+### 2. positive / negative control
+
+`notebooks/exp_v3_controls_and_robustness.py` で、同じ source-conditioned multi-reference
+setting のまま control variants を追加した。
+
+評価した control:
+
+- `source_self`: source GT 自身を同じ source GT に対して評価する positive control
+- `heldout`: 別 human の heldout sketch。表現は違っても design intent が近い positive control
+- `dim_drop50/100`: heldout human から dimensional constraints を削除する negative control
+- `rel_drop50/100`: heldout human から relational constraints を削除する negative control
+- `Vitruvion`: model prediction
+
+validated, `eps=1e-9`, multi-reference `min_i d_feas`:
+
+| variant | n | median `d_feas` | p75 `d_feas` | median gain | median leak |
+|---|---:|---:|---:|---:|---:|
+| source self | 135 | ~0 | ~0 | ~0 | ~0 |
+| human heldout | 135 | ~0 | ~0 | ~0 | ~0 |
+| Vitruvion | 114 | 0.0295 | 0.1102 | ~0 | 0.0558 |
+| dimension drop 50% | 135 | 0.1667 | 0.3709 | 0.1667 | ~0 |
+| dimension drop 100% | 135 | 1.0000 | 1.0000 | 1.0000 | 0 |
+| relation drop 50% | 135 | 0.4479 | 0.9020 | ~0 | 0.6737 |
+| relation drop 100% | 135 | 0.5529 | 0.7819 | 0.3750 | 0.1988 |
+
+解釈:
+
+- `source_self` と `heldout` はほぼ 0 であり、同じ geometry / intent に対する別 human 表現を強く罰していない。
+- dimensional constraints を削ると gain residual が増え、100% dropout では定義通り `d_feas=1` になる。
+- relational constraints を削ると主に leak が増える。`rel_drop100` では leak だけでなく gain も増えており、
+  relations を全削除したことで native dimensional response 自体も edit request を十分 drive できなくなるケースがある。
+- Vitruvion は dropout controls より median は小さいが、human heldout より明確に大きく、
+  その主成分は gain ではなく leak である。これは実験 1 の解釈と整合する。
+
+この control は、`d_feas` が「等価な別表現」をほぼ罰せず、
+dimension loss と relation loss を異なる成分で罰することを確認する sanity check である。
+
+なお、ここでは dimensional と relational を独立に drop した。
+これは gain term と leak term がそれぞれ期待通り反応するかを切り分けるためである。
+両者を同時に drop する mixed control は、自然には `d_feas` が両成分の合成として増えるはずだが、
+追加で示すなら appendix の sanity check として十分であり、主張の必須条件ではない。
+むしろ mixed dropout だけでは、どちらの成分が効いたかが曖昧になるため、
+main table では独立 dropout の方が診断的である。
+
+Artifacts:
+
+- `artifacts/v3_controls_scores.csv`
+- `artifacts/v3_controls_details.csv`
+
+### 3. eps / solver tolerance robustness
+
+`d_feas` 本体に入る主要な数値 hyperparameter は、`J_x` と `J_q R_C` の
+absolute SVD pseudo-inverse cutoff `eps` である。`eps ∈ {1e-11, 1e-9, 1e-7}` を同一設定で振った。
+
+`eps` の役割をもう少し具体的に書く。`d_feas` ではまず各 sketch の constraint equations
+`F(x, p)=0` を線形化し、
+
+```text
+J_x dx + J_p dp = 0
+R_C = dx / dp = - pinv(J_x) J_p
+```
+
+を計算する。さらに、共通 edit probe `q` に対する response は
+
+```text
+S_C^(q) = R_C pinv(J_q R_C)
+```
+
+で計算する。したがって擬似逆は少なくとも 2 箇所に現れる。
+
+```text
+pinv(J_x),  pinv(J_q R_C)
+```
+
+実装ではこれらを SVD で計算し、特異値 `sigma` が `sigma >= eps` の成分だけを rank として採用する。
+つまり `eps` は、ほぼゼロの特異値に対応する数値的に不安定な方向を
+「実際に可動な方向」として拾ってしまわないための absolute rank cutoff である。
+`eps` が大きすぎると、本来使うべき弱い response direction を捨ててしまい、
+edit attainability を過小評価する可能性がある。逆に `eps` が小さすぎると、
+near-singular な方向に巨大な係数を持つ response を許してしまい、
+leak や gain が数値ノイズに敏感になる可能性がある。
+
+なお、ここでの `eps` は HistCAD-style finite edit の `delta_scale` や Newton solver tolerance とは別物である。
+`eps` は `d_feas` の一次線形 algebra の rank 判定、`delta_scale` は有限編集でどれだけ値を動かすか、
+Newton/relation tolerance は有限編集後の成否判定に効く。
+このため、`d_feas` の安定性確認では `eps` sweep が本体の robustness check であり、
+solver tolerance sweep は source-validation mask が変わっても結論が変わらないかを見る補助確認である。
+
+validated controls:
+
+| eps | heldout med | Vitruvion med | dim50 med | dim100 med | rel50 med | rel100 med | Vit vs heldout |
+|---:|---:|---:|---:|---:|---:|---:|---|
+| 1e-11 | ~0 | 0.0295 | 0.1667 | 1.0000 | 0.4479 | 0.5529 | h=57, v=8, t=49, p=8.38e-9 |
+| 1e-9 | ~0 | 0.0295 | 0.1667 | 1.0000 | 0.4479 | 0.5529 | h=57, v=8, t=49, p=8.38e-9 |
+| 1e-7 | ~0 | 0.0295 | 0.1667 | 1.0000 | 0.4479 | 0.5529 | h=57, v=8, t=49, p=8.38e-9 |
+
+ここで `h/v/t` は `d_feas` による Vitruvion vs human heldout の paired 勝敗数であり、
+`h` は human heldout が良い rotation 数、`v` は Vitruvion が良い rotation 数である。
+この範囲では、median trajectory と paired conclusion は完全に不変だった。
+
+さらに、source validation に使う finite solver tolerance も次で振った。
+
+| validation tolerance | heldout med | Vitruvion med | dim50 med | dim100 med | rel50 med | rel100 med | Vit vs heldout |
+|---|---:|---:|---:|---:|---:|---:|---|
+| loose: `newton_tol=1e-5`, `relation_tol=1e-2` | ~0 | 0.0295 | 0.1667 | 1.0000 | 0.4479 | 0.5529 | h=57, v=8, t=49, p=8.38e-9 |
+| default: `newton_tol=1e-6`, `relation_tol=1e-3` | ~0 | 0.0295 | 0.1667 | 1.0000 | 0.4479 | 0.5529 | h=57, v=8, t=49, p=8.38e-9 |
+| strict: `newton_tol=1e-7`, `relation_tol=1e-4` | ~0 | 0.0295 | 0.1667 | 1.0000 | 0.4479 | 0.5529 | h=57, v=8, t=49, p=8.38e-9 |
+
+したがって、今回の結論は少なくとも `eps` と source-validation tolerance の自然な範囲では安定である。
+ただし、`d_feas` 本体は有限編集量 `delta_scale` を使わない。
+`delta_scale` は HistCAD-style finite edit / source validation 側の hyperparameter であり、
+局所線形化の妥当性は次の finite edit check で見る。
+
+Artifacts:
+
+- `artifacts/v3_controls_scores_tol_loose.csv`
+- `artifacts/v3_controls_scores_tol_strict.csv`
+
+### 4. finite edit との局所一致
+
+`exp_linear_vs_finite.py` で、native dimensional edit に対する線形応答
+`dx_lin = S_C^(q) delta` と、同じ finite edit を Newton solve した後の
+`dx_fin` を比較した。これは `d_feas` の直接評価ではなく、first-order response が
+finite edit solver と局所的に整合するかを見る診断である。
+
+結果は混合的だった。
+
+raw primitive-space relative error `||dx_fin - dx_lin|| / ||dx_fin||`:
+
+| file / annotator | 0.1% bbox | 0.5% bbox | 1.0% bbox | interpretation |
+|---|---:|---:|---:|---|
+| `26648...` / Eko | 0.0001 | 0.0435 | 0.0294 | small finite edits agree well |
+| `26648...` / Sagar | 0.0002 | 0.0003 | 0.0028 | small finite edits agree very well |
+| `122579...` / Sagar | 0.0302 | 0.0336 | 0.0735 | small finite edits mostly agree |
+| `122579...` / Ryotaro | 0.9984 | 1.0000 | 1.0197 | finite solve branch / parameterization mismatch |
+
+したがって、linear response は安定な sketch/probe では小さい finite edit とよく一致する。
+一方で、全 probe で一様に一致するわけではなく、FreeCAD/Newton roundtrip、branch change、
+near-singular parameterization の影響を受ける case がある。これは `d_feas` の主張を壊すというより、
+finite edit との橋渡し evidence としては限定的に扱うべき、という示唆である。
+
+論文上は、4 は main evidence ではなく appendix diagnostic に留めるのが安全である。
+主張の中心は、実験 2/3 の control と robustness、および実験 1/2 の paired comparison /
+dropout trajectory に置くのがよい。
+
+Artifacts:
+
+- `artifacts/exp_linear_vs_finite_26648_v3.png`
+- `artifacts/exp_linear_vs_finite_v3.png`
+
+### 5. OES preservation set から Point-Point Coincident を除外する ablation
+
+HistCAD-style OES の cPCSR は preservation set の作り方に依存する。
+特に Point-Point Coincident は topology preservation としてほぼ常に満たされやすく、
+cPCSR を押し上げる可能性がある。そこで、datalib `Coincident` のうち
+Point-Point Coincident だけを preservation set から除外する ablation を行った。
+Point-Line / Line-Line 的な `Coincident` は geometric relation として残した。
+
+結果:
+
+| setting | paired n | human-better | Vit-better | tie | z | p |
+|---|---:|---:|---:|---:|---:|---:|
+| original OES | 114 | 53 | 30 | 31 | 2.74 | 6.1e-3 |
+| no Point-Point Coincident | 114 | 54 | 28 | 32 | 3.21 | 1.3e-3 |
+
+validated dropout trajectory:
+
+| setting | drop0 | drop25 | drop50 | drop75 | drop100 |
+|---|---:|---:|---:|---:|---:|
+| original OES | 0.2857 | 0.5000 | 0.6944 | 0.8750 | 1.0000 |
+| no Point-Point Coincident | 0.2500 | 0.5000 | 0.6667 | 0.8571 | 1.0000 |
+
+detail-level では、Point-Point Coincident は多くの rows に含まれていた。
+
+```text
+rows joined: 3122
+rows with removed Point-Point Coincident: 2918
+median removed per row: 6
+max removed per row: 17
+rows where OES changed: 1267
+OES decreased after removal: 1080 rows
+OES increased after removal: 187 rows
+median(original - no_pp): 0.0362
+```
+
+解釈:
+
+- Point-Point Coincident は確かに cPCSR/OES を少し押し上げていた。
+- しかし除外しても、HistCAD OES が dimensional dropout を高く評価する failure mode は消えない。
+- Vitruvion vs human heldout の paired comparison では、むしろ OES の human 優位が少し強くなる。
+- `0/56013_752d02cb_0001_sketch00.FCStd` の定性例は、Point-Point Coincident 除外前後で変化しなかった。
+  この case の high OES は Point-Point Coincident inflate ではなく、
+  finite edit が通ることと、残った non-Coincident relations が preservation を満たすことに由来する。
+
+したがって、Point-Point Coincident は OES/cPCSR の小さな confound ではあるが、
+本稿で示している HistCAD-style OES の failure mode の主因ではない。
+
+Artifacts:
+
+- `artifacts/source_conditioned_dropout_scores_no_ppcoincident.csv`
+- `artifacts/source_conditioned_dropout_details_no_ppcoincident.csv`
+
 ## Appendix: 実行コマンド
 
 `d_feas` full paired:
@@ -544,4 +748,52 @@ Evidence aggregation:
 python notebooks/analyze_dalign_evidence.py
 python notebooks/analyze_dfeas_trajectory.py
 python notebooks/analyze_dfeas_outliers.py
+```
+
+Additional controls / robustness:
+
+```bash
+conda run -n freecad python notebooks/exp_v3_controls_and_robustness.py \
+  --output-csv artifacts/v3_controls_scores.csv \
+  --details-csv artifacts/v3_controls_details.csv
+
+conda run -n freecad python notebooks/exp_v3_controls_and_robustness.py \
+  --eps-values 1e-9 \
+  --newton-tol 1e-5 \
+  --relation-tol 1e-2 \
+  --output-csv artifacts/v3_controls_scores_tol_loose.csv \
+  --details-csv artifacts/v3_controls_details_tol_loose.csv
+
+conda run -n freecad python notebooks/exp_v3_controls_and_robustness.py \
+  --eps-values 1e-9 \
+  --newton-tol 1e-7 \
+  --relation-tol 1e-4 \
+  --output-csv artifacts/v3_controls_scores_tol_strict.csv \
+  --details-csv artifacts/v3_controls_details_tol_strict.csv
+```
+
+Finite edit local check:
+
+```bash
+conda run -n freecad python notebooks/exp_linear_vs_finite.py \
+  --filename 26648_59fbce6a_0000_sketch03.FCStd \
+  --annotators Eko,Sagar \
+  --n-probes 5 \
+  --out-png artifacts/exp_linear_vs_finite_26648_v3.png
+
+conda run -n freecad python notebooks/exp_linear_vs_finite.py \
+  --filename 122579_2663ded3_0000_sketch04.FCStd \
+  --annotators Sagar,Ryotaro \
+  --n-probes 5 \
+  --out-png artifacts/exp_linear_vs_finite_v3.png
+```
+
+Point-Point Coincident preservation ablation for OES:
+
+```bash
+conda run -n freecad python notebooks/exp_source_conditioned_dropout.py \
+  --drop-rates 100,75,50,25,0 \
+  --exclude-point-point-coincident-preservation \
+  --output-csv artifacts/source_conditioned_dropout_scores_no_ppcoincident.csv \
+  --details-csv artifacts/source_conditioned_dropout_details_no_ppcoincident.csv
 ```

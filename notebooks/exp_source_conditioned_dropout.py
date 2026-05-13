@@ -28,6 +28,7 @@ if NOTEBOOKS_DIR not in sys.path:
     sys.path.insert(0, NOTEBOOKS_DIR)
 
 import sketchgraphs.data as datalib
+from sketchgraphs.data import LocalReferenceParameter
 import torch
 
 from src.metrics.edit_response_distance import (
@@ -209,10 +210,52 @@ def dropout_variant(sketch, *, drop_rate, seed):
 
 # ── source-conditioned probe helpers ──────────────────────────────────────
 
-def source_probes(sketch):
+def _constraint_ref_strings(constraint):
+    return [
+        str(p.value)
+        for p in constraint.parameters
+        if isinstance(p, LocalReferenceParameter)
+    ]
+
+
+def _is_point_like_ref(sketch, ref: str) -> bool:
+    """True for explicit point references, not edge/object references."""
+    eid, sep, _suffix = ref.partition(".")
+    ent = sketch.entities.get(eid)
+    if isinstance(ent, datalib.Point):
+        return True
+    return bool(sep)
+
+
+def is_point_point_coincident(constraint, sketch) -> bool:
+    """Coincident between two point-like refs.
+
+    Datalib Coincident also represents Point-On-Object and line-line collinear
+    cases. Those are intentionally kept in the preservation set; only
+    point-to-point topology coincidences are filtered by the ablation.
+    """
+    if constraint.constraint_type.name != "Coincident":
+        return False
+    refs = _constraint_ref_strings(constraint)
+    if len(refs) != 2:
+        return False
+    return all(_is_point_like_ref(sketch, r) for r in refs)
+
+
+def preservation_relations(sketch, *, exclude_point_point_coincident=False):
+    rels = [c for c in sketch.constraints.values() if _is_relational(c)]
+    if exclude_point_point_coincident:
+        rels = [c for c in rels if not is_point_point_coincident(c, sketch)]
+    return rels
+
+
+def source_probes(sketch, *, exclude_point_point_coincident=False):
     """Extract Q_i (dim probes) and R_i (relational constraints) from source."""
     probes, _ = collect_probes([sketch], kind="dim")
-    rels = [c for c in sketch.constraints.values() if _is_relational(c)]
+    rels = preservation_relations(
+        sketch,
+        exclude_point_point_coincident=exclude_point_point_coincident,
+    )
     return probes, [1.0] * len(probes), rels, [1.0] * len(rels)
 
 
@@ -336,7 +379,8 @@ def score_pair(*, batch, filename, rotation_id, sample_id, drop_rate,
 
 def evaluate_rotation(*, bundle, refs, heldout, drop_rates, samples_per_rate,
                       context, converter, histcad_cfg, base_policy, eps,
-                      eval_model=True):
+                      eval_model=True,
+                      exclude_point_point_coincident_preservation=False):
     rotation_id = f"{bundle.batch}:{bundle.filename}:{'+'.join(refs)}__query={heldout}"
     participants = set(refs) | {heldout}
     bad = []
@@ -354,7 +398,12 @@ def evaluate_rotation(*, bundle, refs, heldout, drop_rates, samples_per_rate,
     source_info = {}  # gt_name -> {probes, weights, rels, rel_weights, valid_mask}
     for gt_name in refs:
         gt_sk = bundle.sketches[gt_name]
-        probes, weights, rels, rel_w = source_probes(gt_sk)
+        probes, weights, rels, rel_w = source_probes(
+            gt_sk,
+            exclude_point_point_coincident=(
+                exclude_point_point_coincident_preservation
+            ),
+        )
         mask = validate_probes_on_source(
             gt_sk, probes, rels, context, converter, histcad_cfg)
         source_info[gt_name] = {
@@ -621,6 +670,14 @@ def parse_args():
     p.add_argument("--er-target-tol", type=float, default=1e-3)
     p.add_argument("--relation-tol", type=float, default=1e-3)
     p.add_argument("--eps", type=float, default=1e-9)
+    p.add_argument(
+        "--exclude-point-point-coincident-preservation",
+        action="store_true",
+        help=(
+            "Remove only point-point Coincident constraints from HistCAD "
+            "preservation sets. Point-line and line-line Coincident remain."
+        ),
+    )
     p.add_argument("--output-csv",
                    default="artifacts/source_conditioned_dropout_scores.csv")
     p.add_argument("--details-csv",
@@ -683,7 +740,10 @@ def main():
                         samples_per_rate=args.samples_per_rate,
                         context=context, converter=converter,
                         histcad_cfg=cfg, base_policy=args.base_policy,
-                        eps=args.eps)
+                        eps=args.eps,
+                        exclude_point_point_coincident_preservation=(
+                            args.exclude_point_point_coincident_preservation
+                        ))
                     summary_rows.extend(srows)
                     detail_rows.extend(drows)
                     n_rot += 1
