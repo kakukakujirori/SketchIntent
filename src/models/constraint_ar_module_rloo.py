@@ -348,6 +348,7 @@ class ConstraintARModuleRLOO(L.LightningModule):
         batch: dict[str, Any],
         max_len: int,
         dtype: torch.dtype = torch.long,
+        temperature: float = 1.0,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Autoregressive token generation using KV cache.
 
@@ -389,6 +390,7 @@ class ConstraintARModuleRLOO(L.LightningModule):
             # Pointer logits: [B, 1, E] @ [B, E, M] → [B, M]
             next_token_logits = torch.matmul(dec_out, memory.transpose(1, 2)).squeeze(1)
             next_token_logits[:, ConstraintToken.Mask] = -torch.inf
+            next_token_logits = next_token_logits / temperature
 
             dist = torch.distributions.Categorical(logits=next_token_logits)
             next_token  = dist.sample()

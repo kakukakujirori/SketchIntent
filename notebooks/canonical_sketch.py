@@ -476,3 +476,39 @@ def _remap_ref(ref: str, source_to_new: Mapping[str, str]) -> str:
     eid, suffix = ref.split(".", 1) if "." in ref else (ref, None)
     new_eid = eid if eid.startswith("-") else source_to_new[eid]
     return f"{new_eid}.{suffix}" if suffix else new_eid
+
+
+def align_pred_entity_ids_to_gt(
+    pred_sketch: datalib.Sketch,
+    gt_sketch: datalib.Sketch,
+) -> tuple[datalib.Sketch, int]:
+    """Align a generated prediction's compact entity ids to a GT sketch by order.
+
+    Dataset-tokenized model outputs commonly use compact ids (0, 1, 2, ...),
+    while the source SketchGraphs GT may retain sparse ids (for example
+    1, 4, 7, ...).  When solver feedback has already overwritten primitive
+    geometry by order, response metrics must evaluate predicted constraints in
+    the GT entity coordinate chart before applying GT edit probes / relations.
+
+    Returns the aligned sketch and the number of predicted constraints dropped
+    because a referenced entity could not be mapped.  If the prediction has more
+    entities than the GT, the function leaves it unchanged and reports the extra
+    entity count; callers should treat that as a diagnostic.
+    """
+    pred_ids = list(pred_sketch.entities.keys())
+    gt_ids = list(gt_sketch.entities.keys())
+    if len(pred_ids) > len(gt_ids):
+        return pred_sketch, len(pred_ids) - len(gt_ids)
+
+    source_to_new = {src: dst for src, dst in zip(pred_ids, gt_ids)}
+    entities = copy.deepcopy(gt_sketch.entities)
+    constraints: dict[str, datalib.Constraint] = {}
+    dropped = 0
+
+    for cid, constraint in pred_sketch.constraints.items():
+        try:
+            constraints[cid] = _remap_constraint(constraint, source_to_new)
+        except KeyError:
+            dropped += 1
+
+    return datalib.Sketch(entities=entities, constraints=constraints), dropped

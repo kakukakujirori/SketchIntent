@@ -32,13 +32,9 @@ relational design intent preservation を 1 つの first-order residual とし�
 
 CAD sketch の constraint set は一意ではない。例えば symmetry, midpoint, equal,
 parallel, distance の組み合わせは、異なる constraint token sequence で同じ設計意図を
-表し得る。そのため token-level の exact matching は過度に厳しい。
+表し得る。そのため constraint command level の exact matching は過度に厳しい。
 
-一方、HistCAD の Constraint-Aware Editability Benchmark は、この多様表現問題をかなり
-うまく回避している。[元論文](https://arxiv.org/html/2602.19171v2)では
-design intent を「redesign に対する robustness」として扱い、
-constraint token の一致ではなく、同じ target dimensional edit を適用した後に、指定された
-preservation set の constraints が保たれるかを見る。
+一方、HistCAD の Constraint-Aware Editability Benchmark は、この多様表現問題をかなりうまく回避している。[元論文](https://arxiv.org/html/2602.19171v2)では constraint command の一致ではなく、同じ target dimensional edit を適用した後に、指定された preservation set の constraints が保たれるかを見る。
 
 HistCAD の benchmark instance は、実行可能な source CAD sequence、作成または変更される
 target dimensional constraint、具体的な edit value と attachment site、そして edit 後に
@@ -518,6 +514,83 @@ S_P^(q; R_G)
 見つかってしまうため、むしろ Vitruvion が良く見える方向に動いた。
 paired comparison でも反対方向に有意であり、不採用とした。
 
+### naive `S_C^(q)` match (`d_smatch`)
+
+`d_feas` は `J_q S_P - I` と `J_{R_G} S_P` という方程式 residual を測る。素朴には、
+そうした residual を取らずに **`S_P^(q)` と `S_G^(q)` を直接比較する** ほうが分かりやすい:
+
+```text
+d_smatch_rms^(q)(P, G) = ||S_P^(q) - S_G^(q)||_F / sqrt(n_x · k_q)
+d_smatch_rel^(q)(P, G) = ||S_P^(q) - S_G^(q)||_F / max(||S_G^(q)||_F, eps)
+d_smatch_sym^(q)(P, G) = 2 ||S_P^(q) - S_G^(q)||_F / (||S_P^(q)||_F + ||S_G^(q)||_F + eps)
+```
+
+各 probe について計算し、source ごとに平均、multi-reference では `min_i` を取る (低いほど良い)。
+`d_feas` と同じ source-conditioned pipeline で 47 files × 3 rotations × 5 dropout rates と
+Vitruvion を評価した (`notebooks/exp_smatch_metric.py`)。
+
+**結果は 3 variants とも不合格**:
+
+dropout trajectory (validated median, n=135):
+
+| drop | `d_smatch_rms` | `d_smatch_rel` | `d_smatch_sym` | `d_feas` |
+|---:|---:|---:|---:|---:|
+| 0% | 0.0804 | 0.4327 | 0.4270 | 0.0000 |
+| 25% | 0.1604 | 0.8096 | 0.7783 | 0.0000 |
+| 50% | 0.1961 | 1.0188 | 1.0883 | 0.1667 |
+| 75% | 0.2903 | 1.2139 | 1.4170 | 0.5000 |
+| 100% | 0.1830 | 1.0000 | 2.0000 | 1.0000 |
+
+Vitruvion vs heldout drop 0% paired (validated, 同 paired rotations n=79):
+
+| metric | human-better | Vit-better | tie | z | p |
+|---|---:|---:|---:|---:|---:|
+| `d_smatch_rms` | 31 | 37 | 11 | -0.53 | 0.60 |
+| `d_smatch_rel` | 33 | 35 | 11 | -0.79 | 0.43 |
+| `d_smatch_sym` | 35 | 33 | 11 | 0.59 | 0.56 |
+| `d_feas` | 40 | 6 | 33 | 4.06 | 4.9e-5 |
+
+問題は 3 点。
+
+1. **drop=0% で 0 にならない** (median 0.08–0.43)。同じ geometry の別 human annotation を penalize しており、design-intent ambiguity を吸収できない。
+2. **dropout に対し非単調**: `d_smatch_rms`/`d_smatch_rel` は 75% でピーク、100% で逆戻り。100% dropout では `S_P=0` なので `||S_P - S_G||=||S_G||` に collapse し、75% dropout で誤った方向に動く `S_P` のほうが diff が大きくなる。within-rotation でも 75→100% は 80% の rotation で値が下がる。
+3. **Vitruvion vs human の paired signal がない** (p > 0.4, しかも 2 variants では Vit がやや有利)。`d_feas` は同じ paired rotations で p=5e-5。
+
+なぜ機能しないか — `S_C^(q) = R_C pinv(J_q R_C)` の `pinv` は **constraint set `C` 固有の native dim 空間 `p_C` で** 最小ノルム解を取る。`p_C` の基底は constraint の選び方に依存するので、intent equivalent な C, C' でも min-norm が指す方向が異なり、specific な `S_C^(q)` は一致しない。`d_feas` の `J_q S_P = I`, `J_{R_G} S_P = 0` は **parameterization 不変** な条件なので、この任意性に影響されない。
+
+#### 最小例: 3 共線点での chain vs fan parameterization
+
+primitive `x = (x_A, x_B, x_C)`, A=0, B=d₁, C=d₁+d₂ を 1 次元上に置く。両者とも fully constrained で同じ geometry を表す:
+
+- GT (chain): `Distance(A, B)=d₁`, `Distance(B, C)=d₂`
+- Pred (fan): `Distance(A, B)=d₁`, `Distance(A, C)=d₃`
+
+probe `q = Distance(B, C)`, `J_q = (0, -1, 1)`. (Coincident は省略。relations 空、よって leak は trivially 0。)
+
+```text
+            [[-2, -1],                    [[-1, -1],
+R_G = (1/3) [ 1, -1],          R_P = (1/3) [ 2, -1],
+            [ 1,  2]]                     [-1,  2]]
+
+J_q R_G = (0, 1)              J_q R_P = (-1, 1)
+pinv((0, 1)) = (0, 1)^T       pinv((-1, 1)) = (-1/2, 1/2)^T
+
+S_G = R_G (0, 1)^T            S_P = R_P (-1/2, 1/2)^T
+    = (1/3)(-1, -1, 2)^T          = (0, -1/2, 1/2)^T
+```
+
+両方とも `J_q S = 1` (gain=0) で leak=0、すなわち `d_feas = 0`。
+しかし `||S_G - S_P|| = 1/√6 ≈ 0.408`、`d_smatch > 0`。
+
+意味: GT 側は BC が **native dim そのもの** なので `J_q R_G` が 1-hot `(0, 1)` になり、min-norm は「d₂ だけ動かす → C だけが動く」を選ぶ。Pred 側は BC が dim でなく d₁ と d₃ の両方が BC に効くので `J_q R_P = (-1, 1)`、min-norm は「d₁ を縮め d₃ を伸ばす → B と C を等量逆向きに動かす」を選ぶ。`p_C` 空間の基底が違うため、同じ probe に対する最小ノルム接ベクトルが異なる。これが Pseudo-inverse の段階で parameterization の違いが S_C^(q) に漏れ出る数値的中身である。
+
+CAD annotation の現場でも、人によって距離を chain でつなぐか参照点からの fan で取るかは分かれる、よくある違いである。`d_feas` はこれを吸収するが、`d_smatch` は本物の design intent 違反と区別できずに罰してしまう。
+
+Artifacts:
+
+- `artifacts/smatch_vs_dfeas_summary.csv`
+- `artifacts/smatch_vs_dfeas_details.csv`
+
 ## Appendix: 追加検証 2/3/4
 
 ### 2. positive / negative control
@@ -796,4 +869,13 @@ conda run -n freecad python notebooks/exp_source_conditioned_dropout.py \
   --exclude-point-point-coincident-preservation \
   --output-csv artifacts/source_conditioned_dropout_scores_no_ppcoincident.csv \
   --details-csv artifacts/source_conditioned_dropout_details_no_ppcoincident.csv
+```
+
+Naive `S_C^(q)` match (`d_smatch`) vs `d_feas`:
+
+```bash
+conda run -n freecad python notebooks/exp_smatch_metric.py \
+  --drop-rates 0,25,50,75,100 \
+  --output-csv artifacts/smatch_vs_dfeas_summary.csv \
+  --details-csv artifacts/smatch_vs_dfeas_details.csv
 ```
