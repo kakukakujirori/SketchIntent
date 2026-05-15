@@ -83,5 +83,17 @@ class ConstraintAttrToken(enum.IntEnum):
 PRIMITIVE_VAL_OFFSET = len(PrimitiveToken)
 CONSTRAINT_VAL_OFFSET = len(ConstraintToken)
 
+# Token IDs of dimensional constraints (have numerical parameters).
+# Used by RLOO relational_only mode to mask these out of next_token_logits.
+DIMENSIONAL_CONSTRAINT_TOKEN_IDS: tuple[int, ...] = (
+    ConstraintToken.Angle,
+    ConstraintToken.Diameter,
+    ConstraintToken.Distance,
+    ConstraintToken.DistanceX,
+    ConstraintToken.DistanceY,
+    ConstraintToken.Length,
+    ConstraintToken.Radius,
+)
+
 # FreeCAD constants
 FC_GEO_UNDEF = -2000

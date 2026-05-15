@@ -43,5 +43,6 @@ trainer:
   check_val_every_n_epoch: null
   val_check_interval: 100
   devices: 1  # Under a lot of CPU-GPU communication, distributed training slows runs
+  max_epochs: 3
 
 pretrained_ckpt_path: logs/train/runs/2026-05-02_20-35-42/checkpoints/epoch_29.ckpt
