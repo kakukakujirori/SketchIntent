@@ -5,10 +5,11 @@ Implements a reward signal based on ``d_feas`` (see
 constraint set for a sketch, the source GT sketch acts as the design-intent
 reference:
 
-  - Q_G = dimensional constraints of the GT sketch (edit probes)
   - R_G = relational constraints of the GT sketch (preservation set)
+  - Q   = edit probes (either GT's dim constraints, or synthetic intrinsic
+          probes derived from primitive features — see ``probe_source``)
 
-For each probe q in Q_G we form the predicted response S_P^(q) on the
+For each probe q in Q we form the predicted response S_P^(q) on the
 Pred sketch and accumulate the two residuals defined in v3:
 
   T_P^(q) = J_q S_P^(q) - I             gain residual (edit attainability)
@@ -27,11 +28,22 @@ the existing SolverReward convention.
 from __future__ import annotations
 
 import math
+import statistics
 
 import numpy as np
 import torch
 
 import sketchgraphs.data as datalib
+from sketchgraphs.data import (
+    Arc,
+    Circle,
+    Constraint,
+    ConstraintType,
+    EnumParameter,
+    Line,
+    LocalReferenceParameter,
+    QuantityParameter,
+)
 from src.metrics.edit_response_distance import (
     _is_dimensional,
     _is_relational,
@@ -44,6 +56,60 @@ from src.sketch_handlers.constants import ConstraintToken
 from src.sketch_handlers.context import SketchContext
 from src.sketch_handlers.sketch_tokenizer import SketchTokenizer
 from src.sketch_handlers.sketch_utils import complete_constraint_values
+
+
+def _make_raw_probe(
+    ctype_name: str, refs: tuple[str, ...]
+) -> datalib.Constraint:
+    """Construct a synthetic dim constraint with an un-watermarked placeholder
+    value.  ``complete_constraint_values`` is responsible for filling in the
+    real value computed from primitive geometry and adding the watermark
+    required by ``ConstraintHandler.get_constraint_props``."""
+    ctype = getattr(ConstraintType, ctype_name)
+    params: list = [
+        LocalReferenceParameter(parameterId=f"local{i}", value=ref)
+        for i, ref in enumerate(refs)
+    ]
+    pid = "angle" if ctype_name == "Angle" else "length"
+    params.append(QuantityParameter(
+        parameterId=pid, value=0.0, expression="0.0"))
+    if ctype_name == "Length":
+        # Required by complete_constraint_values → compute_line_length.
+        params.append(EnumParameter(parameterId="direction", value="MINIMUM"))
+    return Constraint(
+        identifier=f"synthetic_{ctype_name}",
+        constraint_type=ctype,
+        parameters=params,
+    )
+
+
+def _build_intrinsic_probes(sketch: datalib.Sketch) -> list[datalib.Constraint]:
+    """One probe per primitive whose intrinsic size is a natural driving param.
+
+    - Line  → Length (= norm(end - start))
+    - Arc   → Radius
+    - Circle→ Radius
+    - Point → skipped (no intrinsic size)
+
+    All probes have a single-dimensional length residual, so row units are
+    homogeneous and the gain mean-square aggregation in `_compute_d_feas`
+    stays scale-consistent.  Probe values are filled in by
+    ``complete_constraint_values`` on a temporary sketch that shares the
+    source sketch's entities; this follows the project protocol that
+    ``param.expression`` must carry the ``VALUE_ASSIGNED:`` watermark before
+    ``ConstraintHandler.residual`` can be invoked.
+    """
+    raw: dict[str, datalib.Constraint] = {}
+    for eid, ent in sketch.entities.items():
+        if isinstance(ent, Line):
+            raw[f"_probe_L_{eid}"] = _make_raw_probe("Length", (eid,))
+        elif isinstance(ent, (Arc, Circle)):
+            raw[f"_probe_R_{eid}"] = _make_raw_probe("Radius", (eid,))
+    if not raw:
+        return []
+    temp = datalib.Sketch(entities=sketch.entities, constraints=raw)
+    temp, _ = complete_constraint_values(temp, skip_invalid_constraints=True)
+    return list(temp.constraints.values())
 
 
 def _stack_relation_jacobians(rels, state, context):
@@ -66,9 +132,18 @@ def _compute_d_feas(
     context: SketchContext,
     eps: float,
     cap: float,
+    probe_source: str = "gt_dim",
 ) -> tuple[float, float, float, int, int]:
     """Return (d_feas, gain_mean, leak_mean, n_probes_used, n_relations)."""
-    edit_probes = [c for c in gt_sketch.constraints.values() if _is_dimensional(c)]
+    if probe_source == "gt_dim":
+        edit_probes = [c for c in gt_sketch.constraints.values() if _is_dimensional(c)]
+    elif probe_source == "intrinsic":
+        # GT sketch primitives are shared with pred after entity-key alignment
+        # in `_build_pred_sketch`, so deriving probes from gt is equivalent and
+        # makes "probes encode primitive-feature intent" interpretable.
+        edit_probes = _build_intrinsic_probes(gt_sketch)
+    else:
+        raise ValueError(f"unknown probe_source: {probe_source}")
     rels = [c for c in gt_sketch.constraints.values() if _is_relational(c)]
     if not edit_probes:
         return 0.0, 0.0, 0.0, 0, len(rels)
@@ -133,6 +208,12 @@ class DFeasReward(torch.nn.Module):
             comparable to the solver reward.
         coeff: external multiplier; the returned reward at STOP is
             ``-coeff * min(d_feas, cap)``.
+        probe_source: ``"gt_dim"`` uses GT sketch's annotated dim constraints
+            as edit probes (original v3 metric). ``"intrinsic"`` instead
+            generates one probe per primitive from its natural driving size
+            (Line→Length, Arc/Circle→Radius). The intrinsic mode decouples the
+            gain signal from GT's dim-constraint density, so it provides a
+            meaningful signal even on under-constrained training data.
     """
 
     def __init__(
@@ -141,12 +222,16 @@ class DFeasReward(torch.nn.Module):
         eps: float = 1e-9,
         d_feas_cap: float = 5.0,
         coeff: float = 1.0,
+        probe_source: str = "gt_dim",
     ):
         super().__init__()
         self.context = context
         self.eps = eps
         self.d_feas_cap = d_feas_cap
         self.coeff = coeff
+        if probe_source not in ("gt_dim", "intrinsic"):
+            raise ValueError(f"unknown probe_source: {probe_source}")
+        self.probe_source = probe_source
         self.tokenizer = SketchTokenizer(context)
 
     def _build_pred_sketch(
@@ -187,10 +272,9 @@ class DFeasReward(torch.nn.Module):
         prim_np = prim_tokens.detach().cpu().numpy()
         cons_np = cons_tokens.detach().cpu().numpy()
 
-        d_feas_sum = 0.0
-        gain_sum = 0.0
-        leak_sum = 0.0
-        valid_n = 0
+        d_feas_list: list[float] = []
+        gain_list: list[float] = []
+        leak_list: list[float] = []
         skipped_build = 0
         skipped_no_probes = 0
         skipped_not_converged = 0
@@ -216,24 +300,41 @@ class DFeasReward(torch.nn.Module):
             d_feas, gain, leak, n_probes, _ = _compute_d_feas(
                 pred_sketch, gt_sketch, self.context,
                 eps=self.eps, cap=self.d_feas_cap,
+                probe_source=self.probe_source,
             )
             if n_probes == 0:
                 skipped_no_probes += 1
                 continue
 
             scores[i, first_stop_idx] -= self.coeff * float(d_feas)
-            d_feas_sum += d_feas
-            gain_sum += gain
-            leak_sum += leak
-            valid_n += 1
+            d_feas_list.append(d_feas)
+            gain_list.append(gain)
+            leak_list.append(leak)
 
+        valid_n = len(d_feas_list)
+        cap = self.d_feas_cap
+
+        def _mean(xs: list[float]) -> float:
+            return sum(xs) / len(xs) if xs else 0.0
+
+        def _median(xs: list[float]) -> float:
+            return statistics.median(xs) if xs else 0.0
+
+        # Heavy-tail-robust variants: cap before mean (matches per-sample reward
+        # which already enters via min(d_per, cap)).  Median is provided as a
+        # diagnostic that is unaffected by outliers regardless of cap.
         metrics: dict[str, float | int] = {
-            "d_feas_mean": d_feas_sum / max(1, valid_n),
-            "d_feas_gain_mean": gain_sum / max(1, valid_n),
-            "d_feas_leak_mean": leak_sum / max(1, valid_n),
-            "d_feas_valid_n": valid_n,
-            "d_feas_skipped_build": skipped_build,
-            "d_feas_skipped_no_probes": skipped_no_probes,
+            "d_feas_mean":            _mean(d_feas_list),
+            "d_feas_gain_mean":       _mean(gain_list),
+            "d_feas_leak_mean":       _mean(leak_list),
+            "d_feas_leak_capped_mean": _mean([min(l, cap) for l in leak_list]),
+            "d_feas_gain_capped_mean": _mean([min(g, cap) for g in gain_list]),
+            "d_feas_median":          _median(d_feas_list),
+            "d_feas_gain_median":     _median(gain_list),
+            "d_feas_leak_median":     _median(leak_list),
+            "d_feas_valid_n":             valid_n,
+            "d_feas_skipped_build":       skipped_build,
+            "d_feas_skipped_no_probes":   skipped_no_probes,
             "d_feas_skipped_not_converged": skipped_not_converged,
         }
         return scores, metrics
