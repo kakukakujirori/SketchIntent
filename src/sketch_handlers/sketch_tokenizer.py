@@ -238,9 +238,23 @@ class SketchTokenizer:
             raise e
         return prim_tokens | constr_tokens
 
-    def detokenize_primitives(self, val_tokens: np.ndarray) -> tuple[dict[str, datalib.Entity], dict[int, str]]:
+    def detokenize_primitives(
+        self,
+        val_tokens: np.ndarray,
+        reference_entity_ids: list[str] | None = None,
+    ) -> tuple[dict[str, datalib.Entity], dict[int, str]]:
         """
         Detokenize primitives and build tokenpos_to_primitive.
+
+        When ``reference_entity_ids`` is provided, decoded entities reuse those
+        IDs (by position) instead of the default ``"0", "1", ...`` numbering.
+        This is what callers need when comparing the decoded sketch to a source
+        sketch that keeps sparse SketchGraphs IDs ("1", "4", "7", ...): the
+        decoded constraint references then resolve to the same physical entity
+        in both sketches without a separate rekey pass.
+
+        If the token stream decodes more entities than ``reference_entity_ids``
+        provides, extra entities fall back to ``str(current_ent_idx)``.
         """
         entities = []
         tokenpos_to_primitive = {}
@@ -248,6 +262,7 @@ class SketchTokenizer:
         current_ent_idx = 0
         num_bins = self.context.num_quantization_bins
         val_offset = PRIMITIVE_VAL_OFFSET
+        n_ref = len(reference_entity_ids) if reference_entity_ids is not None else 0
 
         # Skip Start
         idx = 1 if val_tokens[0] == SpecialToken.Start else 0
@@ -278,7 +293,10 @@ class SketchTokenizer:
             is_constr = (constr_token - (val_offset + num_bins)) > 0
 
             # Create
-            ent_id = str(current_ent_idx)
+            if reference_entity_ids is not None and current_ent_idx < n_ref:
+                ent_id = reference_entity_ids[current_ent_idx]
+            else:
+                ent_id = str(current_ent_idx)
             entity = handler.decode(vals, entity_id=ent_id)
             entity.isConstruction = bool(is_constr)
             entities.append(entity)
@@ -484,14 +502,27 @@ class SketchTokenizer:
         self,
         tokens: dict[str, np.ndarray],
         allow_invalid_constraints: bool = False,
+        reference_sketch: datalib.Sketch | None = None,
     ) -> tuple[datalib.Sketch, dict[str, int], dict[int, tuple[int, ...]]]:
         """
         Detokenize separate primitive and constraint streams into a Sketch object.
 
+        When ``reference_sketch`` is provided, decoded entities reuse the
+        reference sketch's entity keys by position. This lets the decoded
+        sketch share an entity-ID convention with the source sketch — necessary
+        whenever the decoded sketch will be compared to ``reference_sketch``
+        on a per-entity basis (e.g. d_feas, edit-response distance, BLEU).
+
         Returns:
             sketch, constraint_to_token_start, invalid_constraint_block_start
         """
-        entities, tokenpos_to_primitive = self.detokenize_primitives(tokens['p_val'])
+        ref_entity_ids: list[str] | None = (
+            list(reference_sketch.entities.keys())
+            if reference_sketch is not None else None
+        )
+        entities, tokenpos_to_primitive = self.detokenize_primitives(
+            tokens['p_val'], reference_entity_ids=ref_entity_ids,
+        )
         constraints, constraint_to_token_start, invalid_constraint_block_start = \
             self.detokenize_constraints(tokens['c_val'], tokenpos_to_primitive, allow_invalid_constraints)
 

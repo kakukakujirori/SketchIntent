@@ -9,6 +9,8 @@ __all__ = [
     "compute_null_space_distance",
     "compute_edit_response_distance",
     "compute_edit_invariant_relation_distance",
+    "compute_native_finite_feasibility",
+    "compute_finite_optimized_feasibility",
     "collect_probes",
     "pairwise_distance_observable",
     "nearest_gt",
@@ -33,6 +35,10 @@ _LAZY = {
         ("src.metrics.edit_response_distance", "compute_edit_response_distance"),
     "compute_edit_invariant_relation_distance":
         ("src.metrics.edit_invariant_relation", "compute_edit_invariant_relation_distance"),
+    "compute_native_finite_feasibility":
+        ("src.metrics.edit_feasibility_finite", "compute_native_finite_feasibility"),
+    "compute_finite_optimized_feasibility":
+        ("src.metrics.edit_feasibility_optimized", "compute_finite_optimized_feasibility"),
     "collect_probes":
         ("src.metrics.edit_response_distance", "collect_probes"),
     "pairwise_distance_observable":

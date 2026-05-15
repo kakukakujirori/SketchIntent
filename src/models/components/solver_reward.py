@@ -250,12 +250,14 @@ class SolverReward(torch.nn.Module):
     def collect_results(
         self,
         handle: SolverAsyncHandle,
-    ) -> tuple[torch.Tensor, dict[str, Counter]]:
+    ) -> tuple[torch.Tensor, dict[str, Counter], list[str]]:
         """Wait for solver workers and compute reward scores.
 
         Blocks until all futures in *handle* have completed (or timed out).
-        Returns (scores_cpu, metrics) where scores_cpu is a CPU float32 tensor
-        of shape (B, L_cons).
+        Returns (scores_cpu, metrics, per_sample_status) where scores_cpu is
+        a CPU float32 tensor of shape (B, L_cons) and per_sample_status is a
+        list of per-sample status strings (e.g. "FC", "Under", "Conflicting",
+        "Redundant", "Malformed", "Timeout").
 
         If called after GPU forward passes have already consumed most of the
         solver latency, this returns almost immediately.
@@ -292,6 +294,7 @@ class SolverReward(torch.nn.Module):
         scores = torch.zeros(handle.cons_shape, dtype=torch.float32)
         solver_dof_counter: Counter[int] = Counter()
         solver_status_counter: Counter[str] = Counter()
+        per_sample_status: list[str] = ["Timeout"] * handle.B
 
         for i in range(handle.B):
             res = evaluation_results[i]
@@ -314,6 +317,7 @@ class SolverReward(torch.nn.Module):
                 else:
                     status_name = "Under"
 
+            per_sample_status[i] = status_name
             solver_dof_counter[solver_status.DoF] += 1
             solver_status_counter[status_name] += 1
 
@@ -401,7 +405,7 @@ class SolverReward(torch.nn.Module):
             "dof": solver_dof_counter,
             "status": solver_status_counter,
         }
-        return scores, metrics
+        return scores, metrics, per_sample_status
 
     # ---------------------------------------------------------------------- #
     #  Synchronous API (backward-compatible wrapper)                          #
@@ -429,5 +433,5 @@ class SolverReward(torch.nn.Module):
             metrics: dict with 'dof' and 'status' Counters.
         """
         handle = self.submit_async(prim_tokens, cons_tokens, sketch_original_list)
-        scores, metrics = self.collect_results(handle)
+        scores, metrics, _ = self.collect_results(handle)
         return scores.to(cons_tokens.device), metrics

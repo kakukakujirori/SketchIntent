@@ -1,0 +1,48 @@
+# @package _global_
+
+# Smoke-test RLOO with d_feas reward added on top of the solver reward.
+#
+#   conda run -n freecad python src/train.py experiment=rloo_dfeas \
+#     trainer=cpu data.batch_size=1 model.group_sample_size=2 \
+#     trainer.max_steps=2 trainer.limit_val_batches=0
+
+defaults:
+  - override /data: constraint_rloo.yaml
+  - override /model: constraint_ar_rloo_dfeas.yaml
+  - override /trainer: default
+
+tags: ["rloo", "dfeas"]
+
+callbacks:
+  model_checkpoint_epoch:
+    every_n_train_steps: 100
+    save_top_k: 5
+    filename: "epoch_{epoch}_step_{step}"
+
+  model_checkpoint_loss: null
+
+  model_checkpoint_reward:
+    _target_: lightning.pytorch.callbacks.ModelCheckpoint
+    dirpath: ${paths.output_dir}/checkpoints
+    monitor: "validation_gen/solver_fc_rate"
+    filename: "step_{step}_fc_{validation_gen/solver_fc_rate:.3f}"
+    save_top_k: 3
+    mode: "max"
+    auto_insert_metric_name: false
+    every_n_train_steps: 100
+
+data:
+  batch_size: 32
+  num_workers: 1
+
+model:
+  optimizer:
+    lr: 1e-5
+  gt_reward_coeff: 0.0
+
+trainer:
+  check_val_every_n_epoch: null
+  val_check_interval: 100
+  devices: 1
+
+pretrained_ckpt_path: logs/train/runs/2026-05-02_20-35-42/checkpoints/epoch_29.ckpt

@@ -299,45 +299,23 @@ class ConstraintBLEU(torchmetrics.Metric):
         target_sketches_grouped = []
 
         for i in range(B):
-            # Reindex GT sketch for sequential IDs
             gt_sketch = gt_sketches[i]
-            id_map = {old_id: str(j) for j, old_id in enumerate(gt_sketch.entities.keys())}
 
-            reindexed_entities = {}
-            for old_id, ent in gt_sketch.entities.items():
-                new_id = id_map[old_id]
-                if hasattr(ent, "_replace"):
-                    ent = ent._replace(entityId=new_id)
-                reindexed_entities[new_id] = ent
-
-            reindexed_constraints = {}
-            for cid, constr in gt_sketch.constraints.items():
-                new_params = []
-                for p in constr.parameters:
-                    if isinstance(p, datalib.LocalReferenceParameter):
-                        parts = p.value.split(".")
-                        old_ent_id = parts[0]
-                        if old_ent_id in id_map:
-                            parts[0] = id_map[old_ent_id]
-                            new_params.append(datalib.LocalReferenceParameter(parameterId=p.parameterId, value=".".join(parts)))
-                        else:
-                            new_params.append(p)
-                    else:
-                        new_params.append(p)
-                reindexed_constraints[cid] = constr._replace(parameters=new_params)
-
-            reindexed_gt_sketch = datalib.Sketch(entities=reindexed_entities, constraints=reindexed_constraints)
-
-            # Detokenize prediction
+            # Detokenize the prediction in gt's entity-ID space.
             pred_tokens = {'p_val': p_vals[i], 'c_val': c_vals_gen[i]}
-            pred_sketch, _, _ = self.tokenizer.detokenize(pred_tokens, allow_invalid_constraints=True)
+            pred_sketch, _, _ = self.tokenizer.detokenize(
+                pred_tokens,
+                allow_invalid_constraints=True,
+                reference_sketch=gt_sketch,  # assigns pred entities the same keys as gt by position
+            )
 
-            # Use the precisely indexed entities from GT
-            pred_sketch.entities = reindexed_entities
+            # Replace decoded (quantized) entities with gt's precise entity
+            # objects so downstream geometric checks (e.g. midpoint_tol) see
+            # the unquantized geometry.
+            pred_sketch.entities = dict(gt_sketch.entities)
             pred_sketches.append(pred_sketch)
 
-            # Use normalized GT sketch
-            target_sketches_grouped.append([reindexed_gt_sketch])
+            target_sketches_grouped.append([gt_sketch])
 
         # Calling the metric returns batch-level results and updates global state
         base_prim_dicts = [s[0].entities for s in target_sketches_grouped]

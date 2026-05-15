@@ -9,6 +9,7 @@ from tqdm import tqdm
 
 from src.metrics import ConstraintBLEU, ConstraintIoU, TokenAccuracy
 from src.models.components.constraint_ar_model import ConstraintARModel
+from src.models.components.dfeas_reward import DFeasReward
 from src.models.components.solver_feedback import SolverFeedback
 from src.models.components.solver_reward import SolverReward
 from src.models.components.token_reordering import TokenReordering
@@ -34,18 +35,25 @@ class ConstraintARModuleRLOO(L.LightningModule):
         kl_coeff: float = 0.01,
         sft_coeff: float = 0.0,
         gt_reward_coeff: float = 0.0,
+        dfeas_reward: DFeasReward | None = None,
     ):
         super().__init__()
-        self.save_hyperparameters(ignore=['model', 'reward'], logger=False)
+        self.save_hyperparameters(ignore=['model', 'reward', 'dfeas_reward'], logger=False)
 
         # models
         self.model = model
         self.reward = reward
+        self.dfeas_reward = dfeas_reward
         self.ref_model = copy.deepcopy(model)
 
         self.reward.eval()
         for p in self.reward.parameters():
             p.requires_grad_(False)
+
+        if self.dfeas_reward is not None:
+            self.dfeas_reward.eval()
+            for p in self.dfeas_reward.parameters():
+                p.requires_grad_(False)
 
         self.ref_model.eval()
         for p in self.ref_model.parameters():
@@ -269,7 +277,7 @@ class ConstraintARModuleRLOO(L.LightningModule):
             kl_loss_metric = (kl_penalty * mask).sum() / n_valid
 
         # Step 4: Collect solver results (blocks only for remaining solver time)
-        rewards_cpu, solver_metrics = self.reward.collect_results(solver_handle)
+        rewards_cpu, solver_metrics, per_sample_status = self.reward.collect_results(solver_handle)
         rewards = rewards_cpu.to(self.device).float()  # [B*K, L]
 
         # Step 4b: GT-match reward (added on top of solver reward)
@@ -277,6 +285,19 @@ class ConstraintARModuleRLOO(L.LightningModule):
             gt_expanded = cast(torch.Tensor, expanded['c_val'])  # [B*K, L]
             gt_match_reward = self._compute_gt_match_reward(generated, gt_expanded)
             rewards = rewards + gt_match_reward
+
+        # Step 4c: d_feas reward (first-order edit feasibility / intent preservation)
+        # Only applied to converged samples (FC / Under); conflicting / redundant sketches
+        # have ill-defined first-order responses so d_feas is meaningless there.
+        dfeas_metrics: dict[str, float | int] = {}
+        if self.dfeas_reward is not None:
+            converged_mask = [s in ("FC", "Under") for s in per_sample_status]
+            dfeas_scores_cpu, dfeas_metrics = self.dfeas_reward(
+                p_val_expanded, generated, expanded['sketch'],
+                converged_mask=converged_mask,
+            )
+            dfeas_scores = dfeas_scores_cpu.to(self.device).float()
+            rewards = rewards + dfeas_scores
 
         # Parse solver metrics (Counter → scalar)
         parsed_solver_metrics = {}
@@ -332,7 +353,8 @@ class ConstraintARModuleRLOO(L.LightningModule):
             'entropy':           entropy,
             'ratio':             avg_ratio,
             'gt_match_reward':   gt_match_reward_metric,
-            **parsed_solver_metrics
+            **parsed_solver_metrics,
+            **dfeas_metrics,
         }
         return loss, metrics
 
@@ -481,6 +503,20 @@ class ConstraintARModuleRLOO(L.LightningModule):
         except Exception as e:
             if self.global_rank == 0:
                 print(f"[validation_step] Solver evaluation failed: {e}")
+
+        # Evaluate d_feas and log
+        if self.dfeas_reward is not None:
+            try:
+                _, dfeas_val_results = self.dfeas_reward(
+                    batch['p_val'],
+                    generated,
+                    batch['sketch'],
+                )
+                for metric_name, metric_value in dfeas_val_results.items():
+                    self.log(f'validation_gen/{metric_name}', float(metric_value), add_dataloader_idx=False, sync_dist=True, on_epoch=True)
+            except Exception as e:
+                if self.global_rank == 0:
+                    print(f"[validation_step] DFeas evaluation failed: {e}")
 
         # Save first batch for wandb visualization
         if batch_idx == 0:
