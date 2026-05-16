@@ -381,7 +381,7 @@ class ConstraintARModuleRLOO(L.LightningModule):
         # ── AR loop ───────────────────────────────────────────────────── #
         for pos in tqdm(range(max_len - 1), desc="Sampling", leave=False, disable=self.training):
             # Embed current token at position pos: [B, 1, E]
-            new_emb = self.model.embed_token_at_pos(memory, generated[:, pos], pos)
+            new_emb = self.model.embed_token_at_pos(memory, generated[:, pos])
 
             # One decoder step — writes to self_kv in-place, O(pos) per step
             dec_out = self.model.decoder_step_cached(new_emb, pos, self_kv, cross_kv)  # [B, 1, E]

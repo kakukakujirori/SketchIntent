@@ -1,0 +1,16 @@
+# @package _global_
+
+# to execute this experiment run:
+# python train.py experiment=pretrain
+
+defaults:
+  - override /data: constraint_pretrain.yaml
+  - override /model: constraint_ar.yaml
+  - override /trainer: default
+
+tags: ["pretrain", "rel_only"]
+
+data:
+  context:
+    max_token_length: 192
+  relational_only: true

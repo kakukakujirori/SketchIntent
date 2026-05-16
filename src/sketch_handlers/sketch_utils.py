@@ -1056,6 +1056,27 @@ def complete_constraint_values(sketch: datalib.Sketch, expr_watermark: str = "VA
 
     return sketch, invalid_constraints
 
+
+def remove_dimensional_constraints(sketch: datalib.Sketch) -> datalib.Sketch:
+    """Remove dimensional constraints from the sketch."""
+    DIMENSIONAL_CONSTRAINTS = {
+        datalib.ConstraintType.Angle,
+        datalib.ConstraintType.Diameter,
+        datalib.ConstraintType.Distance,
+        datalib.ConstraintType.Length,
+        datalib.ConstraintType.Radius,
+    }
+    new_constraints = {}
+    for constr_id, constr in sketch.constraints.items():
+        if constr.type in DIMENSIONAL_CONSTRAINTS:
+            continue
+        new_constraints[constr_id] = constr
+    return datalib.Sketch(
+        entities=sketch.entities,
+        constraints=new_constraints,
+    )
+
+
 ################
 
 def cleanse_sketch_primitives(sketch: datalib.Sketch) -> datalib.Sketch:

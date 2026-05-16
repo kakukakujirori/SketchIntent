@@ -113,14 +113,33 @@ class MidpointHandler(ConstraintHandler):
         if p3 <= 0:
             raise ValueError(f"Midpoint constraint must specify a center 'point' of symmetry, but got {(g3, p3)=}")
 
+        # Only aggregate to 2-ref Midpoint(Point, Line) if the geometry is actually a Line.
+        # For Arcs, we must use 3-ref Midpoint(Point, Start, End) to avoid semantic ambiguity.
+        is_line = False
+        try:
+            from src.sketch_handlers.freecad_utils import ensure_freecad_imported
+            _, Part, _ = ensure_freecad_imported()
+            if isinstance(fc_primitives[g1], Part.LineSegment):
+                is_line = True
+        except Exception:
+            pass
+
         if g1 == g2 and (p1, p2) in [(1, 2), (2, 1)]:
-            # 2-ref form: point + line
-            r_point = geoID_to_primitive.get((g3, p3))
-            r_line = geoID_to_primitive.get((g1, 0))
-            assert r_point and r_line
-            return self.create_constraint('Midpoint', (r_point, r_line))
+            if is_line:
+                # 2-ref form: point + line
+                r_point = geoID_to_primitive.get((g3, p3))
+                r_line = geoID_to_primitive.get((g1, 0))
+                assert r_point and r_line
+                return self.create_constraint('Midpoint', (r_point, r_line))
+            else:
+                # 3-ref form: two endpoints + midpoint (explicitly use endpoints for Arcs)
+                r1 = geoID_to_primitive.get((g1, p1))
+                r2 = geoID_to_primitive.get((g2, p2))
+                r3 = geoID_to_primitive.get((g3, p3))
+                assert r1 and r2 and r3
+                return self.create_constraint('Midpoint', (r1, r2, r3))
         elif g1 != g2 and p1 > 0 and p2 > 0:
-            # 3-ref form: two endpoints + midpoint
+            # 3-ref form: two separate points + midpoint
             r1 = geoID_to_primitive.get((g1, p1))
             r2 = geoID_to_primitive.get((g2, p2))
             r3 = geoID_to_primitive.get((g3, p3))

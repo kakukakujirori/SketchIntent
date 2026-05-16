@@ -5,10 +5,14 @@ from src.sketch_handlers.constants import PrimitiveToken, PrimitiveAttrToken, PR
 
 
 class PrimitiveModel(torch.nn.Module):
+    # Fixed upper bound for primitive group indices.
+    # p_pos encodes which primitive each token belongs to (group index),
+    # NOT sequential position. This value is independent of max_token_length.
+    MAX_GROUPS = 128
+
     def __init__(
         self,
         num_bins: int,
-        max_token_length: int,
         embed_dim: int,
         num_heads: int,
         num_layers: int,
@@ -25,10 +29,8 @@ class PrimitiveModel(torch.nn.Module):
         num_attr_embeddings = len(PrimitiveAttrToken)
         self.attr_embed = torch.nn.Embedding(num_attr_embeddings, embed_dim, padding_idx=PrimitiveAttrToken.Pad)
 
-        # Position embeddings
-        # NOTE: num_pos_embedding is redundantly large, but it's fine
-        num_pos_embeddings = max_token_length // 2
-        self.pos_embed = torch.nn.Embedding(num_pos_embeddings, embed_dim, padding_idx=PrimitiveToken.Pad)
+        # Group embeddings: encodes which primitive group each token belongs to
+        self.group_embed = torch.nn.Embedding(self.MAX_GROUPS, embed_dim, padding_idx=PrimitiveToken.Pad)
 
         # Rotary
         self.rotary_emb = dit.Rotary(embed_dim // num_heads)
@@ -45,8 +47,8 @@ class PrimitiveModel(torch.nn.Module):
         # Embed
         val_embeddings = self.val_embed(src['p_val'])
         attr_embeddings = self.attr_embed(src['p_attr'])
-        pos_embeddings = self.pos_embed(src['p_pos'])
-        x = val_embeddings + attr_embeddings + pos_embeddings
+        group_embeddings = self.group_embed(src['p_pos'])
+        x = val_embeddings + attr_embeddings + group_embeddings
 
         # Rotary
         rotary_cos_sin = self.rotary_emb(x)

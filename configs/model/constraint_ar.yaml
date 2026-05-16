@@ -5,7 +5,6 @@ context: ${data.context}
 model:
   _target_: src.models.components.constraint_ar_model.ConstraintARModel
   num_bins: ${data.context.num_quantization_bins}
-  max_token_length: ${data.context.max_token_length}
   embed_dim: 256
   feedforward_dim: 384
   num_heads: 8

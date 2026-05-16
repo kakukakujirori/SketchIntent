@@ -1,9 +1,97 @@
 import numpy as np
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
+from einops import rearrange
 
 from src.models.components.primitive_model import PrimitiveModel
+from src.models.components import dit
 from src.sketch_handlers.constants import ConstraintToken
+
+
+class CausalCrossBlock(nn.Module):
+    """Transformer block with causal self-attention (RoPE) + cross-attention.
+
+    Architecture per block:
+        1. Pre-norm → Self-attention with RoPE + causal mask → Residual
+        2. Pre-norm → Cross-attention (Q from target, K/V from memory) → Residual
+        3. Pre-norm → FFN → Residual
+    """
+    def __init__(self, dim, n_heads, feedforward_dim=None, dropout=0.0):
+        super().__init__()
+        self.n_heads = n_heads
+        self.head_dim = dim // n_heads
+        self.dropout = dropout
+
+        # Self-attention
+        self.norm1 = dit.LayerNorm(dim)
+        self.self_attn_qkv = nn.Linear(dim, 3 * dim, bias=False)
+        self.self_attn_out = nn.Linear(dim, dim, bias=False)
+
+        # Cross-attention
+        self.norm_cross = dit.LayerNorm(dim)
+        self.cross_attn_q = nn.Linear(dim, dim, bias=False)
+        self.cross_attn_kv = nn.Linear(dim, 2 * dim, bias=False)
+        self.cross_attn_out = nn.Linear(dim, dim, bias=False)
+
+        # FFN
+        ff_dim = feedforward_dim or dim * 4
+        self.norm2 = dit.LayerNorm(dim)
+        self.mlp = nn.Sequential(
+            nn.Linear(dim, ff_dim, bias=True),
+            nn.GELU(approximate='tanh'),
+            nn.Linear(ff_dim, dim, bias=True))
+
+    def forward(self, x, memory, rotary_cos_sin):
+        batch_size, seq_len = x.shape[:2]
+
+        # 1. Self-attention with RoPE + causal mask
+        x_skip = x
+        x = self.norm1(x)
+        qkv = self.self_attn_qkv(x)
+        qkv = rearrange(qkv, 'b s (three h d) -> b s three h d',
+                         three=3, h=self.n_heads)
+
+        with torch.amp.autocast('cuda', enabled=False):
+            cos, sin = rotary_cos_sin
+            qkv = dit.apply_rotary_pos_emb(
+                qkv, cos.to(qkv.dtype), sin.to(qkv.dtype))
+
+        q = qkv[:, :, 0].transpose(1, 2)  # [B, H, S, D]
+        k = qkv[:, :, 1].transpose(1, 2)
+        v = qkv[:, :, 2].transpose(1, 2)
+
+        x = F.scaled_dot_product_attention(
+            q, k, v, is_causal=True,
+            dropout_p=self.dropout if self.training else 0.)
+        x = x.transpose(1, 2).reshape(batch_size, seq_len, -1)
+        x = self.self_attn_out(x)
+        x = F.dropout(x, p=self.dropout, training=self.training) + x_skip
+
+        # 2. Cross-attention (Q from target, K/V from memory)
+        x_skip = x
+        x_normed = self.norm_cross(x)
+        q = self.cross_attn_q(x_normed)
+        kv = self.cross_attn_kv(memory)
+        q = rearrange(q, 'b s (h d) -> b h s d', h=self.n_heads)
+        kv = rearrange(kv, 'b s (two h d) -> b s two h d',
+                       two=2, h=self.n_heads)
+        k_c = kv[:, :, 0].transpose(1, 2)
+        v_c = kv[:, :, 1].transpose(1, 2)
+
+        x = F.scaled_dot_product_attention(
+            q, k_c, v_c,
+            dropout_p=self.dropout if self.training else 0.)
+        x = x.transpose(1, 2).reshape(batch_size, seq_len, -1)
+        x = self.cross_attn_out(x)
+        x = F.dropout(x, p=self.dropout, training=self.training) + x_skip
+
+        # 3. FFN
+        x_skip = x
+        x = self.mlp(self.norm2(x))
+        x = F.dropout(x, p=self.dropout, training=self.training) + x_skip
+
+        return x
 
 
 class ConstraintARModel(torch.nn.Module):
@@ -14,7 +102,6 @@ class ConstraintARModel(torch.nn.Module):
     """
     def __init__(self,
                  num_bins: int,
-                 max_token_length: int,
                  embed_dim: int,
                  feedforward_dim: int,
                  num_heads: int,
@@ -22,18 +109,29 @@ class ConstraintARModel(torch.nn.Module):
                  dropout: float = 0):
         super().__init__()
         self.constraint_token_num = len(ConstraintToken)
+        self.embed_dim = embed_dim
+        self.num_heads = num_heads
+        self.head_dim = embed_dim // num_heads
+
         # Primitive model (for dynamic embeddings)
-        self.prim_model = PrimitiveModel(num_bins, max_token_length, embed_dim, num_heads, num_layers, dropout)
+        self.prim_model = PrimitiveModel(num_bins, embed_dim, num_heads, num_layers, dropout)
+
         # Value embeddings (only fixed ones)
         num_val_embeddings = self.constraint_token_num
         self.val_embed = torch.nn.Embedding(num_val_embeddings, embed_dim, padding_idx=ConstraintToken.Pad)
-        # Position embeddings
-        num_pos_embeddings = max_token_length
-        self.pos_embed = torch.nn.Embedding(num_pos_embeddings, embed_dim, padding_idx=ConstraintToken.Pad)
-        # Transformer decoder
-        decoder_layers = torch.nn.TransformerDecoderLayer(embed_dim, num_heads, feedforward_dim, dropout=dropout, batch_first=True)
-        self.trans_decoder = torch.nn.TransformerDecoder(decoder_layers, num_layers)
-        self.embed_dim = embed_dim
+
+        # Rotary Position Embedding (replaces nn.Embedding-based absolute pos encoding)
+        self.rotary_emb = dit.Rotary(self.head_dim)
+
+        # Causal decoder blocks with cross-attention
+        self.blocks = nn.ModuleList([
+            CausalCrossBlock(embed_dim, num_heads, feedforward_dim, dropout)
+            for _ in range(num_layers)
+        ])
+
+        # Final LayerNorm (pre-norm transformers require a trailing norm before
+        # the output projection; without it the residual stream is unbounded).
+        self.final_norm = dit.LayerNorm(embed_dim)
 
     def compute_memory(self, src: dict[str, torch.Tensor]) -> torch.Tensor:
         """Compute the decoder memory (primitive + special-token embeddings).
@@ -61,15 +159,11 @@ class ConstraintARModel(torch.nn.Module):
             prim_embeddings = memory  # reuse precomputed memory
 
         # Gather embeddings for constraint tokens
-        batch_size, seq_len = src['c_val'].shape[:2]
         c_val_indices = src['c_val'].unsqueeze(-1).expand(-1, -1, self.embed_dim)
         val_embeddings = torch.gather(prim_embeddings, 1, c_val_indices)
 
-        # Generate position indices internally (0, 1, 2, ..., seq_len-1)
-        pos_indices = torch.arange(seq_len, device=src['c_val'].device).unsqueeze(0).expand(batch_size, -1)
-        pos_embeddings = self.pos_embed(pos_indices)
-        embeddings = val_embeddings + pos_embeddings
-        return embeddings, prim_embeddings
+        # No absolute position embeddings — RoPE is applied in attention layers
+        return val_embeddings, prim_embeddings
 
     def forward(self, src: dict[str, torch.Tensor], memory: torch.Tensor | None = None):
         """Forward pass.
@@ -85,32 +179,48 @@ class ConstraintARModel(torch.nn.Module):
         """
         # Embed
         c_embeddings, p_embeddings = self._embed_tokens(src, memory=memory)
-        # Pass to transformer with causal mask
-        seq_len = c_embeddings.shape[1]
-        tgt_mask = c_embeddings.new_full((seq_len, seq_len), fill_value=float('-inf')).triu_(diagonal=1)
-        output = self.trans_decoder(c_embeddings, p_embeddings, tgt_mask)
+
+        # Compute rotary embeddings
+        rotary_cos_sin = self.rotary_emb(c_embeddings)
+
+        # Run through causal decoder blocks with cross-attention to primitives
+        x = c_embeddings
+        for block in self.blocks:
+            x = block(x, p_embeddings, rotary_cos_sin)
+        x = self.final_norm(x)
+
         # Pointer dot-product
         p_embeddings = p_embeddings.transpose(1, 2)
-        output = torch.matmul(output, p_embeddings)
+        output = torch.matmul(x, p_embeddings)
         return output
 
     # ------------------------------------------------------------------ #
     #  KV-cache API for efficient autoregressive generation               #
     # ------------------------------------------------------------------ #
 
+    def _rotary_at_pos(self, pos: int, device, dtype):
+        """Compute RoPE cos/sin for a single position.
+
+        Returns cos, sin each of shape [1, head_dim].
+        """
+        inv_freq = self.rotary_emb.inv_freq
+        t = torch.tensor([pos], device=device, dtype=inv_freq.dtype)
+        freqs = torch.einsum("i,j->ij", t, inv_freq)  # [1, head_dim/2]
+        emb = torch.cat((freqs, freqs), dim=-1)        # [1, head_dim]
+        return emb.cos().to(dtype), emb.sin().to(dtype)
+
     def embed_token_at_pos(
         self,
         memory: torch.Tensor,
         token_ids: torch.Tensor,
-        pos: int,
     ) -> torch.Tensor:
-        """Embed a single batch of tokens at position *pos*.
+        """Embed a single batch of tokens (no position encoding needed — RoPE
+        is applied inside the decoder blocks).
 
         Parameters
         ----------
         memory   : [B, M, E]  — output of compute_memory()
         token_ids: [B]        — integer indices into memory
-        pos      : int        — position in the sequence
 
         Returns
         -------
@@ -118,13 +228,7 @@ class ConstraintARModel(torch.nn.Module):
         """
         E = self.embed_dim
         idx = token_ids.unsqueeze(-1).unsqueeze(-1).expand(-1, 1, E)  # [B, 1, E]
-        val_emb = memory.gather(1, idx)                                # [B, 1, E]
-        pos_idx = torch.full(
-            (token_ids.shape[0], 1), pos,
-            device=memory.device, dtype=torch.long,
-        )
-        pos_emb = self.pos_embed(pos_idx)                             # [B, 1, E]
-        return val_emb + pos_emb
+        return memory.gather(1, idx)                                   # [B, 1, E]
 
     def compute_cross_kv_cache(
         self,
@@ -145,17 +249,12 @@ class ConstraintARModel(torch.nn.Module):
         """
         B, M, E = memory.shape
         caches: list[tuple[torch.Tensor, torch.Tensor]] = []
-        for layer in self.trans_decoder.layers:
-            ca = layer.multihead_attn
-            H  = ca.num_heads
-            d  = E // H
-            w, b = ca.in_proj_weight, ca.in_proj_bias
-            # K and V projections applied to memory (Q projection is for the tgt)
-            k = F.linear(memory, w[E:2*E], b[E:2*E] if b is not None else None)  # [B, M, E]
-            v = F.linear(memory, w[2*E:],  b[2*E:]  if b is not None else None)  # [B, M, E]
-            # Reshape to [B, H, M, d] — format expected by SDPA
-            k = k.view(B, M, H, d).transpose(1, 2)  # [B, H, M, d]
-            v = v.view(B, M, H, d).transpose(1, 2)
+        for block in self.blocks:
+            kv = block.cross_attn_kv(memory)              # [B, M, 2*E]
+            kv = kv.view(B, M, 2, self.num_heads, self.head_dim)
+            kv = kv.permute(0, 3, 1, 2, 4)                # [B, H, M, 2, d]
+            k = kv[:, :, :, 0, :].contiguous()             # [B, H, M, d]
+            v = kv[:, :, :, 1, :].contiguous()
             caches.append((k, v))
         return caches
 
@@ -170,19 +269,15 @@ class ConstraintARModel(torch.nn.Module):
 
         Returns a list of (k_buf, v_buf) per layer, each [B, H, max_len, d_head].
         Buffers are written in-place inside decoder_step_cached().
-
-        Pre-allocation avoids repeated torch.cat() calls (O(L²) memory copies)
-        that would occur with a naive append-each-step approach.
         """
-        layer0 = self.trans_decoder.layers[0]
-        H = layer0.self_attn.num_heads
-        d = self.embed_dim // H
+        H = self.num_heads
+        d = self.head_dim
         return [
             (
                 torch.zeros(batch_size, H, max_len, d, device=device, dtype=dtype),
                 torch.zeros(batch_size, H, max_len, d, device=device, dtype=dtype),
             )
-            for _ in self.trans_decoder.layers
+            for _ in self.blocks
         ]
 
     def decoder_step_cached(
@@ -192,7 +287,7 @@ class ConstraintARModel(torch.nn.Module):
         self_kv: list[tuple[torch.Tensor, torch.Tensor]],
         cross_kv: list[tuple[torch.Tensor, torch.Tensor]],
     ) -> torch.Tensor:
-        """Run one AR step through all decoder layers with KV cache.
+        """Run one AR step through all decoder blocks with KV cache.
 
         self_kv buffers are **mutated in-place** (k_buf[:, :, pos, :] is written).
 
@@ -208,61 +303,63 @@ class ConstraintARModel(torch.nn.Module):
         [B, 1, E]  — decoder output for this position
         """
         B, _, E = tgt.shape
+        H = self.num_heads
+        d = self.head_dim
 
-        for i, layer in enumerate(self.trans_decoder.layers):
-            H = layer.self_attn.num_heads
-            d = E // H
+        # Compute RoPE cos/sin for this position
+        cos, sin = self._rotary_at_pos(pos, tgt.device, tgt.dtype)
+        # cos, sin: [1, head_dim]
 
-            # ── Self-attention (with pre-allocated KV cache) ─────────── #
-            sa = layer.self_attn
+        for i, block in enumerate(self.blocks):
+            # ── Self-attention (with pre-allocated KV cache + RoPE) ──── #
+            normed = block.norm1(tgt)
+            qkv = block.self_attn_qkv(normed)          # [B, 1, 3E]
+            q, k_new, v_new = qkv.split(E, dim=-1)     # each [B, 1, E]
 
-            # Fused QKV projection: one GEMM for all three projections
-            qkv    = F.linear(tgt, sa.in_proj_weight, sa.in_proj_bias)  # [B, 1, 3E]
-            q, k_new, v_new = qkv.split(E, dim=-1)                      # each [B, 1, E]
+            # Reshape to [B, H, 1, d]
+            q     = q.view(B, 1, H, d).transpose(1, 2)
+            k_new = k_new.view(B, 1, H, d).transpose(1, 2)
+            v_new = v_new.view(B, 1, H, d).transpose(1, 2)
 
-            # Reshape to SDPA format
-            q     = q.view(B, 1, H, d).transpose(1, 2)   # [B, H, 1, d]
-            k_new = k_new.view(B, H, d)                   # [B, H, d]
-            v_new = v_new.view(B, H, d)                   # [B, H, d]
+            # Apply RoPE to Q and K  (cos/sin: [1, D] -> [1, 1, 1, D])
+            cos_exp = cos.unsqueeze(0).unsqueeze(0)     # [1, 1, 1, D]
+            sin_exp = sin.unsqueeze(0).unsqueeze(0)
+            q     = q * cos_exp + dit.rotate_half(q) * sin_exp
+            k_new = k_new * cos_exp + dit.rotate_half(k_new) * sin_exp
 
             # Write new K, V into pre-allocated buffer at position *pos*
             k_buf, v_buf = self_kv[i]
-            k_buf[:, :, pos, :] = k_new
-            v_buf[:, :, pos, :] = v_new
+            k_buf[:, :, pos, :] = k_new.squeeze(2)
+            v_buf[:, :, pos, :] = v_new.squeeze(2)
 
             # Read the accumulated cache up to (and including) *pos*
-            k_all = k_buf[:, :, :pos + 1, :]  # [B, H, pos+1, d]
+            k_all = k_buf[:, :, :pos + 1, :]           # [B, H, pos+1, d]
             v_all = v_buf[:, :, :pos + 1, :]
 
-            # SDPA — automatically uses Flash Attention on CUDA + float16/bfloat16
-            attn_dp = sa.dropout if self.training else 0.0
+            attn_dp = block.dropout if self.training else 0.0
             sa_out = F.scaled_dot_product_attention(q, k_all, v_all, dropout_p=attn_dp)
             sa_out = sa_out.transpose(1, 2).contiguous().view(B, 1, E)
-            sa_out = F.linear(sa_out, sa.out_proj.weight, sa.out_proj.bias)
+            sa_out = block.self_attn_out(sa_out)
 
-            tgt = layer.norm1(tgt + layer.dropout1(sa_out))  # dropout1: SA residual
+            tgt = F.dropout(sa_out, p=block.dropout, training=self.training) + tgt
 
-            # ── Cross-attention (reuses precomputed KV from memory) ───── #
-            ca = layer.multihead_attn
+            # ── Cross-attention (reuses precomputed KV from memory) ──── #
             cross_k, cross_v = cross_kv[i]   # [B, H, M, d]
 
-            # Only Q is computed for the new token; K/V come from cache
-            q_c = F.linear(
-                tgt,
-                ca.in_proj_weight[:E],
-                ca.in_proj_bias[:E] if ca.in_proj_bias is not None else None,
-            )
+            normed = block.norm_cross(tgt)
+            q_c = block.cross_attn_q(normed)
             q_c = q_c.view(B, 1, H, d).transpose(1, 2)  # [B, H, 1, d]
 
-            ca_dp  = ca.dropout if self.training else 0.0
+            ca_dp = block.dropout if self.training else 0.0
             ca_out = F.scaled_dot_product_attention(q_c, cross_k, cross_v, dropout_p=ca_dp)
             ca_out = ca_out.transpose(1, 2).contiguous().view(B, 1, E)
-            ca_out = F.linear(ca_out, ca.out_proj.weight, ca.out_proj.bias)
+            ca_out = block.cross_attn_out(ca_out)
 
-            tgt = layer.norm2(tgt + layer.dropout2(ca_out))  # dropout2: CA residual
+            tgt = F.dropout(ca_out, p=block.dropout, training=self.training) + tgt
 
-            # ── Feed-forward ──────────────────────────────────────────── #
-            ff_out = layer.linear2(layer.dropout(layer.activation(layer.linear1(tgt))))
-            tgt = layer.norm3(tgt + layer.dropout3(ff_out))  # dropout3: FFN residual
+            # ── Feed-forward ─────────────────────────────────────────── #
+            ff_out = block.mlp(block.norm2(tgt))
+            tgt = F.dropout(ff_out, p=block.dropout, training=self.training) + tgt
 
+        tgt = self.final_norm(tgt)
         return tgt  # [B, 1, E]
