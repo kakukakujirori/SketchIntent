@@ -7,7 +7,13 @@ from sketchgraphs.data import flat_array, Arc, Circle, Line, Point
 from src.data.components.primitive_noise import PrimitiveNoise
 from src.sketch_handlers.context import SketchContext
 from src.sketch_handlers.sketch_tokenizer import SketchTokenizer
-from src.sketch_handlers.sketch_utils import cleanse_sketch_primitives, cleanse_sketch_constraints, complete_constraint_values, normalize_sketch
+from src.sketch_handlers.sketch_utils import (
+    cleanse_sketch_primitives,
+    cleanse_sketch_constraints,
+    complete_constraint_values,
+    normalize_sketch,
+    remove_dimensional_constraints,
+)
 
 
 class ConstraintDataset(torch.utils.data.Dataset):
@@ -36,6 +42,7 @@ class ConstraintDataset(torch.utils.data.Dataset):
         sequence_file: str,
         context: SketchContext,
         primitive_noise: PrimitiveNoise,
+        relational_only: bool = False,
     ):
         """Create a new constraint dataset.
 
@@ -51,16 +58,19 @@ class ConstraintDataset(torch.utils.data.Dataset):
         self.context = context
         self.primitive_noise = primitive_noise
         self.tokenizer = SketchTokenizer(self.context)
+        self.relational_only = relational_only
 
         sequence_array = flat_array.load_dictionary_flat(sequence_file)
         self.sequences = sequence_array['sequences']
         self.source_files = sequence_array.get('source_files')
         self.sketch_ids = sequence_array.get('sketch_ids')
 
-    def __getitem__(self, index: int) -> dict[str, int | datalib.Sketch | torch.Tensor]:
+    def __getitem__(self, index: int) -> dict[str, int | str | datalib.Sketch | torch.Tensor]:
         seq = self.sequences[index]
 
         sketch = datalib.sketch_from_sequence(seq)
+        if self.relational_only:
+            sketch = remove_dimensional_constraints(sketch)
 
         # NOTE: Keep the order: complete_constraint_values is based on the correct cleanse_sketch_primitives output.
         _ = normalize_sketch(sketch)

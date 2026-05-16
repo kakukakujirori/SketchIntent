@@ -5,7 +5,7 @@
 
 defaults:
   - override /data: constraint_rloo.yaml
-  - override /model: constraint_ar_rloo_rel_only.yaml
+  - override /model: constraint_ar_rloo.yaml
   - override /trainer: default
   # - override /callbacks: null  # COMMENT OUT!!!
   # - override /logger: null  # COMMENT OUT!!!
@@ -31,13 +31,17 @@ callbacks:
     every_n_train_steps: 100
 
 data:
+  context:
+    max_token_length: 130  # 192 collapsed
   batch_size: 32
   num_workers: 1  # Less is better since this RL training is compute-bound
+  relational_only: true
 
 model:
   optimizer:
     lr: 1e-5
   gt_reward_coeff: 1.0
+  relational_only: true
 
 trainer:
   check_val_every_n_epoch: null

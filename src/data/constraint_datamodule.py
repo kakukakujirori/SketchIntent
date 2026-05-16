@@ -80,6 +80,7 @@ class ConstraintDataModule(L.LightningDataModule):
         test_sequence_file: str,
         context: SketchContext,
         primitive_noise: PrimitiveNoise,
+        relational_only: bool = False,
         # validation_fraction: float = 0.025,
         # test_fraction: float = 0.05,
         batch_size: int = 32,
@@ -97,18 +98,21 @@ class ConstraintDataModule(L.LightningDataModule):
             self.hparams.train_sequence_file,
             self.hparams.context,
             self.hparams.primitive_noise,
+            self.hparams.relational_only,
         )
 
         self._val_dataset = ConstraintDataset(
             self.hparams.val_sequence_file,
             self.hparams.context,
             self.hparams.primitive_noise,
+            self.hparams.relational_only,
         )
 
         self._test_dataset = ConstraintDataset(
             self.hparams.test_sequence_file,
             self.hparams.context,
             self.hparams.primitive_noise,
+            self.hparams.relational_only,
         )
 
         # self._train_dataset, self._val_dataset, self._test_dataset = split_dataset(
