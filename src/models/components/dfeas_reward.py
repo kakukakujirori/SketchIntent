@@ -16,7 +16,7 @@ Pred sketch and accumulate the two residuals defined in v3:
   L_P^(q) = J_{R_G} S_P^(q)             relation leak (relational preservation)
 
 The per-probe scalar is sqrt(gain_ms + leak_ms) (row-balanced), averaged over
-probes, then capped and negated to become a reward.
+probes, then capped and converted into a reward.
 
 This module is intentionally CAD-solver-free; the only heavy work is per-sketch
 torch.func.jacfwd plus two SVDs (one on J_x of pred, one per probe of size k_q
@@ -83,6 +83,13 @@ def _make_raw_probe(
     )
 
 
+def _is_construction_entity(entity) -> bool:
+    return bool(
+        getattr(entity, "isConstruction", False)
+        or getattr(entity, "Construction", False)
+    )
+
+
 def _build_intrinsic_probes(sketch: datalib.Sketch) -> list[datalib.Constraint]:
     """One probe per primitive whose intrinsic size is a natural driving param.
 
@@ -90,6 +97,7 @@ def _build_intrinsic_probes(sketch: datalib.Sketch) -> list[datalib.Constraint]:
     - Arc   → Radius
     - Circle→ Radius
     - Point → skipped (no intrinsic size)
+    - Construction geometry → skipped (auxiliary, not user-facing edit intent)
 
     All probes have a single-dimensional length residual, so row units are
     homogeneous and the gain mean-square aggregation in `_compute_d_feas`
@@ -101,6 +109,8 @@ def _build_intrinsic_probes(sketch: datalib.Sketch) -> list[datalib.Constraint]:
     """
     raw: dict[str, datalib.Constraint] = {}
     for eid, ent in sketch.entities.items():
+        if _is_construction_entity(ent):
+            continue
         if isinstance(ent, Line):
             raw[f"_probe_L_{eid}"] = _make_raw_probe("Length", (eid,))
         elif isinstance(ent, (Arc, Circle)):
@@ -206,8 +216,12 @@ class DFeasReward(torch.nn.Module):
         d_feas_cap: clip individual d_feas values at this cap. Heavy-tail
             outliers in v3 reached >1e5; cap=5 keeps reward magnitude
             comparable to the solver reward.
-        coeff: external multiplier; the returned reward at STOP is
-            ``-coeff * min(d_feas, cap)``.
+        coeff: external multiplier.
+        reward_mode: ``"penalty"`` returns ``-coeff * min(d_feas, cap)``.
+            ``"bonus"`` returns ``coeff * (1 - min(d_feas, cap) / cap)``.
+            The bonus mode is useful when d_feas should act as a tie-breaker
+            among already fully constrained candidates without pushing them
+            below under-constrained candidates.
         probe_source: ``"gt_dim"`` uses GT sketch's annotated dim constraints
             as edit probes (original v3 metric). ``"intrinsic"`` instead
             generates one probe per primitive from its natural driving size
@@ -222,6 +236,7 @@ class DFeasReward(torch.nn.Module):
         eps: float = 1e-9,
         d_feas_cap: float = 5.0,
         coeff: float = 1.0,
+        reward_mode: str = "penalty",
         probe_source: str = "gt_dim",
     ):
         super().__init__()
@@ -229,10 +244,21 @@ class DFeasReward(torch.nn.Module):
         self.eps = eps
         self.d_feas_cap = d_feas_cap
         self.coeff = coeff
+        if reward_mode not in ("penalty", "bonus"):
+            raise ValueError(f"unknown reward_mode: {reward_mode}")
+        self.reward_mode = reward_mode
         if probe_source not in ("gt_dim", "intrinsic"):
             raise ValueError(f"unknown probe_source: {probe_source}")
         self.probe_source = probe_source
         self.tokenizer = SketchTokenizer(context)
+
+    def _reward_from_d_feas(self, d_feas: float) -> float:
+        clipped = min(max(float(d_feas), 0.0), self.d_feas_cap)
+        if self.reward_mode == "bonus":
+            if self.d_feas_cap <= 0:
+                return 0.0
+            return self.coeff * (1.0 - clipped / self.d_feas_cap)
+        return -self.coeff * clipped
 
     def _build_pred_sketch(
         self,
@@ -306,7 +332,7 @@ class DFeasReward(torch.nn.Module):
                 skipped_no_probes += 1
                 continue
 
-            scores[i, first_stop_idx] -= self.coeff * float(d_feas)
+            scores[i, first_stop_idx] += self._reward_from_d_feas(d_feas)
             d_feas_list.append(d_feas)
             gain_list.append(gain)
             leak_list.append(leak)

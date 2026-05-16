@@ -34,7 +34,10 @@ dfeas_reward:
   eps: 1e-9
   d_feas_cap: 5.0
   coeff: 5.0
-  probe_source: gt_dim   # gt_dim | intrinsic (Line→Length, Arc/Circle→Radius)
+  reward_mode: bonus     # penalty | bonus
+  probe_source: intrinsic   # gt_dim | intrinsic (Line→Length, Arc/Circle→Radius)
+
+dfeas_apply_to: fc       # converged | fc
 
 optimizer:
   _target_: torch.optim.AdamW

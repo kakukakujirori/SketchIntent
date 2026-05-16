@@ -36,9 +36,12 @@ class ConstraintARModuleRLOO(L.LightningModule):
         sft_coeff: float = 0.0,
         gt_reward_coeff: float = 0.0,
         dfeas_reward: DFeasReward | None = None,
+        dfeas_apply_to: str = "converged",
         relational_only: bool = False,
     ):
         super().__init__()
+        if dfeas_apply_to not in ("converged", "fc"):
+            raise ValueError(f"unknown dfeas_apply_to: {dfeas_apply_to}")
         self.save_hyperparameters(ignore=['model', 'reward', 'dfeas_reward'], logger=False)
 
         # models
@@ -75,6 +78,7 @@ class ConstraintARModuleRLOO(L.LightningModule):
         self.kl_coeff = kl_coeff
         self.sft_coeff = sft_coeff
         self.gt_reward_coeff = gt_reward_coeff
+        self.dfeas_apply_to = dfeas_apply_to
         self._block_size: int = context.align_constraint_token_length_to  # tokens per constraint
         self._prefix_len: int = 1  # START token
 
@@ -296,11 +300,16 @@ class ConstraintARModuleRLOO(L.LightningModule):
             rewards = rewards + gt_match_reward
 
         # Step 4c: d_feas reward (first-order edit feasibility / intent preservation)
-        # Only applied to converged samples (FC / Under); conflicting / redundant sketches
-        # have ill-defined first-order responses so d_feas is meaningless there.
+        # Conflicting / redundant sketches have ill-defined first-order
+        # responses, so d_feas is only meaningful on solver-converged samples.
+        # For intent shaping, it can also be restricted to FC samples so the
+        # reward does not compete with early DoF closure.
         dfeas_metrics: dict[str, float | int] = {}
         if self.dfeas_reward is not None:
-            converged_mask = [s in ("FC", "Under") for s in per_sample_status]
+            if self.dfeas_apply_to == "fc":
+                converged_mask = [s == "FC" for s in per_sample_status]
+            else:
+                converged_mask = [s in ("FC", "Under") for s in per_sample_status]
             dfeas_scores_cpu, dfeas_metrics = self.dfeas_reward(
                 p_val_expanded, generated, expanded['sketch'],
                 converged_mask=converged_mask,
