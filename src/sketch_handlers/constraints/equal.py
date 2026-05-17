@@ -38,6 +38,10 @@ class EqualHandler(ConstraintHandler):
         if not res1 or not res2:
             raise ValueError(f"Invalid references for {self.name}: {refs}")
 
+        # FreeCAD wrongly accepts Equal(A, A) as DoF-reducing; reject here.
+        if refs[0] == refs[1]:
+            raise ValueError(f"Tautological {self.name}({refs[0]}, {refs[1]})")
+
         # Equal(e1, e2) — edge-edge only
         return [('Equal', [res1[0], res2[0]], None)]
 
