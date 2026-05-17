@@ -1,7 +1,7 @@
 # @package _global_
 
 # to execute this experiment run:
-# python train.py experiment=rloo
+# python src/train.py experiment=rloo
 
 defaults:
   - override /data: constraint_rloo.yaml
@@ -43,5 +43,6 @@ trainer:
   check_val_every_n_epoch: null
   val_check_interval: 100
   devices: 1  # Under a lot of CPU-GPU communication, distributed training slows runs
+  max_epochs: 3
 
 pretrained_ckpt_path: logs/train/runs/2026-04-13_13-52-20/checkpoints/epoch_29.ckpt

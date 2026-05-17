@@ -13,7 +13,7 @@ from src.models.components.solver_feedback import SolverFeedback
 from src.models.components.solver_reward import SolverReward
 from src.models.components.token_reordering import TokenReordering
 from src.models.components.token_visualizer import visualize_constraint_sequence
-from src.sketch_handlers.constants import ConstraintToken
+from src.sketch_handlers.constants import ConstraintToken, DIMENSIONAL_CONSTRAINT_TOKEN_IDS
 from src.sketch_handlers.context import SketchContext
 from src.sketch_handlers.sketch_tokenizer import SketchTokenizer
 
@@ -34,6 +34,7 @@ class ConstraintARModuleRLOO(L.LightningModule):
         kl_coeff: float = 0.01,
         sft_coeff: float = 0.0,
         gt_reward_coeff: float = 0.0,
+        relational_only: bool = False,
     ):
         super().__init__()
         self.save_hyperparameters(ignore=['model', 'reward'], logger=False)
@@ -42,6 +43,14 @@ class ConstraintARModuleRLOO(L.LightningModule):
         self.model = model
         self.reward = reward
         self.ref_model = copy.deepcopy(model)
+
+        self.relational_only = relational_only
+        if relational_only:
+            self.register_buffer(
+                "_dim_token_ids",
+                torch.tensor(DIMENSIONAL_CONSTRAINT_TOKEN_IDS, dtype=torch.long),
+                persistent=False,
+            )
 
         self.reward.eval()
         for p in self.reward.parameters():
@@ -348,6 +357,7 @@ class ConstraintARModuleRLOO(L.LightningModule):
         batch: dict[str, Any],
         max_len: int,
         dtype: torch.dtype = torch.long,
+        temperature: float = 1.0,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Autoregressive token generation using KV cache.
 
@@ -389,6 +399,9 @@ class ConstraintARModuleRLOO(L.LightningModule):
             # Pointer logits: [B, 1, E] @ [B, E, M] → [B, M]
             next_token_logits = torch.matmul(dec_out, memory.transpose(1, 2)).squeeze(1)
             next_token_logits[:, ConstraintToken.Mask] = -torch.inf
+            if self.relational_only:
+                next_token_logits[:, self._dim_token_ids] = -torch.inf
+            next_token_logits = next_token_logits / temperature
 
             dist = torch.distributions.Categorical(logits=next_token_logits)
             next_token  = dist.sample()
