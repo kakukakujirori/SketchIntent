@@ -253,6 +253,10 @@ class TangentHandler(ConstraintHandler):
         if not res1 or not res2:
             raise ValueError(f"Invalid geometry IDs for {self.name}: {refs=} ({primitive_geoID=})")
 
+        # FreeCAD wrongly accepts Tangent(A, A) as DoF-reducing; reject here.
+        if refs[0] == refs[1]:
+            raise ValueError(f"Tautological {self.name}({refs[0]}, {refs[1]})")
+
         g1, p1 = res1
         g2, p2 = res2
 
