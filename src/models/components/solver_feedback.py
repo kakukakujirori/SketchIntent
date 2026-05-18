@@ -478,6 +478,7 @@ class SolverFeedback:
             'failed': 0,
         }
 
+        dofs = []
         for prim_tokens, cons_tokens, sketch_original in tqdm(zip(prim_tokens_batch, cons_tokens_batch, sketch_original_list), desc="Solver Testing"):
 
             status, sketch, constraint_to_token_start, invalid_constraint_block_start = self.evaluate_constraints(
@@ -491,10 +492,13 @@ class SolverFeedback:
                 counts['conflicting'] += 1
             elif status.RedundantConstraints:
                 counts['redundant'] += 1
-            elif status.DoF <= fully_constrained_dof:
-                counts['fully_constrained'] += 1
             else:
-                counts['under_constrained'] += 1
+                if status.DoF <= fully_constrained_dof:
+                    counts['fully_constrained'] += 1
+                else:
+                    counts['under_constrained'] += 1
+                if status.DoF >= 0:
+                    dofs.append(status.DoF)
 
         # Compute rates
         total_valid = B - counts['failed']
@@ -508,4 +512,5 @@ class SolverFeedback:
             'redundant_rate': counts['redundant'] / total_valid,
             'malformed_rate': counts['malformed'] / total_valid,
             'failed_rate': counts['failed'] / B,
+            'valid_dof_mean': sum(dofs) / len(dofs) if dofs else 0.0,
         }

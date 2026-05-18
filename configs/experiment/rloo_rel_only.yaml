@@ -14,8 +14,7 @@ tags: ["rloo", "rel_only"]
 
 callbacks:
   model_checkpoint_epoch:
-    every_n_train_steps: 100
-    save_top_k: 5
+    save_top_k: 3
     filename: "epoch_{epoch}_step_{step}"
 
   model_checkpoint_loss: null
@@ -23,12 +22,13 @@ callbacks:
   model_checkpoint_reward:
     _target_: lightning.pytorch.callbacks.ModelCheckpoint
     dirpath: ${paths.output_dir}/checkpoints
-    monitor: "validation_gen/solver_fc_rate"
-    filename: "step_{step}_fc_{validation_gen/solver_fc_rate:.3f}"
+    monitor: "validation_gen/solver_valid_dof_mean"
+    filename: "step_{step}_dof_{validation_gen/solver_valid_dof_mean:.3f}"
     save_top_k: 3
-    mode: "max"
+    mode: "min"
     auto_insert_metric_name: false
-    every_n_train_steps: 100
+    every_n_train_steps: 1000
+    save_last: true
 
 data:
   context:
@@ -49,4 +49,4 @@ trainer:
   devices: 1  # Under a lot of CPU-GPU communication, distributed training slows runs
   max_epochs: 3
 
-pretrained_ckpt_path: logs/train/runs/2026-05-16_20-24-34/checkpoints/epoch_29.ckpt
+pretrained_ckpt_path: logs/train/runs/2026-05-16_20-25-32/checkpoints/epoch_29.ckpt
