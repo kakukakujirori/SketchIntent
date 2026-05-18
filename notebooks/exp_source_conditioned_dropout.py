@@ -46,6 +46,7 @@ from src.sketch_handlers.freecad_utils import (
     ensure_freecad_imported, load_freecad_commands,
 )
 from src.sketch_handlers.sketch_freecad_converter import SketchFreecadConverter
+from src.sketch_handlers.sketch_utils import complete_constraint_values, get_sketch_bbox
 from canonical_sketch import (
     build_entity_remap, find_canonical_py, load_sketch_from_fcstd,
     load_sketch_from_py, metric_base_eids, remap_sketch_to_canonical,
@@ -140,8 +141,88 @@ def model_path_for(root, batch, filename):
     return path if os.path.exists(path) else None
 
 
+def _coordinate_transform_from_canonical(
+    canonical_sketch,
+    *,
+    coordinate_scale: float,
+    bbox_normalize_dst_length: float | None,
+) -> tuple[float, float, float]:
+    """Return (offset_x, offset_y, scale) for x' = (x - offset) * scale."""
+    if bbox_normalize_dst_length is None:
+        return 0.0, 0.0, float(coordinate_scale)
+
+    (x0, y0), (x1, y1) = get_sketch_bbox(canonical_sketch)
+    w, h = float(x1 - x0), float(y1 - y0)
+    long_axis = max(w, h)
+    if long_axis <= 0:
+        return 0.0, 0.0, float(coordinate_scale)
+    return (
+        float((x0 + x1) * 0.5),
+        float((y0 + y1) * 0.5),
+        float(coordinate_scale) * float(bbox_normalize_dst_length) / long_axis,
+    )
+
+
+def _transform_sketch_coordinates(
+    sketch: datalib.Sketch,
+    *,
+    offset_x: float,
+    offset_y: float,
+    scale: float,
+) -> datalib.Sketch:
+    out = copy.deepcopy(sketch)
+    for ent in out.entities.values():
+        if isinstance(ent, datalib.Line):
+            ent.pntX = (ent.pntX - offset_x) * scale
+            ent.pntY = (ent.pntY - offset_y) * scale
+            ent.startParam *= scale
+            ent.endParam *= scale
+        elif isinstance(ent, (datalib.Circle, datalib.Arc)):
+            ent.xCenter = (ent.xCenter - offset_x) * scale
+            ent.yCenter = (ent.yCenter - offset_y) * scale
+            ent.radius *= scale
+        elif isinstance(ent, datalib.Point):
+            ent.x = (ent.x - offset_x) * scale
+            ent.y = (ent.y - offset_y) * scale
+    out, _invalid = complete_constraint_values(out)
+    return out
+
+
+def transform_bundle_coordinates(
+    bundle: FileBundle,
+    *,
+    coordinate_scale: float = 1.0,
+    bbox_normalize_dst_length: float | None = 1.0,
+) -> FileBundle:
+    if coordinate_scale == 1.0 and bbox_normalize_dst_length is None:
+        return bundle
+    offset_x, offset_y, scale = _coordinate_transform_from_canonical(
+        bundle.canonical_sketch,
+        coordinate_scale=coordinate_scale,
+        bbox_normalize_dst_length=bbox_normalize_dst_length,
+    )
+    bundle.canonical_sketch = _transform_sketch_coordinates(
+        bundle.canonical_sketch,
+        offset_x=offset_x,
+        offset_y=offset_y,
+        scale=scale,
+    )
+    bundle.sketches = {
+        name: _transform_sketch_coordinates(
+            sketch,
+            offset_x=offset_x,
+            offset_y=offset_y,
+            scale=scale,
+        )
+        for name, sketch in bundle.sketches.items()
+    }
+    return bundle
+
+
 def build_file_bundle(*, batch, filename, humans, file_maps, converter,
-                      geometry_tol, canonical_dir, model_root=None):
+                      geometry_tol, canonical_dir, model_root=None,
+                      coordinate_scale: float = 1.0,
+                      bbox_normalize_dst_length: float | None = 1.0):
     data_dirs = {n: d for n, d in humans}
     annotators = tuple(data_dirs.keys())
     cp = find_canonical_py(filename, data_dirs, annotators, canonical_dir=canonical_dir)
@@ -169,8 +250,13 @@ def build_file_bundle(*, batch, filename, humans, file_maps, converter,
         audit["dropped_constraints"] = dropped
         sketches[name] = remapped
         audits[name] = audit
-    return FileBundle(batch, filename, canonical, sketches, audits,
-                      model_status=model_status, model_dof=model_dof)
+    bundle = FileBundle(batch, filename, canonical, sketches, audits,
+                        model_status=model_status, model_dof=model_dof)
+    return transform_bundle_coordinates(
+        bundle,
+        coordinate_scale=coordinate_scale,
+        bbox_normalize_dst_length=bbox_normalize_dst_length,
+    )
 
 def finite_or_none(v):
     try: x = float(v)
@@ -661,6 +747,18 @@ def parse_args():
     p.add_argument("--geometry-tol", type=float, default=5e-1)
     p.add_argument("--canonical-dir", default=None)
     p.add_argument("--limit", type=int, default=None)
+    p.add_argument("--coordinate-scale", type=float, default=1.0)
+    p.add_argument(
+        "--bbox-normalize-dst-length",
+        type=float,
+        default=1.0,
+        help="Center by canonical bbox and rescale its long axis to this length.",
+    )
+    p.add_argument(
+        "--no-bbox-normalization",
+        action="store_true",
+        help="Use raw coordinates except for any --coordinate-scale multiplier.",
+    )
     p.add_argument("--delta-basis", default="bbox_diag")
     p.add_argument("--delta-scale", type=float, default=0.01)
     p.add_argument("--delta-absolute", type=float, default=1.0)
@@ -701,6 +799,7 @@ def main():
     converter = SketchFreecadConverter(context, verbose=False)
     summary_rows, detail_rows = [], []
     n_files = 0
+    bbox_dst = None if args.no_bbox_normalization else args.bbox_normalize_dst_length
 
     for batch in args.batches:
         humans = [(n, d) for n, d in humans_by_batch.get(batch, [])
@@ -724,7 +823,9 @@ def main():
                     file_maps=file_maps, converter=converter,
                     geometry_tol=args.geometry_tol,
                     canonical_dir=args.canonical_dir,
-                    model_root=args.vitruvion_root)
+                    model_root=args.vitruvion_root,
+                    coordinate_scale=args.coordinate_scale,
+                    bbox_normalize_dst_length=bbox_dst)
             except Exception as e:
                 print(f"  [skip] {batch}/{filename}: {e}")
                 continue
@@ -744,6 +845,12 @@ def main():
                         exclude_point_point_coincident_preservation=(
                             args.exclude_point_point_coincident_preservation
                         ))
+                    for row in srows:
+                        row["coordinate_scale"] = args.coordinate_scale
+                        row["bbox_normalize_dst_length"] = bbox_dst
+                    for row in drows:
+                        row["coordinate_scale"] = args.coordinate_scale
+                        row["bbox_normalize_dst_length"] = bbox_dst
                     summary_rows.extend(srows)
                     detail_rows.extend(drows)
                     n_rot += 1

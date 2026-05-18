@@ -411,10 +411,11 @@ def evaluate_rotation(
 
     # h_scale per source: median over other humans evaluated against this source.
     h_scales = {}  # (gt_name, validated, metric_name) -> float|None
+    validation_modes = (False, True) if source_validation else (True,)
     for gt_name in refs:
         other_humans = [name for name in refs if name != gt_name]
         info = source_info[gt_name]
-        for validated in (False, True):
+        for validated in validation_modes:
             if validated:
                 probes = [p for p, m in zip(info["probes"], info["valid_mask"]) if m]
                 weights = [w for w, m in zip(info["weights"], info["valid_mask"]) if m]
@@ -451,7 +452,7 @@ def evaluate_rotation(
 
     def add_pred_rows(pred_name, pred_sketch, drop_rate, sample_id,
                       n_orig=-1, n_kept=-1, n_dropped=-1):
-        for validated in (False, True):
+        for validated in validation_modes:
             per_source_results = []
             for gt_name in refs:
                 info = source_info[gt_name]
@@ -644,7 +645,29 @@ def parse_args():
     parser.add_argument("--geometry-tol", type=float, default=5e-1)
     parser.add_argument("--canonical-dir", default=None)
     parser.add_argument("--limit", type=int, default=None)
+    parser.add_argument("--limit-per-batch", type=int, default=None)
     parser.add_argument("--eps", type=float, default=1e-9)
+    parser.add_argument(
+        "--coordinate-scale",
+        type=float,
+        default=1.0,
+        help="Uniform coordinate multiplier applied before metric computation.",
+    )
+    parser.add_argument(
+        "--bbox-normalize-dst-length",
+        type=float,
+        default=1.0,
+        help=(
+            "If set, center by the canonical bbox and rescale its long axis to "
+            "this length before applying --coordinate-scale. Use 1.0 for the "
+            "repo's [-0.5,0.5] convention."
+        ),
+    )
+    parser.add_argument(
+        "--no-bbox-normalization",
+        action="store_true",
+        help="Use raw coordinates except for any --coordinate-scale multiplier.",
+    )
     parser.add_argument("--no-source-validation", action="store_true")
     parser.add_argument("--delta-basis", default="bbox_diag")
     parser.add_argument("--delta-scale", type=float, default=0.01)
@@ -682,6 +705,7 @@ def main():
     summary_rows: list[dict] = []
     detail_rows: list[dict] = []
     n_files = 0
+    bbox_dst = None if args.no_bbox_normalization else args.bbox_normalize_dst_length
 
     for batch in args.batches:
         humans = [(n, d) for n, d in humans_by_batch.get(batch, [])
@@ -693,10 +717,14 @@ def main():
         common = sorted(set.intersection(*(set(m) for m in file_maps.values())))
         print(f"Batch {batch}: common={len(common)}")
 
+        n_batch_files = 0
         for filename in common:
             if args.limit is not None and n_files >= args.limit:
                 break
+            if args.limit_per_batch is not None and n_batch_files >= args.limit_per_batch:
+                break
             n_files += 1
+            n_batch_files += 1
             try:
                 bundle = build_file_bundle(
                     batch=batch,
@@ -707,6 +735,8 @@ def main():
                     geometry_tol=args.geometry_tol,
                     canonical_dir=args.canonical_dir,
                     model_root=args.vitruvion_root,
+                    coordinate_scale=args.coordinate_scale,
+                    bbox_normalize_dst_length=bbox_dst,
                 )
             except Exception as exc:
                 print(f"  [skip] {batch}/{filename}: {exc}")
@@ -731,6 +761,12 @@ def main():
                         eps=args.eps,
                         source_validation=not args.no_source_validation,
                     )
+                    for row in srows:
+                        row["coordinate_scale"] = args.coordinate_scale
+                        row["bbox_normalize_dst_length"] = bbox_dst
+                    for row in drows:
+                        row["coordinate_scale"] = args.coordinate_scale
+                        row["bbox_normalize_dst_length"] = bbox_dst
                     summary_rows.extend(srows)
                     detail_rows.extend(drows)
                     n_rot += 1
