@@ -324,17 +324,22 @@ def run_test_inference(
                 prim_tokens = batch['p_val'][global_idx].cpu().numpy()
                 cons_tokens = generated_part[local_idx].cpu().numpy()
 
-                status, sg_sketch, constraint_to_token_start, _ = \
+                status, sg_sketch, constraint_to_token_start, invalid_block_start = \
                     solver_feedback.evaluate_constraints(
                         prim_tokens, cons_tokens,
                         batch['sketch'][global_idx],
                         check_one_by_one=solver_check_one_by_one,
                     )
 
+                # Distorted geometry should also be counted as invalid
+                status_name = status.Status
+                if status.Status == "Converged" and bool(status.DistortingConstraints):
+                    status_name = "Distorted"
+
                 # Record iteration result
                 result_entry = {
                     'tokens': cons_tokens,
-                    'status': status.Status,
+                    'status': status_name,
                     'dof': status.DoF,
                     'malformed': status.MalformedConstraints,
                     'conflicting': status.ConflictingConstraints,
@@ -345,7 +350,7 @@ def run_test_inference(
                     print("\n[run_test_inference]", f"(Iter: {iter_idx})", visualize_constraint_sequence(cons_tokens))
 
                 # Check validity
-                if (status.Status == 'Converged'
+                if (status_name == 'Converged'
                     and not status.MalformedConstraints
                     and not status.ConflictingConstraints
                     and not status.RedundantConstraints):
@@ -361,12 +366,18 @@ def run_test_inference(
                 # Collect invalid positions from all error types
                 invalid_positions = set()
                 problematic_constraints = status.MalformedConstraints + status.ConflictingConstraints + status.RedundantConstraints
-                if status.Status == "Failed" and len(problematic_constraints) == 0:
-                    problematic_constraints = sg_sketch.constraints.keys()
+                if status_name == "Distorted":
+                    if isinstance(status.DistortingConstraints, list):
+                        problematic_constraints += status.DistortingConstraints
+                    elif sg_sketch is not None:
+                        problematic_constraints = list(sg_sketch.constraints.keys())
+                if status.Status == "Failed" and len(problematic_constraints) == 0 and sg_sketch is not None:
+                    problematic_constraints = list(sg_sketch.constraints.keys())
                 for c_id in problematic_constraints:
                     start = constraint_to_token_start.get(c_id)
                     if start is not None:
                         invalid_positions.add(start)
+                invalid_positions.update(invalid_block_start.keys())
 
                 # Remove invalid tokens
                 current_tokens[global_idx] = remove_invalid_tokens(
@@ -376,7 +387,7 @@ def run_test_inference(
                 )
 
                 print(f"  Batch {batch_idx}, sample {global_idx} [{display_name}]: "
-                      f"iter {iter_idx}: {status.Status} (DoF={status.DoF}), "
+                      f"iter {iter_idx}: {status_name} (DoF={status.DoF}), "
                       f"removed {len(invalid_positions)} blocks, regenerating...")
 
         # Store final results
@@ -388,26 +399,51 @@ def run_test_inference(
             final_decode_error = None
             final_commands = []
 
+            # Determine final solver status from the last recorded iteration
+            last_iter = iteration_results[global_idx][-1] if iteration_results[global_idx] else {}
+            final_status = last_iter.get('status', 'Unknown')
+            has_solver_error = bool(
+                last_iter.get('malformed') or
+                last_iter.get('conflicting') or
+                last_iter.get('redundant') or
+                final_status in {'Failed', 'Distorted'}
+            )
+            # under-constrained-converged: converged with no errors but DoF above threshold
+            under_constrained_converged = (
+                not is_valid[global_idx] and
+                final_status == 'Converged' and
+                not has_solver_error
+            )
+            # output_commented: solver error was never resolved
+            output_commented = not is_valid[global_idx] and not under_constrained_converged
+
             # Tokens -> SketchGraphs -> FreeCAD commands
             try:
+                primitive_source_sketch = output_primitive_source_sketch(
+                    batch,
+                    global_idx,
+                    metadata,
+                    solver_feedback,
+                    source_sketch_cache,
+                )
                 sg_sketch, _, _ = solver_feedback.sketch_tokenizer.detokenize(
                     {"p_val": prim_tokens, "c_val": cons_tokens},
                     allow_invalid_constraints=True,
+                    reference_sketch=primitive_source_sketch,
                 )
+                sg_sketch = solver_feedback.overwrite_primitives_with_original(
+                    sg_sketch,
+                    primitive_source_sketch,
+                )
+                sg_sketch, _ = complete_constraint_values(sg_sketch, skip_invalid_constraints=True)
                 if is_valid[global_idx]:
-                    primitive_source_sketch = output_primitive_source_sketch(
-                        batch,
-                        global_idx,
-                        metadata,
-                        solver_feedback,
-                        source_sketch_cache,
-                    )
-                    sg_sketch = solver_feedback.overwrite_primitives_with_original(
-                        sg_sketch,
-                        primitive_source_sketch,
-                    )
-                    sg_sketch, _ = complete_constraint_values(sg_sketch, skip_invalid_constraints=True)
                     final_commands = solver_feedback.sketch_freecad_converter.to_freecad_commands(sg_sketch)
+                elif final_status != "Distorted":
+                    final_commands = solver_feedback.sketch_freecad_converter.to_freecad_commands(sg_sketch, skip_invalid=True)
+                else:
+                    # Distorted cases are intentionally kept commandless: dumping after
+                    # solver recompute can serialize the distorted geometry.
+                    final_commands = []
             except Exception as e:
                 final_decode_error = repr(e)
 
@@ -418,6 +454,9 @@ def run_test_inference(
                 'final_tokens': cons_tokens.tolist(),
                 'final_decode_error': final_decode_error,
                 'solved': is_valid[global_idx],
+                'under_constrained_converged': under_constrained_converged,
+                'output_commented': output_commented,
+                'final_status': final_status,
                 'final_commands': final_commands,
             })
 
@@ -519,11 +558,20 @@ def main():
     )
 
     # Summary
-    solved_count = sum(1 for r in results if r['solved'])
+    fully_solved_count = sum(1 for r in results if r['solved'])
+    under_constrained_count = sum(1 for r in results if r.get('under_constrained_converged'))
+    distorted_count = sum(1 for r in results if r.get('final_status') == 'Distorted')
+    solver_error_count = sum(
+        1 for r in results
+        if r.get('output_commented') and r.get('final_status') != 'Distorted'
+    )
+    n = len(results)
     print(f"\n=== Summary ===")
-    print(f"Total samples: {len(results)}")
-    print(f"Solved: {solved_count} ({100*solved_count/len(results):.1f}%)")
-    print(f"Unsolved: {len(results) - solved_count}")
+    print(f"Total samples: {n}")
+    print(f"Solved (fully constrained): {fully_solved_count} ({100*fully_solved_count/n:.1f}%)")
+    print(f"UnderConstrained (converged, no errors): {under_constrained_count} ({100*under_constrained_count/n:.1f}%)")
+    print(f"Distorted (converged but geometry moved): {distorted_count} ({100*distorted_count/n:.1f}%)")
+    print(f"SolverError (unresolved): {solver_error_count} ({100*solver_error_count/n:.1f}%)")
 
     # Save results
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -531,12 +579,24 @@ def main():
     # Convert numpy arrays to lists for JSON serialization
     results_serializable = []
     for r in results:
+        # Determine three-way status label
+        if r['solved']:
+            status_label = 'Solved'
+        elif r.get('under_constrained_converged'):
+            status_label = 'UnderConstrained'
+        elif r.get('final_status') == 'Distorted':
+            status_label = 'Distorted'
+        else:
+            status_label = 'SolverError'
         r_clean = {
             'sample_idx': r['sample_idx'],
             'dataset_index': r.get('dataset_index'),
             'source_file': r.get('source_file'),
             'sketch_id': r.get('sketch_id'),
-            'solved': r['solved'],
+            # 'solved' is True for both Solved and UnderConstrained
+            'solved': r['solved'] or bool(r.get('under_constrained_converged')),
+            'status': status_label,
+            'final_status': r.get('final_status'),
             'final_decode_error': r.get('final_decode_error'),
             'final_commands': r['final_commands'],
         }
@@ -562,13 +622,39 @@ def main():
 
     # Save FreeCAD command scripts
     for r in results:
-        if r['final_commands']:
-            fc_path = output_dir / result_script_name(r)
-            with open(fc_path, "w") as f:
-                f.write("# Sample {:04d} | Solved: {}\n".format(r['sample_idx'], r['solved']))
-                if r.get('source_file'):
-                    f.write("# Source: {}\n".format(r['source_file']))
-                for cmd in r['final_commands']:
+        commented = r.get('output_commented', False)
+        has_commands = bool(r['final_commands'])
+        # Always write a file for under-constrained-converged and solver-error cases;
+        # skip only if there are no commands AND it was fully solved (shouldn't happen).
+        if not has_commands and not commented and not r.get('under_constrained_converged'):
+            continue
+        fc_path = output_dir / result_script_name(r)
+        with open(fc_path, "w") as f:
+            # Header block uses ## so it is visually distinct from # commented-out commands
+            status_label = (
+                "Solved" if r['solved']
+                else (
+                    "UnderConstrained" if r.get('under_constrained_converged')
+                    else ("Distorted" if r.get('final_status') == "Distorted" else "SolverError")
+                )
+            )
+            f.write("## Sample {:04d} | Status: {} | DoF: {} | Final solver status: {}\n".format(
+                r['sample_idx'], status_label,
+                r['iterations'][-1]['dof'] if r['iterations'] else '?',
+                r.get('final_status', '?'),
+            ))
+            if r.get('source_file'):
+                f.write("## Source: {}\n".format(r['source_file']))
+            if commented:
+                f.write("## NOTE: Final constraints were marked invalid; commands below are commented out when present.\n")
+                if r.get('final_status') == "Distorted":
+                    f.write("## NOTE: Geometry distortion was detected; no commands were exported.\n")
+                if r.get('final_decode_error'):
+                    f.write("## Decode error: {}\n".format(r['final_decode_error']))
+            for cmd in r['final_commands']:
+                if commented:
+                    f.write("# " + cmd + "\n")
+                else:
                     f.write(cmd + "\n")
     print(f"FreeCAD scripts saved to {output_dir}/*.py")
 
