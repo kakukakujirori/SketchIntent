@@ -168,6 +168,20 @@ def finalize_constraint_tokens(tokens: np.ndarray) -> np.ndarray:
     return result
 
 
+def last_clean_converged_iteration(iterations: list[dict]) -> tuple[int | None, dict | None]:
+    """Return the last iteration whose solver result is cleanly Converged."""
+    for iter_idx in range(len(iterations) - 1, -1, -1):
+        iteration = iterations[iter_idx]
+        if (
+            iteration.get('status') == 'Converged'
+            and not iteration.get('malformed')
+            and not iteration.get('conflicting')
+            and not iteration.get('redundant')
+        ):
+            return iter_idx, iteration
+    return None, None
+
+
 def batch_item(batch: dict, key: str, index: int, default=None):
     if key not in batch:
         return default
@@ -395,17 +409,23 @@ def run_test_inference(
             metadata = sample_metadata(batch, batch_idx, batch_size, global_idx)
             # Convert final tokens to FreeCAD commands
             prim_tokens = batch['p_val'][global_idx].cpu().numpy()
-            cons_tokens = finalize_constraint_tokens(current_tokens[global_idx])
             final_decode_error = None
             final_commands = []
 
-            # Determine final solver status from the last recorded iteration
-            last_iter = iteration_results[global_idx][-1] if iteration_results[global_idx] else {}
-            final_status = last_iter.get('status', 'Unknown')
+            # Prefer the last clean Converged result over later failed retries.
+            iterations = iteration_results[global_idx]
+            last_iter = iterations[-1] if iterations else {}
+            selected_iter_idx, selected_iter = last_clean_converged_iteration(iterations)
+            output_iter = selected_iter or last_iter
+            cons_tokens = finalize_constraint_tokens(
+                output_iter.get('tokens', current_tokens[global_idx])
+            )
+            final_status = output_iter.get('status', 'Unknown')
+            final_dof = output_iter.get('dof')
             has_solver_error = bool(
-                last_iter.get('malformed') or
-                last_iter.get('conflicting') or
-                last_iter.get('redundant') or
+                output_iter.get('malformed') or
+                output_iter.get('conflicting') or
+                output_iter.get('redundant') or
                 final_status in {'Failed', 'Distorted'}
             )
             # under-constrained-converged: converged with no errors but DoF above threshold
@@ -436,7 +456,7 @@ def run_test_inference(
                     primitive_source_sketch,
                 )
                 sg_sketch, _ = complete_constraint_values(sg_sketch, skip_invalid_constraints=True)
-                if is_valid[global_idx]:
+                if is_valid[global_idx] or under_constrained_converged:
                     final_commands = solver_feedback.sketch_freecad_converter.to_freecad_commands(sg_sketch)
                 elif final_status != "Distorted":
                     final_commands = solver_feedback.sketch_freecad_converter.to_freecad_commands(sg_sketch, skip_invalid=True)
@@ -457,6 +477,9 @@ def run_test_inference(
                 'under_constrained_converged': under_constrained_converged,
                 'output_commented': output_commented,
                 'final_status': final_status,
+                'final_dof': final_dof,
+                'last_iteration_status': last_iter.get('status', 'Unknown'),
+                'selected_iteration': selected_iter_idx,
                 'final_commands': final_commands,
             })
 
@@ -597,6 +620,9 @@ def main():
             'solved': r['solved'] or bool(r.get('under_constrained_converged')),
             'status': status_label,
             'final_status': r.get('final_status'),
+            'final_dof': r.get('final_dof'),
+            'last_iteration_status': r.get('last_iteration_status'),
+            'selected_iteration': r.get('selected_iteration'),
             'final_decode_error': r.get('final_decode_error'),
             'final_commands': r['final_commands'],
         }
@@ -640,11 +666,16 @@ def main():
             )
             f.write("## Sample {:04d} | Status: {} | DoF: {} | Final solver status: {}\n".format(
                 r['sample_idx'], status_label,
-                r['iterations'][-1]['dof'] if r['iterations'] else '?',
+                r.get('final_dof', '?'),
                 r.get('final_status', '?'),
             ))
             if r.get('source_file'):
                 f.write("## Source: {}\n".format(r['source_file']))
+            if r.get('last_iteration_status') != r.get('final_status'):
+                f.write("## Selected iteration: {} | Last attempted solver status: {}\n".format(
+                    r.get('selected_iteration'),
+                    r.get('last_iteration_status'),
+                ))
             if commented:
                 f.write("## NOTE: Final constraints were marked invalid; commands below are commented out when present.\n")
                 if r.get('final_status') == "Distorted":
