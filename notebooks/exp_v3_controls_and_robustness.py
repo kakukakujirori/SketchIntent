@@ -35,6 +35,7 @@ if NOTEBOOKS_DIR not in sys.path:
 
 from exp_constrained_response_metric import compute_metrics
 from exp_source_conditioned_dropout import (
+    DEFAULT_BATCHES,
     HistCADConfig,
     base_policy_pass,
     build_base_eids,
@@ -45,6 +46,7 @@ from exp_source_conditioned_dropout import (
     parse_human_specs,
     parse_percentages,
     parse_signs,
+    parse_vitruvion_specs,
     safe_median,
     source_probes,
     stable_seed,
@@ -261,10 +263,10 @@ def evaluate_rotation(
             {"n_rel_original": n_orig, "n_rel_kept": n_kept, "n_rel_dropped": n_dropped},
         ))
 
-    if bundle.model_status == "loaded" and "Vitruvion" in bundle.sketches:
-        ok, _reason = base_policy_pass(bundle.audits["Vitruvion"], base_policy)
+    for model_label in bundle.loaded_model_labels():
+        ok, _reason = base_policy_pass(bundle.audits[model_label], base_policy)
         if ok:
-            variants.append(("Vitruvion", bundle.sketches["Vitruvion"], {}))
+            variants.append((model_label, bundle.sketches[model_label], {}))
 
     summary_rows = []
     detail_rows = []
@@ -337,15 +339,20 @@ def print_summary(rows: list[dict]):
     valid = [r for r in rows if not r.get("error")]
     print("\n--- V3 controls and eps robustness ---")
     eps_values = sorted({float(r["eps"]) for r in valid})
-    variants = [
+    fixed = [
         "source_self",
         "heldout",
         "dim_drop50",
         "dim_drop100",
         "rel_drop50",
         "rel_drop100",
-        "Vitruvion",
     ]
+    extra: list[str] = []
+    for r in valid:
+        v = r.get("variant")
+        if v and v not in fixed and v not in extra:
+            extra.append(v)
+    variants = fixed + extra
     for eps in eps_values:
         erows = [r for r in valid if float(r["eps"]) == eps]
         print(f"\n  [eps={eps:g}] n={len(erows)}")
@@ -354,7 +361,7 @@ def print_summary(rows: list[dict]):
             if not rs:
                 continue
             print(
-                f"    {variant:12s} n={len(rs):4d}"
+                f"    {variant:14s} n={len(rs):4d}"
                 f"  med_d_feas={safe_median([r.get('min_d_feas') for r in rs])}"
                 f"  p75_d_feas={percentile([r.get('min_d_feas') for r in rs], 75)}"
                 f"  med_gain={safe_median([r.get('median_d_feas_gain') for r in rs])}"
@@ -381,9 +388,16 @@ def parse_args():
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument(
         "--vitruvion-root",
-        default="/home/sturk/Downloads/fiverr/Vitruvion_2026-05-03_17-08-23_step_56400",
+        default=None,
+        help="Legacy single-model root. Prefer --vitruvion-spec.",
     )
-    parser.add_argument("--batches", nargs="+", default=["0", "9"])
+    parser.add_argument(
+        "--vitruvion-spec",
+        action="append",
+        default=None,
+        help="label:path, repeatable. Defaults to base + solver_rl when neither flag given.",
+    )
+    parser.add_argument("--batches", nargs="+", default=list(DEFAULT_BATCHES))
     parser.add_argument("--human", action="append", default=None)
     parser.add_argument("--ref-size", type=int, default=2)
     parser.add_argument("--dim-drop-rates", default="50,100")
@@ -432,6 +446,9 @@ def main():
     summary_rows: list[dict] = []
     detail_rows: list[dict] = []
     n_files = 0
+    model_specs = parse_vitruvion_specs(args.vitruvion_spec, args.vitruvion_root)
+    if model_specs:
+        print("[Vitruvion specs] " + ", ".join(f"{l}={p}" for l, p in model_specs))
 
     for batch in args.batches:
         humans = [(n, d) for n, d in humans_by_batch.get(batch, [])
@@ -456,7 +473,7 @@ def main():
                     converter=converter,
                     geometry_tol=args.geometry_tol,
                     canonical_dir=args.canonical_dir,
-                    model_root=args.vitruvion_root,
+                    model_specs=model_specs,
                 )
             except Exception as exc:
                 print(f"  [skip] {batch}/{filename}: {exc}")

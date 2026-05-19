@@ -42,6 +42,7 @@ if NOTEBOOKS_DIR not in sys.path:
     sys.path.insert(0, NOTEBOOKS_DIR)
 
 from exp_source_conditioned_dropout import (
+    DEFAULT_BATCHES,
     HistCADConfig,
     base_policy_pass,
     build_base_eids,
@@ -53,6 +54,7 @@ from exp_source_conditioned_dropout import (
     parse_human_specs,
     parse_percentages,
     parse_signs,
+    parse_vitruvion_specs,
     safe_median,
     source_probes,
     stable_seed,
@@ -562,12 +564,14 @@ def evaluate_rotation(
                 n_dropped=n_dropped,
             )
 
-    if eval_model and bundle.model_status == "loaded" and "Vitruvion" in bundle.sketches:
-        ok, _reason = base_policy_pass(bundle.audits["Vitruvion"], base_policy)
-        if ok:
+    if eval_model:
+        for model_label in bundle.loaded_model_labels():
+            ok, _reason = base_policy_pass(bundle.audits[model_label], base_policy)
+            if not ok:
+                continue
             add_pred_rows(
-                pred_name="Vitruvion",
-                pred_sketch=bundle.sketches["Vitruvion"],
+                pred_name=model_label,
+                pred_sketch=bundle.sketches[model_label],
                 drop_rate=-1,
                 sample_id=0,
             )
@@ -582,14 +586,16 @@ def print_summary(rows: list[dict]):
         tag = "validated" if validated else "unvalidated"
         rv = [r for r in valid if r.get("source_validated") == validated]
         print(f"\n  [{tag}] n={len(rv)}")
-        by_rate = {}
+        groups: dict[tuple, list[dict]] = {}
         for r in rv:
-            by_rate.setdefault(float(r["drop_rate"]), []).append(r)
-        for rate in sorted(by_rate):
-            rs = by_rate[rate]
-            label = "Vitruvion" if rate == -1 else f"drop={rate:5.1f}%"
+            rate = float(r["drop_rate"])
+            key = (rate, r.get("pred") or "Vitruvion") if rate == -1 else (rate, None)
+            groups.setdefault(key, []).append(r)
+        for (rate, pred_label) in sorted(groups, key=lambda k: (k[0], k[1] or "")):
+            rs = groups[(rate, pred_label)]
+            label = (pred_label or "Vitruvion") if rate == -1 else f"drop={rate:5.1f}%"
             print(
-                f"    {label:12s} n={len(rs):4d}"
+                f"    {label:14s} n={len(rs):4d}"
                 f"  d_resp={safe_median([r.get('norm_d_resp') for r in rs])}"
                 f"  d_cresp={safe_median([r.get('norm_d_cresp') for r in rs])}"
                 f"  d_leak={safe_median([r.get('norm_d_leak') for r in rs])}"
@@ -601,9 +607,10 @@ def print_summary(rows: list[dict]):
 
 
 def paired_inversion(rows: list[dict], metric: str,
-                     value_key: str = "min") -> tuple[int, int, int]:
-    """Pair Vitruvion vs heldout drop 0 within the same rotation. Returns
-    (model_better, human_better, tie). value_key is 'min' (raw) or 'norm'."""
+                     value_key: str = "min",
+                     pred_label: str = "Vitruvion") -> tuple[int, int, int]:
+    """Pair `pred_label` model vs heldout drop 0 within the same rotation.
+    Returns (model_better, human_better, tie). value_key is 'min' or 'norm'."""
     field = f"{value_key}_{metric}"
     by_rot: dict[str, dict[str, float | None]] = {}
     for r in rows:
@@ -611,7 +618,7 @@ def paired_inversion(rows: list[dict], metric: str,
             continue
         rotid = r["rotation_id"]
         d = by_rot.setdefault(rotid, {})
-        if float(r["drop_rate"]) == -1.0 and r["pred"] == "Vitruvion":
+        if float(r["drop_rate"]) == -1.0 and r.get("pred") == pred_label:
             d["vit"] = finite_or_none(r.get(field))
         elif float(r["drop_rate"]) == 0.0:
             d["h0"] = finite_or_none(r.get(field))
@@ -629,13 +636,30 @@ def paired_inversion(rows: list[dict], metric: str,
     return model, human, tie
 
 
+def loaded_model_labels_in_rows(rows: list[dict]) -> list[str]:
+    seen: list[str] = []
+    for r in rows:
+        if float(r.get("drop_rate", 0)) == -1.0:
+            lbl = r.get("pred")
+            if lbl and lbl not in seen:
+                seen.append(lbl)
+    return seen
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument(
         "--vitruvion-root",
-        default="/home/sturk/Downloads/fiverr/Vitruvion_2026-05-03_17-08-23_step_56400",
+        default=None,
+        help="Legacy single-model root. Prefer --vitruvion-spec.",
     )
-    parser.add_argument("--batches", nargs="+", default=["0", "9"])
+    parser.add_argument(
+        "--vitruvion-spec",
+        action="append",
+        default=None,
+        help="label:path, repeatable. Defaults to base + solver_rl when neither flag given.",
+    )
+    parser.add_argument("--batches", nargs="+", default=list(DEFAULT_BATCHES))
     parser.add_argument("--human", action="append", default=None)
     parser.add_argument("--ref-size", type=int, default=2)
     parser.add_argument("--drop-rates", default="0,100")
@@ -706,6 +730,9 @@ def main():
     detail_rows: list[dict] = []
     n_files = 0
     bbox_dst = None if args.no_bbox_normalization else args.bbox_normalize_dst_length
+    model_specs = parse_vitruvion_specs(args.vitruvion_spec, args.vitruvion_root)
+    if model_specs:
+        print("[Vitruvion specs] " + ", ".join(f"{l}={p}" for l, p in model_specs))
 
     for batch in args.batches:
         humans = [(n, d) for n, d in humans_by_batch.get(batch, [])
@@ -734,7 +761,7 @@ def main():
                     converter=converter,
                     geometry_tol=args.geometry_tol,
                     canonical_dir=args.canonical_dir,
-                    model_root=args.vitruvion_root,
+                    model_specs=model_specs,
                     coordinate_scale=args.coordinate_scale,
                     bbox_normalize_dst_length=bbox_dst,
                 )
@@ -777,15 +804,17 @@ def main():
 
     print_summary(summary_rows)
 
-    print("\n--- Paired Vitruvion vs heldout drop 0% (validated) ---")
-    for m in METRIC_NAMES:
-        model_n, human_n, tie_n = paired_inversion(summary_rows, m, "norm")
-        model_r, human_r, tie_r = paired_inversion(summary_rows, m, "min")
-        print(
-            f"  {m:14s}"
-            f"  norm[m={model_n} h={human_n} t={tie_n}]"
-            f"  raw [m={model_r} h={human_r} t={tie_r}]"
-        )
+    model_labels = loaded_model_labels_in_rows(summary_rows) or ["Vitruvion"]
+    for lbl in model_labels:
+        print(f"\n--- Paired {lbl} vs heldout drop 0% (validated) ---")
+        for m in METRIC_NAMES:
+            model_n, human_n, tie_n = paired_inversion(summary_rows, m, "norm", pred_label=lbl)
+            model_r, human_r, tie_r = paired_inversion(summary_rows, m, "min", pred_label=lbl)
+            print(
+                f"  {m:14s}"
+                f"  norm[m={model_n} h={human_n} t={tie_n}]"
+                f"  raw [m={model_r} h={human_r} t={tie_r}]"
+            )
 
     write_csv(args.output_csv, summary_rows)
     write_csv(args.details_csv, detail_rows)

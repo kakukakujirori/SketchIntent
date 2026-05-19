@@ -14,8 +14,8 @@ Optionally validates probes on source (--source-validation).
 """
 from __future__ import annotations
 
-import argparse, copy, csv, hashlib, math, os, random, sys
-from dataclasses import dataclass
+import argparse, copy, csv, hashlib, math, os, random, re, sys
+from dataclasses import dataclass, field
 from itertools import combinations
 from statistics import median
 from typing import Mapping, Sequence
@@ -54,13 +54,34 @@ from canonical_sketch import (
 
 HUMAN_ROOTS = "/home/sturk/Downloads/fiverr"
 DEFAULT_HUMANS: dict[str, list[tuple[str, str]]] = {
-    "0": [("Johnny", f"{HUMAN_ROOTS}/Johnny/0"),
-          ("Sagar", f"{HUMAN_ROOTS}/Sagar/0"),
-          ("Ryotaro", f"{HUMAN_ROOTS}/Ryotaro/0")],
-    "9": [("Eko", f"{HUMAN_ROOTS}/Eko/9"),
-          ("Sagar", f"{HUMAN_ROOTS}/Sagar/9"),
-          ("Ryotaro", f"{HUMAN_ROOTS}/Ryotaro/9")],
+    "0":  [("Johnny",  f"{HUMAN_ROOTS}/Johnny/0"),
+           ("Sagar",   f"{HUMAN_ROOTS}/Sagar/0"),
+           ("Ryotaro", f"{HUMAN_ROOTS}/Ryotaro/0")],
+    "4":  [("Johnny",  f"{HUMAN_ROOTS}/Johnny/4"),
+           ("Sagar",   f"{HUMAN_ROOTS}/Sagar/4"),
+           ("Tanaka",  f"{HUMAN_ROOTS}/Tanaka/4")],
+    "6":  [("Eko",     f"{HUMAN_ROOTS}/Eko/6"),
+           ("Johnny",  f"{HUMAN_ROOTS}/Johnny/6"),
+           ("Ryotaro", f"{HUMAN_ROOTS}/Ryotaro/6")],
+    "8":  [("Eko",     f"{HUMAN_ROOTS}/Eko/8"),
+           ("Ryotaro", f"{HUMAN_ROOTS}/Ryotaro/8"),
+           ("Tanaka",  f"{HUMAN_ROOTS}/Tanaka/8")],
+    "9":  [("Eko",     f"{HUMAN_ROOTS}/Eko/9"),
+           ("Sagar",   f"{HUMAN_ROOTS}/Sagar/9"),
+           ("Ryotaro", f"{HUMAN_ROOTS}/Ryotaro/9")],
+    "11": [("Eko",     f"{HUMAN_ROOTS}/Eko/11"),
+           ("Johnny",  f"{HUMAN_ROOTS}/Johnny/11"),
+           ("Tanaka",  f"{HUMAN_ROOTS}/Tanaka/11")],
 }
+DEFAULT_BATCHES: list[str] = ["0", "4", "6", "8", "9", "11"]
+
+# Default Vitruvion model variants for `parse_vitruvion_specs` (used when neither
+# --vitruvion-spec nor --vitruvion-root is passed). `base` is SFT Vitruvion at
+# epoch 29; `solver_rl` is Casey-style solver-RL at step 56400.
+DEFAULT_VITRUVION_SPECS: list[tuple[str, str]] = [
+    ("base", f"{HUMAN_ROOTS}/Vitruvion_ori_2026-05-02_20-35-42_epoch_29"),
+    ("solver_rl", f"{HUMAN_ROOTS}/Vitruvion_2026-05-03_17-08-23_step_56400"),
+]
 
 
 @dataclass
@@ -70,8 +91,25 @@ class FileBundle:
     canonical_sketch: datalib.Sketch
     sketches: dict[str, datalib.Sketch]
     audits: dict[str, dict]
-    model_status: str = "missing"
-    model_dof: int | None = None
+    # Per-label model status / DoF. Keys are Vitruvion variant labels.
+    model_statuses: dict[str, str] = field(default_factory=dict)
+    model_dofs: dict[str, int | None] = field(default_factory=dict)
+
+    def loaded_model_labels(self) -> list[str]:
+        return [lbl for lbl, st in self.model_statuses.items() if st == "loaded"]
+
+    @property
+    def model_status(self) -> str:
+        """Legacy single-model accessor: returns first label's status or 'missing'."""
+        if not self.model_statuses:
+            return "missing"
+        return next(iter(self.model_statuses.values()))
+
+    @property
+    def model_dof(self) -> int | None:
+        if not self.model_dofs:
+            return None
+        return next(iter(self.model_dofs.values()))
 
 
 # ── shared helpers (from exp_dimensional_dropout_ablation.py) ─────────────
@@ -95,6 +133,40 @@ def parse_human_specs(specs):
     for s in specs:
         batch, name, path = s.split(":", 2)
         out.setdefault(batch, []).append((name, path))
+    return out
+
+
+def parse_vitruvion_specs(
+    specs: list[str] | None,
+    legacy_root: str | None = None,
+) -> list[tuple[str, str]]:
+    """Parse Vitruvion model spec strings.
+
+    Each spec is either 'label:path' (preferred) or just 'path' (legacy,
+    labeled 'Vitruvion'). If neither `specs` nor `legacy_root` is provided,
+    returns `DEFAULT_VITRUVION_SPECS`.
+    """
+    if not specs and not legacy_root:
+        return list(DEFAULT_VITRUVION_SPECS)
+    out: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    if legacy_root:
+        out.append(("Vitruvion", legacy_root))
+        seen.add("Vitruvion")
+    for s in (specs or []):
+        if ":" in s:
+            label, path = s.split(":", 1)
+            label = label.strip()
+            path = path.strip()
+        else:
+            label, path = "Vitruvion", s.strip()
+        if not label or not path:
+            continue
+        if label in seen:
+            out = [(lbl, p) if lbl != label else (label, path) for lbl, p in out]
+        else:
+            out.append((label, path))
+            seen.add(label)
     return out
 
 def get_fcstd_map(d):
@@ -133,6 +205,39 @@ def vitruvion_solver_status(path):
         if doc is not None:
             try: FreeCAD.closeDocument(doc.Name)
             except Exception: pass
+
+
+_HEADER_RE = re.compile(
+    r"Status:\s*(?P<status>\w+).*?Final solver status:\s*(?P<solver>\w+)"
+)
+
+
+def parse_pred_header(path: str) -> tuple[str | None, str | None]:
+    """Read the first-line header of a Vitruvion .py output.
+
+    Returns (status_label, final_solver_status), or (None, None) if the
+    header is absent / unparseable. status_label is the inference-time
+    classification {Solved, UnderConstrained, Distorted, SolverError};
+    final_solver_status is FreeCAD's solver verdict on the saved sketch
+    {Converged, Redundant, Conflicting, Failed, Malformed, Distorted}.
+    """
+    try:
+        with open(path) as f:
+            line = f.readline()
+    except OSError:
+        return None, None
+    m = _HEADER_RE.search(line)
+    if not m:
+        return None, None
+    return m.group("status"), m.group("solver")
+
+
+# Header status labels that exclude a Vitruvion output from d_feas evaluation.
+# Distorted (geometry moved during solve) and SolverError (Redundant /
+# Conflicting / Failed / Malformed in the inference-time check) are excluded.
+# UnderConstrained and Solved are both accepted: d_feas is well-defined for
+# under-constrained outputs (gain residual handles the DoF mismatch).
+_REJECTED_HEADER_STATUSES = frozenset({"Distorted", "SolverError"})
 
 
 def model_path_for(root, batch, filename):
@@ -220,9 +325,16 @@ def transform_bundle_coordinates(
 
 
 def build_file_bundle(*, batch, filename, humans, file_maps, converter,
-                      geometry_tol, canonical_dir, model_root=None,
+                      geometry_tol, canonical_dir,
+                      model_root=None,
+                      model_specs: list[tuple[str, str]] | None = None,
                       coordinate_scale: float = 1.0,
                       bbox_normalize_dst_length: float | None = 1.0):
+    """Load human sketches plus zero or more model variants into a FileBundle.
+
+    Either `model_root` (legacy, label='Vitruvion') or `model_specs` (a list of
+    (label, root) pairs) may be passed. Specs from both sources are merged.
+    """
     data_dirs = {n: d for n, d in humans}
     annotators = tuple(data_dirs.keys())
     cp = find_canonical_py(filename, data_dirs, annotators, canonical_dir=canonical_dir)
@@ -232,16 +344,39 @@ def build_file_bundle(*, batch, filename, humans, file_maps, converter,
         raw[name] = load_sketch_from_fcstd(
             os.path.join(d, file_maps[name][filename]), converter)
 
-    model_status = "missing"
-    model_dof = None
-    mp = model_path_for(model_root, batch, filename)
-    if mp is not None:
-        model_dof, solver_st = vitruvion_solver_status(mp)
-        if model_dof == 2 and solver_st == "Converged":
-            raw["Vitruvion"] = load_sketch_from_py(mp, converter)
-            model_status = "loaded"
+    specs: list[tuple[str, str]] = []
+    if model_root is not None:
+        specs.append(("Vitruvion", model_root))
+    if model_specs:
+        specs.extend(model_specs)
+
+    model_statuses: dict[str, str] = {}
+    model_dofs: dict[str, int | None] = {}
+    for label, root in specs:
+        mp = model_path_for(root, batch, filename)
+        if mp is None:
+            model_statuses[label] = "missing"
+            model_dofs[label] = None
+            continue
+        header_status, header_solver = parse_pred_header(mp)
+        dof, solver_st = vitruvion_solver_status(mp)
+        model_dofs[label] = dof
+        # Gate: accept Converged outputs whose inference-time header is not
+        # Distorted / SolverError. UnderConstrained outputs are admitted
+        # because d_feas is well-defined for them (the gain residual handles
+        # rank deficiency). The header's "Final solver status" takes
+        # precedence when present; we fall back to FreeCAD's runtime status
+        # only when the header is missing.
+        accepted_solver = (header_solver or solver_st) == "Converged"
+        rejected_label = header_status in _REJECTED_HEADER_STATUSES
+        if accepted_solver and not rejected_label:
+            raw[label] = load_sketch_from_py(mp, converter)
+            model_statuses[label] = "loaded"
         else:
-            model_status = f"filtered(dof={model_dof},st={solver_st})"
+            model_statuses[label] = (
+                f"filtered(dof={dof},st={solver_st},"
+                f"hdr_status={header_status},hdr_solver={header_solver})"
+            )
 
     sketches, audits = {}, {}
     for name, full in raw.items():
@@ -251,7 +386,7 @@ def build_file_bundle(*, batch, filename, humans, file_maps, converter,
         sketches[name] = remapped
         audits[name] = audit
     bundle = FileBundle(batch, filename, canonical, sketches, audits,
-                        model_status=model_status, model_dof=model_dof)
+                        model_statuses=model_statuses, model_dofs=model_dofs)
     return transform_bundle_coordinates(
         bundle,
         coordinate_scale=coordinate_scale,
@@ -620,12 +755,14 @@ def evaluate_rotation(*, bundle, refs, heldout, drop_rates, samples_per_rate,
                 })
                 summary_rows.append(srow)
 
-    # ── Evaluate Vitruvion model if available ──
-    if eval_model and bundle.model_status == "loaded" and "Vitruvion" in bundle.sketches:
-        model_ok, model_reason = base_policy_pass(
-            bundle.audits["Vitruvion"], base_policy)
-        if model_ok:
-            model_sketch = bundle.sketches["Vitruvion"]
+    # ── Evaluate each loaded Vitruvion variant if available ──
+    if eval_model:
+        for model_label in bundle.loaded_model_labels():
+            model_ok, model_reason = base_policy_pass(
+                bundle.audits[model_label], base_policy)
+            if not model_ok:
+                continue
+            model_sketch = bundle.sketches[model_label]
             for validated in (False, True):
                 vt = validated
                 per_source = []
@@ -643,7 +780,7 @@ def evaluate_rotation(*, bundle, refs, heldout, drop_rates, samples_per_rate,
                         batch=bundle.batch, filename=bundle.filename,
                         rotation_id=rotation_id, sample_id=0,
                         drop_rate=-1,  # sentinel: model, not dropout
-                        pred_name="Vitruvion", gt_name=gt_name,
+                        pred_name=model_label, gt_name=gt_name,
                         pred_sketch=model_sketch,
                         gt_sketch=bundle.sketches[gt_name],
                         edit_probes=probes, edit_weights=weights, rels=rels,
@@ -676,6 +813,7 @@ def evaluate_rotation(*, bundle, refs, heldout, drop_rates, samples_per_rate,
                     "drop_rate": -1, "keep_rate": -1,
                     "n_dim_original": -1, "n_dim_kept": -1, "n_dim_dropped": -1,
                     "source_validated": vt,
+                    "pred": model_label,
                     "min_d_resp": min_d,
                     "norm_d_resp": norm_by_scale(min_d, hs, eps),
                     "h_scale": hs,
@@ -718,13 +856,19 @@ def print_summary(rows):
         vrows = [r for r in valid if r.get("source_validated") == vt]
         tag = "validated" if vt else "unvalidated"
         print(f"\n  [{tag}] n={len(vrows)}")
-        by_rate = {}
+        # Group dropout rows by drop_rate; group model rows (rate=-1) by pred label.
+        groups: dict[tuple, list[dict]] = {}
         for r in vrows:
-            by_rate.setdefault(float(r["drop_rate"]), []).append(r)
-        for rate in sorted(by_rate):
-            rs = by_rate[rate]
-            label = "Vitruvion" if rate == -1 else f"drop={rate:5.1f}%"
-            print(f"    {label:12s} n={len(rs):4d}"
+            rate = float(r["drop_rate"])
+            if rate == -1:
+                key = (rate, r.get("pred") or "Vitruvion")
+            else:
+                key = (rate, None)
+            groups.setdefault(key, []).append(r)
+        for (rate, pred_label) in sorted(groups, key=lambda k: (k[0], k[1] or "")):
+            rs = groups[(rate, pred_label)]
+            label = (pred_label or "Vitruvion") if rate == -1 else f"drop={rate:5.1f}%"
+            print(f"    {label:14s} n={len(rs):4d}"
                   f" med_OES={safe_median([r.get('max_histcad_oes') for r in rs])}"
                   f" med_ER={safe_median([r.get('median_histcad_er') for r in rs])}"
                   f" med_norm_d={safe_median([r.get('norm_d_resp') for r in rs])}"
@@ -735,9 +879,26 @@ def print_summary(rows):
 
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    p.add_argument("--vitruvion-root",
-                   default="/home/sturk/Downloads/fiverr/Vitruvion_2026-05-03_17-08-23_step_56400")
-    p.add_argument("--batches", nargs="+", default=["0", "9"])
+    p.add_argument(
+        "--vitruvion-root",
+        default=None,
+        help=(
+            "Legacy single-model root. Prefer --vitruvion-spec. "
+            "If neither flag is given, evaluates DEFAULT_VITRUVION_SPECS "
+            "(base + solver_rl)."
+        ),
+    )
+    p.add_argument(
+        "--vitruvion-spec",
+        action="append",
+        default=None,
+        help=(
+            "label:path, repeatable. e.g. "
+            "--vitruvion-spec base:/path/to/Vitruvion_ori_... "
+            "--vitruvion-spec solver_rl:/path/to/Vitruvion_2026-05-03_..."
+        ),
+    )
+    p.add_argument("--batches", nargs="+", default=list(DEFAULT_BATCHES))
     p.add_argument("--human", action="append", default=None)
     p.add_argument("--ref-size", type=int, default=2)
     p.add_argument("--drop-rates", default="100,75,50,25,0")
@@ -787,6 +948,9 @@ def main():
     args = parse_args()
     humans_by_batch = parse_human_specs(args.human)
     drop_rates = parse_percentages(args.drop_rates)
+    model_specs = parse_vitruvion_specs(args.vitruvion_spec, args.vitruvion_root)
+    if model_specs:
+        print("[Vitruvion specs] " + ", ".join(f"{l}={p}" for l, p in model_specs))
     cfg = HistCADConfig(
         delta_basis=args.delta_basis, delta_scale=args.delta_scale,
         delta_absolute=args.delta_absolute,
@@ -823,7 +987,7 @@ def main():
                     file_maps=file_maps, converter=converter,
                     geometry_tol=args.geometry_tol,
                     canonical_dir=args.canonical_dir,
-                    model_root=args.vitruvion_root,
+                    model_specs=model_specs,
                     coordinate_scale=args.coordinate_scale,
                     bbox_normalize_dst_length=bbox_dst)
             except Exception as e:

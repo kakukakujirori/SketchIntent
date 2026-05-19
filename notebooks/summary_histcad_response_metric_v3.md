@@ -1,6 +1,23 @@
 # HistCAD-style OES に対する response-feasibility 指標の優位性
 
-作成日: 2026-05-12
+作成日: 2026-05-12 (本番スケール再検証 / 追加実験 6–9 を 2026-05-19 に追記)
+
+> **2026-05-19 更新メモ (2 回目: model gate 緩和後の最終数値)**
+>
+> 実験 1, 2, 3 は当初 batch 0+9 (47 files, 3 humans) の予備データで行ったが、
+> 本日 6 batches {0,4,6,8,9,11} × 5 humans {Eko, Johnny, Ryotaro, Sagar, Tanaka}
+> の本番スケールで再実行した。さらに base/solver_rl の 2 モデル比較、
+> human-human distribution、token-level F1、divergent-case extraction を新規追加
+> ( §6 / §7 / §8 / §9 )。本番数値は §6 以降に集約。実験 1/2 の本文は当初の
+> 予備実験設定を歴史的に残し、本番スケール結果は §6 以降を参照する形にした。
+>
+> **model-output gate を `DoF==2 ∧ Converged` から
+> `Converged ∧ Status∉{Distorted,SolverError}` に緩和**し、under-constrained
+> な valid 出力も d_feas 評価対象に含めた。base の admit 率は 14% → 77%、
+> solver_rl は 80% → 94% に拡大。これにより base の under-constrained 出力が
+> d_feas の gain 残差で penalize されるという正しい構造が見え、HistCAD OES が
+> **base を human より良いと判定する** sign inversion (p=2.2e-19) という強力な
+> failure 証拠も得られた。§6 / §7 の数値はすべて新 gate ベースに置き換え済み。
 
 ## Executive Summary
 
@@ -408,29 +425,47 @@ leak の mean は一部 dropout rate で巨大になった。これが主張を�
 したがって、`d_feas` の median / quantile trajectory は外れ値に依存しない。
 論文では mean ではなく median, quantile, paired counts を使うのが安全である。
 
-## ここから導かれる結論
-
-今回の実験から有用と分かった事実は 3 つである。
+## ここから導かれる結論 (予備実験 + 本番スケール再検証 + 新 gate)
 
 1. **HistCAD OES は editability baseline として有用だが、design intent evaluation としては不十分。**
-   Dimensional dropout によって OES が改善するため、fully constrained / dimensioned sketch を
-   不当に penalize する failure mode がある。
+   Dimensional dropout によって OES が改善し、また実 model レベルでも base
+   (大半が under-constrained) を human より良いと判定する sign inversion
+   (p=2.2e-19) を起こすため、fully constrained / dimensioned sketch を
+   不当に penalize し under-constrained 出力を reward する failure mode がある。
 
 2. **`d_feas` は intent preservation と edit feasibility を単一 residual で扱える。**
-   Vitruvion は leak 成分で罰され、dimensional dropout は gain 成分で罰される。
-   HistCAD OES が dropout を逆方向に評価するのに対し、`d_feas` は正しい方向に悪化する。
+   Vitruvion は leak 成分で罰され、dimensional dropout と under-constrained
+   model 出力は gain 成分で罰される。HistCAD OES が dropout を逆方向に評価し
+   base sign を反転させるのに対し、`d_feas` はすべての劣化方向に対して正しい
+   方向に悪化する。
 
 3. **最終的な論文上の立て付けは `d_feas` vs HistCAD OES が最も真っ直ぐである。**
    HistCAD OES は比較 baseline として残し、`d_feas` を main metric にする。
 
-主張の強さは次のように整理できる。
+4. (§7) **gain と leak は異なる model 改良軸に反応する**。
+   solver-RL は base Vitruvion から fc-rate を 13.8% → 81.8%、d_feas median を
+   0.121 → 0.042 に改善するが、leak は 0.059 → 0.068 と閉じない。すなわち
+   solver-RL は **gain failure (under-constraining) を fix するが leak failure
+   (relational intent mismatch) は fix しない**。`d_feas` の gain/leak 分解は
+   この区別を直接表示する。
+
+5. (§6 / §8) **`d_feas` は同一 geometry の別 human annotation を吸収する**。
+   heldout (human) の `d_feas` は 73% が `<1e-4`、Q90=0.13。一方 base は
+   near-zero が 22% に留まり Q90=1.0 まで tail を持つ、solver_rl は 37% で
+   tail も短い (Q90=0.20)。token-level でも heldout の rel F1 は 0.759、
+   両モデルは 0.60–0.67 で同方向の劣化を示す。
+
+主張の強さは次のように整理できる (新 gate 後の本番スケール数値で更新):
 
 | claim | strength | evidence |
 |---|---|---|
 | HistCAD OES does not measure response-equivalence | strong | OES=1.0 でも response が異なる human-human case |
-| HistCAD OES rewards dimensional dropout | strong | OES `0.286 -> 1.000` |
-| `d_feas` detects Vitruvion relational intent mismatch better than OES | strong | p `8.4e-9` vs OES p `6.0e-3` |
-| `d_feas` detects dimensional dropout degradation | strong | median `0 -> 1`, gain-driven |
+| HistCAD OES rewards dimensional dropout | strong | OES `0.310 -> 1.000` (§6.2) |
+| HistCAD OES inverts sign against under-constrained models | **very strong** | base 行で model > human, p=2.2e-19 (§6.1) |
+| `d_feas` detects Vitruvion design-intent mismatch better than OES | strong | solver_rl p=1.5e-19, base p=1.2e-31 (§6.1) |
+| `d_feas` detects dimensional dropout degradation | strong | median `0 -> 1`, gain-driven (§6.2) |
+| `d_feas` gain/leak 分解は model 改良軸を透視する | strong | RL: gain 0.121→0.042 改善 / leak 0.059→0.068 不変 (§7) |
+| `d_feas` は別 human の表現差を吸収する | strong | heldout frac<1e-4=0.73, source_self=1.00 (§6.3 / §8) |
 
 推奨する final wording:
 
@@ -438,9 +473,302 @@ leak の mean は一部 dropout rate で巨大になった。これが主張を�
 > evaluating design-intent-aware 2D sketch constraint inference. Our response-based
 > metric directly tests the first-order conditions that a useful editable sketch should satisfy:
 > the requested edit should be attainable, and the source design relations should remain invariant.
-> On Vitruvion predictions, `d_feas` distinguishes human-like constraints more strongly than OES;
-> under dimensional dropout, OES improves while `d_feas` worsens, exposing a concrete failure mode
-> of HistCAD-style scoring.
+> On Vitruvion predictions, `d_feas` distinguishes human-like constraints more strongly than OES,
+> and discriminates the gain (driver-loss) failure mode from the leak (relational-intent-loss)
+> failure mode --- a decomposition that surfaces which axis a model improvement actually fixes.
+> Under dimensional dropout OES improves while `d_feas` worsens; on under-constrained model output
+> OES inverts sign and judges the model better than human, while `d_feas` correctly penalizes it.
+
+## 残タスク (このセクションは TODO リスト)
+
+本番スケール + 新 gate の結果で示せたことは上記 conclusion / claim table の通り。
+**残っている作業**を優先度順に整理しておく。**user study は最重要だが下記とは別軸の
+ロードマップ**として扱う。
+
+### 必須 (paper revision の正面で要求される)
+
+1. **[要作業] Qualitative figure render** — §9 (実験 9) の divergent rotation 上位
+   ケースを sketch image として描画する。最有力候補は
+   `0/127646_b88ed13f_0015_sketch00.FCStd` (base, OES=0.90, d_feas=41.6, leak=100.5)。
+   `notebooks/histcad_case_detail_report.py` を流用すれば半日で完成する。論文 §5.6
+   から既に参照済みで、figure が無いと完結しない。
+2. **[x] paper supplement (7_suppl.tex) の数値同期** — eps sweep、smatch ablation、
+   Point-Point Coincident ablation、d_feas_tilde を新 gate 数値に更新済み
+   (2026-05-19)。PP-Coincident ablation も新 gate で再 run し、sign inversion が
+   ablation 下でも持続することを確認 (`h=75 m=202 p=6.3e-17`)。
+3. **[x] base のサンプル選択 bias の脚注** — `paper/sec/7_suppl.tex` に
+   `Model-Output Gate Sensitivity` 節を追加し、strict gate vs relaxed gate の
+   admit rate (14% vs 77%) と d_feas 中央値 (~0 vs 0.121) の比較表を掲載済み
+   (2026-05-19)。
+
+### 強い補強 (P2 だが reviewer 効果大)
+
+4. **Reranking experiment** — K=10–20 候補を sample し、leave-one-out で
+   `d_feas-best vs OES-best vs random` の held-out comparison。`d_feas` を
+   selection signal として使える独立証拠になる。user study 抜きでも成立する。
+   候補 sampling pipeline の改修が必要 (数日工数)。
+5. **Oracle intent / synthetic suite** — symmetric bracket / repeated hole pattern
+   などの synthetic family と機械的 degradation を appendix で。cherry-pick リスクは
+   `summary_experiments_update.md` §2 で議論済み。
+
+### 自動追加 (リスクなし)
+
+6. **Dany データ到着後の re-run** — `DEFAULT_HUMANS` に追加して 6 humans フル run
+   を回し直す。追加リスクなし、statistical power が増えるだけ。
+
+### 別軸 (最終目標)
+
+7. **User study** — `d_feas` が "human design preference" を測ると claim するための
+   subjective judgment validation。本文では現在 "captures local edit-response consistency"
+   などの弱め表現に留めて回避済み。実施には別途設計とリクルートが必要。
+
+## 実験 6: 本番スケール再検証 (実験 1, 2, 3 の更新)
+
+### 設定差分
+
+- データ: 6 batches = {0, 4, 6, 8, 9, 11}、annotator set = {Eko, Johnny, Ryotaro, Sagar, Tanaka}。
+  各 batch で 3 annotators (合計 5 humans のうち 3) が共通する file を対象に、
+  3 人 → ref 2 / heldout 1 の rotation を作る。
+- model 比較: `base` = `Vitruvion_ori_..._epoch_29`、
+  `solver_rl` = `Vitruvion_2026-05-03_..._step_56400` (Casey-style solver RL fine-tune)。
+  両者を同じ pipeline で評価し、CSV `pred` 列にラベルを格納する。
+- bbox normalization (commit 8e6945d) 適用済み。
+- **新 model-output gate**: 旧 `DoF==2 ∧ Converged` (fully-constrained のみ
+  通過) を改め、新 gate `Final solver status == Converged ∧ Status ∉
+  {Distorted, SolverError}` で under-constrained な valid 出力も d_feas
+  評価対象に含める。Distorted (geometry が solve 中に動いた)・SolverError
+  (Redundant / Conflicting / Failed / Malformed) のみ除外。実装は
+  `notebooks/exp_source_conditioned_dropout.py:make_bundle` の
+  `parse_pred_header()` / `_REJECTED_HEADER_STATUSES`。
+- 結果 admit 率: base 14% → **77.4%** (123/159 files)、solver_rl 80% → **93.7%** (149/159 files)。
+
+### 6.1 Vitruvion vs heldout drop 0% paired (apples-to-apples, 新 gate)
+
+validated rotations の交差集合上で d_feas と HistCAD OES を同じ rotation set
+に対して計算:
+
+| Model | $n$ | Metric | h_better | m_better | tie | p (two-sided) |
+|---|---:|---|---:|---:|---:|---:|
+| solver_rl | 369 | HistCAD OES | 188 | 99 | 78 | 3.3e-7 |
+| solver_rl | 369 | `d_feas` | 199 | 41 | 129 | 1.5e-19 |
+| **base** | 309 | HistCAD OES | 75 | **204** | 27 | **2.2e-19 (逆方向)** |
+| base | 309 | `d_feas` | 217 | 29 | 63 | 1.2e-31 |
+
+**核心結果 — base 行の OES sign inversion**: HistCAD OES は base を human より
+**良いと判定**する (model-better=204 vs human-better=75, p=2.2e-19)。これは
+base 出力の大多数が under-constrained で、その結果 OES の構成要素である ER
+(edit reachability) と cPCSR (preservation set 縮小) が両方上昇するため。
+すなわち §6.2 の dimensional dropout で示された OES failure mode が、合成劣化
+ではなく **実際の model 出力レベル**で再現されたことを意味する。`d_feas` は
+同じ rotation で base を正しく human より悪いと判定する (h=217 vs m=29,
+p=1.2e-31)。
+
+### 6.2 Dimensional dropout sweep (validated median, 本番スケール, 新 gate)
+
+| drop% | HistCAD OES | ER | cPCSR | `d_feas` | gain | leak |
+|---:|---:|---:|---:|---:|---:|---:|
+| 0%  | 0.310 | 0.250 | 0.647 | 0.0000 | 0.0000 | 0.0000 |
+| 25% | 0.578 | 0.506 | 0.930 | 0.0000 | 0.0000 | 0.0000 |
+| 50% | 0.750 | 0.727 | 0.941 | 0.1667 | 0.1667 | 0.0000 |
+| 75% | 0.884 | 0.900 | 0.943 | 0.4444 | 0.4120 | 0.0000 |
+| 100%| 1.000 | 1.000 | 0.943 | 1.0000 | 1.0000 | 0.0000 |
+
+dropout sweep は human heldout 側の degradation なので gate 変更の影響を
+受けない (heldout は常に admit)。OES は単調に増加、`d_feas` は gain 主成分で
+単調に劣化、leak は 0。
+
+25% dropout で `d_feas` median が依然 0 のままなのは、random dropout が
+評価 probe に効かない dimensions を抜く場合があるため。これは "random
+dropout は coarse degradation である" という sanity 観察として本文中で開示する。
+
+### 6.3 Positive / Negative controls + Robustness (eps)
+
+`v3_controls_scores_full.csv` (validated, eps=1e-9, multi-reference `min_i d_feas`、新 gate):
+
+| variant | n | median | Q75 | Q90 | mean | frac<1e-4 | gain_med | leak_med |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| source_self | 392 | ~0 | ~0 | ~0 | ~0 | 1.00 | ~0 | ~0 |
+| heldout | 392 | ~0 | 0.001 | 0.128 | 0.047 | 0.73 | ~0 | ~0 |
+| **base** | 306 | **0.121** | 0.373 | **1.000** | 0.557 | 0.22 | ~0 | 0.059 |
+| solver_rl | 365 | 0.042 | 0.126 | 0.195 | 0.074 | 0.37 | ~0 | 0.068 |
+| dim_drop50 | 392 | 0.151 | 0.333 | 0.500 | 0.210 | 0.33 | 0.146 | ~0 |
+| dim_drop100 | 392 | 1.000 | 1.000 | 1.000 | 1.000 | 0.00 | 1.000 | 0 |
+| rel_drop50 | 392 | 0.299 | 0.469 | 0.821 | (heavy tail) | 0.03 | ~0 | 0.322 |
+| rel_drop100 | 392 | 0.429 | 0.575 | 0.724 | (heavy tail) | 0.03 | 0.333 | 0.144 |
+
+base の分布は **bimodal**: median = 0.121 (Q75 = 0.373) で dim_drop50 並みだが、
+Q90 = 1.000 (約 1 割の rotation が完全 gain ceiling) で **dim_drop100 と同様の
+under-constrained tail を含む**。mean = 0.557 がそれを反映。
+solver_rl は tail が短く Q90 = 0.195 に収まる。
+
+eps robustness は新 gate 下でも維持 (eps ∈ {1e-11, 1e-9, 1e-7} で median と
+paired stat が完全一致)。
+
+`rel_drop50/100` の mean が巨大なのは heavy-tail outlier が引き続き残るため。
+論文では median / quartile / paired count を主体に提示する方針を維持。
+
+Artifacts:
+
+- `artifacts/constrained_response_scores_dropout.csv`
+- `artifacts/constrained_response_details_dropout.csv`
+- `artifacts/source_conditioned_dropout_scores_full.csv`
+- `artifacts/source_conditioned_dropout_details_full.csv`
+- `artifacts/v3_controls_scores_full.csv`
+- `artifacts/v3_controls_details_full.csv`
+- 旧 gate 結果は `*.prev.csv` として保存
+
+## 実験 7: Model ranking — fully constrainedness と design intent leak は分離する
+
+base と solver-RL を同一 pipeline で評価し、(i) fully-constrained rate (fc-rate)、
+(ii) loadable / eval-admit rate (eval-rate)、(iii) HistCAD OES、(iv) token F1、
+(v) `d_feas` の各成分を並べる。新 gate により under-constrained base 出力も
+評価対象に含めた最終結果:
+
+| Method | n_files | **fc-rate** ↑ | **eval-rate** ↑ | OES ↑ | ER ↑ | F1 ↑ | rel_F1 | dim_F1 | `d_feas` ↓ | gain ↓ | leak ↓ |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| heldout (human) | 139 | — | 1.000 | 0.310 | 0.250 | 0.622 | 0.759 | 0.333 | ~0 | ~0 | ~0 |
+| **base** Vitruvion | 107 | 0.138 | 0.774 | **0.625** | 0.655 | 0.483 | 0.600 | 0.118 | **0.121** | ~0 | 0.059 |
+| **solver_rl** Vitruvion | 129 | **0.818** | **0.937** | 0.185 | 0.167 | 0.500 | 0.667 | 0.154 | **0.042** | ~0 | 0.068 |
+
+ここで **fc-rate** = `Status=Solved` (DoF≤2 + Converged) の割合 = RL の training
+objective 直接対応量。**eval-rate** = 新 gate (Converged ∧ not Distorted ∧ not
+SolverError) を通る割合 = d_feas で評価可能な割合。
+
+### 観察と解釈
+
+1. **fc-rate は solver-RL で大幅改善**: 13.8% → 81.8%。RL は training objective を達成。
+2. **eval-rate も改善**: 77.4% → 93.7%。malformed 出力が減り、評価対象が増えた。
+3. **HistCAD OES は逆方向に低下**: base 0.625 → solver_rl 0.185。これは
+   base の under-constrained 出力を OES が "良い" と判定するからで、§6.2 の
+   dropout sweep と §6.1 の paired test (base 列の sign inversion p=2.2e-19)
+   と整合する。OES は model 改良によって正しく挙動しない。
+4. **`d_feas` median は正しく改善**: 0.121 → 0.042。RL によって under-constrained
+   出力が減り、gain residual が小さくなった結果。
+5. **`d_feas` leak は本質的に不変**: 0.059 → 0.068 (むしろ微増)。
+   solver-RL は **gain failure (under-constraining) を修正するが、leak failure
+   (relational intent mismatch) は修正しない**。
+6. **Token-level F1 と整合**: rel F1 は base 0.600 → solver_rl 0.667 で若干改善
+   するが、heldout の 0.759 に届かない。dim F1 はどちらも 0.12–0.15 程度で、
+   heldout の 0.333 から大きく離れている。
+
+すなわち、`d_feas` の gain/leak 分解は **どの failure を model 改良が直したかを
+透視的に表示**する。RL は gain 側の容易な failure (under-constraining) を
+解消するが、leak 側の難しい failure (relation intent) は閉じない。
+fully-constrainedness は design intent の必要条件にすぎない、という主張に対する
+直接的な model-level の数値証拠。
+
+### 7.1 base の admit 拡大が変えたこと
+
+旧 gate (`DoF==2 ∧ Converged`) では base が 20 files しか通らず、d_feas は
+median ~0 / leak 0.043 で人間並みに見えていた。これは "loadable な fully
+constrained 出力に限定された easier subset" が原因のサンプル選択 bias。
+
+新 gate で base を 107 files まで拡大すると:
+- base d_feas median が ~0 → **0.121** に跳ね上がる
+- 上記表の通り base の Q90 = 1.0 (10% は完全 gain ceiling)
+- HistCAD OES は逆に 0.195 → 0.625 に上昇 (under-constrained を reward)
+
+これにより、`d_feas` が **本来評価したかった model failure mode** (under-constrained
+かつ relation も不揃いな出力) を実際に捕捉していることが示せる。`d_feas` は数学的に
+under-constrained sketch でも well-defined であり、gain residual がその DoF 過多を
+penalize する。この特性は §6.2 の dropout sweep で示した挙動と一致する。
+
+Artifacts:
+
+- `artifacts/model_ranking_table.csv`
+- `artifacts/constraint_token_f1.csv`
+
+## 実験 8: Human-human distribution と CDF
+
+### 8.1 CDF (`dfeas_cdf.png`)
+
+主観察 (log-x CDF):
+
+- `source_self` は near-zero に縦線。definition による sanity check のみ。
+- `heldout` (human) は 73% が `<1e-4`、残り 27% が `[10⁻³, 10⁰]` に薄く分布。
+  → 別 human による表現差はおよそ 3/4 が完全に等価とみなされ、
+  残り 1/4 にも near-zero 周辺の小さなテールしか出ない。
+- `solver_rl` Vitruvion は `<1e-4` が 41% に縮み、残り 60% が `[10⁻², 10⁻⁰·⁵]` に
+  まんべんなく分布。heldout と完全分離はしないが分布全体が右にシフトする。
+- `base` Vitruvion は n=60 で曲線が segmented になるが、`<1e-4` が 57% と
+  solver_rl より高い。loadable subset に easier cases が多い疑いと整合。
+- `dim_drop100` は 1.0 に縦線 (definitional)。`dim_drop50` は `[0, 0.5]` に集中。
+- `rel_drop50/100` は `[10⁻¹, 10⁰]` にテール、log-scale で見ると最右端まで
+  超巨大外れ値 (~10⁷) が見える (§実験 3 の heavy-tail と同根)。
+
+### 8.2 Paired Wilcoxon (`dfeas_human_vs_model_cdf.png` 上の数値, `dfeas_human_vs_model_stats.csv`、新 gate)
+
+| model | n_paired | model_better | human_better | tie | p_two_sided |
+|---|---:|---:|---:|---:|---:|
+| solver_rl | 365 | 39 | 194 | 132 | 4.9e-19 |
+| base | 306 | 27 | **216** | 63 | 7.5e-31 |
+
+解釈:
+
+- どちらの model も heldout より `d_feas` 上で有意に悪い。base のシグナルは
+  p=7.5e-31 で極めて強い (under-constrained 出力が gain で捕捉される結果)。
+- solver_rl の tie 数 (132) は base (63) より顕著に多い。fully-constrained 化
+  により response が heldout と一致する rotation が増えていることを示す。
+  これは model 改良が `d_feas` 上でも検出可能であるという証拠。
+
+### 8.3 書ける結論
+
+- **heldout (human) の `d_feas` 分布は near-zero に偏る** → 同一 geometry の別 human
+  annotation を吸収できる。
+- **model output の `d_feas` 分布は明確に右シフトする** が、low end は
+  overlap している → model が偶然 human-equivalent な出力をする rotation も存在し、
+  tie として正しく扱われる。
+- **paired test では人間優位が有意** → multi-reference setting の下でも、
+  Vitruvion は人間に比べて design-intent preservation の点で劣ることを `d_feas` が
+  検出できる。
+
+Artifacts:
+
+- `artifacts/dfeas_quantile_table.csv`
+- `artifacts/dfeas_cdf.png` / `dfeas_violin.png` (violin は heavy-tail で見づらいため supplement 推奨)
+- `artifacts/dfeas_human_vs_model_cdf.png`
+- `artifacts/dfeas_human_vs_model_stats.csv`
+
+## 実験 9: Qualitative divergent cases (high-OES / high-d_feas, 新 gate)
+
+`find_dfeas_oes_divergent_cases.py` で OES と `d_feas` の divergent rotation を
+列挙した (閾値: `OES≥0.5 ∧ d_feas≥0.1` / `OES≤0.05 ∧ d_feas≤0.05`、top-12)。
+
+新 gate により base の under-constrained 出力が大量に admit された結果、
+**論文 figure 候補の主役が base に移った**:
+
+`OES ≥ 0.5 ∧ d_feas ≥ 0.1` top-5:
+
+| rank | file | heldout | pred | OES | `d_feas` | gain | leak |
+|---:|---|---|---|---:|---:|---:|---:|
+| 1 | `0/127646_b88ed13f_0015_sketch00.FCStd` | Johnny | base | 0.900 | **41.58** | ~0 | **100.5** |
+| 2 | `0/127646_b88ed13f_0015_sketch00.FCStd` | Ryotaro | base | 0.900 | 22.59 | ~0 | 91.01 |
+| 3 | `0/127646_b88ed13f_0015_sketch00.FCStd` | Sagar | base | 0.750 | 22.59 | ~0 | 32.08 |
+| 4 | `8/21337_062b39fa_0001_sketch05.FCStd` | Tanaka | base | 0.889 | 1.870 | ~0 | 2.631 |
+| 5 | `9/22645_1ba0af00_0011_sketch04.FCStd` | Eko | base | 0.677 | 1.515 | ~0 | 1.515 |
+
+(extreme leak 値 41–100 は base の under-constrained sketch で多数の relation が
+一次線形で壊れる場合に発生する。これらは figure として理想的だが、HistCAD 側は
+preservation set が稀薄なため依然 OES = 0.75–0.90 と高評価する。)
+
+`OES ≤ 0.05 ∧ d_feas ≤ 0.05` top-5:
+
+| rank | file | heldout | pred | OES | `d_feas` |
+|---:|---|---|---|---:|---:|
+| 1 | `4/136477_c46134fc_0000_sketch01.FCStd` | Tanaka | base | 0.000 | 0.044 |
+| 2 | `4/136477_c46134fc_0000_sketch01.FCStd` | Sagar | base | 0.000 | 0.044 |
+| 3 | `4/136477_c46134fc_0000_sketch01.FCStd` | Johnny | base | 0.000 | 0.044 |
+| 4 | `11/136127_140a874c_0000_sketch02.FCStd` | Eko | solver_rl | 0.000 | 0.042 |
+| 5 | `6/55546_670606b4_0000_sketch03.FCStd` | Johnny | solver_rl | 0.000 | 0.040 |
+
+これは "OES が fully constrained model 出力を penalize する" failure の qualitative
+補強。`d_feas` は同じ rotation で human-equivalent と判定する。
+
+sketch render は paper 整形段階で `histcad_case_detail_report.py` 流用で生成する。
+
+Artifacts:
+
+- `artifacts/dfeas_oes_divergent_cases.csv` (12 high + 12 low)
 
 ## Appendix: relation-only diagnostic `d_align`
 
@@ -878,4 +1206,50 @@ conda run -n freecad python notebooks/exp_smatch_metric.py \
   --drop-rates 0,25,50,75,100 \
   --output-csv artifacts/smatch_vs_dfeas_summary.csv \
   --details-csv artifacts/smatch_vs_dfeas_details.csv
+```
+
+本番スケール再検証 (実験 6–9, 2026-05-19):
+
+```bash
+# Fully-scaled experiment runs (6 batches × 5 humans × 2 model preds × dropout sweep)
+conda run -p /home/sturk/miniforge3/envs/freecad python notebooks/exp_constrained_response_metric.py \
+  --drop-rates 0,25,50,75,100 \
+  --output-csv artifacts/constrained_response_scores_dropout.csv \
+  --details-csv artifacts/constrained_response_details_dropout.csv
+
+conda run -p /home/sturk/miniforge3/envs/freecad python notebooks/exp_source_conditioned_dropout.py \
+  --drop-rates 100,75,50,25,0 \
+  --output-csv artifacts/source_conditioned_dropout_scores_full.csv \
+  --details-csv artifacts/source_conditioned_dropout_details_full.csv
+
+conda run -p /home/sturk/miniforge3/envs/freecad python notebooks/exp_v3_controls_and_robustness.py \
+  --eps-values 1e-11,1e-9,1e-7 \
+  --output-csv artifacts/v3_controls_scores_full.csv \
+  --details-csv artifacts/v3_controls_details_full.csv
+
+conda run -p /home/sturk/miniforge3/envs/freecad python notebooks/exp_smatch_metric.py \
+  --drop-rates 0,25,50,75,100 \
+  --output-csv artifacts/smatch_vs_dfeas_summary_full.csv \
+  --details-csv artifacts/smatch_vs_dfeas_details_full.csv
+
+conda run -p /home/sturk/miniforge3/envs/freecad python notebooks/compute_constraint_token_f1.py \
+  --output-csv artifacts/constraint_token_f1.csv
+
+# Analysis chaining
+python notebooks/analyze_dfeas_distribution.py \
+  --input-csv artifacts/v3_controls_scores_full.csv \
+  --eps 1e-9
+python notebooks/analyze_model_ranking.py \
+  --dfeas-csv artifacts/constrained_response_scores_dropout.csv \
+  --oes-csv artifacts/source_conditioned_dropout_scores_full.csv \
+  --controls-csv artifacts/v3_controls_scores_full.csv \
+  --f1-csv artifacts/constraint_token_f1.csv
+python notebooks/find_dfeas_oes_divergent_cases.py \
+  --dfeas-csv artifacts/constrained_response_scores_dropout.csv \
+  --oes-csv artifacts/source_conditioned_dropout_scores_full.csv \
+  --high-oes-threshold 0.5 --high-dfeas-threshold 0.1 \
+  --low-oes-threshold 0.05 --low-dfeas-threshold 0.05 \
+  --top-k 12
+python notebooks/analyze_dfeas_pairwise_human_vs_model.py \
+  --controls-csv artifacts/v3_controls_scores_full.csv
 ```
