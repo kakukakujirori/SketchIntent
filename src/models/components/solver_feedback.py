@@ -124,6 +124,32 @@ class SolverFeedback:
 
         return coords
 
+    _ANISOTROPY_RATIO_TOL = 1.10
+
+    @classmethod
+    def _extract_anchor_points(cls, fc_sketch: "Sketcher.SketchObject") -> dict[int, np.ndarray]:
+        """Per-entity anchor used by the alignment residual check.
+
+        Mirrors check_submission's per-attribute comparison: line midpoint
+        (pntX, pntY when round-tripped through sketchgraphs), circle/arc center,
+        and point position. Rotations of a line around its midpoint therefore
+        do not register as distortion, matching the annotator submission check.
+        """
+        anchors: dict[int, np.ndarray] = {}
+        for geo_id, geo in enumerate(fc_sketch.Geometry):
+            geo_type = type(geo).__name__
+            if geo_type == 'Point':
+                anchors[geo_id] = np.array([[geo.X, geo.Y]])
+            elif geo_type == 'LineSegment':
+                sp, ep = geo.StartPoint, geo.EndPoint
+                anchors[geo_id] = np.array([[(sp.x + ep.x) / 2.0, (sp.y + ep.y) / 2.0]])
+            elif geo_type in ('Circle', 'ArcOfCircle'):
+                c = geo.Center
+                anchors[geo_id] = np.array([[c.x, c.y]])
+            else:
+                raise NotImplementedError(f"Unhandled geometry type: {geo_type}")
+        return anchors
+
     @classmethod
     def check_geometry_distortion(
         cls,
@@ -131,26 +157,54 @@ class SolverFeedback:
         fc_sketch_post: "Sketcher.SketchObject",
         distortion_threshold: float,
     ) -> bool:
+        """Detect distortion after bbox-based anisotropic affine alignment of post to pre.
+
+        Relational constraints are scale/translation invariant, so the solver may
+        legitimately settle at a different absolute scale/position. We absorb that
+        freedom by aligning post to pre via per-axis bbox scaling + translation,
+        then comparing anchor residuals against ``distortion_threshold * max(bw, bh)``.
+        Mirrors ``fusion360_annotation/check_submission.py:align_sketch``.
+        """
         coords_pre = SolverFeedback._extract_geometry_coords(fc_sketch_pre)
         coords_post = SolverFeedback._extract_geometry_coords(fc_sketch_post)
-        geo_id_list = coords_pre.keys()
-        if len(coords_pre) != len(coords_post):
-            raise ValueError(f"fc_sketch_pre and fc_sketch_post must have the same number and order of primitives: {len(coords_pre)=}, {len(coords_post)=}")
+        geo_id_list = list(coords_pre.keys())
         if set(coords_pre.keys()) != set(coords_post.keys()):
             raise ValueError(f"fc_sketch_pre and fc_sketch_post must have the same set of geometry ids: {coords_pre.keys()=}, {coords_post.keys()=}")
         if not all(coords_pre[gid].shape == coords_post[gid].shape for gid in geo_id_list):
             raise ValueError(f"fc_sketch_pre and fc_sketch_post must have the same number of points per primitive: {coords_pre=}, {coords_post=}")
 
-        is_distorted = False
-        for gid in geo_id_list:
-            p_pre = coords_pre[gid]
-            p_post = coords_post[gid]
-            dist = np.linalg.norm(p_pre - p_post, axis=1)
-            if np.any(dist > distortion_threshold):
-                is_distorted = True
-                break
+        # bbox uses full geometric extent (start/end of lines, ±radius of circles)
+        all_pre = np.concatenate([coords_pre[gid] for gid in geo_id_list], axis=0)
+        all_post = np.concatenate([coords_post[gid] for gid in geo_id_list], axis=0)
 
-        return is_distorted
+        pre_min, pre_max = all_pre.min(axis=0), all_pre.max(axis=0)
+        post_min, post_max = all_post.min(axis=0), all_post.max(axis=0)
+        bw, bh = float(pre_max[0] - pre_min[0]), float(pre_max[1] - pre_min[1])
+        tw, th = float(post_max[0] - post_min[0]), float(post_max[1] - post_min[1])
+
+        fx = bw / tw if tw > 1e-9 else 1.0
+        fy = bh / th if th > 1e-9 else 1.0
+        scale_ratio = fx / fy if fy > 1e-9 else float('inf')
+        if not (1.0 / cls._ANISOTROPY_RATIO_TOL <= scale_ratio <= cls._ANISOTROPY_RATIO_TOL):
+            return True
+
+        tcx, tcy = (post_min[0] + post_max[0]) / 2.0, (post_min[1] + post_max[1]) / 2.0
+        bcx, bcy = (pre_min[0] + pre_max[0]) / 2.0, (pre_min[1] + pre_max[1]) / 2.0
+
+        # residual check uses anchor points only (line midpoint, circle/arc center, point)
+        anchors_pre = cls._extract_anchor_points(fc_sketch_pre)
+        anchors_post = cls._extract_anchor_points(fc_sketch_post)
+        anchors_pre_arr = np.concatenate([anchors_pre[gid] for gid in geo_id_list], axis=0)
+        anchors_post_arr = np.concatenate([anchors_post[gid] for gid in geo_id_list], axis=0)
+
+        aligned_post = np.empty_like(anchors_post_arr)
+        aligned_post[:, 0] = (anchors_post_arr[:, 0] - tcx) * fx + bcx
+        aligned_post[:, 1] = (anchors_post_arr[:, 1] - tcy) * fy + bcy
+
+        bbox_size = max(bw, bh) if max(bw, bh) > 1e-9 else 1.0
+        pos_tol_abs = distortion_threshold * bbox_size
+        residual = np.linalg.norm(anchors_pre_arr - aligned_post, axis=1)
+        return bool(np.any(residual > pos_tol_abs))
 
     def get_solver_status(self, sketch: datalib.Sketch) -> SolverStatus:
         """Get solver status from FreeCAD sketch."""
