@@ -526,13 +526,14 @@ class SolverFeedback:
         counts = {
             'fully_constrained': 0,
             'under_constrained': 0,
+            'distorted': 0,
             'conflicting': 0,
             'redundant': 0,
             'malformed': 0,
             'failed': 0,
         }
 
-        dofs = []
+        dofs: list[int] = []
         for prim_tokens, cons_tokens, sketch_original in tqdm(zip(prim_tokens_batch, cons_tokens_batch, sketch_original_list), desc="Solver Testing"):
 
             status, sketch, constraint_to_token_start, invalid_constraint_block_start = self.evaluate_constraints(
@@ -546,6 +547,8 @@ class SolverFeedback:
                 counts['conflicting'] += 1
             elif status.RedundantConstraints:
                 counts['redundant'] += 1
+            elif bool(status.DistortingConstraints):
+                counts['distorted'] += 1
             else:
                 if status.DoF <= fully_constrained_dof:
                     counts['fully_constrained'] += 1
@@ -562,6 +565,7 @@ class SolverFeedback:
         return {
             'fc_rate': counts['fully_constrained'] / total_valid,
             'under_rate': counts['under_constrained'] / total_valid,
+            'distorted_rate': counts['distorted'] / total_valid,
             'conflicting_rate': counts['conflicting'] / total_valid,
             'redundant_rate': counts['redundant'] / total_valid,
             'malformed_rate': counts['malformed'] / total_valid,

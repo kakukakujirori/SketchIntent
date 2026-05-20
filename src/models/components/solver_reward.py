@@ -309,7 +309,9 @@ class SolverReward(torch.nn.Module):
             # Categorize status for logging
             status_name = solver_status.Status
             if status_name == "Converged":
-                if solver_status.DoF <= self.fully_constrained_dof:
+                if solver_status.DistortingConstraints:
+                    status_name = "Distorted"
+                elif solver_status.DoF <= self.fully_constrained_dof:
                     status_name = "FC"
                 else:
                     status_name = "Under"
@@ -363,26 +365,27 @@ class SolverReward(torch.nn.Module):
             # 2. Sequence-wise penalty / reward
             ################################################################
             seq_reward = 0.0
+            is_distorted = bool(solver_status.DistortingConstraints)
 
-            if solver_status.Status != "Converged":
-                # Invalid sequence
+            if solver_status.Status != "Converged" or is_distorted:
+                # Invalid sequence (Distorted-converged is treated as invalid:
+                # no DoF reward, only the seq-level deformation penalty).
                 invalid_penalties = []
                 if solver_status.ConflictingConstraints: invalid_penalties.append(self.penalty_conflicting)
                 if solver_status.RedundantConstraints:   invalid_penalties.append(self.penalty_redundant)
                 if solver_status.MalformedConstraints:   invalid_penalties.append(self.penalty_malformed)
+                if is_distorted:                         invalid_penalties.append(self.penalty_deformed)
 
                 # heaviest penalty as the sequence-level penalty
                 seq_reward = min(invalid_penalties) if invalid_penalties else 0.0
 
             else:
-                # Valid / converged sequence
+                # Valid / converged sequence (and not distorted)
                 orig_dof = self._get_dof_without_constraints(sketch)
                 dof_reduction_rate = (orig_dof - solver_status.DoF) / max(1, orig_dof - self.fully_constrained_dof)
                 seq_reward = self.reward_dof_reduction * dof_reduction_rate
 
-                if solver_status.DistortingConstraints:
-                    seq_reward += self.penalty_deformed
-                elif solver_status.DoF <= self.fully_constrained_dof:
+                if solver_status.DoF <= self.fully_constrained_dof:
                     seq_reward += self.reward_fully_constrained
 
                 # dimension constraints penalty
