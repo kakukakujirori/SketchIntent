@@ -458,12 +458,8 @@ def run_test_inference(
                 sg_sketch, _ = complete_constraint_values(sg_sketch, skip_invalid_constraints=True)
                 if is_valid[global_idx] or under_constrained_converged:
                     final_commands = solver_feedback.sketch_freecad_converter.to_freecad_commands(sg_sketch)
-                elif final_status != "Distorted":
-                    final_commands = solver_feedback.sketch_freecad_converter.to_freecad_commands(sg_sketch, skip_invalid=True)
                 else:
-                    # Distorted cases are intentionally kept commandless: dumping after
-                    # solver recompute can serialize the distorted geometry.
-                    final_commands = []
+                    final_commands = solver_feedback.sketch_freecad_converter.to_freecad_commands(sg_sketch, skip_invalid=True)
             except Exception as e:
                 final_decode_error = repr(e)
 
@@ -679,7 +675,7 @@ def main():
             if commented:
                 f.write("## NOTE: Final constraints were marked invalid; commands below are commented out when present.\n")
                 if r.get('final_status') == "Distorted":
-                    f.write("## NOTE: Geometry distortion was detected; no commands were exported.\n")
+                    f.write("## NOTE: Geometry distortion was detected; commands below are commented out.\n")
                 if r.get('final_decode_error'):
                     f.write("## Decode error: {}\n".format(r['final_decode_error']))
             for cmd in r['final_commands']:
