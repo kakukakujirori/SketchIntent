@@ -51,7 +51,7 @@ if __name__ == '__main__':
             continue
 
         try:
-            seq = datalib.sequence.sketch_to_sequence(sketch_or_error)
+            seq = datalib.sequence.sketch_to_sequence(sketch)
             sequences.append(seq)
             # NOTE: (doc_id, part_id, sketch_id), where part_id and sketch_id are dummy
             # Ref: sketchgraphs/pipeline/make_sequence_dataset.py
