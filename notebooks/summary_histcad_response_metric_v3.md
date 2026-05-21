@@ -249,7 +249,7 @@ Q_i = G_i に含まれる dimensional constraints
 R_i = G_i に含まれる relational constraints
 ```
 
-`source_validated=True` のフラグ指定により `G_i` 自身で finite edit が成功するかを確認し、成功する probes だけを残す。この source validation は HistCAD benchmark の feasible edit site に合わせるためである。（現在の設定では常に成功するだろうが、念の為に実装している。）
+各 `G_i` について、`G_i` 自身で finite edit が成功するかを常に事前確認し、成功する probes だけを残す。この source validation は HistCAD benchmark の feasible edit site に合わせるためである。（現在の設定では常に成功するだろうが、念の為に実装している。）旧 `--no-source-validation` 経路と unvalidated 出力は削除し、CSV の `source_validated` は常に `True` である。
 
 評価対象:
 
@@ -265,23 +265,29 @@ multi-reference aggregation:
 
 主要実装と artifacts:
 
-- `notebooks/exp_constrained_response_metric.py`:
+V3 関連の実験・集計 script は `notebooks/v3_exp/` に集約した。`v3_exp/_fast.py` は
+`compute_native_response`, `pairwise_distance_observable`, `constraint_jacobian`
+などの per-rotation cache を提供し、各 experiment script の `main()` 冒頭で同一プロセス内に
+install される。したがって `v3_exp` の entry script は親 `notebooks/` 直下の実験 script に依存せず、
+`notebooks/v3_exp/` と `src/` 下のコードで再実行できる。
+
+- `notebooks/v3_exp/exp_constrained_response_metric.py`:
 
   `d_resp`, `d_cresp`, `d_leak`, `d_feas`, `d_feas_tilde`, `d_align` を
   source-conditioned multi-reference setting で計算する主実験スクリプト。
   Vitruvion vs heldout-drop0 と dimensional dropout sweep の raw scores を出す。
-- `notebooks/exp_source_conditioned_dropout.py`:
+- `notebooks/v3_exp/exp_source_conditioned_dropout.py`:
 
   同じ source-conditioned probes を使って HistCAD-style ER / cPCSR / OES と
   既存 response baseline を計算するスクリプト。
-- `notebooks/analyze_dalign_evidence.py`:
+- `notebooks/v3_exp/analyze_dalign_evidence.py`:
 
   `d_feas` と HistCAD OES の paired Wilcoxon test、dropout trajectory、
   component median を集計する evidence aggregation。
-- `notebooks/analyze_dfeas_trajectory.py`:
+- `notebooks/v3_exp/analyze_dfeas_trajectory.py`:
 
   dropout 率に対する `d_feas`, gain, leak の trajectory を詳しく見る補助解析。
-- `notebooks/analyze_dfeas_outliers.py`:
+- `notebooks/v3_exp/analyze_dfeas_outliers.py`:
 
   leak mean を壊す heavy-tail outlier を特定し、外れ値除外後の trajectory を確認する補助解析。
 - `artifacts/constrained_response_scores_full.csv`:
@@ -538,7 +544,7 @@ leak の mean は一部 dropout rate で巨大になった。これが主張を�
   {Distorted, SolverError}` で under-constrained な valid 出力も d_feas
   評価対象に含める。Distorted (geometry が solve 中に動いた)・SolverError
   (Redundant / Conflicting / Failed / Malformed) のみ除外。実装は
-  `notebooks/exp_source_conditioned_dropout.py:make_bundle` の
+  `notebooks/v3_exp/exp_source_conditioned_dropout.py:build_file_bundle` の
   `parse_pred_header()` / `_REJECTED_HEADER_STATUSES`。
 - 結果 admit 率: base 14% → **77.4%** (123/159 files)、solver_rl 80% → **93.7%** (149/159 files)。
 
@@ -855,7 +861,7 @@ d_smatch_sym^(q)(P, G) = 2 ||S_P^(q) - S_G^(q)||_F / (||S_P^(q)||_F + ||S_G^(q)|
 
 各 probe について計算し、source ごとに平均、multi-reference では `min_i` を取る (低いほど良い)。
 `d_feas` と同じ source-conditioned pipeline で 47 files × 3 rotations × 5 dropout rates と
-Vitruvion を評価した (`notebooks/exp_smatch_metric.py`)。
+Vitruvion を評価した (`notebooks/v3_exp/exp_smatch_metric.py`)。
 
 **結果は 3 variants とも不合格**:
 
@@ -923,7 +929,7 @@ Artifacts:
 
 ### 2. positive / negative control
 
-`notebooks/exp_v3_controls_and_robustness.py` で、同じ source-conditioned multi-reference
+`notebooks/v3_exp/exp_v3_controls_and_robustness.py` で、同じ source-conditioned multi-reference
 setting のまま control variants を追加した。
 
 評価した control:
@@ -1128,7 +1134,7 @@ Artifacts:
 `d_feas` full paired:
 
 ```bash
-conda run -n freecad python notebooks/exp_constrained_response_metric.py \
+conda run -n freecad python notebooks/v3_exp/exp_constrained_response_metric.py \
   --drop-rates 0,100 \
   --output-csv artifacts/constrained_response_scores_full.csv \
   --details-csv artifacts/constrained_response_details_full.csv
@@ -1137,7 +1143,7 @@ conda run -n freecad python notebooks/exp_constrained_response_metric.py \
 Dimensional dropout sweep:
 
 ```bash
-conda run -n freecad python notebooks/exp_constrained_response_metric.py \
+conda run -n freecad python notebooks/v3_exp/exp_constrained_response_metric.py \
   --drop-rates 0,25,50,75,100 \
   --output-csv artifacts/constrained_response_scores_dropout.csv \
   --details-csv artifacts/constrained_response_details_dropout.csv
@@ -1146,26 +1152,26 @@ conda run -n freecad python notebooks/exp_constrained_response_metric.py \
 Evidence aggregation:
 
 ```bash
-python notebooks/analyze_dalign_evidence.py
-python notebooks/analyze_dfeas_trajectory.py
-python notebooks/analyze_dfeas_outliers.py
+python notebooks/v3_exp/analyze_dalign_evidence.py
+python notebooks/v3_exp/analyze_dfeas_trajectory.py
+python notebooks/v3_exp/analyze_dfeas_outliers.py
 ```
 
 Additional controls / robustness:
 
 ```bash
-conda run -n freecad python notebooks/exp_v3_controls_and_robustness.py \
+conda run -n freecad python notebooks/v3_exp/exp_v3_controls_and_robustness.py \
   --output-csv artifacts/v3_controls_scores.csv \
   --details-csv artifacts/v3_controls_details.csv
 
-conda run -n freecad python notebooks/exp_v3_controls_and_robustness.py \
+conda run -n freecad python notebooks/v3_exp/exp_v3_controls_and_robustness.py \
   --eps-values 1e-9 \
   --newton-tol 1e-5 \
   --relation-tol 1e-2 \
   --output-csv artifacts/v3_controls_scores_tol_loose.csv \
   --details-csv artifacts/v3_controls_details_tol_loose.csv
 
-conda run -n freecad python notebooks/exp_v3_controls_and_robustness.py \
+conda run -n freecad python notebooks/v3_exp/exp_v3_controls_and_robustness.py \
   --eps-values 1e-9 \
   --newton-tol 1e-7 \
   --relation-tol 1e-4 \
@@ -1176,13 +1182,13 @@ conda run -n freecad python notebooks/exp_v3_controls_and_robustness.py \
 Finite edit local check:
 
 ```bash
-conda run -n freecad python notebooks/exp_linear_vs_finite.py \
+conda run -n freecad python notebooks/v3_exp/exp_linear_vs_finite.py \
   --filename 26648_59fbce6a_0000_sketch03.FCStd \
   --annotators Eko,Sagar \
   --n-probes 5 \
   --out-png artifacts/exp_linear_vs_finite_26648_v3.png
 
-conda run -n freecad python notebooks/exp_linear_vs_finite.py \
+conda run -n freecad python notebooks/v3_exp/exp_linear_vs_finite.py \
   --filename 122579_2663ded3_0000_sketch04.FCStd \
   --annotators Sagar,Ryotaro \
   --n-probes 5 \
@@ -1192,7 +1198,7 @@ conda run -n freecad python notebooks/exp_linear_vs_finite.py \
 Point-Point Coincident preservation ablation for OES:
 
 ```bash
-conda run -n freecad python notebooks/exp_source_conditioned_dropout.py \
+conda run -n freecad python notebooks/v3_exp/exp_source_conditioned_dropout.py \
   --drop-rates 100,75,50,25,0 \
   --exclude-point-point-coincident-preservation \
   --output-csv artifacts/source_conditioned_dropout_scores_no_ppcoincident.csv \
@@ -1202,7 +1208,7 @@ conda run -n freecad python notebooks/exp_source_conditioned_dropout.py \
 Naive `S_C^(q)` match (`d_smatch`) vs `d_feas`:
 
 ```bash
-conda run -n freecad python notebooks/exp_smatch_metric.py \
+conda run -n freecad python notebooks/v3_exp/exp_smatch_metric.py \
   --drop-rates 0,25,50,75,100 \
   --output-csv artifacts/smatch_vs_dfeas_summary.csv \
   --details-csv artifacts/smatch_vs_dfeas_details.csv
@@ -1212,44 +1218,44 @@ conda run -n freecad python notebooks/exp_smatch_metric.py \
 
 ```bash
 # Fully-scaled experiment runs (6 batches × 5 humans × 2 model preds × dropout sweep)
-conda run -p /home/sturk/miniforge3/envs/freecad python notebooks/exp_constrained_response_metric.py \
+conda run -p /home/sturk/miniforge3/envs/freecad python notebooks/v3_exp/exp_constrained_response_metric.py \
   --drop-rates 0,25,50,75,100 \
   --output-csv artifacts/constrained_response_scores_dropout.csv \
   --details-csv artifacts/constrained_response_details_dropout.csv
 
-conda run -p /home/sturk/miniforge3/envs/freecad python notebooks/exp_source_conditioned_dropout.py \
+conda run -p /home/sturk/miniforge3/envs/freecad python notebooks/v3_exp/exp_source_conditioned_dropout.py \
   --drop-rates 100,75,50,25,0 \
   --output-csv artifacts/source_conditioned_dropout_scores_full.csv \
   --details-csv artifacts/source_conditioned_dropout_details_full.csv
 
-conda run -p /home/sturk/miniforge3/envs/freecad python notebooks/exp_v3_controls_and_robustness.py \
+conda run -p /home/sturk/miniforge3/envs/freecad python notebooks/v3_exp/exp_v3_controls_and_robustness.py \
   --eps-values 1e-11,1e-9,1e-7 \
   --output-csv artifacts/v3_controls_scores_full.csv \
   --details-csv artifacts/v3_controls_details_full.csv
 
-conda run -p /home/sturk/miniforge3/envs/freecad python notebooks/exp_smatch_metric.py \
+conda run -p /home/sturk/miniforge3/envs/freecad python notebooks/v3_exp/exp_smatch_metric.py \
   --drop-rates 0,25,50,75,100 \
   --output-csv artifacts/smatch_vs_dfeas_summary_full.csv \
   --details-csv artifacts/smatch_vs_dfeas_details_full.csv
 
-conda run -p /home/sturk/miniforge3/envs/freecad python notebooks/compute_constraint_token_f1.py \
+conda run -p /home/sturk/miniforge3/envs/freecad python notebooks/v3_exp/compute_constraint_token_f1.py \
   --output-csv artifacts/constraint_token_f1.csv
 
 # Analysis chaining
-python notebooks/analyze_dfeas_distribution.py \
+python notebooks/v3_exp/analyze_dfeas_distribution.py \
   --input-csv artifacts/v3_controls_scores_full.csv \
   --eps 1e-9
-python notebooks/analyze_model_ranking.py \
+python notebooks/v3_exp/analyze_model_ranking.py \
   --dfeas-csv artifacts/constrained_response_scores_dropout.csv \
   --oes-csv artifacts/source_conditioned_dropout_scores_full.csv \
   --controls-csv artifacts/v3_controls_scores_full.csv \
   --f1-csv artifacts/constraint_token_f1.csv
-python notebooks/find_dfeas_oes_divergent_cases.py \
+python notebooks/v3_exp/find_dfeas_oes_divergent_cases.py \
   --dfeas-csv artifacts/constrained_response_scores_dropout.csv \
   --oes-csv artifacts/source_conditioned_dropout_scores_full.csv \
   --high-oes-threshold 0.5 --high-dfeas-threshold 0.1 \
   --low-oes-threshold 0.05 --low-dfeas-threshold 0.05 \
   --top-k 12
-python notebooks/analyze_dfeas_pairwise_human_vs_model.py \
+python notebooks/v3_exp/analyze_dfeas_pairwise_human_vs_model.py \
   --controls-csv artifacts/v3_controls_scores_full.csv
 ```

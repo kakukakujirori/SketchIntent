@@ -377,7 +377,6 @@ def evaluate_rotation(
     base_policy,
     eps,
     eval_model=True,
-    source_validation=True,
 ):
     rotation_id = f"{bundle.batch}:{bundle.filename}:{'+'.join(refs)}__query={heldout}"
     participants = set(refs) | {heldout}
@@ -397,11 +396,8 @@ def evaluate_rotation(
     for gt_name in refs:
         gt_sketch = bundle.sketches[gt_name]
         probes, weights, rels, _rel_weights = source_probes(gt_sketch)
-        if source_validation:
-            mask = validate_probes_on_source(
-                gt_sketch, probes, rels, context, converter, histcad_cfg)
-        else:
-            mask = [True] * len(probes)
+        mask = validate_probes_on_source(
+            gt_sketch, probes, rels, context, converter, histcad_cfg)
         source_info[gt_name] = {
             "probes": probes,
             "weights": weights,
@@ -413,7 +409,7 @@ def evaluate_rotation(
 
     # h_scale per source: median over other humans evaluated against this source.
     h_scales = {}  # (gt_name, validated, metric_name) -> float|None
-    validation_modes = (False, True) if source_validation else (True,)
+    validation_modes = (True,)
     for gt_name in refs:
         other_humans = [name for name in refs if name != gt_name]
         info = source_info[gt_name]
@@ -692,7 +688,6 @@ def parse_args():
         action="store_true",
         help="Use raw coordinates except for any --coordinate-scale multiplier.",
     )
-    parser.add_argument("--no-source-validation", action="store_true")
     parser.add_argument("--delta-basis", default="bbox_diag")
     parser.add_argument("--delta-scale", type=float, default=0.01)
     parser.add_argument("--delta-absolute", type=float, default=1.0)
@@ -786,7 +781,6 @@ def main():
                         histcad_cfg=histcad_cfg,
                         base_policy=args.base_policy,
                         eps=args.eps,
-                        source_validation=not args.no_source_validation,
                     )
                     for row in srows:
                         row["coordinate_scale"] = args.coordinate_scale
