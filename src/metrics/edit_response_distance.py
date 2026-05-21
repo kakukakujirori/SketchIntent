@@ -215,7 +215,8 @@ def compute_native_response(
     context,
     constraint_ids: list[str] | None = None,
     dtype: torch.dtype = torch.float64,
-    eps: float = 1e-8,
+    eps: float = 1e-9,
+    rcond: float = 1e-6,
 ) -> NativeResponse:
     """
     Build the response map of primitive parameters to a constraint set's own
@@ -227,6 +228,22 @@ def compute_native_response(
     set: Distance, Length, Diameter, Radius, Angle, ...). Multi-row residuals
     from such constraints are accepted but their extra rows are treated as
     relational (no p-column), which is an approximation.
+
+    Singular value threshold for pinv(J_x):
+        eps_eff = max(eps, rcond * sigma_max(J_x))
+
+    The combined absolute+relative threshold prevents two failure modes:
+    - eps alone (absolute): misses near-zero-but-nonzero singular values that
+      arise when constraint equations are nearly linearly dependent (e.g. a
+      sketch with nearly-redundant distance constraints).  Those tiny singular
+      values invert to huge factors and make R blow up.
+    - rcond alone (relative): a purely relative cutoff would drop weak but real
+      constraint directions in very small or poorly-scaled sketches.
+
+    The default rcond=1e-6 (condition number cap of 1e6) cleanly handles rigid
+    body modes and near-degenerate constraint Jacobians seen in practice without
+    affecting well-conditioned sketches (verified: main-experiment sketches have
+    min real SV ≈ 1.7e-2, well above rcond * sigma_max ≈ 2e-5).
     """
     state = SketchState(sketch, dtype=dtype)
     n_x = state.num_dof()
@@ -275,9 +292,9 @@ def compute_native_response(
     if n_p == 0:
         R = torch.zeros(n_x, 0, dtype=dtype)
     else:
-        # Absolute-eps SVD pseudo-inverse for J_x.
         U, S, Vh = torch.linalg.svd(J_x, full_matrices=False)
-        keep = S >= eps
+        eps_eff = max(eps, rcond * float(S[0])) if S.numel() > 0 else eps
+        keep = S >= eps_eff
         if not bool(keep.any()):
             R = torch.zeros(n_x, n_p, dtype=dtype)
         else:
@@ -292,11 +309,16 @@ def compute_native_response(
 # Edit response  S_C^(q) = R_C pinv(J_q R_C)
 # ---------------------------------------------------------------------------
 
-def _abs_pinv(A: torch.Tensor, eps: float) -> torch.Tensor:
+def _abs_pinv(A: torch.Tensor, eps: float, rcond: float = 0.0) -> torch.Tensor:
+    """Pseudo-inverse with combined absolute+relative singular value cutoff.
+
+    eps_eff = max(eps, rcond * sigma_max).  Set rcond=0 to use absolute eps only.
+    """
     if A.numel() == 0:
         return torch.zeros(A.shape[1], A.shape[0], dtype=A.dtype, device=A.device)
     U, S, Vh = torch.linalg.svd(A, full_matrices=False)
-    keep = S >= eps
+    eps_eff = max(eps, rcond * float(S[0])) if S.numel() > 0 and rcond > 0.0 else eps
+    keep = S >= eps_eff
     if not bool(keep.any()):
         return torch.zeros(A.shape[1], A.shape[0], dtype=A.dtype, device=A.device)
     S_inv = torch.diag(1.0 / S[keep])
@@ -307,13 +329,17 @@ def edit_response_for_probe(
     native: NativeResponse,
     probe: datalib.Constraint,
     context,
-    eps: float = 1e-8,
+    eps: float = 1e-9,
+    rcond: float = 1e-6,
 ) -> torch.Tensor | None:
     """
     Compute S_C^(q) = R_C pinv(J_q R_C) for a single edit probe q.
 
     Shape: (n_x, k_q) where k_q is the residual size of the probe (typically 1).
     Returns None if the probe Jacobian could not be computed for this sketch.
+
+    The combined absolute+relative cutoff (eps, rcond) is applied to
+    pinv(J_q R_C), matching the convention in compute_native_response.
     """
     Jq = constraint_jacobian(probe, native.state, context)
     if Jq is None:
@@ -325,9 +351,18 @@ def edit_response_for_probe(
         # No native dimensions → cannot realize any edit; return zero response.
         return torch.zeros(n_x, k_q, dtype=Jq.dtype, device=Jq.device)
 
-    A = Jq @ native.R                              # (k_q, n_p)
-    A_pinv = _abs_pinv(A, eps=eps)                 # (n_p, k_q)
-    return native.R @ A_pinv                       # (n_x, k_q)
+    A = Jq @ native.R                                    # (k_q, n_p)
+    # eps_A is normalized by ||J_q|| * ||R||_op so that near-zero SVs of A
+    # are thresholded relative to the physical scale of the probe, not relative
+    # to sigma_max(A) itself (which would be circular when A is already tiny).
+    if rcond > 0.0:
+        Jq_norm = float(torch.linalg.norm(Jq))
+        R_op = float(torch.linalg.norm(native.R, ord=2))
+        eps_A = max(eps, rcond * Jq_norm * R_op)
+    else:
+        eps_A = eps
+    A_pinv = _abs_pinv(A, eps=eps_A, rcond=0.0)         # (n_p, k_q)
+    return native.R @ A_pinv                             # (n_x, k_q)
 
 
 # ---------------------------------------------------------------------------

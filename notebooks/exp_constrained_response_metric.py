@@ -81,6 +81,7 @@ def constrained_edit_response_for_probe(
     J_R_external: torch.Tensor | None,
     context,
     eps: float = 1e-9,
+    rcond: float = 1e-6,
 ):
     """S = R · pinv([J_q R; J_{R_ext} R]) · [I; 0].
 
@@ -104,10 +105,20 @@ def constrained_edit_response_for_probe(
         A = torch.cat([A_top, A_bot], dim=0)
         b = torch.zeros(A.shape[0], k_q, dtype=Jq.dtype, device=Jq.device)
         b[:k_q, :] = torch.eye(k_q, dtype=Jq.dtype, device=Jq.device)
+        # Stacked A has sigma_max from J_R rows; rcond relative to that is fine.
+        A_pinv = _abs_pinv(A, eps=eps, rcond=rcond)
     else:
         A = A_top
         b = torch.eye(k_q, dtype=Jq.dtype, device=Jq.device)
-    A_pinv = _abs_pinv(A, eps=eps)
+        # Unconstrained: normalize eps_A by ||J_q|| * ||R||_op so near-zero SVs
+        # of A are dropped relative to the physical scale of the probe.
+        if rcond > 0.0:
+            Jq_norm = float(torch.linalg.norm(Jq))
+            R_op = float(torch.linalg.norm(native.R, ord=2))
+            eps_A = max(eps, rcond * Jq_norm * R_op)
+        else:
+            eps_A = eps
+        A_pinv = _abs_pinv(A, eps=eps_A, rcond=0.0)
     dp_star = A_pinv @ b  # (n_p, k_q)
     return native.R @ dp_star  # (n_x, k_q)
 
@@ -175,12 +186,13 @@ def compute_metrics(
     context,
     base_eids,
     eps: float,
+    rcond: float = 1e-6,
 ):
     """Compute d_resp, d_cresp, d_leak for this (pred, gt) pair using
     `rels` (=GT's relations) as the source relation set R_G."""
 
-    gt_native = compute_native_response(gt_sketch, context, eps=eps)
-    pred_native = compute_native_response(pred_sketch, context, eps=eps)
+    gt_native = compute_native_response(gt_sketch, context, eps=eps, rcond=rcond)
+    pred_native = compute_native_response(pred_sketch, context, eps=eps, rcond=rcond)
 
     J_phi_gt = J_phi_pr = None
     if base_eids is not None:
@@ -376,6 +388,7 @@ def evaluate_rotation(
     histcad_cfg,
     base_policy,
     eps,
+    rcond: float = 1e-6,
     eval_model=True,
     source_validation=True,
 ):
@@ -438,6 +451,7 @@ def evaluate_rotation(
                     context=context,
                     base_eids=base_eids,
                     eps=eps,
+                    rcond=rcond,
                 )
                 for m in METRIC_NAMES:
                     v = finite_or_none(res.get(m))
@@ -475,6 +489,7 @@ def evaluate_rotation(
                     context=context,
                     base_eids=base_eids,
                     eps=eps,
+                    rcond=rcond,
                 )
                 row = {
                     "batch": bundle.batch,
@@ -692,6 +707,11 @@ def parse_args():
         action="store_true",
         help="Use raw coordinates except for any --coordinate-scale multiplier.",
     )
+    parser.add_argument(
+        "--rcond", type=float, default=1e-6,
+        help="Relative singular value cutoff for pinv(J_x): eps_eff = max(eps, rcond*sigma_max). "
+             "Set to 0 to use absolute eps only.")
+
     parser.add_argument("--no-source-validation", action="store_true")
     parser.add_argument("--delta-basis", default="bbox_diag")
     parser.add_argument("--delta-scale", type=float, default=0.01)
@@ -786,6 +806,7 @@ def main():
                         histcad_cfg=histcad_cfg,
                         base_policy=args.base_policy,
                         eps=args.eps,
+                        rcond=args.rcond,
                         source_validation=not args.no_source_validation,
                     )
                     for row in srows:

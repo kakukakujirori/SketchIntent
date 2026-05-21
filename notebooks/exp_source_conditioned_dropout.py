@@ -545,9 +545,9 @@ def histcad_score(*, pred_sketch, gt_sketch, edit_probes, rels,
         return None, None, None, None, None, 0, 0, str(e)[:200]
 
 
-def edit_attainability(*, sketch, edit_probes, edit_weights, context, eps=1e-8):
+def edit_attainability(*, sketch, edit_probes, edit_weights, context, eps=1e-9, rcond=1e-6):
     try:
-        native = compute_native_response(sketch, context, eps=eps)
+        native = compute_native_response(sketch, context, eps=eps, rcond=rcond)
     except Exception:
         return None, len(edit_probes)
     total = total_w = 0.0
@@ -929,6 +929,9 @@ def parse_args():
     p.add_argument("--er-target-tol", type=float, default=1e-3)
     p.add_argument("--relation-tol", type=float, default=1e-3)
     p.add_argument("--eps", type=float, default=1e-9)
+    p.add_argument(
+        "--rcond", type=float, default=1e-6,
+        help="Relative singular value cutoff for pinv(J_x): eps_eff = max(eps, rcond*sigma_max).")
     p.add_argument(
         "--exclude-point-point-coincident-preservation",
         action="store_true",

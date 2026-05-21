@@ -119,6 +119,7 @@ def evaluate_variant_for_eps(
     base_eids,
     context,
     eps: float,
+    rcond: float = 1e-6,
     source_validated: bool = True,
 ):
     per_source = []
@@ -142,6 +143,7 @@ def evaluate_variant_for_eps(
             context=context,
             base_eids=base_eids,
             eps=eps,
+            rcond=rcond,
         )
         row = {
             "batch": bundle.batch,
@@ -202,6 +204,7 @@ def evaluate_rotation(
     dim_drop_rates,
     rel_drop_rates,
     eps_values,
+    rcond: float = 1e-6,
     context,
     converter,
     histcad_cfg,
@@ -286,6 +289,7 @@ def evaluate_rotation(
                 base_eids=base_eids,
                 context=context,
                 eps=eps,
+                rcond=rcond,
             )
             per_source_self.append(row)
             source_self_detail.extend(drows)
@@ -327,6 +331,7 @@ def evaluate_rotation(
                 base_eids=base_eids,
                 context=context,
                 eps=eps,
+                rcond=rcond,
             )
             srow.update(meta)
             summary_rows.append(srow)
@@ -403,6 +408,10 @@ def parse_args():
     parser.add_argument("--dim-drop-rates", default="50,100")
     parser.add_argument("--rel-drop-rates", default="50,100")
     parser.add_argument("--eps-values", default="1e-7,1e-9,1e-11")
+    parser.add_argument(
+        "--rcond", type=float, default=1e-6,
+        help="Relative singular value cutoff for pinv(J_x): eps_eff = max(eps, rcond*sigma_max). "
+             "Sweeping eps with rcond=0 isolates the absolute-eps effect.")
     parser.add_argument("--base-policy", default="canonical_solid",
                         choices=("none", "canonical_solid", "canonical_all"))
     parser.add_argument("--geometry-tol", type=float, default=5e-1)
@@ -492,6 +501,7 @@ def main():
                         dim_drop_rates=dim_drop_rates,
                         rel_drop_rates=rel_drop_rates,
                         eps_values=eps_values,
+                        rcond=args.rcond,
                         context=context,
                         converter=converter,
                         histcad_cfg=histcad_cfg,
