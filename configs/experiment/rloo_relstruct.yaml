@@ -1,0 +1,64 @@
+# @package _global_
+
+# RLOO with Plan A″ RelStruct reward (leak_prime + d_relstruct + gain_intrinsic).
+#
+# Staged rollout — controlled by model.relstruct_reward.use_* flags:
+#   Step 1 (B2): leak only
+#     conda run -n freecad python src/train.py experiment=rloo_relstruct
+#   Step 2 (B3): leak + d_relstruct
+#     conda run -n freecad python src/train.py experiment=rloo_relstruct \
+#       model.relstruct_reward.use_relstruct=true
+#   Step 3 (B4 full A″): + gain + dim penalty
+#     conda run -n freecad python src/train.py experiment=rloo_relstruct \
+#       model.relstruct_reward.use_relstruct=true \
+#       model.relstruct_reward.use_gain=true \
+#       model.relstruct_reward.use_dim_penalty=true
+#     (SolverReward.penalty_num_dimensional_constraints is automatically
+#      zeroed when use_dim_penalty=true; see ConstraintARModuleRLOO.__init__)
+#
+# Smoke test (CPU, 2 steps):
+#   conda run -n freecad python src/train.py experiment=rloo_relstruct \
+#     trainer=cpu data.batch_size=1 model.group_sample_size=2 \
+#     trainer.max_steps=2 trainer.limit_val_batches=0
+
+defaults:
+  - override /data: constraint_rloo.yaml
+  - override /model: constraint_ar_rloo_relstruct.yaml
+  - override /trainer: default
+
+tags: ["rloo", "relstruct"]
+
+callbacks:
+  model_checkpoint_epoch:
+    every_n_train_steps: 100
+    save_top_k: 3
+    filename: "epoch_{epoch}_step_{step}"
+
+  model_checkpoint_loss: null
+
+  model_checkpoint_reward:
+    _target_: lightning.pytorch.callbacks.ModelCheckpoint
+    dirpath: ${paths.output_dir}/checkpoints
+    monitor: "validation_gen/solver_fc_rate"
+    filename: "step_{step}_fc_{validation_gen/solver_fc_rate:.3f}"
+    save_top_k: 3
+    mode: "max"
+    auto_insert_metric_name: false
+    every_n_train_steps: 100
+
+data:
+  batch_size: 32
+  num_workers: 1
+
+model:
+  optimizer:
+    lr: 1e-5
+  gt_reward_coeff: 0.0
+
+trainer:
+  check_val_every_n_epoch: null
+  val_check_interval: 100
+  devices: 1
+  max_epochs: 3
+
+pretrained_ckpt_path: logs/train/runs/2026-05-02_20-35-42/checkpoints/epoch_29.ckpt

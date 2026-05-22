@@ -10,6 +10,7 @@ from tqdm import tqdm
 from src.metrics import ConstraintBLEU, ConstraintIoU, TokenAccuracy
 from src.models.components.constraint_ar_model import ConstraintARModel
 from src.models.components.dfeas_reward import DFeasReward
+from src.models.components.relstruct_reward import RelStructReward
 from src.models.components.solver_feedback import SolverFeedback
 from src.models.components.solver_reward import SolverReward
 from src.models.components.token_reordering import TokenReordering
@@ -38,17 +39,19 @@ class ConstraintARModuleRLOO(L.LightningModule):
         penalty_duplicate: float = -1.0,
         dfeas_reward: DFeasReward | None = None,
         dfeas_apply_to: str = "converged",
+        relstruct_reward: RelStructReward | None = None,
         relational_only: bool = False,
     ):
         super().__init__()
         if dfeas_apply_to not in ("converged", "fc"):
             raise ValueError(f"unknown dfeas_apply_to: {dfeas_apply_to}")
-        self.save_hyperparameters(ignore=['model', 'reward', 'dfeas_reward'], logger=False)
+        self.save_hyperparameters(ignore=['model', 'reward', 'dfeas_reward', 'relstruct_reward'], logger=False)
 
         # models
         self.model = model
         self.reward = reward
         self.dfeas_reward = dfeas_reward
+        self.relstruct_reward = relstruct_reward
         self.ref_model = copy.deepcopy(model)
 
         self.relational_only = relational_only
@@ -67,6 +70,25 @@ class ConstraintARModuleRLOO(L.LightningModule):
             self.dfeas_reward.eval()
             for p in self.dfeas_reward.parameters():
                 p.requires_grad_(False)
+
+        if self.relstruct_reward is not None:
+            self.relstruct_reward.eval()
+            for p in self.relstruct_reward.parameters():
+                p.requires_grad_(False)
+
+            # If RelStructReward owns the dim-count penalty, zero out
+            # SolverReward's penalty_num_dimensional_constraints to avoid
+            # double-counting (plan §6.1 / config comment "set
+            # penalty_num_dimensional_constraints=0 when use_dim_penalty=true").
+            if getattr(self.relstruct_reward, "use_dim_penalty", False):
+                prev = getattr(self.reward, "penalty_num_dimensional_constraints", 0.0)
+                if prev != 0.0:
+                    print(
+                        f"[ConstraintARModuleRLOO] RelStructReward.use_dim_penalty=True "
+                        f"-> overriding SolverReward.penalty_num_dimensional_constraints "
+                        f"{prev} -> 0.0 to avoid double penalty."
+                    )
+                    self.reward.penalty_num_dimensional_constraints = 0.0
 
         self.ref_model.eval()
         for p in self.ref_model.parameters():
@@ -396,6 +418,15 @@ class ConstraintARModuleRLOO(L.LightningModule):
             dfeas_scores = dfeas_scores_cpu.to(self.device).float()
             rewards = rewards + dfeas_scores
 
+        # Step 4d: RelStruct reward (plan A″ — leak_prime + d_relstruct + gain_intrinsic)
+        relstruct_metrics: dict[str, float | int] = {}
+        if self.relstruct_reward is not None:
+            relstruct_scores_cpu, relstruct_metrics = self.relstruct_reward(
+                p_val_expanded, generated, expanded['sketch'],
+                per_sample_status=per_sample_status,
+            )
+            rewards = rewards + relstruct_scores_cpu.to(self.device).float()
+
         # Parse solver metrics (Counter → scalar)
         parsed_solver_metrics = {}
         if "status" in solver_metrics:
@@ -457,6 +488,7 @@ class ConstraintARModuleRLOO(L.LightningModule):
             'duplicate_penalty':  duplicate_penalty_metric,
             **parsed_solver_metrics,
             **dfeas_metrics,
+            **relstruct_metrics,
         }
         return loss, metrics
 
@@ -593,13 +625,17 @@ class ConstraintARModuleRLOO(L.LightningModule):
             elif isinstance(v, torch.Tensor):
                 self.log(f'validation_gen/bleu_{k}', v, add_dataloader_idx=False, sync_dist=True, on_epoch=True)
 
-        # Evaluate solver constraints and log solver feedback metrics
+        # Evaluate solver constraints and log solver feedback metrics.
+        # per_sample_status is reused for gating RelStructReward bonuses, so
+        # both signals come from a single solver evaluation pass.
+        per_sample_status: list[str] | None = None
         try:
-            solver_results = self.solver_feedback.evaluate_constraints_batch(
+            solver_results, per_sample_status = self.solver_feedback.evaluate_constraints_batch(
                 batch['p_val'].cpu().numpy(),
                 generated.cpu().numpy(),
                 batch['sketch'],
                 fully_constrained_dof=2,
+                return_per_sample_status=True,
             )
             if solver_results:
                 for metric_name, metric_value in solver_results.items():
@@ -621,6 +657,21 @@ class ConstraintARModuleRLOO(L.LightningModule):
             except Exception as e:
                 if self.global_rank == 0:
                     print(f"[validation_step] DFeas evaluation failed: {e}")
+
+        # Evaluate RelStruct reward components and log
+        if self.relstruct_reward is not None:
+            try:
+                _, relstruct_val_results = self.relstruct_reward(
+                    batch['p_val'],
+                    generated,
+                    batch['sketch'],
+                    per_sample_status=per_sample_status,
+                )
+                for metric_name, metric_value in relstruct_val_results.items():
+                    self.log(f'validation_gen/{metric_name}', float(metric_value), add_dataloader_idx=False, sync_dist=True, on_epoch=True)
+            except Exception as e:
+                if self.global_rank == 0:
+                    print(f"[validation_step] RelStruct evaluation failed: {e}")
 
         # Save first batch for wandb visualization
         if batch_idx == 0:
