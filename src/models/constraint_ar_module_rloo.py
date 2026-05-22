@@ -35,6 +35,7 @@ class ConstraintARModuleRLOO(L.LightningModule):
         kl_coeff: float = 0.01,
         sft_coeff: float = 0.0,
         gt_reward_coeff: float = 0.0,
+        penalty_duplicate: float = -1.0,
         dfeas_reward: DFeasReward | None = None,
         dfeas_apply_to: str = "converged",
         relational_only: bool = False,
@@ -78,6 +79,7 @@ class ConstraintARModuleRLOO(L.LightningModule):
         self.kl_coeff = kl_coeff
         self.sft_coeff = sft_coeff
         self.gt_reward_coeff = gt_reward_coeff
+        self.penalty_duplicate = penalty_duplicate
         self.dfeas_apply_to = dfeas_apply_to
         self._block_size: int = context.align_constraint_token_length_to  # tokens per constraint
         self._prefix_len: int = 1  # START token
@@ -147,9 +149,10 @@ class ConstraintARModuleRLOO(L.LightningModule):
         """Compute per-token GT-match reward for each generated sequence.
 
         For every constraint block in *generated*, checks whether an identical
-        block exists anywhere in *gt* (after intra-ref canonical sorting on both
-        sides).  If a match is found the reward `gt_reward_coeff` is added at
-        the **last token position of that block**.
+        block exists in *gt* (after intra-ref canonical sorting on both sides).
+        Matching is **one-to-one**: each GT block can be consumed by at most one
+        generated block (greedy first-match in scan order).  This prevents
+        duplicate-spam from farming the same GT block N times.
 
         Args:
             generated: [BK, L] generated token sequences (includes START token at pos 0).
@@ -207,7 +210,7 @@ class ConstraintARModuleRLOO(L.LightningModule):
             (gt_body == pad_id) | (gt_body == stop_id)
         ).any(dim=-1)
 
-        # ── set-containment check (vectorised): gen_block ∈ gt_set ───────────
+        # ── pairwise block match (vectorised) ─────────────────────────────────
         # Compare every gen block against every gt block for each sample.
         # gen_exp: [BK, N, 1, bs]  vs  gt_exp: [BK, 1, M, bs]
         gen_exp = gen_body.unsqueeze(2)  # [BK, N, 1, bs]
@@ -216,15 +219,24 @@ class ConstraintARModuleRLOO(L.LightningModule):
         # block_match: [BK, N, M]  — True if whole block matches
         block_match = (gen_exp == gt_exp).all(dim=-1)
 
-        # Mask out matches involving invalid GT blocks
-        # gt_invalid: [BK, M] → [BK, 1, M]
+        # Disallow matches with invalid blocks on either side
         block_match = block_match & (~gt_invalid.unsqueeze(1))
+        block_match = block_match & (~gen_invalid.unsqueeze(2))
 
-        # matched: [BK, N]  — True if this gen block matches *any* valid GT block
-        matched = block_match.any(dim=-1)  # [BK, N]
-
-        # Also mask out invalid generated blocks (stop/pad blocks never get reward)
-        matched = matched & (~gen_invalid)  # [BK, N]
+        # ── greedy one-to-one assignment ──────────────────────────────────────
+        # Each GT block can be matched at most once. Iterate gen blocks in scan
+        # order and consume the first available GT match. N is small (~32), so
+        # the Python loop over N is cheap.
+        used = torch.zeros(BK, M, dtype=torch.bool, device=generated.device)
+        matched = torch.zeros(BK, N, dtype=torch.bool, device=generated.device)
+        row_idx = torch.arange(BK, device=generated.device)
+        for n in range(N):
+            cand = block_match[:, n, :] & ~used          # [BK, M]
+            has_match = cand.any(dim=-1)                  # [BK]
+            first_idx = cand.int().argmax(dim=-1)         # [BK]; 0 if no match
+            matched[:, n] = has_match
+            # Mark consumed GT block (only where a match actually exists)
+            used[row_idx[has_match], first_idx[has_match]] = True
 
         # ── assign reward to the LAST token of each matched block ─────────────
         reward = torch.zeros(BK, L, dtype=torch.float32, device=generated.device)
@@ -242,6 +254,64 @@ class ConstraintARModuleRLOO(L.LightningModule):
             )
 
         return reward  # [BK, L]
+
+    @torch.no_grad()
+    def _compute_duplicate_penalty(self, generated: torch.Tensor) -> torch.Tensor:
+        """Penalise duplicate constraint blocks within a sequence.
+
+        FreeCAD's solver returns only a single id in ``RedundantConstraints``
+        even when N identical constraints are added, so SolverReward's
+        ``penalty_per_problematic_constraint`` only fires once regardless of
+        N.  This method closes that loophole by checking the canonical-sorted
+        generated blocks ourselves and applying ``penalty_duplicate`` to every
+        non-first occurrence at the block's tail token.
+
+        Args:
+            generated: [BK, L] generated token sequences.
+
+        Returns:
+            penalty: [BK, L] float32 tensor (<= 0 everywhere).
+        """
+        BK, L = generated.shape
+        bs = self._block_size
+        prefix = self._prefix_len
+        N = (L - prefix) // bs
+        body_end = prefix + N * bs
+
+        pad_id  = int(ConstraintToken.Pad)
+        stop_id = int(ConstraintToken.Stop)
+
+        gen_np = generated.cpu().numpy()
+        gen_sorted_np = np.stack(
+            [self.reward.sort_intra_refs(gen_np[k]) for k in range(BK)], axis=0
+        )
+        gen_sorted = torch.from_numpy(gen_sorted_np).to(generated.device)
+        gen_body = gen_sorted[:, prefix:body_end].reshape(BK, N, bs)
+
+        gen_invalid = (
+            (gen_body == pad_id) | (gen_body == stop_id)
+        ).any(dim=-1)  # [BK, N]
+
+        penalty = torch.zeros(BK, L, dtype=torch.float32, device=generated.device)
+        block_tail_positions = (
+            torch.arange(N, device=generated.device) * bs + (bs - 1) + prefix
+        )
+
+        # Per-sample loop — BK*N ≈ 256*32 = 8k iterations, negligible.
+        gen_body_cpu = gen_body.cpu().numpy()
+        gen_invalid_cpu = gen_invalid.cpu().numpy()
+        tail_cpu = block_tail_positions.cpu().numpy()
+        for k in range(BK):
+            seen: set[tuple[int, ...]] = set()
+            for n in range(N):
+                if gen_invalid_cpu[k, n]:
+                    continue
+                key = tuple(gen_body_cpu[k, n].tolist())
+                if key in seen:
+                    penalty[k, int(tail_cpu[n])] += self.penalty_duplicate
+                else:
+                    seen.add(key)
+        return penalty
 
     def _compute_rloo_loss(self, batch: dict[str, Any]) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         B, K = batch['p_val'].shape[0], self.group_sample_size
@@ -298,6 +368,15 @@ class ConstraintARModuleRLOO(L.LightningModule):
             gt_expanded = cast(torch.Tensor, expanded['c_val'])  # [B*K, L]
             gt_match_reward = self._compute_gt_match_reward(generated, gt_expanded)
             rewards = rewards + gt_match_reward
+
+        # Step 4b': duplicate-block penalty.  FreeCAD reports only a single
+        # RedundantConstraints id for N identical constraints, so SolverReward's
+        # per-constraint penalty does not scale with N.  This closes the
+        # spam-the-same-constraint loophole regardless of the reward mix.
+        duplicate_penalty: torch.Tensor | None = None
+        if self.penalty_duplicate < 0.0:
+            duplicate_penalty = self._compute_duplicate_penalty(generated)
+            rewards = rewards + duplicate_penalty
 
         # Step 4c: d_feas reward (first-order edit feasibility / intent preservation)
         # Conflicting / redundant sketches have ill-defined first-order
@@ -362,15 +441,20 @@ class ConstraintARModuleRLOO(L.LightningModule):
             # gt_match_reward was added into rewards already; recover it for logging
             gt_match_reward_metric = gt_match_reward.sum() / n_valid  # type: ignore[possibly-undefined]
 
+        duplicate_penalty_metric = torch.tensor(0.0, device=self.device)
+        if duplicate_penalty is not None:
+            duplicate_penalty_metric = duplicate_penalty.sum() / n_valid
+
         metrics = {
-            'pg_loss':           pg_loss,
-            'kl_loss':           kl_loss_metric,
-            'reward_mean':       rewards.mean(),
-            'reward_std':        rewards.std(),
-            'reward_at_stop':    (rewards * stop_mask).sum() / stop_mask.sum().clamp(min=1),
-            'entropy':           entropy,
-            'ratio':             avg_ratio,
-            'gt_match_reward':   gt_match_reward_metric,
+            'pg_loss':            pg_loss,
+            'kl_loss':            kl_loss_metric,
+            'reward_mean':        rewards.mean(),
+            'reward_std':         rewards.std(),
+            'reward_at_stop':     (rewards * stop_mask).sum() / stop_mask.sum().clamp(min=1),
+            'entropy':            entropy,
+            'ratio':              avg_ratio,
+            'gt_match_reward':    gt_match_reward_metric,
+            'duplicate_penalty':  duplicate_penalty_metric,
             **parsed_solver_metrics,
             **dfeas_metrics,
         }
