@@ -246,6 +246,20 @@ class SolverFeedback:
                 RedundantConstraints = _map_indices(fc_status['RedundantConstraints']),
                 DistortingConstraints = is_distorted,
             )
+
+            # Safety net: FreeCAD occasionally returns Status="Converged" while
+            # also reporting problematic constraints.  Override in severity order
+            # (Malformed > Conflicting > Redundant > Distorted).  Mirrors the
+            # logic in scripts/qwen3_refine_data_with_solver.py L1722-1739.
+            if status.Status == "Converged":
+                if status.MalformedConstraints:
+                    status.Status = "Malformed"
+                elif status.ConflictingConstraints:
+                    status.Status = "Conflicting"
+                elif status.RedundantConstraints:
+                    status.Status = "Redundant"
+                elif status.DistortingConstraints:
+                    status.Status = "Distorted"
         except Exception:
             status = SolverStatus(
                 Status=f"Error: {traceback.format_exc()}",
@@ -490,7 +504,8 @@ class SolverFeedback:
         cons_tokens_batch: np.ndarray,
         sketch_original_list: list[datalib.Sketch] | None = None,
         fully_constrained_dof: int = 2,
-    ) -> dict[str, float]:
+        return_per_sample_status: bool = False,
+    ) -> dict[str, float] | tuple[dict[str, float], list[str]]:
         """Evaluate constraint status for a batch of samples.
 
         Parameters
@@ -504,11 +519,20 @@ class SolverFeedback:
             If None, primitive values are assigned from the quantized prim_tokens.
         fully_constrained_dof : int
             Number of degrees of freedom to be regarded as fully constrained
+        return_per_sample_status : bool
+            If True, also return a per-sample status string list with the same
+            naming convention as SolverReward.collect_results
+            ({"FC","Under","Distorted","Conflicting","Redundant","Malformed",
+            "Failed"}).  Used by downstream rewards (e.g. RelStructReward) that
+            gate by per-sample status.
 
         Returns
         -------
         dict[str, float]
             Dictionary with rates: fc_rate, under_rate, over_rate, redundant_rate
+        list[str], optional
+            Per-sample status names of length B, when
+            ``return_per_sample_status=True``.
         """
         FreeCAD, Part, Sketcher = ensure_freecad_imported()
 
@@ -534,41 +558,53 @@ class SolverFeedback:
         }
 
         dofs: list[int] = []
+        per_sample_status: list[str] = []
         for prim_tokens, cons_tokens, sketch_original in tqdm(zip(prim_tokens_batch, cons_tokens_batch, sketch_original_list), desc="Solver Testing"):
 
             status, sketch, constraint_to_token_start, invalid_constraint_block_start = self.evaluate_constraints(
                 prim_tokens, cons_tokens, sketch_original, check_one_by_one=False)
 
-            if status.Status == "Error":
+            if status.Status == "Error" or status.Status.startswith("Error"):
                 counts['failed'] += 1
+                per_sample_status.append("Failed")
             elif status.MalformedConstraints:
                 counts['malformed'] += 1
+                per_sample_status.append("Malformed")
             elif status.ConflictingConstraints:
                 counts['conflicting'] += 1
+                per_sample_status.append("Conflicting")
             elif status.RedundantConstraints:
                 counts['redundant'] += 1
+                per_sample_status.append("Redundant")
             elif bool(status.DistortingConstraints):
                 counts['distorted'] += 1
+                per_sample_status.append("Distorted")
             else:
                 if status.DoF <= fully_constrained_dof:
                     counts['fully_constrained'] += 1
+                    per_sample_status.append("FC")
                 else:
                     counts['under_constrained'] += 1
+                    per_sample_status.append("Under")
                 if status.DoF >= 0:
                     dofs.append(status.DoF)
 
         # Compute rates
         total_valid = B - counts['failed']
         if total_valid == 0:
-            return {}
+            rates: dict[str, float] = {}
+        else:
+            rates = {
+                'fc_rate': counts['fully_constrained'] / total_valid,
+                'under_rate': counts['under_constrained'] / total_valid,
+                'distorted_rate': counts['distorted'] / total_valid,
+                'conflicting_rate': counts['conflicting'] / total_valid,
+                'redundant_rate': counts['redundant'] / total_valid,
+                'malformed_rate': counts['malformed'] / total_valid,
+                'failed_rate': counts['failed'] / B,
+                'valid_dof_mean': sum(dofs) / len(dofs) if dofs else 0.0,
+            }
 
-        return {
-            'fc_rate': counts['fully_constrained'] / total_valid,
-            'under_rate': counts['under_constrained'] / total_valid,
-            'distorted_rate': counts['distorted'] / total_valid,
-            'conflicting_rate': counts['conflicting'] / total_valid,
-            'redundant_rate': counts['redundant'] / total_valid,
-            'malformed_rate': counts['malformed'] / total_valid,
-            'failed_rate': counts['failed'] / B,
-            'valid_dof_mean': sum(dofs) / len(dofs) if dofs else 0.0,
-        }
+        if return_per_sample_status:
+            return rates, per_sample_status
+        return rates
