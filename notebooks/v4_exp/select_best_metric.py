@@ -74,6 +74,7 @@ def main():
         "d_K", "d_K_pure",
         "d_M", "d_M_pure",
         "gain_I", "gain_J",
+        "d_SVD_sigma_rel", "d_SVD_sub_trunc", "d_SVD_top1",
     ]
 
     rows = []

@@ -311,6 +311,11 @@ def write_csv(path, rows):
     print(f"  saved: {os.path.relpath(path, REPO_ROOT)}  ({len(rows)} rows)")
 
 
+DEFAULT_METRIC_LIST = (
+    "d_feas,d_H,d_sub,leak_prime,d_feas_gain,d_feas_leak"
+)
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     p.add_argument("--smatch-csv", default="artifacts/smatch_vs_dfeas_details_full.csv")
@@ -319,33 +324,52 @@ def main():
     p.add_argument("--prev-oes-csv",
                    default="artifacts/source_conditioned_dropout_scores_full.prev.csv")
     p.add_argument("--out-dir", default="artifacts/v4_exp")
+    p.add_argument("--metric-list", default=DEFAULT_METRIC_LIST,
+                   help="Comma-separated metric names (without min_ prefix) for "
+                        "strict-gate paired Wilcoxon")
+    p.add_argument("--skip-smatch", action="store_true",
+                   help="Skip the smatch correlation ablation (e.g. when the "
+                        "main metric is itself SVD-based and token-level "
+                        "correlation is not meaningful)")
+    p.add_argument("--tag", default="",
+                   help="Output filename prefix.  Empty preserves legacy "
+                        "filenames (ablation_gate_strict.csv, "
+                        "ablation_summary.txt).")
     args = p.parse_args()
 
     out_dir = os.path.join(REPO_ROOT, args.out_dir)
     os.makedirs(out_dir, exist_ok=True)
+    prefix = f"{args.tag}_" if args.tag else ""
 
-    smatch_rows = load_smatch(args.smatch_csv)
-    v4_details = load_v4_details(args.v4_details)
     v4_scores = load_v4_scores(args.v4_scores)
     strict_cohort = load_strict_cohort(args.prev_oes_csv)
-
-    print(f"smatch validated rows: {len(smatch_rows)}")
-    print(f"v4 detail rows: {len(v4_details)}")
     print(f"v4 score rows: {len(v4_scores)}")
     print(f"strict-gate cohort: " +
           ", ".join(f"{k}={len(v)}" for k, v in strict_cohort.items()))
 
-    # ---------- smatch correlation ----------
-    joined, corr_summary = smatch_correlation(smatch_rows, v4_details)
-    print(f"smatch ↔ v4 joined rows: {len(joined)}")
-    write_csv(os.path.join(out_dir, "ablation_smatch_dH_correlation.csv"),
-              corr_summary)
+    metrics = [m.strip() for m in args.metric_list.split(",") if m.strip()]
+    print(f"metrics: {metrics}")
+
+    # ---------- smatch correlation (optional) ----------
+    corr_summary: list[dict] = []
+    if not args.skip_smatch:
+        smatch_rows = load_smatch(args.smatch_csv)
+        v4_details = load_v4_details(args.v4_details)
+        print(f"smatch validated rows: {len(smatch_rows)}")
+        print(f"v4 detail rows: {len(v4_details)}")
+        joined, corr_summary = smatch_correlation(smatch_rows, v4_details)
+        print(f"smatch ↔ v4 joined rows: {len(joined)}")
+        write_csv(
+            os.path.join(out_dir, f"{prefix}ablation_smatch_dH_correlation.csv"),
+            corr_summary,
+        )
+    else:
+        print("skipping smatch correlation (--skip-smatch)")
 
     # ---------- strict gate ----------
-    metrics = ["d_feas", "d_H", "d_sub", "leak_prime",
-               "d_feas_gain", "d_feas_leak"]
     strict_rows = strict_gate_paired(v4_scores, strict_cohort, metrics)
-    write_csv(os.path.join(out_dir, "ablation_gate_strict.csv"), strict_rows)
+    write_csv(os.path.join(out_dir, f"{prefix}ablation_gate_strict.csv"),
+              strict_rows)
 
     # ---------- console summary ----------
     lines = []
@@ -356,14 +380,15 @@ def main():
     emit("Task 5 sub-ablations: smatch correlation + strict-gate sensitivity")
     emit("=" * 78)
 
-    emit("\n[smatch ↔ d_H correlation by variant]")
-    emit(f"  {'variant':14s} {'smatch':14s} {'v4':12s} {'n':>4s} "
-         f"{'rho':>8s} {'r':>8s} {'med_sm':>10s} {'med_v4':>10s}")
-    for r in corr_summary:
-        emit(f"  {r['variant']:14s} {r['smatch_metric']:14s} {r['v4_metric']:12s} "
-             f"{r['n']:>4d} {(r['spearman'] or 0):>+8.3f} "
-             f"{(r['pearson'] or 0):>+8.3f} "
-             f"{(r['med_smatch'] or 0):>10.4f} {(r['med_v4'] or 0):>10.4f}")
+    if corr_summary:
+        emit("\n[smatch ↔ v4 correlation by variant]")
+        emit(f"  {'variant':14s} {'smatch':14s} {'v4':12s} {'n':>4s} "
+             f"{'rho':>8s} {'r':>8s} {'med_sm':>10s} {'med_v4':>10s}")
+        for r in corr_summary:
+            emit(f"  {r['variant']:14s} {r['smatch_metric']:14s} {r['v4_metric']:12s} "
+                 f"{r['n']:>4d} {(r['spearman'] or 0):>+8.3f} "
+                 f"{(r['pearson'] or 0):>+8.3f} "
+                 f"{(r['med_smatch'] or 0):>10.4f} {(r['med_v4'] or 0):>10.4f}")
 
     emit("\n[Strict-gate cohort paired Wilcoxon (DoF==2 ∧ Converged)]")
     emit("Comparison vs heldout (lower-is-better; z>0 = human better)")
@@ -377,7 +402,7 @@ def main():
                  f"  h={r['human_better']:>4d} m={r['model_better']:>4d}"
                  f"  t={r['tie']:>4d}  z={r['z']:+7.2f}  p={r['p_two_sided']:.2e}")
 
-    summary_path = os.path.join(out_dir, "ablation_summary.txt")
+    summary_path = os.path.join(out_dir, f"{prefix}ablation_summary.txt")
     with open(summary_path, "w") as f:
         f.write("\n".join(lines) + "\n")
     print(f"\nSaved: {os.path.relpath(summary_path, REPO_ROOT)}")

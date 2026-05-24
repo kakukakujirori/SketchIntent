@@ -141,6 +141,7 @@ def main():
         "d_K", "d_K_pure", "gain_K", "leak_K", "effort_K",     # Case K
         "d_M", "d_M_pure", "gain_M", "leak_M", "effort_M",     # Case M
         "gain_I", "gain_J",                                    # Case I / J
+        "d_SVD_sigma_rel", "d_SVD_sub_trunc", "d_SVD_top1",    # Case P
     ]
 
     by_variant: dict[str, list[dict]] = defaultdict(list)

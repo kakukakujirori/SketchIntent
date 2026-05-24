@@ -125,9 +125,12 @@ METRIC_KEYS_V4 = (
     "d_K", "gain_K", "leak_K", "effort_K",
     "d_M", "gain_M", "leak_M", "effort_M",
     "gain_I", "gain_J",
+    # case P (d_SVD family)
+    "d_SVD_sigma_rel", "d_SVD_sub_trunc", "d_SVD_top1",
     # diagnostics
     "dim_P", "dim_G",
     "n_p_pred", "n_p_gt", "n_R_rows", "n_relations", "k_Q_stack",
+    "k_Q_used", "k_eff_P", "k_eff_G", "sigma_P_norm", "sigma_G_norm",
 )
 
 
@@ -371,6 +374,7 @@ def print_summary(rows: list[dict]):
         "gain_K", "leak_K",
         "gain_M", "leak_M",
         "gain_I", "gain_J",
+        "d_SVD_sigma_rel", "d_SVD_sub_trunc", "d_SVD_top1",  # case P
     ]
     for variant in order:
         rs = [r for r in valid if r["variant"] == variant]
@@ -411,6 +415,9 @@ def parse_args():
                         help="Effort regulariser for Case K / M")
     parser.add_argument("--tau-j", type=float, default=1.0,
                         help="Reach scale for Case J")
+    parser.add_argument("--tau-p", type=float, default=0.01,
+                        help="Case P SVD truncation threshold (relative to "
+                             "max(sigma_P[0], sigma_G[0]))")
     parser.add_argument("--base-policy", default="canonical_solid",
                         choices=("none", "canonical_solid", "canonical_all"))
     parser.add_argument("--geometry-tol", type=float, default=5e-1)
@@ -470,8 +477,9 @@ def main():
         mu_k=args.mu_k,
         lambda_k=args.lambda_k,
         tau_j=args.tau_j,
+        tau_p=args.tau_p,
     )
-    print(f"[V4 hyperparams] eps={hp.eps} mu_k={hp.mu_k} lambda_k={hp.lambda_k} tau_j={hp.tau_j}")
+    print(f"[V4 hyperparams] eps={hp.eps} mu_k={hp.mu_k} lambda_k={hp.lambda_k} tau_j={hp.tau_j} tau_p={hp.tau_p}")
 
     context = SketchContext()
     converter = SketchFreecadConverter(context, verbose=False)

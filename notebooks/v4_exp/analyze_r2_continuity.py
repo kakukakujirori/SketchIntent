@@ -84,6 +84,7 @@ def main():
         "d_K", "gain_K", "leak_K",
         "d_M", "gain_M", "leak_M",
         "gain_I", "gain_J",
+        "d_SVD_sigma_rel", "d_SVD_sub_trunc", "d_SVD_top1",
     ]
 
     # Per (rotation, drop_rate) → metric values

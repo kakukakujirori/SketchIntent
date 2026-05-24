@@ -70,6 +70,7 @@ _install_v3 = _v3_fast.install
 from metrics_v4 import (  # noqa: E402
     V4Hyperparams,
     _column_norms,
+    _compute_case_p,
     _orthonormal_range,
     _row_norms,
     _solve_regularised_ls,
@@ -190,6 +191,20 @@ def compute_metrics_v4_cached(
 
     d_H_sq = d_sub_sq + leak_prime_sq
     d_H = math.sqrt(max(d_H_sq, 0.0))
+
+    # Case P (d_SVD family) — uses constraint_jacobian via metrics_v4 helper.
+    # The helper computes its own Jacobians (no CACHE.get_jq) so this is not
+    # cached in the v4_fast layer; per-rotation overhead is small (one pinv
+    # + thin SVD per (pred, gt) pair).
+    case_p = _compute_case_p(
+        R_P=R_P, R_G=R_G,
+        J_phi_P=J_phi_P, J_phi_G=J_phi_G,
+        pred_state=pred_native.state,
+        gt_state=gt_native.state,
+        edit_probes=edit_probes,
+        context=context,
+        tau_p=hp.tau_p,
+    ) or {}
 
     D_p_pred = _column_norms(R_P, eps=eps)
     if n_p_pred > 0:
@@ -350,6 +365,14 @@ def compute_metrics_v4_cached(
         "k_Q_stack": int(k_Q),
         "gain_I": gain_I_mean,
         "gain_J": gain_J_mean,
+        "d_SVD_sigma_rel": case_p.get("d_SVD_sigma_rel"),
+        "d_SVD_sub_trunc": case_p.get("d_SVD_sub_trunc"),
+        "d_SVD_top1": case_p.get("d_SVD_top1"),
+        "sigma_P_norm": case_p.get("sigma_P_norm"),
+        "sigma_G_norm": case_p.get("sigma_G_norm"),
+        "k_eff_P": case_p.get("k_eff_P"),
+        "k_eff_G": case_p.get("k_eff_G"),
+        "k_Q_used": case_p.get("k_Q_used"),
         "n_R_rows": int(n_R_rows_pred),
         "n_p_pred": int(n_p_pred),
         "n_p_gt": int(n_p_gt),

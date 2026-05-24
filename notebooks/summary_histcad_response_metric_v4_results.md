@@ -431,13 +431,12 @@ variance 吸収力の代表値である (本来は §7 の `frac<1e-4` と直接
 5. ✓ **PP-Coincident / smatch / gate sensitivity の 3 ablation を `d_H` で再 run** —
    v3 supplement で行った ablation の `d_H` 版
    → §13.4 / §13.5 / §13.6 で実施
-6. **(優先度低, 2026-05-21 追記) 案 P (d_SVD) のフル評価** —
+6. ✓ **案 P (d_SVD) のフル評価** —
    smoke test (本 doc §9 後追い) で `d_SVD_sigma_rel` に独自 signal を確認したため、
    `metrics_v4.py` に case P を実装し、`exp_v4_controls.py` の出力 column に追加して
-   `d_H` と並列に paired Wilcoxon / dropout sweep / model ranking を出す。1–5 が完了
-   して `d_H` の paper-ready が確定したあと、appendix diagnostic として補強する位置
-   付け。`tau` の sweep (例: 0.001 / 0.01 / 0.1) と sigma normalization choice
-   (absolute vs relative) を §4.2 N12 に従って報告する。
+   `d_H` と並列に paired Wilcoxon / tau sensitivity / R3 cohort / PP-Coincident /
+   strict-gate を実施 (smatch correlation のみ skip)。
+   → §14 で実施
 
 ## 11. 実行コマンド
 
@@ -724,3 +723,262 @@ Artifact: [ablation_gate_strict.csv](../artifacts/v4_exp/ablation_gate_strict.cs
 
 残課題は §10 task 4 (R10 finite consistency) と §10 task 6 (案 P d_SVD フル評価)
 のみで、いずれも別 PR で対応予定。
+
+(2026-05-24 追記) §10 task 6 は §14 で実施。残課題は task 4 のみとなった。
+
+## 14. 案 P (d_SVD) 徹底テスト (§10 task 6 の実施結果, 2026-05-24 追記)
+
+§10 task 6 を実施。推奨 3 variant (`d_SVD_sigma_rel`, `d_SVD_sub_trunc`,
+`d_SVD_top1`) を `d_H` と並列にフル評価。Task 1 (paired Wilcoxon, dropout
+sweep, OES divergent), Task 2 (tau sensitivity), Task 3 (R3 subset cohort),
+Task 5-1 (PP-Coincident 除外), Task 5-3 (strict-gate cohort) を実施。
+Task 5-2 (smatch correlation) は d_SVD が SVD 内部比較で token-level 表現と
+独立軸なため skip。
+
+**結論**: case P は `d_H` を置き換える main metric ではないが、`d_SVD_sub_trunc`
+と `d_SVD_top1` は appendix supplement diagnostic として paper 採用に値する
+強い識別力を示した。`d_SVD_sigma_rel` は cohort 全体では弱いが §9 後追い
+smoke test で示した overconstrained pred (dfeas_rl 系) の応答縮退検出という
+独自軸を持つ。
+
+実装:
+
+- 解析: [analyze_d_metric_paper.py](v4_exp/analyze_d_metric_paper.py)
+  (analyze_dH_paper.py の汎化版, `--metric-main` / `--metric-related` / `--tag`),
+  [analyze_phase_b_dsvd.py](v4_exp/analyze_phase_b_dsvd.py) (tau sweep),
+  [ablation_smatch_gate.py](v4_exp/ablation_smatch_gate.py)
+  (`--skip-smatch` / `--metric-list` / `--tag` flag 追加)
+- metric: [metrics_v4.py](v4_exp/metrics_v4.py) の `_compute_case_p`,
+  [_fast.py](v4_exp/_fast.py) の cached path にも同等実装を追加
+- driver: [run_parallel_dsvd.sh](v4_exp/run_parallel_dsvd.sh)
+  (7 並列 full pipeline run, ~35 min)
+- code patch: `exp_v4_controls.py` に `--tau-p` flag 追加
+
+### 14.1 Task 1 — paired Wilcoxon (full 6 batches)
+
+| Model | Metric | n | h | m | t | z | p |
+|---|---|---:|---:|---:|---:|---:|---:|
+| base | d_feas | 307 | 218 | 26 | 63 | +11.68 | 1.6e-31 |
+| base | **d_H** | 307 | 256 | 36 | 15 | **+13.62** | **3.2e-42** |
+| base | d_SVD_sigma_rel | 274 | 202 | 32 | 40 | +10.63 | 2.2e-26 |
+| base | **d_SVD_sub_trunc** | 274 | 215 | 32 | 27 | **+11.93** | **8.1e-33** |
+| base | d_SVD_top1 | 274 | 207 | 40 | 27 | +11.18 | 4.9e-29 |
+| solver_rl | d_feas | 366 | 195 | 39 | 132 | +8.94 | 3.9e-19 |
+| solver_rl | **d_H** | 366 | 256 | 74 | 36 | **+11.25** | **2.2e-29** |
+| solver_rl | d_SVD_sigma_rel | 366 | 191 | 85 | 90 | +6.25 | 4.1e-10 |
+| solver_rl | d_SVD_sub_trunc | 366 | 234 | 92 | 40 | +9.33 | 1.1e-20 |
+| solver_rl | **d_SVD_top1** | 366 | 227 | 82 | 57 | **+10.08** | **6.5e-24** |
+
+**読み**:
+
+- 3 variant すべて両モデルで人間優位 (z > +6, p < 1e-9)
+- `d_H` に対し `d_SVD_sub_trunc` は base で 88%、solver_rl で 83% の paired z
+  を達成 (各 +11.93/+9.33 vs +13.62/+11.25)
+- `d_SVD_top1` は solver_rl で **`d_H` の 90%** (z=+10.08) の識別力。
+  cohort 全体では sub_trunc/top1 が sigma_rel より強い
+- sigma_rel の n=274 は他 (n=307) より少ない: pred の sigma が完全 0
+  (dim count 0 系の縮退) で sigma_G_norm ≈ 0 となるケースで分母発散を
+  避けるために除外されているため。dim_drop100 で `min_d_SVD_sigma_rel = NA`
+  になる挙動と整合
+
+### 14.2 Task 1.2 — variant 別 median (full 6 batches)
+
+| variant | d_feas | d_H | d_SVD_sigma_rel | d_SVD_sub_trunc | d_SVD_top1 |
+|---|---:|---:|---:|---:|---:|
+| source_self | 0.0000 | 0.0000 | 0.0000 | 0.0000 | 0.0000 |
+| heldout | 0.0000 | 0.0000 | 0.0006 | 0.0015 | 0.0002 |
+| dim_drop25 | 0.0002 | 0.5107 | 0.3097 | 0.5774 | 0.3473 |
+| dim_drop50 | 0.1543 | 0.7071 | 0.5122 | 0.7071 | 0.7286 |
+| dim_drop75 | 0.4444 | 0.8660 | 0.6718 | 0.8660 | 0.9792 |
+| dim_drop100 | 1.0000 | 1.0000 | NA | NA | NA |
+| rel_drop50 | 0.2977 | 0.9394 | 0.5579 | 0.9434 | 0.9695 |
+| rel_drop100 | 0.4296 | 1.1047 | 0.6529 | 1.0000 | 1.1749 |
+| **base** | 0.1213 | 0.7667 | 0.3071 | 0.7117 | 0.7213 |
+| **solver_rl** | 0.0426 | 0.5195 | 0.1088 | 0.5495 | 0.3992 |
+
+- `d_SVD_sub_trunc` は dim_drop sweep で 0 → 0.71 → 1.00 と滑らかに上昇
+  (`d_H` の `d_sub` 成分とほぼ同じ shape)、dim_drop100 だけ NA
+- `d_SVD_top1` は rel_drop100 で 1.17 と `d_H` (1.10) を超える: top-1
+  singular direction が relation drop の影響を相対的に強く受ける
+- solver_rl で sigma_rel/top1 は heldout/source_self に最も近い (0.11/0.40),
+  sub_trunc は中間 (0.55) — case ごとに異なるシグナル軸を持つことを示唆
+
+### 14.3 Task 2 — tau sensitivity (paired z swing)
+
+3 variant について tau_p ∈ {0.001, 0.005, 0.01 (center), 0.05, 0.1} の
+paired z を比較。center は §13 と同じ `v4_controls_scores_full_dsvd.csv`
+(tau_p=0.01); 4 sweep CSV は `tau_sweep/scores_tau_{value}.csv`。
+
+| Metric | tau_p | base z | solver_rl z |
+|---|---:|---:|---:|
+| d_SVD_sigma_rel | 0.001 | +10.54 | +6.24 |
+| | 0.005 | +10.48 | +6.37 |
+| | **0.01 (ctr)** | **+10.63** | **+6.25** |
+| | 0.05 | +10.60 | +6.51 |
+| | 0.1 | +10.62 | +6.23 |
+| d_SVD_sub_trunc | 0.001 | +11.97 | +9.26 |
+| | 0.005 | +12.00 | +9.34 |
+| | **0.01 (ctr)** | **+11.93** | **+9.33** |
+| | 0.05 | +11.89 | +9.40 |
+| | 0.1 | +11.69 | +9.27 |
+| d_SVD_top1 | 0.001 | +11.20 | +10.11 |
+| | 0.005 | +11.16 | +10.04 |
+| | **0.01 (ctr)** | **+11.18** | **+10.08** |
+| | 0.05 | +11.24 | +10.25 |
+| | 0.1 | +11.22 | +10.13 |
+
+**最大 swing**: sigma_rel で base 0.15 / solver_rl 0.28、sub_trunc で base
+0.31 / solver_rl 0.14、top1 で base 0.08 / solver_rl 0.21。**全 variant で
+paired z swing ≤ 0.31** (§13.2 で `d_H` が示した ±0.15 と同等水準)。tau は
+load-bearing でない。tau=0.01 を center とした smoke test の選定は妥当。
+
+### 14.4 Task 3 — R3 subset cohort (n_dim_G ≤ 3)
+
+heldout の `min_dim_G ≤ 3` cohort (base n=125, solver_rl n=152) で paired
+Wilcoxon。fully-constrained regime で case P が機能するかを確認。
+
+| Model | n | Metric | z | p |
+|---|---:|---|---:|---:|
+| base | 125 | d_feas | +7.27 | 3.5e-13 |
+| base | 119 | d_SVD_sigma_rel | +6.43 | 1.3e-10 |
+| base | 119 | **d_SVD_sub_trunc** | **+7.29** | **3.1e-13** |
+| base | 119 | d_SVD_top1 | +6.82 | 8.8e-12 |
+| solver_rl | 152 | d_feas | +6.13 | 8.9e-10 |
+| solver_rl | 152 | d_SVD_sigma_rel | +5.63 | 1.8e-08 |
+| solver_rl | 152 | d_SVD_sub_trunc | +7.65 | 2.0e-14 |
+| solver_rl | 152 | **d_SVD_top1** | **+7.91** | **2.6e-15** |
+
+**重要観察**: §13.3 で `d_feas_gain` が solver_rl に対し n.s.
+(z=-0.59) に縮退した fully-constrained regime で、case P 3 variant
+すべて z > +5.6 を維持。`d_SVD_top1` は solver_rl で d_feas を上回る
++7.91、`d_SVD_sub_trunc` は base で d_feas と同等 +7.29。`d_H` (§13.3 で
++8.02/+8.09) より少し弱いが、d_feas の弱点を補う diagnostic として機能。
+
+### 14.5 Task 5-1 — PP-Coincident 除外
+
+`source_probes(gt_sketch, exclude_point_point_coincident=True)` を全
+evaluation に適用 (full pipeline 1 run, `v4_controls_scores_no_ppcoincident_dsvd.csv`)。
+include vs exclude の paired z 差で PP-Coincident への依存度を測る。
+
+| Metric | Model | include z | exclude z | diff |
+|---|---|---:|---:|---:|
+| d_SVD_sigma_rel | base | +10.63 | +10.34 | 0.293 |
+| d_SVD_sigma_rel | solver_rl | +6.25 | +6.25 | 0.005 |
+| d_SVD_sub_trunc | base | +11.93 | +11.78 | 0.158 |
+| d_SVD_sub_trunc | solver_rl | +9.33 | +9.33 | 0.003 |
+| d_SVD_top1 | base | +11.18 | +11.11 | 0.066 |
+| d_SVD_top1 | solver_rl | +10.08 | +10.13 | 0.045 |
+
+**全 variant で z 差 ≤ 0.30** (§13.4 で `d_H` が示した同等の non-dependence)。
+solver_rl での swing は ≤ 0.05 とほぼ完全な非依存。`d_H` と同様、case P
+の判定は PP-Coincident 制約に **structurally non-dependent**。
+
+### 14.6 Task 5-3 — Strict-gate cohort (DoF==2 ∧ Converged)
+
+旧 OES CSV の strict-gate admit cohort (base n=60, solver_rl n=321) に
+v4 結果を restrict して paired Wilcoxon。
+
+| Metric | Model | n_strict | n_paired | z | p |
+|---|---|---:|---:|---:|---:|
+| d_feas | base | 60 | 60 | +2.58 | 9.9e-03 |
+| d_H | base | 60 | 60 | +1.61 | 1.1e-01 |
+| d_SVD_sigma_rel | base | 60 | 60 | +1.82 | 6.8e-02 |
+| d_SVD_sub_trunc | base | 60 | 60 | +2.68 | 7.5e-03 |
+| d_SVD_top1 | base | 60 | 60 | +2.39 | 1.7e-02 |
+| d_feas | solver_rl | 321 | 318 | +7.70 | 1.4e-14 |
+| d_H | solver_rl | 321 | 318 | +9.42 | 4.5e-21 |
+| d_SVD_sigma_rel | solver_rl | 321 | 318 | +3.90 | 9.5e-05 |
+| **d_SVD_sub_trunc** | solver_rl | 321 | 318 | **+7.26** | 3.8e-13 |
+| **d_SVD_top1** | solver_rl | 321 | 318 | **+8.14** | 3.9e-16 |
+
+- solver_rl: `d_SVD_top1` (+8.14) と `d_SVD_sub_trunc` (+7.26) は strict
+  gate でも `d_feas` (+7.70) と同等、`d_H` (+9.42) からはやや低下するが
+  方向性は完全保持
+- base: cohort 縮小 (309→60) で `d_H` が +1.61 (n.s.) に弱まる §13.6
+  と同じ "loadable subset bias" 構造を共有。case P 3 variant のうち
+  `d_SVD_sub_trunc` (+2.68) と `d_SVD_top1` (+2.39) は `d_feas` (+2.58)
+  と同程度、`d_H` (+1.61) より僅かに強い
+- **sigma_rel は solver_rl で +3.90 とやや弱化**: strict gate cohort は
+  overconstrained pred 比率が低いため、sigma_rel の独自シグナル軸の出番が
+  減ることと整合
+
+### 14.7 v4_scorecard.csv (N1-N5 + R3 自動評価)
+
+| metric | score_total |
+|---|---:|
+| **d_H** | **5.960** |
+| d_sub | 5.943 |
+| **d_SVD_sub_trunc** | **5.731** |
+| **d_SVD_top1** | **5.673** |
+| d_feas | 5.656 |
+| d_SVD_sigma_rel | 5.465 |
+
+case P 3 variant とも `d_feas` (5.656) と同等以上のスコア。`d_H` /
+`d_sub` には及ばないが、appendix supplement metric として paper 採用の
+資格を満たす (§4.2 N1-N5 / R3 criteria の合算)。
+
+### 14.8 まとめと推奨
+
+| 軸 | d_H (main) | d_SVD_sub_trunc | d_SVD_top1 | d_SVD_sigma_rel |
+|---|---:|---:|---:|---:|
+| paired z (base / solver_rl) | +13.62 / +11.25 | +11.93 / +9.33 | +11.18 / +10.08 | +10.63 / +6.25 |
+| R3 cohort z (base / solver_rl) | +8.02 / +8.09 | +7.29 / +7.65 | +6.82 / +7.91 | +6.43 / +5.63 |
+| tau swing (max) | — | 0.31 | 0.21 | 0.28 |
+| PP non-dependence (max diff) | 0.02 (§13.4) | 0.16 | 0.07 | 0.29 |
+| strict-gate solver_rl z | +9.42 | +7.26 | +8.14 | +3.90 |
+| scorecard | 5.96 | 5.73 | 5.67 | 5.46 |
+
+**最終推奨**:
+
+1. **main metric**: `d_H` (§13.7 の結論を維持)。3 variant 全てが `d_H`
+   より弱いため、置き換えは行わない
+2. **supplement diagnostic A**: `d_SVD_sub_trunc` — cohort 全体 / R3 cohort /
+   strict-gate のすべてで case P 3 variant 中最も `d_H` に近い。pred の
+   観測空間 subspace 構造を SVD ベースで補強する diagnostic として
+   `d_sub` の代替/補完
+3. **supplement diagnostic B**: `d_SVD_sigma_rel` — cohort 全体では弱いが
+   overconstrained pred の応答縮退 (smoke §9 後追いで示した 21803 sketch の
+   dfeas_rl 完全縮退) という `d_H` が捕捉しない failure mode に対し 1 桁
+   強い signal。`sigma_P_norm` ≈ 0 の縮退率を per-rotation で出せる diagnostic
+4. **d_SVD_top1**: 概ね sub_trunc と同等。1 つに絞る場合は sub_trunc を
+   優先 (top-1 のみで判定は principal subspace 全体の情報を捨てるため)
+
+### 14.9 §9 案 P の予測との対比
+
+§9 後追いで「`d_SVD_sigma_rel` には `d_H` が捕捉しない独自シグナル」
+「`appendix diagnostic として補強する位置付け`」と書いた予測は、フル評価で
+**部分的に裏付けられた**:
+
+- 独自シグナル ✓: strict-gate cohort で sub_trunc/top1 が d_H に近い数値を
+  示すのに対し、sigma_rel だけ +3.90 と独自に弱化する挙動が、sigma_rel が
+  cohort 全体とは別の "縮退検出" 軸を測っていることを示唆
+- main metric 置換ではない ✓: scorecard / paired z すべてで d_H が優位
+- tau truncation 必須 ✓: smoke §9 の `d_SVD_sub` (untruncated) failure を
+  本フル評価では tau ∈ {0.001..0.1} sweep で **paired z swing ≤ 0.31** を
+  確認、tau 選択は load-bearing でない
+
+§9 では「`d_SVD_sigma_rel` を主役」と暫定的に位置付けていたが、cohort 全体の
+paired Wilcoxon では `d_SVD_sub_trunc` / `d_SVD_top1` が sigma_rel を上回る。
+21803 sketch のような overconstrained failure はコホート内で稀で、cohort
+全体での識別は sub_trunc / top1 が担当、sigma_rel は per-sketch failure mode
+分析の diagnostic という二段構成が paper-ready の整理。
+
+### 14.10 主要 artifact
+
+- 解析スクリプト: [analyze_d_metric_paper.py](v4_exp/analyze_d_metric_paper.py),
+  [analyze_phase_b_dsvd.py](v4_exp/analyze_phase_b_dsvd.py),
+  [run_parallel_dsvd.sh](v4_exp/run_parallel_dsvd.sh)
+- 主データ (3846 rows × 7 CSV): [v4_controls_scores_full_dsvd.csv](../artifacts/v4_exp/v4_controls_scores_full_dsvd.csv),
+  [v4_controls_scores_no_ppcoincident_dsvd.csv](../artifacts/v4_exp/v4_controls_scores_no_ppcoincident_dsvd.csv),
+  [tau_sweep/scores_tau_{0.001,0.005,0.05,0.1}.csv](../artifacts/v4_exp/tau_sweep/),
+  [v4_controls_scores_sweep_dsvd.csv](../artifacts/v4_exp/v4_controls_scores_sweep_dsvd.csv)
+- per-variant artifacts (各 3 variant × 各 task):
+  `{dSVD_sigmarel, dSVD_subtrunc, dSVD_top1}_{paired_paper, dropout_sweep, model_ranking, cdf_long, oes_divergent_cases, subset_cohort, tau_sensitivity_summary, tau_sensitivity_paired, pp_coincident_paired, pp_coincident_diagnostic, ablation_gate_strict}.csv`
+  + `*_paper_summary.txt`, `*_phase_b_dsvd_summary.txt`, `*_ablation_summary.txt`
+
+### 14.11 残課題
+
+- §10 task 4 (R10 finite consistency) のみ残存 (case P でも別 PR で対応)
+- 21803-tier overconstrained failure (sigma_P_norm ≈ 0) の per-rotation
+  inspection で `d_SVD_sigma_rel` の独立シグナル軸の qualitative case
+  study を追加するかは paper revision の判断

@@ -148,6 +148,109 @@ def _solve_regularised_ls(
     return torch.linalg.lstsq(A, b).solution
 
 
+def _compute_case_p(
+    *,
+    R_P: torch.Tensor,
+    R_G: torch.Tensor,
+    J_phi_P: torch.Tensor,
+    J_phi_G: torch.Tensor,
+    pred_state,
+    gt_state,
+    edit_probes,
+    context,
+    tau_p: float,
+) -> dict | None:
+    """Case P : SVD-based response comparison in observable space.
+
+    Builds ``T_C = J_phi @ R_C @ pinv(J_Q @ R_C)`` for Pred and GT, then
+    compares their singular spectra (``d_SVD_sigma_rel``), truncated
+    principal-angle subspaces (``d_SVD_sub_trunc``), and leading singular
+    directions (``d_SVD_top1``).  Only probes for which BOTH Pred and GT
+    can evaluate a Jacobian are retained, so the column counts of T_P / T_G
+    match by construction.  Returns ``None`` when there is no common
+    observable space or no shared probe.
+
+    ``tau_p`` is the relative threshold for truncated subspace comparison;
+    components with sigma < tau_p * max(sig_P[0], sig_G[0]) are excluded
+    when computing ``d_SVD_sub_trunc``.
+    """
+    if J_phi_P.shape[0] != J_phi_G.shape[0] or J_phi_P.shape[0] == 0:
+        return None
+    if R_P.shape[1] == 0 or R_G.shape[1] == 0:
+        return None
+
+    J_Q_P_rows: list[torch.Tensor] = []
+    J_Q_G_rows: list[torch.Tensor] = []
+    for probe in edit_probes:
+        Jq_P = constraint_jacobian(probe, pred_state, context)
+        Jq_G = constraint_jacobian(probe, gt_state, context)
+        if Jq_P is None or Jq_G is None:
+            continue
+        # First row only — matches ``test_dH.compute_d_svd`` scalar-probe
+        # convention; multi-row dimensional residuals are unusual in our set.
+        J_Q_P_rows.append(Jq_P[:1])
+        J_Q_G_rows.append(Jq_G[:1])
+    if not J_Q_P_rows:
+        return None
+
+    J_Q_P = torch.cat(J_Q_P_rows, dim=0)
+    J_Q_G = torch.cat(J_Q_G_rows, dim=0)
+
+    M_P = J_Q_P @ R_P
+    M_G = J_Q_G @ R_G
+
+    S_P = R_P @ torch.linalg.pinv(M_P)
+    S_G = R_G @ torch.linalg.pinv(M_G)
+
+    T_P = J_phi_P @ S_P
+    T_G = J_phi_G @ S_G
+
+    m_phi, k_Q = T_P.shape
+
+    U_P, sig_P, _Vh_P = torch.linalg.svd(T_P, full_matrices=False)
+    U_G, sig_G, _Vh_G = torch.linalg.svd(T_G, full_matrices=False)
+
+    sigma_P_norm = float(torch.linalg.norm(sig_P))
+    sigma_G_norm = float(torch.linalg.norm(sig_G))
+
+    d_sigma = float(torch.linalg.norm(sig_P - sig_G))
+    d_sigma_rel = d_sigma / (sigma_G_norm + 1e-12)
+
+    # Truncated subspace distance: keep components with sigma >= tau_p * sig_max
+    sig_max = max(float(sig_P[0]), float(sig_G[0]), 1e-30)
+    thresh = tau_p * sig_max
+    k_eff_P = int((sig_P >= thresh).sum().item())
+    k_eff_G = int((sig_G >= thresh).sum().item())
+    k_norm = max(k_eff_P, k_eff_G, 1)
+    if k_eff_P > 0 and k_eff_G > 0:
+        Ut_P = U_P[:, :k_eff_P]
+        Ut_G = U_G[:, :k_eff_G]
+        M_align_t = Ut_G.T @ Ut_P
+        svals_t = torch.linalg.svdvals(M_align_t).clamp(0.0, 1.0)
+        cos2_t = float((svals_t ** 2).sum())
+        d_sub_trunc_sq = (k_eff_P + k_eff_G - 2.0 * cos2_t) / k_norm
+        d_sub_trunc = math.sqrt(max(d_sub_trunc_sq, 0.0))
+    elif k_eff_P == 0 and k_eff_G == 0:
+        d_sub_trunc = 0.0
+    else:
+        d_sub_trunc = math.sqrt((k_eff_P + k_eff_G) / k_norm)
+
+    # Top-1 leading direction (sign-invariant).
+    cos1 = abs(float(U_P[:, 0] @ U_G[:, 0]))
+    d_top1 = math.sqrt(max(2.0 - 2.0 * cos1, 0.0))
+
+    return {
+        "d_SVD_sigma_rel": d_sigma_rel,
+        "d_SVD_sub_trunc": d_sub_trunc,
+        "d_SVD_top1": d_top1,
+        "sigma_P_norm": sigma_P_norm,
+        "sigma_G_norm": sigma_G_norm,
+        "k_eff_P": k_eff_P,
+        "k_eff_G": k_eff_G,
+        "k_Q_used": int(k_Q),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
@@ -158,6 +261,7 @@ class V4Hyperparams:
     mu_k: float = 1.0       # relation-preservation weight in Case K / M
     lambda_k: float = 1e-3  # effort regulariser in Case K / M
     tau_j: float = 1.0      # reach scale for Case J
+    tau_p: float = 0.01     # Case P SVD truncation threshold (relative)
 
 
 METRIC_NAMES_V4: tuple[str, ...] = (
@@ -167,6 +271,9 @@ METRIC_NAMES_V4: tuple[str, ...] = (
     "d_M",
     "gain_I",
     "gain_J",
+    "d_SVD_sigma_rel",
+    "d_SVD_sub_trunc",
+    "d_SVD_top1",
 )
 
 
@@ -261,6 +368,17 @@ def compute_metrics_v4(
 
     d_H_sq = d_sub_sq + leak_prime_sq
     d_H = math.sqrt(max(d_H_sq, 0.0))
+
+    # ---------- Case P (d_SVD family) ----------
+    case_p = _compute_case_p(
+        R_P=R_P, R_G=R_G,
+        J_phi_P=J_phi_P, J_phi_G=J_phi_G,
+        pred_state=pred_native.state,
+        gt_state=gt_native.state,
+        edit_probes=edit_probes,
+        context=context,
+        tau_p=hp.tau_p,
+    ) or {}
 
     # ---------- Case K / M / I / J  (q-retaining) ----------
     # Column-normalise R_P so each "unit knob" produces unit-norm primitive
@@ -441,6 +559,15 @@ def compute_metrics_v4(
         # Case I / J
         "gain_I": gain_I_mean,
         "gain_J": gain_J_mean,
+        # Case P (d_SVD family)
+        "d_SVD_sigma_rel": case_p.get("d_SVD_sigma_rel"),
+        "d_SVD_sub_trunc": case_p.get("d_SVD_sub_trunc"),
+        "d_SVD_top1": case_p.get("d_SVD_top1"),
+        "sigma_P_norm": case_p.get("sigma_P_norm"),
+        "sigma_G_norm": case_p.get("sigma_G_norm"),
+        "k_eff_P": case_p.get("k_eff_P"),
+        "k_eff_G": case_p.get("k_eff_G"),
+        "k_Q_used": case_p.get("k_Q_used"),
         # Diagnostics
         "n_R_rows": int(n_R_rows_pred),
         "n_p_pred": int(n_p_pred),
