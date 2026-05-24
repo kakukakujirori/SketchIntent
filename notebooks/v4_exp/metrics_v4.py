@@ -266,7 +266,10 @@ class V4Hyperparams:
 
 METRIC_NAMES_V4: tuple[str, ...] = (
     "d_sub",
+    "d_sub_angle",
     "d_H",
+    "d_H_angle",
+    "leak_angle",
     "d_K",
     "d_M",
     "gain_I",
@@ -349,6 +352,13 @@ def compute_metrics_v4(
     d_sub_sq = (dim_P_obs + dim_G_obs - 2.0 * cos2_sum) / d_norm
     d_sub_sq = max(d_sub_sq, 0.0)
     d_sub = math.sqrt(d_sub_sq)
+    # Padded principal-angle view: compare over max(dim_P, dim_G) angles,
+    # treating missing dimensions as cos(theta)=0.  This preserves the
+    # existing nested-subspace dropout scale while making equal-dimension
+    # orthogonal subspaces have ceiling 1 instead of sqrt(2).
+    d_sub_angle_sq = (d_norm - cos2_sum) / d_norm
+    d_sub_angle_sq = min(max(d_sub_angle_sq, 0.0), 1.0)
+    d_sub_angle = math.sqrt(d_sub_angle_sq)
     rank_loss = abs(dim_P_obs - dim_G_obs) / d_norm
 
     # Operator leak  ||J_{R_G} U_P_prim||_F^2  in Pred's primitive space.
@@ -366,8 +376,25 @@ def compute_metrics_v4(
         leak_prime_sq = 0.0
     leak_prime = math.sqrt(max(leak_prime_sq, 0.0))
 
+    # Scale-free angular leak.  N_G spans the forbidden normal directions of
+    # GT relations in primitive space; leak_angle is the RMS cosine between
+    # Pred's allowed motion directions and that forbidden subspace.
+    if J_R_pred_state is not None and dim_P_prim > 0 and n_R_rows_pred > 0:
+        N_G_prim, dim_N_prim = _orthonormal_range(J_R_pred_state.T, eps=eps)
+        if dim_N_prim > 0:
+            forbidden_overlap = N_G_prim.T @ U_P_prim
+            leak_angle_sq = float((forbidden_overlap ** 2).sum()) / float(dim_P_prim)
+        else:
+            leak_angle_sq = 0.0
+    else:
+        leak_angle_sq = 0.0
+    leak_angle_sq = min(max(leak_angle_sq, 0.0), 1.0)
+    leak_angle = math.sqrt(leak_angle_sq)
+
     d_H_sq = d_sub_sq + leak_prime_sq
     d_H = math.sqrt(max(d_H_sq, 0.0))
+    d_H_angle_sq = d_sub_angle_sq + leak_angle_sq
+    d_H_angle = math.sqrt(max(d_H_angle_sq, 0.0))
 
     # ---------- Case P (d_SVD family) ----------
     case_p = _compute_case_p(
@@ -537,6 +564,7 @@ def compute_metrics_v4(
     return {
         # Case D (observable subspace)
         "d_sub": d_sub,
+        "d_sub_angle": d_sub_angle,
         "align_loss": align_loss,
         "rank_loss": rank_loss,
         "dim_P": int(dim_P_obs),
@@ -545,6 +573,8 @@ def compute_metrics_v4(
         # Case H
         "d_H": d_H,
         "leak_prime": leak_prime,
+        "d_H_angle": d_H_angle,
+        "leak_angle": leak_angle,
         # Case K (per-probe mean)
         "d_K": d_K,
         "gain_K": gain_K,

@@ -313,6 +313,61 @@ d_H(P, G)   = sqrt(gain' + leak')
 
 両者は補完的で、`V_G` の dimension 数に応じて自動的に役割分担される。
 
+#### 案 Hθ: subspace + angular leak の hybrid (probe-free, 2026-05-24 追記)
+
+実験後の再検討で、案 H の `leak_prime` は paired test では強い signal を持つ一方、
+絶対値スケールでは `d_sub` よりかなり小さく、`d_H = sqrt(d_sub^2 + leak_prime^2)`
+の total score では実質的に `d_sub` が支配的になることが分かった。これは
+`d_sub` が principal-angle / projection distance であるのに対し、`leak_prime` が
+`J_R` の residual operator norm であり、両者の単位が揃っていないためである。
+
+そこで GT relation の forbidden normal subspace を
+
+```text
+N_G := orth(row(J_{R_G}))
+```
+
+Pred の許す primitive motion subspace を
+
+```text
+U_P := orth(range(R_P))
+```
+
+として、scale-free な angular leak を定義する:
+
+```text
+leak_angle(P, G)^2 = ||N_G^T U_P||_F^2 / dim(V_P)
+```
+
+これは「Pred が許す motion が、GT relation が禁じる normal direction にどれだけ
+乗るか」を平均 squared cosine として測る。`J_R` の絶対 scale を捨て、
+`d_sub` と同じ subspace angle 系の量に揃える。
+
+`d_sub` 側も同じ angular scale に合わせるため、padded principal-angle form を併記する:
+
+```text
+d_sub_angle(P, G)^2 = 1 - Σ_i cos^2 θ_i / max(dim V_P, dim V_G)
+```
+
+足りない次元は 90 度の angle とみなす。したがって nested dropout では現行 `d_sub`
+と同じ値を保ち、等次元の傾き差では `d_sub_angle = d_sub / sqrt(2)` になる。
+
+単一 scalar が必要な場合は
+
+```text
+d_H_angle(P, G) = sqrt(d_sub_angle^2 + leak_angle^2)
+```
+
+を使う。これは heuristic な重み付け和ではなく、両成分を「正規化された angular error」
+という同じ単位に変換してから合成する設計である。
+
+実験結果は
+[`summary_histcad_response_metric_v4_results.md`](summary_histcad_response_metric_v4_results.md)
+§14 に追記した。結論として、paper では `d_sub_angle` / `leak_angle` の 2 軸 report を
+主診断とし、単一 scalar が必要な表では `d_H_angle` を使うのが最も defensible。
+最大限 parsimonious な主指標が必要な場合のみ、`d_sub` または `d_sub_angle` を main、
+`leak_angle` を mandatory diagnostic とする。
+
 ## 3. 比較表
 
 | 案 | per-rotation 連続性 | `q` 設計依存 | gain/leak 分離 | annotator var. 耐性 | 実装コスト |
@@ -325,6 +380,7 @@ d_H(P, G)   = sqrt(gain' + leak')
 | F: kernel 表現 (D の双対) | 強 | 無 | 再現 | 強 | 中 |
 | G: q bank | 中 (MC noise) | 弱 | 明示 | 中 | 高 |
 | **H: subspace + operator leak** | **強** | **無** | **明示 (gain'/leak')** | **強** | 中 |
+| **Hθ: subspace + angular leak** | **強** | **無** | **明示 (subspace/leak angle)** | 中〜強 | 中 |
 
 ## 4. 指標選定のための meta-evaluation criteria
 
@@ -600,6 +656,12 @@ Vit vs heldout の paired Wilcoxon の `|z|` (大きいほど良い)。base / so
 最有力候補**、観測空間投影 (案 E 統合) も同時適用とする。**案 D は H の特殊ケース
 (leak' を捨てる) として論文の理論導出に残す**。
 
+> 2026-05-24 追記: 実験後の scale 再検討により、`leak_prime` は単独では強いが
+> `d_H` total score への寄与が小さすぎることが確認された。現在の probe-free 側の
+> 推奨は **案 Hθ (`d_sub_angle`, `leak_angle`, `d_H_angle`)**。特に paper では
+> `d_sub_angle` / `leak_angle` の 2 軸を主診断として report し、単一 scalar が必要な
+> 場面で `d_H_angle` を使う。
+
 ただし §8–§9 の q-retaining family 追加後は、主指標候補は H に固定せず、
 §4 の scorecard に従って **H/D と K/M を並列比較**する。`q` が共通土俵として不可欠
 という立場を採る場合、K/M が N10–N13 を通れば main metric 候補として H より優先される。
@@ -610,13 +672,14 @@ Vit vs heldout の paired Wilcoxon の `|z|` (大きいほど良い)。base / so
    `R_C` を取り出す (現状は `S_C^(q)` の中で internal に計算しているはず)。SVD で
    `U_C, Σ_C, V_C^T` を出し、`V_C = range(U_C)` を保持。
 2. **subspace 距離**: `d_norm = max(dim V_P, dim V_G)`、`||P_P - P_G||_F^2` を SVD 経由で。
-3. **operator leak**: `J_{R_G}` を v3.md と同じ relation Jacobian から取る。`J_{R_G} U_P`
-   の Frobenius norm を `sqrt(n_R · dim V_P)` で正規化。
+3. **operator leak / angular leak**: `J_{R_G}` を v3.md と同じ relation Jacobian から取る。
+   旧 H では `J_{R_G} U_P` の Frobenius norm を `sqrt(n_R · dim V_P)` で正規化する。
+   Hθ では `orth(row(J_{R_G}))` と `U_P` の subspace overlap を `leak_angle` として測る。
 4. **観測空間版**: `J_phi` を bbox 正規化された vertex Jacobian として、`J_phi U_C` の
    range で同じことを繰り返す。
 5. **paired 統計**: 現 `d_feas` の dataset (`v3_controls_scores_full.csv` の cohort) を
    そのまま再利用。新指標を同 CSV にカラム追加 (`d_sub`, `gain_prime`, `leak_prime`,
-   `d_H`, `d_obs`)。
+   `d_H`, `d_sub_angle`, `leak_angle`, `d_H_angle`, `d_obs`)。
 6. **可視化**: §8 と同形式の CDF と paired Wilcoxon を新指標で再生成。
 
 ### 想定工数
@@ -644,8 +707,10 @@ Vit vs heldout の paired Wilcoxon の `|z|` (大きいほど良い)。base / so
   と期待しているが、要 sanity check。
 - **`d_norm` の選択**: `max(dim V_P, dim V_G)` か `(dim V_P + dim V_G)/2` か。前者は
   jump を抑える、後者は連続性 (片方が縮むときの挙動) で勝る。実験で決める。
-- **leak' の正規化**: `n_R` で割るか、`n_R · dim V_P` で割るか。Frobenius norm の
-  entry 数で割るのが標準だが、interpretation を壊す可能性あり。
+- **leak' の正規化**: `n_R · dim V_P` で割る operator norm 版 (`leak_prime`) は実験では
+  単独 signal が強い一方、`d_sub` と合成すると scale が小さすぎた。Hθ ではこの問題を
+  `orth(row(J_R))` による `leak_angle` で解消する。旧 `leak_prime` は residual-scale
+  diagnostic として残す。
 - **rank jump の不連続性**: 実 sketch でこれが頻繁に起きるか? 起きる場合の影響は
   `gain'` の jump 幅でどれくらいか。soft rank approximation (Tikhonov 風だが subspace
   に適用) を検討すべきか。
@@ -1087,3 +1152,8 @@ ablation column として実施する想定。
 > 2026-05-21 追記: 上記実装フェーズの結果 (主指標は `d_H` で固定) を反映した実験は
 > [`summary_histcad_response_metric_v4_results.md`](summary_histcad_response_metric_v4_results.md)
 > 参照。その後発候補 (案 P) も同 doc の §9 後追い節で smoke test 結果を整理してある。
+>
+> 2026-05-24 追記: `d_H` の scale issue を受けて Hθ (`d_sub_angle` + `leak_angle`) を
+> 追加実装・フル評価した。結果は同 doc §14。結論は「`d_sub` だけでは solver_rl の
+> relational mismatch を十分に表現しきれないが、旧 `leak_prime` をそのまま足すより
+> `leak_angle` として angle scale に揃える方がよい」。

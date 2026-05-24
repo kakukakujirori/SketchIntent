@@ -136,8 +136,8 @@ def main():
 
     metric_cols = [
         "d_feas", "d_feas_gain", "d_feas_leak",                # v3 baseline
-        "d_sub", "align_loss", "rank_loss",                    # Case D
-        "d_H", "leak_prime",                                   # Case H
+        "d_sub", "d_sub_angle", "align_loss", "rank_loss",     # Case D
+        "d_H", "leak_prime", "d_H_angle", "leak_angle",        # Case H / angular variant
         "d_K", "d_K_pure", "gain_K", "leak_K", "effort_K",     # Case K
         "d_M", "d_M_pure", "gain_M", "leak_M", "effort_M",     # Case M
         "gain_I", "gain_J",                                    # Case I / J
@@ -270,7 +270,10 @@ def main():
     emit("=" * 78)
 
     emit("\n[Quantile table — median per variant]")
-    header_metrics = ["d_feas", "d_sub", "d_H", "d_K", "d_M", "gain_I", "gain_J"]
+    header_metrics = [
+        "d_feas", "d_sub", "d_H", "d_sub_angle", "leak_angle",
+        "d_H_angle", "d_K", "d_M", "gain_I", "gain_J",
+    ]
     emit(f"  {'variant':14s}  {'n':>4s}  " + "  ".join(f"{m:>9s}" for m in header_metrics))
     for q in quant_rows:
         line = f"  {q['variant']:14s}  {q['n']:>4d}"
