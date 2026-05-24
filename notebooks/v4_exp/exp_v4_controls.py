@@ -119,8 +119,8 @@ METRIC_KEYS_V3 = (
 )
 METRIC_KEYS_V4 = (
     # subspace family
-    "d_sub", "align_loss", "rank_loss",
-    "d_H", "leak_prime",
+    "d_sub", "d_sub_angle", "align_loss", "rank_loss",
+    "d_H", "leak_prime", "d_H_angle", "leak_angle",
     # q-retaining family
     "d_K", "gain_K", "leak_K", "effort_K",
     "d_M", "gain_M", "leak_M", "effort_M",
@@ -366,7 +366,7 @@ def print_summary(rows: list[dict]):
 
     key_metrics = [
         "d_feas",      # v3 baseline
-        "d_sub", "d_H",                # probe-free
+        "d_sub", "d_H", "d_sub_angle", "d_H_angle", "leak_angle",  # probe-free
         "d_K", "d_M",                  # q-retaining
         "gain_K", "leak_K",
         "gain_M", "leak_M",

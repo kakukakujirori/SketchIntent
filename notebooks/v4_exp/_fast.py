@@ -175,6 +175,9 @@ def compute_metrics_v4_cached(
     d_sub_sq = (dim_P_obs + dim_G_obs - 2.0 * cos2_sum) / d_norm
     d_sub_sq = max(d_sub_sq, 0.0)
     d_sub = math.sqrt(d_sub_sq)
+    d_sub_angle_sq = (d_norm - cos2_sum) / d_norm
+    d_sub_angle_sq = min(max(d_sub_angle_sq, 0.0), 1.0)
+    d_sub_angle = math.sqrt(d_sub_angle_sq)
     rank_loss = abs(dim_P_obs - dim_G_obs) / d_norm
 
     U_P_prim, dim_P_prim = _orthonormal_range(R_P, eps=eps)
@@ -188,8 +191,22 @@ def compute_metrics_v4_cached(
         leak_prime_sq = 0.0
     leak_prime = math.sqrt(max(leak_prime_sq, 0.0))
 
+    if J_R_pred_state is not None and dim_P_prim > 0 and n_R_rows_pred > 0:
+        N_G_prim, dim_N_prim = _orthonormal_range(J_R_pred_state.T, eps=eps)
+        if dim_N_prim > 0:
+            forbidden_overlap = N_G_prim.T @ U_P_prim
+            leak_angle_sq = float((forbidden_overlap ** 2).sum()) / float(dim_P_prim)
+        else:
+            leak_angle_sq = 0.0
+    else:
+        leak_angle_sq = 0.0
+    leak_angle_sq = min(max(leak_angle_sq, 0.0), 1.0)
+    leak_angle = math.sqrt(leak_angle_sq)
+
     d_H_sq = d_sub_sq + leak_prime_sq
     d_H = math.sqrt(max(d_H_sq, 0.0))
+    d_H_angle_sq = d_sub_angle_sq + leak_angle_sq
+    d_H_angle = math.sqrt(max(d_H_angle_sq, 0.0))
 
     D_p_pred = _column_norms(R_P, eps=eps)
     if n_p_pred > 0:
@@ -332,6 +349,7 @@ def compute_metrics_v4_cached(
 
     return {
         "d_sub": d_sub,
+        "d_sub_angle": d_sub_angle,
         "align_loss": align_loss,
         "rank_loss": rank_loss,
         "dim_P": int(dim_P_obs),
@@ -339,6 +357,8 @@ def compute_metrics_v4_cached(
         "dim_P_prim": int(dim_P_prim),
         "d_H": d_H,
         "leak_prime": leak_prime,
+        "d_H_angle": d_H_angle,
+        "leak_angle": leak_angle,
         "d_K": d_K,
         "gain_K": gain_K,
         "leak_K": leak_K,

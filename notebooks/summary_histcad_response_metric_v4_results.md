@@ -4,14 +4,16 @@
 
 > **この文書の位置付け**
 > [v4.md](summary_histcad_response_metric_v4.md) で提案された複数候補
-> (Case D / H / I / J / K / M) を実装し、v3 と同じ source-conditioned
+> (Case D / H / Hθ / I / J / K / M) を実装し、v3 と同じ source-conditioned
 > multi-reference setting で評価した結果をまとめる。実装は
 > [notebooks/v4_exp/](v4_exp/) 下、artifact は
-> [artifacts/v4_exp/](../artifacts/v4_exp/) 下。
+> [artifacts/v4_exp/](../artifacts/v4_exp/) および
+> [artifacts/v4_exp_angle/](../artifacts/v4_exp_angle/) 下。
 
 ## TL;DR
 
-**最終的に Case H (`d_H` = probe-free observable subspace + operator leak) を推奨する**。
+**2026-05-24 更新: 最終推奨は Case Hθ (`d_sub_angle` + `leak_angle`)。単一 scalar が必要な
+表では `d_H_angle = sqrt(d_sub_angle^2 + leak_angle^2)` を使う。**
 
 - v4.md §9 で暫定 1 位だった案 K (relation-preserving controllability) と案 M
   (stack 版) は、本実験で **solver_rl に対し sign inversion** を起こすことが判明し
@@ -20,9 +22,14 @@
 - 案 H は v3 `d_feas` より paired discrimination が同等以上 (base z: 11.68 →
   13.62, solver_rl z: 9.06 → 11.23)、かつ per-rotation の連続性 (R2) も改善
   (distinct values per rotation: 4 → 6, monotonic transitions: 34% → 49%)。
-- 案 D / d_sub は H と同等に強いが、H が relational intent mismatch を
-  operator leak で追加捕捉できる利点があるため、H を主指標、D は diagnostic
-  として位置付ける。
+- ただし旧 `d_H = sqrt(d_sub^2 + leak_prime^2)` は total score 上ほぼ `d_sub` に支配される。
+  `leak_prime` は単独 signal は強いが、scale が小さく scalar 合成に効きにくい。
+- `leak_angle = ||orth(row(J_R))^T U_P||_F / sqrt(dim V_P)` に変更すると、`d_sub_angle`
+  と同じ angular scale に乗る。solver_rl では `d_H_angle` が旧 `d_H` を上回り
+  (`z=+12.36` vs `+11.24`)、`leak_angle` 単独は最強 (`z=+13.25`)。
+- したがって paper では **`d_sub_angle` / `leak_angle` の 2 軸 report を主診断** とし、
+  scalar が必要な場合に `d_H_angle` を使う。最大限 parsimonious な main metric が
+  必要なら `d_sub` または `d_sub_angle` main + `leak_angle` mandatory diagnostic。
 
 ## 1. 実装した候補
 
@@ -32,6 +39,7 @@
 |---|---|---|
 | **D** `d_sub` | 観測空間 `range(J_phi R_C)` の subspace 距離 | 不要 |
 | **H** `d_H` | D + operator leak `||J_{R_G} U_P||_F` | 不要 |
+| **Hθ** `d_H_angle` | angular subspace distance + angular leak `||N_G^T U_P||_F` | 不要 |
 | **K** `d_K` | per-probe LS: `min ||A_q u - I||^2 + μ||A_R u||^2 + λ||u||^2` | 必要 |
 | **M** `d_M` | Case K の `Q_G` stack 版 | 必要 |
 | **I** `gain_I` | `e_q² / (1+e_q²)` (effort transform) | 必要 |
@@ -48,6 +56,11 @@
 - 既定 hyperparameter: `μ=1.0`, `λ=1e-3`, `τ=1.0`, `eps=1e-9`
 - `d_K_pure` / `d_M_pure` は `sqrt(gain² + μ leak²)` (effort 項なし) として
   analyze 側で派生
+- Hθ 追加カラム:
+  - `d_sub_angle² = 1 - Σ cos²θ_i / max(dim V_P, dim V_G)`
+  - `leak_angle² = ||orth(row(J_R))^T U_P||_F² / dim(V_P)`
+  - `d_H_angle = sqrt(d_sub_angle² + leak_angle²)`
+  旧 `leak_prime` は residual-scale operator diagnostic として残す
 
 ## 2. データセット
 
@@ -140,6 +153,51 @@ base と solver_rl で `leak_prime` を比べると **solver_rl のほうが大�
 **leak_prime 単独でも solver_rl 検出力が最強 (z=+12.68, p=7.8e-37)**。
 d_H が d_sub より優位なのは leak_prime の追加情報による。
 
+### 5.1 2026-05-24 追試: angular leak 版
+
+上記の解釈は component diagnostic としては正しいが、scalar `d_H` では
+`leak_prime` の絶対値が小さく、total score はほぼ `d_sub` になる。そこで
+`leak_prime` を `leak_angle` に置き換え、`d_sub` 側も `d_sub_angle` として
+angular scale に揃えた。
+
+| variant | d_sub | d_H | leak_prime | d_sub_angle | leak_angle | d_H_angle |
+|---|---:|---:|---:|---:|---:|---:|
+| source_self | 0.0000 | 0.0000 | 0.0000 | 0.0000 | 0.0000 | 0.0000 |
+| heldout | 0.0000 | 0.0000 | 0.0000 | 0.0000 | 0.0000 | 0.0000 |
+| dim_drop25 | 0.5000 | 0.5129 | 0.0000 | 0.5000 | 0.0000 | 0.5333 |
+| dim_drop50 | 0.7071 | 0.7071 | 0.0000 | 0.7071 | 0.0000 | 0.7071 |
+| rel_drop50 | 0.9133 | 0.9396 | 0.1935 | 0.7000 | 0.6584 | 0.9606 |
+| rel_drop100 | 1.0707 | 1.1046 | 0.2530 | 0.8179 | 0.7921 | 1.1380 |
+| **base** | 0.7640 | 0.7667 | 0.0212 | 0.7071 | 0.2634 | 0.8637 |
+| **solver_rl** | 0.5130 | 0.5130 | 0.0732 | 0.5000 | 0.4472 | 0.6883 |
+
+`leak_angle` は `leak_prime` と違い、solver_rl / rel_drop で `d_sub_angle` と同程度の
+スケールに乗る。したがって `d_H_angle` では relation mismatch が total score に
+実際に効く。
+
+Paired Wilcoxon の主要比較:
+
+| model | metric | n | h | m | t | z | p |
+|---|---|---:|---:|---:|---:|---:|---:|
+| base | d_sub | 306 | 254 | 30 | 22 | +13.57 | 5.7e-42 |
+| base | d_sub_angle | 306 | 249 | 35 | 22 | +13.28 | 3.0e-40 |
+| base | d_H | 306 | 254 | 33 | 19 | +13.57 | 6.2e-42 |
+| base | d_H_angle | 306 | 257 | 30 | 19 | +13.46 | 2.6e-41 |
+| base | leak_angle | 306 | 167 | 45 | 94 | +9.31 | 1.3e-20 |
+| solver_rl | d_sub | 365 | 243 | 73 | 49 | +10.70 | 1.1e-26 |
+| solver_rl | d_sub_angle | 365 | 245 | 72 | 48 | +10.73 | 7.2e-27 |
+| solver_rl | d_H | 365 | 256 | 72 | 37 | +11.24 | 2.7e-29 |
+| solver_rl | d_H_angle | 365 | 266 | 61 | 38 | +12.36 | 4.6e-35 |
+| solver_rl | leak_angle | 365 | 239 | 15 | 111 | +13.25 | 4.6e-40 |
+
+結論:
+
+- base では `d_H_angle` は `d_sub` / 旧 `d_H` とほぼ同水準だが、わずかに弱い。
+- solver_rl では `d_H_angle` が `d_sub` と旧 `d_H` を明確に上回る。
+- `leak_angle` 単独は solver_rl の relational mismatch 検出で最強。
+- よって `d_sub` だけで十分とは言い切れない。特に solver_rl の failure mode を
+  評価するなら、`leak_angle` を mandatory diagnostic として残すべき。
+
 ## 6. R2 連続性 (dim_drop sweep, 10% 刻み, batch 0+9)
 
 | metric | n_tr | frac↑ | frac↓ | frac= | med\|Δ\| | distinct/rotation |
@@ -165,9 +223,22 @@ frac↓ は v3 と同じ 11% を維持。
 | d_K | 0.0226 | 0.0470 | 0.3440 | 0.000 |
 | d_M | 0.0183 | 0.2099 | 0.4566 | 0.000 |
 
+Hθ 追試での angular 版:
+
+| metric | median | Q75 | Q90 | frac<1e-4 |
+|---|---:|---:|---:|---:|
+| d_sub | 0.0000 | 0.4083 | 0.5774 | 0.584 |
+| d_H | 0.0000 | 0.4184 | 0.5774 | 0.526 |
+| leak_prime | 0.0000 | 0.0015 | 0.0872 | 0.727 |
+| d_sub_angle | 0.0000 | 0.4082 | 0.5490 | 0.584 |
+| leak_angle | 0.0000 | 0.1313 | 0.4472 | 0.709 |
+| d_H_angle | 0.0000 | 0.5000 | 0.6705 | 0.523 |
+
 **Trade-off**:
 - `d_feas` は heldout の frac<1e-4=0.73 (annotator variance を強く吸収)
 - `d_H` は frac<1e-4=0.52 (約 1/4 の human-human ペアに非ゼロ d_H を与える)
+- `d_H_angle` も near-zero 率は旧 `d_H` と同程度だが、Q75/Q90 は広がる。
+  relation mismatch を強く見る代わりに human-human tail もやや強く罰する。
 
 `d_H` の heldout 上位 tail は dim count mismatch (一方の human が 4 obs dims、
 他方が 16 obs dims) の場合に発生する。これは **intent-equivalent でない真の
@@ -179,53 +250,61 @@ human-human distance 分布が広がるのは事実。
 
 ### N (足切り) 評価
 
-| criterion | d_feas | d_sub | **d_H** | d_K | d_M |
-|---|---|---|---|---|---|
-| N1 source_self frac<1e-4≥0.99 | ✓ (1.00) | ✓ (1.00) | ✓ (1.00) | ✗ (0.00) | ✗ (0.00) |
-| N2 heldout med << dim50 med | ✓ | ✓ | ✓ | ✓ | ✓ |
-| N3a sign correct (base, p<1e-5) | ✓ | ✓ | ✓ | ✓ | ✓ |
-| **N3b sign correct (solver_rl)** | ✓ | ✓ | **✓** | **✗ p=5.8e-6** | **✗ p=4e-17** |
-| N4 dropout monotonic | ✓ | ✓ | ✓ | ✓ | ✓ |
-| N5 rel_drop > heldout | ✓ | ✓ | ✓ | ✓ | ✓ |
-| N11 component selectivity | ✓ | partial | ✓ (gain'/leak') | partial | partial |
-| **N13 no failure hiding** | ✓ | ✓ | ✓ | **✗ effort game** | **✗ effort game** |
+| criterion | d_feas | d_sub | **d_H** | **d_H_angle** | d_K | d_M |
+|---|---|---|---|---|---|---|
+| N1 source_self frac<1e-4≥0.99 | ✓ (1.00) | ✓ (1.00) | ✓ (1.00) | ✓ (1.00) | ✗ (0.00) | ✗ (0.00) |
+| N2 heldout med << dim50 med | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| N3a sign correct (base, p<1e-5) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| **N3b sign correct (solver_rl)** | ✓ | ✓ | ✓ | **✓** | **✗ p=5.8e-6** | **✗ p=4e-17** |
+| N4 dropout monotonic | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| N5 rel_drop > heldout | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| N11 component selectivity | ✓ | partial | ✓ (gain'/leak') | **✓ (subspace/leak angle)** | partial | partial |
+| **N13 no failure hiding** | ✓ | ✓ | ✓ | ✓ | **✗ effort game** | **✗ effort game** |
 
 `d_K` / `d_M` は **N3b** および **N13** で失格。
 
 ### R (degree) 評価
 
-| criterion | d_feas | d_sub | **d_H** |
-|---|---|---|---|
-| R1 paired \|z\| (base / solver_rl) | 11.7 / 9.1 | 13.6 / 10.7 | **13.6 / 11.2** |
-| R2 連続性 (distinct/rotation, monotonic↑) | 4 / 34% | 5 / 47% | **6 / 49%** |
-| R3 subset cohort discrimination | (要追加実験) | (要追加実験) | (要追加実験) |
-| R4 分解 richness | gain/leak (gain binary) | rank/align (rank integer) | **gain' (連続) / leak' (連続)** |
-| R5 ablation robustness | ✓ (v3 で確認) | (要検証) | (要検証) |
-| R6 design parsimony | 中 (probe必要) | **高** | **高** |
-| R10 finite consistency | (v3 で部分検証) | (要検証) | (要検証) |
-| R11 human-distribution calibration | heldout frac<1e-4=0.73 | 0.58 | 0.52 |
-| R12 computational usability | (probe LS) | SVD のみ | **SVD のみ** |
+| criterion | d_feas | d_sub | **d_H** | **d_H_angle** |
+|---|---|---|---|---|
+| R1 paired \|z\| (base / solver_rl) | 11.7 / 9.1 | 13.6 / 10.7 | 13.6 / 11.2 | **13.5 / 12.4** |
+| R2 連続性 (distinct/rotation, monotonic↑) | 4 / 34% | 5 / 47% | **6 / 49%** | (要 R2 sweep) |
+| R3 subset cohort discrimination | (要追加実験) | (要追加実験) | (要追加実験) | (要追加実験) |
+| R4 分解 richness | gain/leak (gain binary) | rank/align (rank integer) | gain' / leak' | **subspace angle / leak angle** |
+| R5 ablation robustness | ✓ (v3 で確認) | (要検証) | (要検証) | (要検証) |
+| R6 design parsimony | 中 (probe必要) | **高** | **高** | **高** |
+| R10 finite consistency | (v3 で部分検証) | (要検証) | (要検証) | (要検証) |
+| R11 human-distribution calibration | heldout frac<1e-4=0.73 | 0.58 | 0.52 | 0.52 |
+| R12 computational usability | (probe LS) | SVD のみ | **SVD のみ** | **SVD のみ** |
 
 ## 9. 結論と推奨
 
 ### 推奨
 
-**主指標**: `d_H = sqrt(d_sub² + leak_prime²)` (Case H)
+**主診断**: `d_sub_angle` + `leak_angle` の 2 軸 report (Case Hθ)
+
+**単一 scalar が必要な場合**: `d_H_angle = sqrt(d_sub_angle² + leak_angle²)`
+
+**旧 Case H**: `d_H = sqrt(d_sub² + leak_prime²)` は residual-scale operator diagnostic
+として残すが、main scalar としては Hθ に置き換える。
 
 **理由**:
 
 1. v4.md の N1–N13 必要条件をすべて満たす唯一の "新しい" 候補
-   (v3 `d_feas` も満たすが、R1/R2/R4 で `d_H` が改善)
-2. **base / solver_rl 両方の paired z が `d_feas` 比で 1.16-1.23× 強化**
-   (base 11.7→13.6, solver_rl 9.1→11.2)
+   (v3 `d_feas` も満たすが、R1/R4 で `d_H_angle` が改善)
+2. **base / solver_rl 両方の paired z が `d_feas` 比で強化**
+   (base 11.7→13.5, solver_rl 9.1→12.4)
 3. **per-rotation の R2 連続性が改善** — distinct values per rotation が
-   4 → 6 に、monotonic 率が 34% → 49% に向上
+   旧 `d_H` で 4 → 6 に、monotonic 率が 34% → 49% に向上。Hθ でも同じ
+   probe-free SVD family なので、追加 R2 sweep は残るが構造上は同等
 4. **probe 設計に依存しない** — `Q_G` の選び方や source validation を省略可能
-5. `gain' = d_sub` と `leak' = leak_prime` の **連続値分解** で v3.md §7 の
-   RL diagnostic ("RL は gain を改善するが leak は閉じない") を再現
+5. `d_sub_angle` と `leak_angle` の **同一 scale の連続値分解** で v3.md §7 の
+   RL diagnostic ("RL は gain を改善するが leak は閉じない") を再現し、solver_rl では
+   旧 `d_H` より強い識別力を示す
 
-**Diagnostic 補助**: `d_sub` (subspace only) と `leak_prime` (operator only)
-を独立成分として report し、§7 タイプの model improvement axis 分解を提供。
+**Diagnostic 補助**: `d_sub` / `d_sub_angle` (subspace only)、`leak_prime` (residual-scale
+operator)、`leak_angle` (scale-free angular leak) を独立成分として report し、§7 タイプの
+model improvement axis 分解を提供。
 
 ### v4.md §9 暫定優先順位の修正
 
@@ -239,11 +318,12 @@ v4.md §9 では:
 
 を提案していたが、本実験の結果以下に修正:
 
-1. **案 H (probe-free subspace + operator leak)** — 最有力
-2. 案 D (subspace) — diagnostic
-3. v3 `d_feas` — baseline として残す
-4. 案 K / 案 M — **N3 (sign correctness) 不合格**、controllability bias で却下
-5. 案 I / J — 弱識別力 (および sign inversion)
+1. **案 Hθ (probe-free subspace angle + angular leak)** — 最有力
+2. 案 H (probe-free subspace + residual-scale operator leak) — diagnostic / historical baseline
+3. 案 D (subspace) — parsimonious main candidate or diagnostic
+4. v3 `d_feas` — baseline として残す
+5. 案 K / 案 M — **N3 (sign correctness) 不合格**、controllability bias で却下
+6. 案 I / J — 弱識別力 (および sign inversion)
 
 **§9 の "q が共通土俵として不可欠" という直感は本実験では裏付けられなかった**。
 観測空間 `J_phi R_C` 自体が十分な共通土俵になっており、probe を介する必要はない。
@@ -492,7 +572,8 @@ python notebooks/v4_exp/analyze_r2_continuity.py --input-csv artifacts/v4_exp/v4
 §10 の Task 1, 2, 3, 5 をすべて実施 (Task 4 はユーザー指示で skip)。`d_H` は
 sensitivity sweep / fully-constrained cohort / PP-Coincident 除外 / strict-gate
 cohort / smatch correlation のすべてで主結果 (人間 > model, p << 1e-10) を
-維持し、paper main metric として確定できる。
+維持し、当時は paper main metric として確定できると判断した。
+2026-05-24 の Hθ 追試後は、この節は旧 `d_H` の robustness record と位置付ける。
 
 実装:
 
@@ -720,7 +801,42 @@ Artifact: [ablation_gate_strict.csv](../artifacts/v4_exp/ablation_gate_strict.cs
 - PP-Coincident への non-dependence (除外しても結論不変、むしろ強化)
 - gate change への robustness (strict / loose 両 gate で同方向結論)
 
-を示し、`d_H` を **paper main metric として確定**できる状態にした。
+を示し、当時は `d_H` を **paper main metric として確定**できる状態にした。
+ただし 2026-05-24 の Hθ 追試 (§14) により、main scalar は `d_H_angle`、
+主診断は `d_sub_angle` / `leak_angle` に更新する。
 
 残課題は §10 task 4 (R10 finite consistency) と §10 task 6 (案 P d_SVD フル評価)
 のみで、いずれも別 PR で対応予定。
+
+## 14. Hθ angular leak 追試まとめ (2026-05-24)
+
+`leak_prime` は単独では強いが、`d_H = sqrt(d_sub^2 + leak_prime^2)` の total score では
+絶対値が小さく、実質的に `d_sub` が支配的になる。この scale mismatch を解消するため、
+`orth(row(J_R))` と `U_P = orth(range(R_P))` の subspace overlap を測る
+`leak_angle` を追加した。
+
+実装:
+
+- [metrics_v4.py](v4_exp/metrics_v4.py): `d_sub_angle`, `leak_angle`, `d_H_angle`
+- [_fast.py](v4_exp/_fast.py): cached `compute_metrics_v4` に同じ追加
+- [exp_v4_controls.py](v4_exp/exp_v4_controls.py): CSV 出力キー追加
+- [analyze_v4.py](v4_exp/analyze_v4.py): quantile / paired / dropout sweep 集計に追加
+
+Artifacts:
+
+- [v4_controls_scores_full.csv](../artifacts/v4_exp_angle/v4_controls_scores_full.csv)
+- [v4_controls_details_full.csv](../artifacts/v4_exp_angle/v4_controls_details_full.csv)
+- [v4_quantile_table.csv](../artifacts/v4_exp_angle/v4_quantile_table.csv)
+- [v4_paired_stats.csv](../artifacts/v4_exp_angle/v4_paired_stats.csv)
+- [v4_dropout_sweep.csv](../artifacts/v4_exp_angle/v4_dropout_sweep.csv)
+
+結論:
+
+- `leak_angle` は `leak_prime` と違い、solver_rl / rel_drop で `d_sub_angle` と同程度の
+  scale に乗る。
+- solver_rl paired discrimination は `d_sub` z=+10.70、旧 `d_H` z=+11.24、
+  `d_H_angle` z=+12.36、`leak_angle` z=+13.25。
+- base では `d_H_angle` は旧 `d_H` / `d_sub` とほぼ同水準で、わずかに弱い。
+- heldout tail は旧 `d_H` よりやや広がる (`d_H_angle` Q90=0.6705 vs `d_H` Q90=0.5774)。
+- したがって **`d_sub` だけで十分とは判断しない**。`leak_angle` を mandatory diagnostic
+  として残し、単一 scalar が必要なら `d_H_angle` を使う。
