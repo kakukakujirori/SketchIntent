@@ -59,34 +59,17 @@ from src.sketch_handlers.constants import ConstraintToken
 from src.sketch_handlers.context import SketchContext
 from src.sketch_handlers.sketch_tokenizer import SketchTokenizer
 from src.sketch_handlers.sketch_utils import complete_constraint_values
-from src.models.components.dfeas_reward import _build_intrinsic_probes
-from src.models.components.relation_subspace_metric import (
+from src.models.components.solver_feedback import SolverFeedback
+from src.models.rewards.utils.geometry import (
+    orthonormal_range as _orthonormal_range,
+    stack_relation_jacobians_at as _stack_relation_jacobians_at,
+)
+from src.models.rewards.utils.probes import (
+    build_intrinsic_probes as _build_intrinsic_probes,
+)
+from src.models.rewards.utils.relation_subspace import (
     compute_relation_subspace_distance,
 )
-from src.models.components.solver_feedback import SolverFeedback
-
-
-def _orthonormal_range(R: torch.Tensor, eps: float) -> tuple[torch.Tensor, int]:
-    if R.numel() == 0 or R.shape[1] == 0:
-        return torch.zeros(R.shape[0], 0, dtype=R.dtype, device=R.device), 0
-    U, S, _Vh = torch.linalg.svd(R, full_matrices=False)
-    keep = int((S >= eps).sum().item())
-    if keep == 0:
-        return torch.zeros(R.shape[0], 0, dtype=R.dtype, device=R.device), 0
-    return U[:, :keep].contiguous(), keep
-
-
-def _stack_relation_jacobians_at(rels, state, context) -> tuple[torch.Tensor | None, int]:
-    rows: list[torch.Tensor] = []
-    for rel in rels:
-        j = constraint_jacobian(rel, state, context)
-        if j is None or j.shape[0] == 0:
-            continue
-        rows.append(j)
-    if not rows:
-        return None, 0
-    Jr = torch.cat(rows, dim=0)
-    return Jr, int(Jr.shape[0])
 
 
 # ---------------------------------------------------------------------------

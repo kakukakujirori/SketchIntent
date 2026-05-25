@@ -9,8 +9,11 @@ import sketchgraphs.data as datalib
 from src.metrics.edit_response_distance import (
     NativeResponse,
     _is_relational,
-    constraint_jacobian,
     pairwise_distance_observable,
+)
+from src.models.rewards.utils.geometry import (
+    orthonormal_range,
+    stack_relation_jacobians_at,
 )
 from src.sketch_handlers.sketch_solver import compute_null_space
 
@@ -20,33 +23,6 @@ RELATION_SUBSPACE_DISTANCE_MODES = {
     "pred_subset_gt",
     "mixed_subset",
 }
-
-
-def orthonormal_range(R: torch.Tensor, eps: float) -> tuple[torch.Tensor, int]:
-    if R.numel() == 0 or R.shape[1] == 0:
-        return torch.zeros(R.shape[0], 0, dtype=R.dtype, device=R.device), 0
-    U, S, _Vh = torch.linalg.svd(R, full_matrices=False)
-    keep = int((S >= eps).sum().item())
-    if keep == 0:
-        return torch.zeros(R.shape[0], 0, dtype=R.dtype, device=R.device), 0
-    return U[:, :keep].contiguous(), keep
-
-
-def stack_relation_jacobians_at(
-    rels,
-    state,
-    context,
-) -> tuple[torch.Tensor | None, int]:
-    rows: list[torch.Tensor] = []
-    for rel in rels:
-        j = constraint_jacobian(rel, state, context)
-        if j is None or j.shape[0] == 0:
-            continue
-        rows.append(j)
-    if not rows:
-        return None, 0
-    Jr = torch.cat(rows, dim=0)
-    return Jr, int(Jr.shape[0])
 
 
 def compute_relation_subspace_distance(

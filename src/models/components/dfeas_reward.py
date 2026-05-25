@@ -34,16 +34,6 @@ import numpy as np
 import torch
 
 import sketchgraphs.data as datalib
-from sketchgraphs.data import (
-    Arc,
-    Circle,
-    Constraint,
-    ConstraintType,
-    EnumParameter,
-    Line,
-    LocalReferenceParameter,
-    QuantityParameter,
-)
 from src.metrics.edit_response_distance import (
     _is_dimensional,
     _is_relational,
@@ -52,88 +42,16 @@ from src.metrics.edit_response_distance import (
     edit_response_for_probe,
 )
 from src.models.components.solver_feedback import SolverFeedback
+from src.models.rewards.utils.geometry import (
+    stack_relation_jacobians_at as _stack_relation_jacobians,
+)
+from src.models.rewards.utils.probes import (
+    build_intrinsic_probes as _build_intrinsic_probes,
+)
 from src.sketch_handlers.constants import ConstraintToken
 from src.sketch_handlers.context import SketchContext
 from src.sketch_handlers.sketch_tokenizer import SketchTokenizer
 from src.sketch_handlers.sketch_utils import complete_constraint_values
-
-
-def _make_raw_probe(
-    ctype_name: str, refs: tuple[str, ...]
-) -> datalib.Constraint:
-    """Construct a synthetic dim constraint with an un-watermarked placeholder
-    value.  ``complete_constraint_values`` is responsible for filling in the
-    real value computed from primitive geometry and adding the watermark
-    required by ``ConstraintHandler.get_constraint_props``."""
-    ctype = getattr(ConstraintType, ctype_name)
-    params: list = [
-        LocalReferenceParameter(parameterId=f"local{i}", value=ref)
-        for i, ref in enumerate(refs)
-    ]
-    pid = "angle" if ctype_name == "Angle" else "length"
-    params.append(QuantityParameter(
-        parameterId=pid, value=0.0, expression="0.0"))
-    if ctype_name == "Length":
-        # Required by complete_constraint_values → compute_line_length.
-        params.append(EnumParameter(parameterId="direction", value="MINIMUM"))
-    return Constraint(
-        identifier=f"synthetic_{ctype_name}",
-        constraint_type=ctype,
-        parameters=params,
-    )
-
-
-def _is_construction_entity(entity) -> bool:
-    return bool(
-        getattr(entity, "isConstruction", False)
-        or getattr(entity, "Construction", False)
-    )
-
-
-def _build_intrinsic_probes(sketch: datalib.Sketch) -> list[datalib.Constraint]:
-    """One probe per primitive whose intrinsic size is a natural driving param.
-
-    - Line  → Length (= norm(end - start))
-    - Arc   → Radius
-    - Circle→ Radius
-    - Point → skipped (no intrinsic size)
-    - Construction geometry → skipped (auxiliary, not user-facing edit intent)
-
-    All probes have a single-dimensional length residual, so row units are
-    homogeneous and the gain mean-square aggregation in `_compute_d_feas`
-    stays scale-consistent.  Probe values are filled in by
-    ``complete_constraint_values`` on a temporary sketch that shares the
-    source sketch's entities; this follows the project protocol that
-    ``param.expression`` must carry the ``VALUE_ASSIGNED:`` watermark before
-    ``ConstraintHandler.residual`` can be invoked.
-    """
-    raw: dict[str, datalib.Constraint] = {}
-    for eid, ent in sketch.entities.items():
-        if _is_construction_entity(ent):
-            continue
-        if isinstance(ent, Line):
-            raw[f"_probe_L_{eid}"] = _make_raw_probe("Length", (eid,))
-        elif isinstance(ent, (Arc, Circle)):
-            raw[f"_probe_R_{eid}"] = _make_raw_probe("Radius", (eid,))
-    if not raw:
-        return []
-    temp = datalib.Sketch(entities=sketch.entities, constraints=raw)
-    temp, _ = complete_constraint_values(temp, skip_invalid_constraints=True)
-    return list(temp.constraints.values())
-
-
-def _stack_relation_jacobians(rels, state, context):
-    rows: list[torch.Tensor] = []
-    total = 0
-    for rel in rels:
-        j = constraint_jacobian(rel, state, context)
-        if j is None or j.shape[0] == 0:
-            continue
-        rows.append(j)
-        total += j.shape[0]
-    if not rows:
-        return None, 0
-    return torch.cat(rows, dim=0), total
 
 
 def _compute_d_feas(

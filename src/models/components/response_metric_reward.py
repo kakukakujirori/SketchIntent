@@ -22,54 +22,23 @@ from src.metrics.edit_response_distance import (
     constraint_jacobian,
     pairwise_distance_observable,
 )
-from src.models.components.dfeas_reward import _build_intrinsic_probes
-from src.models.components.relation_subspace_metric import (
+from src.models.components.solver_feedback import SolverFeedback
+from src.models.rewards.utils.geometry import (
+    observable_subspace as _observable_subspace,
+    orthonormal_range as _orthonormal_range,
+    stack_relation_jacobians_at as _stack_relation_jacobians_at,
+)
+from src.models.rewards.utils.probes import (
+    build_intrinsic_probes as _build_intrinsic_probes,
+)
+from src.models.rewards.utils.relation_subspace import (
     RELATION_SUBSPACE_DISTANCE_MODES,
     compute_relation_subspace_distance,
 )
-from src.models.components.solver_feedback import SolverFeedback
 from src.sketch_handlers.constants import ConstraintToken
 from src.sketch_handlers.context import SketchContext
 from src.sketch_handlers.sketch_tokenizer import SketchTokenizer
 from src.sketch_handlers.sketch_utils import complete_constraint_values
-
-
-def _orthonormal_range(R: torch.Tensor, eps: float) -> tuple[torch.Tensor, int]:
-    if R.numel() == 0 or R.shape[1] == 0:
-        return torch.zeros(R.shape[0], 0, dtype=R.dtype, device=R.device), 0
-    U, S, _Vh = torch.linalg.svd(R, full_matrices=False)
-    keep = int((S >= eps).sum().item())
-    if keep == 0:
-        return torch.zeros(R.shape[0], 0, dtype=R.dtype, device=R.device), 0
-    return U[:, :keep].contiguous(), keep
-
-
-def _stack_relation_jacobians_at(rels, state, context) -> tuple[torch.Tensor | None, int]:
-    rows: list[torch.Tensor] = []
-    for rel in rels:
-        j = constraint_jacobian(rel, state, context)
-        if j is None or j.shape[0] == 0:
-            continue
-        rows.append(j)
-    if not rows:
-        return None, 0
-    Jr = torch.cat(rows, dim=0)
-    return Jr, int(Jr.shape[0])
-
-
-def _observable_subspace(
-    sketch: datalib.Sketch,
-    native: NativeResponse,
-    eps: float,
-) -> tuple[torch.Tensor, int]:
-    """Orthonormal basis of range(J_phi R) in pairwise-distance space."""
-    J_phi = pairwise_distance_observable(
-        sketch,
-        dtype=native.R.dtype,
-    ).to(dtype=native.R.dtype)
-    if J_phi.shape[0] == 0 or native.R.shape[1] == 0:
-        return torch.zeros(J_phi.shape[0], 0, dtype=native.R.dtype), 0
-    return _orthonormal_range(J_phi @ native.R, eps)
 
 
 H_ANGLE_REWARD_METRICS = {
