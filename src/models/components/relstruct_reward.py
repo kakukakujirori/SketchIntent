@@ -11,15 +11,17 @@ independently gateable components:
 
   **d_relstruct**   subspace distance between null(J_{R_P,rel}) and
                     null(J_{R_G,rel}) in pairwise-distance observable space.
-      Measures relational structure equivalence in both directions
-      (unlike leak_prime which is one-sided).  Bonus at  Converged gate
+      The default symmetric mode measures relational structure equivalence in
+      both directions (unlike leak_prime which is one-sided).  The optional
+      directed / mixed modes can soften the penalty when pseudo-GT relations
+      are treated as high-precision but incomplete.  Bonus at Converged gate
       (status in {"FC","Under"}).
 
   **gain_intrinsic** mean per-probe attainability for intrinsic size probes
       (Line→Length, Arc/Circle→Radius).  Lower = better attainability.
       Bonus at  Converged ∧ ¬Redundant gate (status == "FC").
 
-  **dim_penalty**   -η · #dimensional_constraints_in_Pred
+  **dim_penalty**   -η · f(#dimensional_constraints_in_Pred)
       Explicit parsimony penalty to counteract dim inflation.
       Applied at  Converged gate.
 
@@ -32,7 +34,7 @@ Reward formula (A″):
     r = α  · max(0, 1 − leak_prime    / cap_leak)  · 1[FC]
       + α' · max(0, 1 − d_relstruct   / cap_rs)    · 1[Converged]
       + β  · max(0, 1 − gain_intrinsic / cap_gain) · 1[FC]
-      − η  · #dims                                  · 1[Converged]
+      − η  · dim_penalty_value                      · 1[Converged]
 
 The reward is placed at the STOP token position to match SolverReward convention.
 """
@@ -124,17 +126,30 @@ def _compute_d_relstruct(
     pred_native: NativeResponse,
     context,
     eps: float,
-) -> float:
+    distance_mode: str = "symmetric",
+    reverse_weight: float = 0.5,
+) -> tuple[float, float, float, int, int]:
     """Subspace distance between null(J_{R_P}) and null(J_{R_G}) in observable space.
 
     Both Jacobians are evaluated at Pred's state, which carries GT primitive
     coordinates (via overwrite_primitives_with_original), so the null spaces
     live in the same ambient tangent space.
 
-    d_relstruct(P,G) = (dim_P + dim_G - 2 Σ σ_i^2) / max(dim_P, dim_G)
+    Let C = ||U_G^T U_P||_F^2, where U_* spans range(J_phi null(J_R_*)).
+    The supported distances are:
 
-    where σ_i are singular values of U_G^T U_P in the pairwise-distance
-    observable space.
+      symmetric:
+        (dim_P + dim_G - 2C) / max(dim_P, dim_G)
+
+      pred_subset_gt:
+        (dim_P - C) / dim_P
+        This is zero when Pred's relation-only observable null space is
+        contained in GT's relation-only observable null space.
+
+      mixed_subset:
+        d(P⊂G)^2 + reverse_weight * d(G⊂P)^2
+
+    Returns (selected_distance, pred_subset_gt, gt_subset_pred, dim_pred, dim_gt).
     """
     state = pred_native.state
     n_x = state.num_dof()
@@ -158,7 +173,7 @@ def _compute_d_relstruct(
     # Observable Jacobian: pairwise distances, shape (n_obs, n_x)
     J_phi = pairwise_distance_observable(pred_sketch).to(dtype=dtype)
     if J_phi.shape[0] == 0:
-        return 0.0
+        return 0.0, 0.0, 0.0, 0, 0
 
     W_pred = J_phi @ N_pred   # (n_obs, dim_null_pred)
     W_gt = J_phi @ N_gt       # (n_obs, dim_null_gt)
@@ -175,8 +190,30 @@ def _compute_d_relstruct(
         sigmas = torch.linalg.svdvals(M).clamp(0.0, 1.0)
         cos2_sum = float((sigmas ** 2).sum())
 
-    d_rs_sq = (dim_pred + dim_gt - 2.0 * cos2_sum) / d_norm
-    return math.sqrt(max(d_rs_sq, 0.0))
+    pred_subset_gt_sq = 0.0
+    if dim_pred > 0:
+        pred_subset_gt_sq = (dim_pred - cos2_sum) / float(dim_pred)
+
+    gt_subset_pred_sq = 0.0
+    if dim_gt > 0:
+        gt_subset_pred_sq = (dim_gt - cos2_sum) / float(dim_gt)
+
+    if distance_mode == "symmetric":
+        d_rs_sq = (dim_pred + dim_gt - 2.0 * cos2_sum) / d_norm
+    elif distance_mode == "pred_subset_gt":
+        d_rs_sq = pred_subset_gt_sq
+    elif distance_mode == "mixed_subset":
+        d_rs_sq = pred_subset_gt_sq + reverse_weight * gt_subset_pred_sq
+    else:
+        raise ValueError(f"unknown relstruct_distance_mode: {distance_mode!r}")
+
+    return (
+        math.sqrt(max(d_rs_sq, 0.0)),
+        math.sqrt(max(pred_subset_gt_sq, 0.0)),
+        math.sqrt(max(gt_subset_pred_sq, 0.0)),
+        dim_pred,
+        dim_gt,
+    )
 
 
 def _compute_gain_intrinsic(
@@ -241,14 +278,23 @@ class RelStructReward(torch.nn.Module):
             depends on pseudo-relation quality).
         cap_relstruct: clip denominator for d_relstruct bonus. 0.6 is a
             conservative initial value; tune via offline rescore.
+        relstruct_distance_mode: "symmetric" keeps the original two-sided
+            principal-angle distance. "pred_subset_gt" rewards Pred's
+            relation-only null space being contained in GT's, which is useful
+            when pseudo-GT is high-precision but incomplete. "mixed_subset"
+            adds a weaker reverse containment term.
+        relstruct_reverse_weight: reverse containment weight used only for
+            "mixed_subset".
 
         coeff_gain: multiplier β for gain_intrinsic bonus.
         cap_gain: clip denominator for gain_intrinsic bonus.
 
-        coeff_dim_penalty: penalty η per dimensional constraint in Pred.
+        coeff_dim_penalty: multiplier η for the dimensional parsimony penalty.
             Applied only to Converged samples (FC / Under) to avoid penalising
-            broken solver states.  Default 0.05 — small enough not to compete
-            with DoF closure during early training.
+            broken solver states.
+        dim_penalty_mode: normalization for the dimensional parsimony term:
+            "count" = #dims, "ratio" = #dims/#constraints, and
+            "per_primitive" = #dims/#primitives.
 
         use_leak: enable leak_prime bonus (FC gate).
         use_relstruct: enable d_relstruct bonus (Converged gate).
@@ -269,11 +315,14 @@ class RelStructReward(torch.nn.Module):
         # d_relstruct
         coeff_relstruct: float = 3.0,
         cap_relstruct: float = 0.6,
+        relstruct_distance_mode: str = "symmetric",
+        relstruct_reverse_weight: float = 0.5,
         # gain_intrinsic
         coeff_gain: float = 3.0,
         cap_gain: float = 0.5,
         # dim penalty
         coeff_dim_penalty: float = 0.05,
+        dim_penalty_mode: str = "count",
         # toggles
         use_leak: bool = True,
         use_relstruct: bool = True,
@@ -287,9 +336,31 @@ class RelStructReward(torch.nn.Module):
         self.cap_leak = cap_leak
         self.coeff_relstruct = coeff_relstruct
         self.cap_relstruct = cap_relstruct
+        if relstruct_distance_mode not in (
+            "symmetric",
+            "pred_subset_gt",
+            "mixed_subset",
+        ):
+            raise ValueError(
+                "relstruct_distance_mode must be one of "
+                "{'symmetric', 'pred_subset_gt', 'mixed_subset'}, "
+                f"got {relstruct_distance_mode!r}"
+            )
+        if relstruct_reverse_weight < 0.0:
+            raise ValueError(
+                f"relstruct_reverse_weight must be non-negative, got {relstruct_reverse_weight}"
+            )
+        self.relstruct_distance_mode = relstruct_distance_mode
+        self.relstruct_reverse_weight = relstruct_reverse_weight
         self.coeff_gain = coeff_gain
         self.cap_gain = cap_gain
         self.coeff_dim_penalty = coeff_dim_penalty
+        if dim_penalty_mode not in ("count", "ratio", "per_primitive"):
+            raise ValueError(
+                "dim_penalty_mode must be one of {'count', 'ratio', 'per_primitive'}, "
+                f"got {dim_penalty_mode!r}"
+            )
+        self.dim_penalty_mode = dim_penalty_mode
         self.use_leak = use_leak
         self.use_relstruct = use_relstruct
         self.use_gain = use_gain
@@ -322,6 +393,21 @@ class RelStructReward(torch.nn.Module):
             return 0.0
         clipped = min(max(value, 0.0), cap)
         return coeff * (1.0 - clipped / cap)
+
+    def _dim_penalty_value(
+        self,
+        n_dims: int,
+        n_total_constraints: int,
+        n_primitives: int,
+    ) -> float:
+        """Return the normalized dimensional parsimony quantity to penalize."""
+        if self.dim_penalty_mode == "count":
+            return float(n_dims)
+        if self.dim_penalty_mode == "ratio":
+            return float(n_dims) / float(max(1, n_total_constraints))
+        if self.dim_penalty_mode == "per_primitive":
+            return float(n_dims) / float(max(1, n_primitives))
+        raise RuntimeError(f"unreachable dim_penalty_mode: {self.dim_penalty_mode!r}")
 
     @torch.no_grad()
     def forward(
@@ -360,8 +446,16 @@ class RelStructReward(torch.nn.Module):
         # Per-component accumulators
         leak_vals: list[float] = []
         rs_vals: list[float] = []
+        rs_pred_subset_gt_vals: list[float] = []
+        rs_gt_subset_pred_vals: list[float] = []
+        rs_dim_pred_vals: list[int] = []
+        rs_dim_gt_vals: list[int] = []
         gain_vals: list[float] = []
         dim_counts: list[int] = []
+        total_counts: list[int] = []
+        dim_ratio_vals: list[float] = []
+        dim_per_primitive_vals: list[float] = []
+        dim_penalty_values: list[float] = []
         reward_vals: list[float] = []
 
         skipped_build = 0
@@ -409,12 +503,32 @@ class RelStructReward(torch.nn.Module):
             # ── d_relstruct bonus (Converged gate) ────────────────────────
             if self.use_relstruct:
                 try:
-                    drs = _compute_d_relstruct(
-                        pred_sketch, gt_sketch, pred_native, self.context, self.eps
+                    (
+                        drs,
+                        drs_pred_subset_gt,
+                        drs_gt_subset_pred,
+                        drs_dim_pred,
+                        drs_dim_gt,
+                    ) = _compute_d_relstruct(
+                        pred_sketch,
+                        gt_sketch,
+                        pred_native,
+                        self.context,
+                        self.eps,
+                        distance_mode=self.relstruct_distance_mode,
+                        reverse_weight=self.relstruct_reverse_weight,
                     )
                 except Exception:
                     drs = self.cap_relstruct  # fallback to worst case
+                    drs_pred_subset_gt = self.cap_relstruct
+                    drs_gt_subset_pred = self.cap_relstruct
+                    drs_dim_pred = 0
+                    drs_dim_gt = 0
                 rs_vals.append(drs)
+                rs_pred_subset_gt_vals.append(drs_pred_subset_gt)
+                rs_gt_subset_pred_vals.append(drs_gt_subset_pred)
+                rs_dim_pred_vals.append(drs_dim_pred)
+                rs_dim_gt_vals.append(drs_dim_gt)
                 sample_reward += self._bonus(drs, self.cap_relstruct, self.coeff_relstruct)
 
             # ── gain_intrinsic bonus (FC gate) ────────────────────────────
@@ -429,9 +543,20 @@ class RelStructReward(torch.nn.Module):
             n_dims = sum(
                 1 for c in pred_sketch.constraints.values() if _is_dimensional(c)
             )
+            n_total_constraints = len(pred_sketch.constraints)
+            n_primitives = len(pred_sketch.entities)
+            dim_penalty_value = self._dim_penalty_value(
+                n_dims,
+                n_total_constraints,
+                n_primitives,
+            )
             dim_counts.append(n_dims)
+            total_counts.append(n_total_constraints)
+            dim_ratio_vals.append(float(n_dims) / float(max(1, n_total_constraints)))
+            dim_per_primitive_vals.append(float(n_dims) / float(max(1, n_primitives)))
+            dim_penalty_values.append(dim_penalty_value)
             if self.use_dim_penalty:
-                sample_reward -= self.coeff_dim_penalty * n_dims
+                sample_reward -= self.coeff_dim_penalty * dim_penalty_value
 
             scores[i, first_stop_idx] += sample_reward
             reward_vals.append(sample_reward)
@@ -450,9 +575,17 @@ class RelStructReward(torch.nn.Module):
             "relstruct_leak_median":          _median(leak_vals),
             "relstruct_d_relstruct_mean":     _mean(rs_vals),
             "relstruct_d_relstruct_median":   _median(rs_vals),
+            "relstruct_d_pred_subset_gt_mean": _mean(rs_pred_subset_gt_vals),
+            "relstruct_d_gt_subset_pred_mean": _mean(rs_gt_subset_pred_vals),
+            "relstruct_obs_dim_pred_mean":     _mean(rs_dim_pred_vals),
+            "relstruct_obs_dim_gt_mean":       _mean(rs_dim_gt_vals),
             "relstruct_gain_intrinsic_mean":  _mean(gain_vals),
             "relstruct_gain_intrinsic_median":_median(gain_vals),
             "relstruct_dim_count_mean":       _mean(dim_counts),
+            "relstruct_total_count_mean":     _mean(total_counts),
+            "relstruct_dim_ratio_mean":       _mean(dim_ratio_vals),
+            "relstruct_dim_per_primitive_mean":_mean(dim_per_primitive_vals),
+            "relstruct_dim_penalty_value_mean":_mean(dim_penalty_values),
             "relstruct_valid_n":              valid_n,
             "relstruct_skipped_build":        skipped_build,
             "relstruct_skipped_not_converged":skipped_not_converged,

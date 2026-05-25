@@ -238,6 +238,24 @@ d_relstruct(P, G) := ||P_{N_P_obs} - P_{N_G_obs}||_F^2
                      / max(dim N_P_obs, dim N_G_obs)
 ```
 
+2026-05-24 実装では、pseudo-GT relational constraints が高精度だが
+不完全である可能性に備え、上の対称距離に加えて非対称版も選べるようにした。
+
+```text
+C := ||U_G^T U_P||_F^2
+
+d_{P⊂G}^2 := (dim_P - C) / dim_P       # Pred null space ⊂ GT null space を報酬
+d_{G⊂P}^2 := (dim_G - C) / dim_G
+
+d_relstruct_mode =
+  symmetric      : (dim_P + dim_G - 2C) / max(dim_P, dim_G)
+  pred_subset_gt : d_{P⊂G}^2
+  mixed_subset   : d_{P⊂G}^2 + λ d_{G⊂P}^2
+```
+
+default は `symmetric` のまま。pseudo-GT を「precision は高いが recall は
+不完全」と見る canary では `mixed_subset`, `λ=0.25-0.5` を候補にする。
+
 #### 性質
 
 **(a) dim 構成に依存しない**: `N_C` は relation のみから決まる。annotator が
@@ -247,6 +265,12 @@ dim 数を変えても `N_C` は不変 → annotator variance 耐性が `d_sub` 
 **(b) 両側対称**: subspace 距離は対称なので、Pred が relations を「足りない」
 (`N_P ⊋ N_G`) でも「過剰」(`N_P ⊊ N_G`) でも罰する → **leak_prime の
 over-constraining 盲点を補完**。
+
+ただしこれは default の `symmetric` mode の性質である。`pred_subset_gt` /
+`mixed_subset` mode では、pseudo-GT の不完全性を許容するために
+over-relation-constraining penalty を弱める。solver 的に Redundant /
+Conflicting な過制約は SolverReward が検出するが、solver-valid で semantic に
+過剰な relation は d_relstruct 側でしか見えない。
 
 | シナリオ | leak_prime | d_relstruct |
 |---|---|---|
@@ -307,11 +331,29 @@ paper main metric としては情報量が落ちる。
 
 ```text
 r_total = r_solver_total
-        + α  · max(0, 1 − leak_prime    / cap_leak)   · 1[FC ∧ ¬Redundant]
+        + α  · max(0, 1 − leak_prime    / cap_leak)   · 1[FC]
         + α' · max(0, 1 − d_relstruct   / cap_rs)     · 1[Converged]
-        + β  · max(0, 1 − gain_intrinsic / cap_gain)  · 1[Converged ∧ ¬Redundant]
-        − η  · #dims_in_Pred
+        + β  · max(0, 1 − gain_intrinsic / cap_gain)  · 1[FC]
+        − η  · dim_penalty_value(Pred)                · 1[Converged]
 ```
+
+ここで実装上の `FC` は `per_sample_status == "FC"`、つまり
+`Converged ∧ DoF <= fully_constrained_dof ∧ ¬Redundant ∧ ¬Conflicting ∧ ¬Distorted`
+を表す。現在の config では `fully_constrained_dof: 2`。
+
+dimensional parsimony は 2026-05-24 実装から RelStructReward 側に寄せた。
+SolverReward 側の `penalty_num_dimensional_constraints` は B2.5/B3 系では
+`0.0` にし、必要なら legacy baseline として override で戻す。
+
+```text
+dim_penalty_mode =
+  count         : #dims
+  ratio         : #dims / #total_constraints
+  per_primitive : #dims / #primitives
+```
+
+default は `per_primitive`。`ratio` は relation spam で比率だけ下げる逃げ道が
+あるため、最初の canary では採用しない。
 
 ### 6.1 推奨初期値 (offline rescore で sweep して固定する)
 
@@ -320,11 +362,14 @@ r_total = r_solver_total
 | `α` (leak_prime weight) | 5.0 | roadmap.md L295-303 を踏襲 |
 | `α'` (d_relstruct weight) | 3.0 | novel signal なので保守的 |
 | `β` (gain_intrinsic weight) | 3.0 | |
-| `η` (parsimony) | 0.05 | dim あたり -0.05 |
+| `η` (parsimony) | 0.10 | default B2.5: `#dims/#primitives` に掛ける弱い圧 |
+| `dim_penalty_mode` | `per_primitive` | sketch size 正規化。`ratio` は relation spam に弱い |
 | `cap_leak` | 0.3 | v4_results.md §3 solver_rl=0.073, rel_drop50=0.195 |
 | `cap_rs` | 0.6 | d_sub と同 scale 仮置き、要 smoke test |
 | `cap_gain` | 0.5 | |
-| FC-gate | DoF==0 ∧ ¬Redundant | CAD solver Redundant status を弾く |
+| `relstruct_distance_mode` | `symmetric` | B3 default。pseudo-GT-tolerant canary では `mixed_subset` |
+| `relstruct_reverse_weight` | 0.5 | `mixed_subset` 用。canary 候補は 0.25-0.5 |
+| FC-gate | `per_sample_status == "FC"` | 実装上は `DoF <= 2` かつ solver-valid |
 | Convergence gate | status ∈ {FC, Under} (Distorted/SolverError は除外) | v4_results gate と同型 |
 
 ### 6.2 成分と Goal の対応
@@ -336,14 +381,20 @@ r_total = r_solver_total
 | **`d_relstruct`** | **✓✓ (R_G equivalence, two-sided)** | — | ✓ (FC-gate 経由 implicit) | — |
 | `gain_intrinsic` | — | ✓ (drive coverage) | — | — |
 | non-redundant FC-gate | — | — | ✓ (max dim count cap) | — |
-| `η · #dims` | — | — | ✓✓ (明示) | — |
+| `η · dim_penalty_value` | — | — | ✓✓ (明示) | — |
 
 ### 6.3 Reward mode と gate
 
-全 bonus 項について `bonus + fc` または `bonus + converged` mode を採用し、
-penalty mode は使わない。理由は roadmap.md L188-220 で d_feas について
-議論された通り、penalty mode は FC 化途中の DoF improvement と競合する
-リスクがあるため。
+intent 系の距離項 (`leak_prime`, `d_relstruct`, `gain_intrinsic`) については
+`bonus + fc` または `bonus + converged` mode を採用し、距離を直接負報酬にする
+penalty mode は使わない。理由は roadmap.md L188-220 で d_feas について議論された通り、
+FC 化途中の DoF improvement と競合するリスクがあるため。
+
+一方、dimensional parsimony だけは explicit penalty として弱く入れる。これは
+現在の B2 leak-only run で、`leak_prime` が下がっても dimensional constraints が
+多く残ることが確認されたためである。default は `η=0.10`,
+`dim_penalty_mode=per_primitive` で、solver reward に比べると小さい tie-breaker
+として機能させる。
 
 `d_relstruct` は Converged gate (FC でなくとも relations 構造が比較可能)。
 これは d_relstruct が dim を見ないため、Pred が under-constrained でも
@@ -455,11 +506,15 @@ pretrain checkpoint の K=32 sample に対し A″ reward で rescore
 500-1000 step の短期 RL を A″ で実走 (roadmap.md L437-447 と同型)。
 追加で監視すべき W&B metric:
 
-- `d_relstruct_median`, `d_relstruct_p90`
-- `leak_prime_median`
-- `gain_intrinsic_median`
-- `pred_dim_count_mean`, `pred_dim_count_vs_gt_ratio`
-- `pred_rel_count_mean`, `pred_rel_count_vs_gt_ratio`
+- `validation_gen/relstruct_d_relstruct_mean`, `validation_gen/relstruct_d_relstruct_median`
+- `validation_gen/relstruct_d_pred_subset_gt_mean`, `validation_gen/relstruct_d_gt_subset_pred_mean`
+- `validation_gen/relstruct_leak_mean`, `validation_gen/relstruct_leak_median`
+- `validation_gen/relstruct_gain_intrinsic_mean`, `validation_gen/relstruct_gain_intrinsic_median`
+- `validation_gen/relstruct_dim_count_mean`
+- `validation_gen/relstruct_dim_ratio_mean`
+- `validation_gen/relstruct_dim_per_primitive_mean`
+- `validation_gen/relstruct_dim_penalty_value_mean`
+- `pred_rel_count_mean`, `pred_rel_count_vs_gt_ratio` (未実装なら qualitative / token F1 で代用)
 - `pseudo_token_recall` (mimicry check の連続値版)
 
 監視シグナル:
@@ -470,14 +525,15 @@ pretrain checkpoint の K=32 sample に対し A″ reward で rescore
 
 ### 8.4 対照実験 (roadmap.md §D 拡張版)
 
-最終的に以下の 4 arm を比較:
+最終的に以下の arm を比較:
 
 | Arm | 報酬 | 期待される結果 |
 |---|---|---|
 | A0 | r_solver のみ | baseline (solver-only RLOO) |
 | A1 | r_solver + leak_prime | d_feas leak 単独効果と等価 |
-| A2 | r_solver + leak_prime + d_relstruct | over-constraining 抑制効果 |
-| **A″** | A2 + gain_intrinsic + η penalty | フル合成 |
+| A1.5 | A1 + weak dim penalty (`per_primitive`) | dimensional inflation の緩和 |
+| A2 | A1.5 + d_relstruct | relation 構造一致 / solver-valid over-relation 抑制 |
+| **A″** | A2 + gain_intrinsic | フル合成候補 |
 
 各 arm の評価指標: d_H, d_feas, token-level F1, HistCAD OES, predicted
 constraint type distribution, dim/rel count distribution。
@@ -579,12 +635,16 @@ A″ の役割は、`d_H` そのものを reward にすることではなく、`
 
 - `d_relstruct` は relation 構造の両側一致を見られるが、pseudo relation の
   semantic false positive には弱い。表現違いには強いが、間違った独立 relation
-  が入ると目標 null space 自体が歪む。
+  が入ると目標 null space 自体が歪む。2026-05-24 実装ではこれに備えて
+  `symmetric / pred_subset_gt / mixed_subset` を切り替え可能にした。
 - `gain_intrinsic` は Line Length / Arc Radius の drive 可能性を見る proxy であり、
   human-like な offset / angle / inter-entity distance placement を直接は見ない。
-- dim penalty は既存 SolverReward の `penalty_num_total_constraints` /
-  `penalty_num_dimensional_constraints` と重なる。全候補に強く掛けると、FC 化の途中で
-  dimensional constraints を足す必要のある候補まで不利にする。
+- dim penalty は既存 SolverReward の `penalty_num_dimensional_constraints` と
+  責務が重なるため、B2.5/B3 系では RelStructReward 側に寄せる。
+  SolverReward 側の dimensional ratio penalty は `0.0` にし、
+  `penalty_num_total_constraints` だけ弱く残す。
+  全候補に強く掛けると、FC 化の途中で dimensional constraints を足す必要のある
+  候補まで不利にするため、default は `η=0.10`, `#dims/#primitives` の弱い圧にする。
 - 既存実装の FC は `DoF <= fully_constrained_dof` であり、現在は
   `fully_constrained_dof: 2`。A″ の gate も実装上は `per_sample_status == "FC"` に
   合わせるべきで、数式上の `DoF==0` をそのまま使わない。
@@ -610,9 +670,55 @@ full reward として走らせる。
 なるのか」を確認すること。十分なら A″ は小さく入れる。足りなければ A″ の必要性が
 強まる。
 
-#### Step 1: `d_relstruct` smoke test
+#### Step 1: leak-only baseline
 
-RL に入れる前に、GT relations だけで `d_relstruct` を実装・評価する。
+`experiment=rloo_relstruct` の初期 run は leak-only で走らせた。2026-05-24 時点の
+観察では、validation の `relstruct_leak_mean` は下がる一方で
+`relstruct_dim_count_mean` が約 9 まで増え、推論サンプルでも GT/source の
+dimensional count に対して中央値で約 5.5 倍の dimensional constraints が残った。
+したがって leak-only は relation preservation には効くが、dimensional parsimony
+には不十分と判断した。
+
+legacy leak-only を再現する場合:
+
+```bash
+conda run -n freecad python src/train.py experiment=rloo_relstruct \
+  model.relstruct_reward.use_dim_penalty=false \
+  model.reward.penalty_num_dimensional_constraints=-0.1
+```
+
+#### Step 1.5: B2.5 canary (`leak_prime` + weak dim penalty)
+
+現在の default:
+
+```bash
+conda run -n freecad python src/train.py experiment=rloo_relstruct
+```
+
+実際の報酬構成:
+
+```text
+SolverReward
+  + leak_prime bonus               (FC gate, coeff=5.0, cap=0.3)
+  - 0.10 * (#dims/#primitives)     (Converged gate)
+```
+
+この run で期待するのは「劇的な改善」ではなく、leak-only と比べた
+dimensional inflation の緩和である。具体的には:
+
+- `validation_gen/solver_fc_rate` が大きく落ちない
+- `validation_gen/relstruct_leak_mean` / median が leak-only と同程度に保たれる
+- `validation_gen/relstruct_dim_count_mean` が leak-only 終盤の約 9 より下がる
+- `validation_gen/relstruct_dim_per_primitive_mean` が下がる
+- `validation_gen/solver_redundant_rate` が増えすぎない
+
+`η=0.10` は solver reward に対して小さい tie-breaker なので、dim count が
+ほとんど動かない場合は `coeff_dim_penalty=0.20` へ上げる。FC rate が落ちるなら
+`0.05` へ戻す。
+
+#### Step 2: `d_relstruct` smoke / offline check
+
+RL に強く入れる前に、GT relations または pseudo-relations で `d_relstruct` を評価する。
 
 必須条件:
 
@@ -620,11 +726,12 @@ RL に入れる前に、GT relations だけで `d_relstruct` を実装・評価�
 - `rel_drop` で上がる
 - synthetic `rel_add` で上がる
 - `leak_prime` と完全には冗長でない
+- `symmetric` と `mixed_subset (λ=0.25-0.5)` の winner flip が定性的に妥当
 
 ここで失敗した場合、A″ の full 構成には進まない。代わりに
-`leak_prime` + existing SolverReward + GT-match を優先する。
+`leak_prime` + weak dim penalty を優先する。
 
-#### Step 2: offline rescore
+#### Step 3: offline rescore
 
 pretrain checkpoint から K=32 などで候補を出し、RL ではなく reranking として
 次を比較する。
@@ -633,8 +740,9 @@ pretrain checkpoint から K=32 などで候補を出し、RL ではなく reran
 R0 = solver
 R1 = solver + GT-match
 R2 = solver + GT-match + leak_prime bonus
-R3 = R2 + d_relstruct bonus
-R4 = R3 + gain_intrinsic bonus + weak dim penalty
+R2.5 = R2 + weak dim penalty
+R3 = R2.5 + d_relstruct bonus
+R4 = R3 + gain_intrinsic bonus
 ```
 
 期待する winner flip:
@@ -647,20 +755,20 @@ R4 = R3 + gain_intrinsic bonus + weak dim penalty
 
 この offline rescore で risky flip が出る構成は、そのまま RL に入れない。
 
-#### Step 3: canary RL
+#### Step 4: canary RL
 
 offline rescore が通った最小構成から 500-1000 step の canary を行う。
 いきなり A″ full ではなく、次の順で足す。
 
 1. `solver + GT-match + leak_prime`
-2. `+ d_relstruct`
-3. `+ gain_intrinsic`
-4. `+ weak dim penalty`
+2. `+ weak dim penalty` (`per_primitive`, η=0.10 default)
+3. `+ d_relstruct` (`symmetric` or `mixed_subset`)
+4. `+ gain_intrinsic`
 
 途中で dim count 膨張、rel count 膨張、pseudo token recall の張り付き、
 FC rate 低下が出たら、その成分は外す。
 
-#### Step 4: 最終対照実験
+#### Step 5: 最終対照実験
 
 最終的な論文用比較は、少なくとも以下を含める。
 
@@ -669,8 +777,9 @@ FC rate 低下が出たら、その成分は外す。
 | B0 | SolverReward (`gt_reward_coeff=0`) | pure solver baseline |
 | B1 | SolverReward + GT-match (`gt_reward_coeff=1`) | SG GT anchor の効果 |
 | B2 | B1 + `leak_prime` | relation preservation bonus |
-| B3 | B2 + `d_relstruct` | relation 構造一致 / over-relation 抑制 |
-| B4 | B3 + `gain_intrinsic` + weak dim penalty | A″ full candidate |
+| B2.5 | B2 + weak dim penalty | dimensional inflation 緩和 |
+| B3 | B2.5 + `d_relstruct` | relation 構造一致 / solver-valid over-relation 抑制 |
+| B4 | B3 + `gain_intrinsic` | A″ full candidate |
 
 結論は B4 が必ず勝つ必要はない。もし B2 や B3 が最も安定なら、それを採用する。
 A″ は「全成分を入れること」が目的ではなく、SolverReward が作る dimension-heavy な
@@ -682,10 +791,10 @@ FC 解を、どの最小追加信号で relation-rich / design-intent-aware に�
 - すぐ full A″ RLOO を走らせない。
 - まず `experiment=rloo model.gt_reward_coeff=0.0` と現行
   `model.gt_reward_coeff=1.0` を比較し、GT-match の限界を測る。
-- `d_relstruct` は有望だが、reward 前に smoke test 必須。
-- `leak_prime` は最も安全な最初の追加成分。FC candidate 間の nonnegative bonus として
-  入れるのがよい。
-- `gain_intrinsic` と dim penalty は最後に足す。dimensional naturalness の proxy であり、
+- leak-only run で dimensional inflation が残ったため、現在の
+  `experiment=rloo_relstruct` default は B2.5 (`leak_prime` + weak dim penalty) とする。
+- `d_relstruct` は有望だが、reward 前に smoke / offline rescore 必須。
+- `gain_intrinsic` は最後に足す。dimensional naturalness の proxy であり、
   ここが最も gaming されやすい。
 - 最終報酬は A″ full とは限らない。実験で B2/B3 が勝つなら、その方が論文上も防御しやすい。
 
