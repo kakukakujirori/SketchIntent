@@ -25,9 +25,6 @@ reward_composer:
       penalty_malformed: -0.5
       penalty_deformed: -0.25
       penalty_per_problematic_constraint: -1.0
-      penalty_num_total_constraints: -0.1
-      # Dimensional parsimony is owned by DimParsimonyReward below.
-      penalty_num_dimensional_constraints: 0.0
       penalty_rigid_dimensional: -0.0
       fully_constrained_dof: 2
       distortion_threshold: null

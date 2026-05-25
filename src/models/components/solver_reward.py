@@ -51,8 +51,6 @@ class SolverReward(BaseReward):
         penalty_malformed: float = -0.5,
         penalty_deformed: float = -0.25,
         penalty_per_problematic_constraint: float = -1.0,
-        penalty_num_total_constraints: float = -0.01,
-        penalty_num_dimensional_constraints: float = -0.2,
         penalty_rigid_dimensional: float = -0.5,
         fully_constrained_dof: int = 2,
         distortion_threshold: float | None = None,
@@ -63,8 +61,8 @@ class SolverReward(BaseReward):
         self.sketch_tokenizer = SketchTokenizer(context)
         self.fully_constrained_dof = fully_constrained_dof
 
-        assert all(v <= 0 for v in [penalty_conflicting, penalty_redundant, penalty_malformed, penalty_deformed, penalty_per_problematic_constraint, penalty_num_total_constraints, penalty_num_dimensional_constraints, penalty_rigid_dimensional]), \
-            f"{penalty_conflicting=}, {penalty_redundant=}, {penalty_malformed=}, {penalty_deformed=}, {penalty_per_problematic_constraint=}, {penalty_num_total_constraints=}, {penalty_num_dimensional_constraints=}, {penalty_rigid_dimensional=}"
+        assert all(v <= 0 for v in [penalty_conflicting, penalty_redundant, penalty_malformed, penalty_deformed, penalty_per_problematic_constraint, penalty_rigid_dimensional]), \
+            f"{penalty_conflicting=}, {penalty_redundant=}, {penalty_malformed=}, {penalty_deformed=}, {penalty_per_problematic_constraint=}, {penalty_rigid_dimensional=}"
 
         self.reward_dof_reduction = reward_dof_reduction
         self.reward_fully_constrained = reward_fully_constrained
@@ -73,8 +71,6 @@ class SolverReward(BaseReward):
         self.penalty_malformed = penalty_malformed
         self.penalty_deformed = penalty_deformed
         self.penalty_per_problematic_constraint = penalty_per_problematic_constraint
-        self.penalty_num_total_constraints = penalty_num_total_constraints
-        self.penalty_num_dimensional_constraints = penalty_num_dimensional_constraints
         self.penalty_rigid_dimensional = penalty_rigid_dimensional
 
         # Execution and caching
@@ -397,13 +393,6 @@ class SolverReward(BaseReward):
 
                 if solver_status.DoF <= self.fully_constrained_dof:
                     seq_reward += self.reward_fully_constrained
-
-                # dimension constraints penalty
-                NumTotalPrimiitves = len(sketch.entities)
-                NumTotalConstraints = solver_status.NumRelationalConstraints + solver_status.NumDimensionalConstraints
-                seq_reward += self.penalty_num_total_constraints * NumTotalConstraints / NumTotalPrimiitves
-                seq_reward += self.penalty_num_dimensional_constraints * (
-                    solver_status.NumDimensionalConstraints / max(1, NumTotalConstraints))
 
             ################################################################
             # 3. Assign the sequence reward at the STOP token position
