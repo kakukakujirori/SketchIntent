@@ -46,15 +46,36 @@ relstruct_reward:
   # gain_intrinsic: FC gate — dim naturalness (gameable; add after smoke test)
   coeff_gain: 3.0
   cap_gain: 0.5
-  # dim penalty: Converged gate. per_primitive avoids rewarding relation spam
-  # merely because #dim/#total went down.
-  coeff_dim_penalty: 0.10
-  dim_penalty_mode: per_primitive      # count | ratio | per_primitive
-  # Staged rollout toggles — default is B2.5: leak + dim parsimony.
-  use_leak: true
+  # dim penalty: Converged gate. Hinge mode avoids penalising the dimensions
+  # needed for FC and only charges dimensions beyond the source GT budget.
+  coeff_dim_penalty: 0.30
+  dim_penalty_mode: excess_over_gt_per_primitive
+  dim_excess_margin: 1
+  # Staged rollout toggles for relation-structure shaping and dim hinge.
+  # Default keeps only the GT-excess dim hinge here; Hθ lives in
+  # response_metric_reward below.
+  use_leak: false
   use_relstruct: false   # enable after d_relstruct smoke test passes
   use_gain: false        # enable last
   use_dim_penalty: true
+
+# Direct metric-as-reward canary (independent of RelStructReward).
+response_metric_reward:
+  _target_: src.models.components.response_metric_reward.ResponseMetricReward
+  context: ${data.context}
+  eps: 1.0e-9
+  # d_H_angle: FC gate — main Hθ canary. Keep coefficient modest because
+  # d_sub_angle can carry annotator dim-count noise.
+  coeff_h_angle: 2.0
+  cap_h_angle: 1.0
+  # d_SVD: FC gate — probe-dependent response-SVD diagnostic reward.
+  coeff_d_svd: 1.0
+  cap_d_svd: 1.0
+  d_svd_metric: d_SVD_sub_trunc        # d_SVD_sub_trunc | d_SVD_top1 | d_SVD_sigma_rel
+  d_svd_probe_source: gt_dim           # gt_dim | intrinsic
+  tau_p: 0.01
+  use_h_angle: true
+  use_d_svd: false                     # ablation only; probe-dependent
 
 optimizer:
   _target_: torch.optim.AdamW

@@ -11,6 +11,7 @@ from src.metrics import ConstraintBLEU, ConstraintIoU, TokenAccuracy
 from src.models.components.constraint_ar_model import ConstraintARModel
 from src.models.components.dfeas_reward import DFeasReward
 from src.models.components.relstruct_reward import RelStructReward
+from src.models.components.response_metric_reward import ResponseMetricReward
 from src.models.components.solver_feedback import SolverFeedback
 from src.models.components.solver_reward import SolverReward
 from src.models.components.token_reordering import TokenReordering
@@ -40,18 +41,29 @@ class ConstraintARModuleRLOO(L.LightningModule):
         dfeas_reward: DFeasReward | None = None,
         dfeas_apply_to: str = "converged",
         relstruct_reward: RelStructReward | None = None,
+        response_metric_reward: ResponseMetricReward | None = None,
         relational_only: bool = False,
     ):
         super().__init__()
         if dfeas_apply_to not in ("converged", "fc"):
             raise ValueError(f"unknown dfeas_apply_to: {dfeas_apply_to}")
-        self.save_hyperparameters(ignore=['model', 'reward', 'dfeas_reward', 'relstruct_reward'], logger=False)
+        self.save_hyperparameters(
+            ignore=[
+                'model',
+                'reward',
+                'dfeas_reward',
+                'relstruct_reward',
+                'response_metric_reward',
+            ],
+            logger=False,
+        )
 
         # models
         self.model = model
         self.reward = reward
         self.dfeas_reward = dfeas_reward
         self.relstruct_reward = relstruct_reward
+        self.response_metric_reward = response_metric_reward
         self.ref_model = copy.deepcopy(model)
 
         self.relational_only = relational_only
@@ -89,6 +101,11 @@ class ConstraintARModuleRLOO(L.LightningModule):
                         f"{prev} -> 0.0 to avoid double penalty."
                     )
                     self.reward.penalty_num_dimensional_constraints = 0.0
+
+        if self.response_metric_reward is not None:
+            self.response_metric_reward.eval()
+            for p in self.response_metric_reward.parameters():
+                p.requires_grad_(False)
 
         self.ref_model.eval()
         for p in self.ref_model.parameters():
@@ -427,6 +444,15 @@ class ConstraintARModuleRLOO(L.LightningModule):
             )
             rewards = rewards + relstruct_scores_cpu.to(self.device).float()
 
+        # Step 4e: direct response-metric reward (Hθ / d_SVD).
+        response_metric_metrics: dict[str, float | int] = {}
+        if self.response_metric_reward is not None:
+            response_metric_scores_cpu, response_metric_metrics = self.response_metric_reward(
+                p_val_expanded, generated, expanded['sketch'],
+                per_sample_status=per_sample_status,
+            )
+            rewards = rewards + response_metric_scores_cpu.to(self.device).float()
+
         # Parse solver metrics (Counter → scalar)
         parsed_solver_metrics = {}
         if "status" in solver_metrics:
@@ -489,6 +515,7 @@ class ConstraintARModuleRLOO(L.LightningModule):
             **parsed_solver_metrics,
             **dfeas_metrics,
             **relstruct_metrics,
+            **response_metric_metrics,
         }
         return loss, metrics
 
@@ -672,6 +699,21 @@ class ConstraintARModuleRLOO(L.LightningModule):
             except Exception as e:
                 if self.global_rank == 0:
                     print(f"[validation_step] RelStruct evaluation failed: {e}")
+
+        # Evaluate direct response-metric reward components and log
+        if self.response_metric_reward is not None:
+            try:
+                _, response_metric_val_results = self.response_metric_reward(
+                    batch['p_val'],
+                    generated,
+                    batch['sketch'],
+                    per_sample_status=per_sample_status,
+                )
+                for metric_name, metric_value in response_metric_val_results.items():
+                    self.log(f'validation_gen/{metric_name}', float(metric_value), add_dataloader_idx=False, sync_dist=True, on_epoch=True)
+            except Exception as e:
+                if self.global_rank == 0:
+                    print(f"[validation_step] ResponseMetric evaluation failed: {e}")
 
         # Save first batch for wandb visualization
         if batch_idx == 0:

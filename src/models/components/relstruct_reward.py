@@ -1,9 +1,8 @@
-"""RelStructReward — Plan A″ RL reward for design-intent-aware constraint inference.
+"""RelStructReward — relation-structure shaping reward for RLOO.
 
-This is the RL reward counterpart to the d_H evaluation metric (v4 paper).
-Rather than using d_H directly (which carries annotator-variance issues from
-d_sub), this reward decomposes the intent-awareness signal into three
-independently gateable components:
+This module owns relation-structure and dimensional-parsimony shaping signals.
+Direct evaluation-metric rewards such as Hθ / d_SVD live in
+``response_metric_reward.py``.  The components here are independently gateable:
 
   **leak_prime**    ||J_{R_G} U_P||_F / sqrt(n_R · dim V_P)
       Measures how much Pred's response subspace "leaks through" GT's
@@ -65,34 +64,28 @@ from src.sketch_handlers.sketch_utils import complete_constraint_values
 from src.models.components.dfeas_reward import _build_intrinsic_probes
 from src.models.components.solver_feedback import SolverFeedback
 
-# Re-export helper from metrics_v4 (relative import to avoid circular deps)
-try:
-    from notebooks.v4_exp.metrics_v4 import (
-        _orthonormal_range,
-        _stack_relation_jacobians_at,
-    )
-except ImportError:
-    # Inline fallback so the module can be imported outside the notebooks tree
-    def _orthonormal_range(R: torch.Tensor, eps: float) -> tuple[torch.Tensor, int]:
-        if R.numel() == 0 or R.shape[1] == 0:
-            return torch.zeros(R.shape[0], 0, dtype=R.dtype), 0
-        U, S, _Vh = torch.linalg.svd(R, full_matrices=False)
-        keep = int((S >= eps).sum().item())
-        if keep == 0:
-            return torch.zeros(R.shape[0], 0, dtype=R.dtype), 0
-        return U[:, :keep].contiguous(), keep
 
-    def _stack_relation_jacobians_at(rels, state, context):
-        rows: list[torch.Tensor] = []
-        for rel in rels:
-            j = constraint_jacobian(rel, state, context)
-            if j is None or j.shape[0] == 0:
-                continue
-            rows.append(j)
-        if not rows:
-            return None, 0
-        Jr = torch.cat(rows, dim=0)
-        return Jr, int(Jr.shape[0])
+def _orthonormal_range(R: torch.Tensor, eps: float) -> tuple[torch.Tensor, int]:
+    if R.numel() == 0 or R.shape[1] == 0:
+        return torch.zeros(R.shape[0], 0, dtype=R.dtype, device=R.device), 0
+    U, S, _Vh = torch.linalg.svd(R, full_matrices=False)
+    keep = int((S >= eps).sum().item())
+    if keep == 0:
+        return torch.zeros(R.shape[0], 0, dtype=R.dtype, device=R.device), 0
+    return U[:, :keep].contiguous(), keep
+
+
+def _stack_relation_jacobians_at(rels, state, context) -> tuple[torch.Tensor | None, int]:
+    rows: list[torch.Tensor] = []
+    for rel in rels:
+        j = constraint_jacobian(rel, state, context)
+        if j is None or j.shape[0] == 0:
+            continue
+        rows.append(j)
+    if not rows:
+        return None, 0
+    Jr = torch.cat(rows, dim=0)
+    return Jr, int(Jr.shape[0])
 
 
 # ---------------------------------------------------------------------------
@@ -294,7 +287,10 @@ class RelStructReward(torch.nn.Module):
             broken solver states.
         dim_penalty_mode: normalization for the dimensional parsimony term:
             "count" = #dims, "ratio" = #dims/#constraints, and
-            "per_primitive" = #dims/#primitives.
+            "per_primitive" = #dims/#primitives. "excess_over_gt" and
+            "excess_over_gt_per_primitive" are hinge penalties that only charge
+            predicted dimensions above the source GT count plus
+            dim_excess_margin.
 
         use_leak: enable leak_prime bonus (FC gate).
         use_relstruct: enable d_relstruct bonus (Converged gate).
@@ -323,6 +319,7 @@ class RelStructReward(torch.nn.Module):
         # dim penalty
         coeff_dim_penalty: float = 0.05,
         dim_penalty_mode: str = "count",
+        dim_excess_margin: int = 0,
         # toggles
         use_leak: bool = True,
         use_relstruct: bool = True,
@@ -355,12 +352,25 @@ class RelStructReward(torch.nn.Module):
         self.coeff_gain = coeff_gain
         self.cap_gain = cap_gain
         self.coeff_dim_penalty = coeff_dim_penalty
-        if dim_penalty_mode not in ("count", "ratio", "per_primitive"):
+        if dim_penalty_mode not in (
+            "count",
+            "ratio",
+            "per_primitive",
+            "excess_over_gt",
+            "excess_over_gt_per_primitive",
+        ):
             raise ValueError(
-                "dim_penalty_mode must be one of {'count', 'ratio', 'per_primitive'}, "
+                "dim_penalty_mode must be one of {'count', 'ratio', "
+                "'per_primitive', 'excess_over_gt', "
+                "'excess_over_gt_per_primitive'}, "
                 f"got {dim_penalty_mode!r}"
             )
         self.dim_penalty_mode = dim_penalty_mode
+        if dim_excess_margin < 0:
+            raise ValueError(
+                f"dim_excess_margin must be non-negative, got {dim_excess_margin}"
+            )
+        self.dim_excess_margin = int(dim_excess_margin)
         self.use_leak = use_leak
         self.use_relstruct = use_relstruct
         self.use_gain = use_gain
@@ -399,6 +409,7 @@ class RelStructReward(torch.nn.Module):
         n_dims: int,
         n_total_constraints: int,
         n_primitives: int,
+        n_gt_dims: int = 0,
     ) -> float:
         """Return the normalized dimensional parsimony quantity to penalize."""
         if self.dim_penalty_mode == "count":
@@ -407,6 +418,11 @@ class RelStructReward(torch.nn.Module):
             return float(n_dims) / float(max(1, n_total_constraints))
         if self.dim_penalty_mode == "per_primitive":
             return float(n_dims) / float(max(1, n_primitives))
+        if self.dim_penalty_mode == "excess_over_gt":
+            return float(max(0, n_dims - n_gt_dims - self.dim_excess_margin))
+        if self.dim_penalty_mode == "excess_over_gt_per_primitive":
+            excess = max(0, n_dims - n_gt_dims - self.dim_excess_margin)
+            return float(excess) / float(max(1, n_primitives))
         raise RuntimeError(f"unreachable dim_penalty_mode: {self.dim_penalty_mode!r}")
 
     @torch.no_grad()
@@ -452,6 +468,8 @@ class RelStructReward(torch.nn.Module):
         rs_dim_gt_vals: list[int] = []
         gain_vals: list[float] = []
         dim_counts: list[int] = []
+        gt_dim_counts: list[int] = []
+        dim_excess_vals: list[int] = []
         total_counts: list[int] = []
         dim_ratio_vals: list[float] = []
         dim_per_primitive_vals: list[float] = []
@@ -491,6 +509,8 @@ class RelStructReward(torch.nn.Module):
                 continue
 
             gt_rels = [c for c in gt_sketch.constraints.values() if _is_relational(c)]
+            gt_dims = [c for c in gt_sketch.constraints.values() if _is_dimensional(c)]
+            n_gt_dims = len(gt_dims)
 
             sample_reward = 0.0
 
@@ -545,12 +565,16 @@ class RelStructReward(torch.nn.Module):
             )
             n_total_constraints = len(pred_sketch.constraints)
             n_primitives = len(pred_sketch.entities)
+            dim_excess = max(0, n_dims - n_gt_dims - self.dim_excess_margin)
             dim_penalty_value = self._dim_penalty_value(
                 n_dims,
                 n_total_constraints,
                 n_primitives,
+                n_gt_dims=n_gt_dims,
             )
             dim_counts.append(n_dims)
+            gt_dim_counts.append(n_gt_dims)
+            dim_excess_vals.append(dim_excess)
             total_counts.append(n_total_constraints)
             dim_ratio_vals.append(float(n_dims) / float(max(1, n_total_constraints)))
             dim_per_primitive_vals.append(float(n_dims) / float(max(1, n_primitives)))
@@ -582,6 +606,8 @@ class RelStructReward(torch.nn.Module):
             "relstruct_gain_intrinsic_mean":  _mean(gain_vals),
             "relstruct_gain_intrinsic_median":_median(gain_vals),
             "relstruct_dim_count_mean":       _mean(dim_counts),
+            "relstruct_gt_dim_count_mean":    _mean(gt_dim_counts),
+            "relstruct_dim_excess_mean":      _mean(dim_excess_vals),
             "relstruct_total_count_mean":     _mean(total_counts),
             "relstruct_dim_ratio_mean":       _mean(dim_ratio_vals),
             "relstruct_dim_per_primitive_mean":_mean(dim_per_primitive_vals),
