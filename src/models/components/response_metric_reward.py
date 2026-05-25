@@ -1,9 +1,9 @@
-"""ResponseMetricReward — direct reward wrappers for v4 response metrics.
+"""ResponseMetricReward — reward-oriented wrappers for v4 response metrics.
 
-This module owns metric-as-reward signals such as Hθ (``d_H_angle``) and the
-Case-P ``d_SVD`` family.  These are evaluation-metric counterparts, not
-relation-structure shaping terms, so they intentionally live outside
-``RelStructReward``.
+This module owns metric-as-reward signals such as canonical Hθ
+(``d_H_angle``), the reward-oriented Hθ surrogate
+``d_H_relstruct_angle = sqrt(d_relstruct^2 + leak_angle^2)``, and the Case-P
+``d_SVD`` family.  Dimensional-count parsimony remains in ``RelStructReward``.
 """
 from __future__ import annotations
 
@@ -23,6 +23,10 @@ from src.metrics.edit_response_distance import (
     pairwise_distance_observable,
 )
 from src.models.components.dfeas_reward import _build_intrinsic_probes
+from src.models.components.relation_subspace_metric import (
+    RELATION_SUBSPACE_DISTANCE_MODES,
+    compute_relation_subspace_distance,
+)
 from src.models.components.solver_feedback import SolverFeedback
 from src.sketch_handlers.constants import ConstraintToken
 from src.sketch_handlers.context import SketchContext
@@ -68,7 +72,16 @@ def _observable_subspace(
     return _orthonormal_range(J_phi @ native.R, eps)
 
 
-def compute_d_h_angle(
+H_ANGLE_REWARD_METRICS = {
+    "d_H_angle",
+    "d_H_relstruct_angle",
+    "d_sub_angle",
+    "d_relstruct",
+    "leak_angle",
+}
+
+
+def compute_h_angle_metrics(
     pred_sketch: datalib.Sketch,
     pred_native: NativeResponse,
     gt_sketch: datalib.Sketch,
@@ -76,8 +89,10 @@ def compute_d_h_angle(
     gt_rels: list,
     context,
     eps: float,
-) -> tuple[float, float, float, int, int]:
-    """Return (d_H_angle, d_sub_angle, leak_angle, dim_P_obs, dim_G_obs)."""
+    relstruct_distance_mode: str = "symmetric",
+    relstruct_reverse_weight: float = 0.5,
+) -> dict[str, float | int]:
+    """Return canonical Hθ plus the reward-oriented relation-only substitute."""
     U_W_P, dim_P_obs = _observable_subspace(pred_sketch, pred_native, eps)
     U_W_G, dim_G_obs = _observable_subspace(gt_sketch, gt_native, eps)
 
@@ -106,8 +121,60 @@ def compute_d_h_angle(
     leak_angle_sq = min(max(leak_angle_sq, 0.0), 1.0)
     leak_angle = math.sqrt(leak_angle_sq)
 
+    relstruct = compute_relation_subspace_distance(
+        pred_sketch,
+        gt_sketch,
+        pred_native,
+        context,
+        eps,
+        relstruct_distance_mode,
+        relstruct_reverse_weight,
+    )
+    d_relstruct = float(relstruct["d_relstruct"])
+
     d_h_angle = math.sqrt(max(d_sub_angle_sq + leak_angle_sq, 0.0))
-    return d_h_angle, d_sub_angle, leak_angle, dim_P_obs, dim_G_obs
+    d_h_relstruct_angle = math.sqrt(max(d_relstruct ** 2 + leak_angle_sq, 0.0))
+    return {
+        "d_H_angle": d_h_angle,
+        "d_H_relstruct_angle": d_h_relstruct_angle,
+        "d_sub_angle": d_sub_angle,
+        "d_relstruct": d_relstruct,
+        "leak_angle": leak_angle,
+        "d_relstruct_pred_subset_gt": float(relstruct["d_relstruct_pred_subset_gt"]),
+        "d_relstruct_gt_subset_pred": float(relstruct["d_relstruct_gt_subset_pred"]),
+        "relstruct_dim_pred": int(relstruct["relstruct_dim_pred"]),
+        "relstruct_dim_gt": int(relstruct["relstruct_dim_gt"]),
+        "h_obs_dim_pred": int(dim_P_obs),
+        "h_obs_dim_gt": int(dim_G_obs),
+    }
+
+
+def compute_d_h_angle(
+    pred_sketch: datalib.Sketch,
+    pred_native: NativeResponse,
+    gt_sketch: datalib.Sketch,
+    gt_native: NativeResponse,
+    gt_rels: list,
+    context,
+    eps: float,
+) -> tuple[float, float, float, int, int]:
+    """Backward-compatible canonical Hθ tuple."""
+    metrics = compute_h_angle_metrics(
+        pred_sketch,
+        pred_native,
+        gt_sketch,
+        gt_native,
+        gt_rels,
+        context,
+        eps,
+    )
+    return (
+        float(metrics["d_H_angle"]),
+        float(metrics["d_sub_angle"]),
+        float(metrics["leak_angle"]),
+        int(metrics["h_obs_dim_pred"]),
+        int(metrics["h_obs_dim_gt"]),
+    )
 
 
 def compute_d_svd(
@@ -196,7 +263,7 @@ def compute_d_svd(
 
 
 class ResponseMetricReward(torch.nn.Module):
-    """Direct reward for d_H_angle and optional d_SVD metrics."""
+    """Direct reward for Hθ components and optional d_SVD metrics."""
 
     def __init__(
         self,
@@ -204,6 +271,9 @@ class ResponseMetricReward(torch.nn.Module):
         eps: float = 1e-9,
         coeff_h_angle: float = 2.0,
         cap_h_angle: float = 1.0,
+        h_angle_reward_metric: str = "d_H_relstruct_angle",
+        relstruct_distance_mode: str = "symmetric",
+        relstruct_reverse_weight: float = 0.5,
         coeff_d_svd: float = 1.0,
         cap_d_svd: float = 1.0,
         d_svd_metric: str = "d_SVD_sub_trunc",
@@ -217,6 +287,21 @@ class ResponseMetricReward(torch.nn.Module):
         self.eps = eps
         self.coeff_h_angle = coeff_h_angle
         self.cap_h_angle = cap_h_angle
+        if h_angle_reward_metric not in H_ANGLE_REWARD_METRICS:
+            raise ValueError(
+                "h_angle_reward_metric must be one of "
+                f"{sorted(H_ANGLE_REWARD_METRICS)}, got "
+                f"{h_angle_reward_metric!r}"
+            )
+        if relstruct_distance_mode not in RELATION_SUBSPACE_DISTANCE_MODES:
+            raise ValueError(
+                "relstruct_distance_mode must be one of "
+                f"{sorted(RELATION_SUBSPACE_DISTANCE_MODES)}, got "
+                f"{relstruct_distance_mode!r}"
+            )
+        self.h_angle_reward_metric = h_angle_reward_metric
+        self.relstruct_distance_mode = relstruct_distance_mode
+        self.relstruct_reverse_weight = relstruct_reverse_weight
         self.coeff_d_svd = coeff_d_svd
         self.cap_d_svd = cap_d_svd
         if d_svd_metric not in (
@@ -288,9 +373,16 @@ class ResponseMetricReward(torch.nn.Module):
             per_sample_status = ["FC"] * B
 
         reward_vals: list[float] = []
+        h_reward_distance_vals: list[float] = []
         h_angle_vals: list[float] = []
+        h_relstruct_angle_vals: list[float] = []
         h_sub_angle_vals: list[float] = []
+        h_relstruct_vals: list[float] = []
         h_leak_angle_vals: list[float] = []
+        h_relstruct_pred_subset_gt_vals: list[float] = []
+        h_relstruct_gt_subset_pred_vals: list[float] = []
+        h_relstruct_dim_pred_vals: list[int] = []
+        h_relstruct_dim_gt_vals: list[int] = []
         h_obs_dim_pred_vals: list[int] = []
         h_obs_dim_gt_vals: list[int] = []
         svd_selected_vals: list[float] = []
@@ -342,7 +434,7 @@ class ResponseMetricReward(torch.nn.Module):
                         gt_native_cache[gt_key] = compute_native_response(
                             gt_sketch, self.context, eps=self.eps
                         )
-                    dha, dsa, la, dim_p_obs, dim_g_obs = compute_d_h_angle(
+                    h_metrics = compute_h_angle_metrics(
                         pred_sketch,
                         pred_native,
                         gt_sketch,
@@ -350,14 +442,39 @@ class ResponseMetricReward(torch.nn.Module):
                         gt_rels,
                         self.context,
                         self.eps,
+                        self.relstruct_distance_mode,
+                        self.relstruct_reverse_weight,
+                    )
+                    dha = float(h_metrics["d_H_angle"])
+                    dhra = float(h_metrics["d_H_relstruct_angle"])
+                    dsa = float(h_metrics["d_sub_angle"])
+                    drs = float(h_metrics["d_relstruct"])
+                    la = float(h_metrics["leak_angle"])
+                    h_reward_distance = float(
+                        h_metrics[self.h_angle_reward_metric]
                     )
                     h_angle_vals.append(dha)
+                    h_relstruct_angle_vals.append(dhra)
                     h_sub_angle_vals.append(dsa)
+                    h_relstruct_vals.append(drs)
                     h_leak_angle_vals.append(la)
-                    h_obs_dim_pred_vals.append(dim_p_obs)
-                    h_obs_dim_gt_vals.append(dim_g_obs)
+                    h_reward_distance_vals.append(h_reward_distance)
+                    h_relstruct_pred_subset_gt_vals.append(
+                        float(h_metrics["d_relstruct_pred_subset_gt"])
+                    )
+                    h_relstruct_gt_subset_pred_vals.append(
+                        float(h_metrics["d_relstruct_gt_subset_pred"])
+                    )
+                    h_relstruct_dim_pred_vals.append(
+                        int(h_metrics["relstruct_dim_pred"])
+                    )
+                    h_relstruct_dim_gt_vals.append(
+                        int(h_metrics["relstruct_dim_gt"])
+                    )
+                    h_obs_dim_pred_vals.append(int(h_metrics["h_obs_dim_pred"]))
+                    h_obs_dim_gt_vals.append(int(h_metrics["h_obs_dim_gt"]))
                     sample_reward += self._bonus(
-                        dha, self.cap_h_angle, self.coeff_h_angle
+                        h_reward_distance, self.cap_h_angle, self.coeff_h_angle
                     )
                 except Exception:
                     skipped_h_angle += 1
@@ -414,9 +531,19 @@ class ResponseMetricReward(torch.nn.Module):
         metrics: dict[str, float | int] = {
             "response_metric_reward_mean": _mean(reward_vals),
             "response_metric_reward_median": _median(reward_vals),
+            "response_metric_h_reward_distance_mean": _mean(h_reward_distance_vals),
+            "response_metric_h_reward_distance_median": _median(h_reward_distance_vals),
             "response_metric_d_h_angle_mean": _mean(h_angle_vals),
             "response_metric_d_h_angle_median": _median(h_angle_vals),
+            "response_metric_d_h_relstruct_angle_mean": _mean(h_relstruct_angle_vals),
+            "response_metric_d_h_relstruct_angle_median": _median(h_relstruct_angle_vals),
             "response_metric_d_sub_angle_mean": _mean(h_sub_angle_vals),
+            "response_metric_d_relstruct_mean": _mean(h_relstruct_vals),
+            "response_metric_d_relstruct_median": _median(h_relstruct_vals),
+            "response_metric_d_relstruct_pred_subset_gt_mean": _mean(h_relstruct_pred_subset_gt_vals),
+            "response_metric_d_relstruct_gt_subset_pred_mean": _mean(h_relstruct_gt_subset_pred_vals),
+            "response_metric_relstruct_dim_pred_mean": _mean(h_relstruct_dim_pred_vals),
+            "response_metric_relstruct_dim_gt_mean": _mean(h_relstruct_dim_gt_vals),
             "response_metric_leak_angle_mean": _mean(h_leak_angle_vals),
             "response_metric_h_obs_dim_pred_mean": _mean(h_obs_dim_pred_vals),
             "response_metric_h_obs_dim_gt_mean": _mean(h_obs_dim_gt_vals),

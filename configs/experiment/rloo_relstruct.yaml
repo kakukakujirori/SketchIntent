@@ -1,8 +1,13 @@
 # @package _global_
 
-# RLOO with Plan A″ RelStruct reward (leak_prime + dim parsimony + d_relstruct).
+# RLOO with reward-Hθ + dimensional parsimony.
 #
-# Staged rollout — controlled by model.relstruct_reward.use_* flags:
+# Default reward-Hθ lives in ResponseMetricReward:
+#   sqrt(d_relstruct^2 + leak_angle^2)
+# where d_relstruct is the relation-only substitute for canonical d_sub_angle.
+# RelStructReward owns only the GT-excess dimensional hinge by default.
+#
+# Staged rollout:
 #   Step 1 (B2 legacy): leak only
 #     conda run -n freecad python src/train.py experiment=rloo_relstruct \
 #       model.relstruct_reward.use_dim_penalty=false \
@@ -15,20 +20,27 @@
 #     conda run -n freecad python src/train.py experiment=rloo_relstruct \
 #       model.relstruct_reward.use_leak=true \
 #       model.response_metric_reward.use_h_angle=false
-#   Step 1.7 (Hθ canary, default): d_H_angle + GT-excess dim hinge
+#   Step 1.7 (reward-Hθ canary, default):
+#       sqrt(d_relstruct^2 + leak_angle^2) + GT-excess dim hinge
 #     conda run -n freecad python src/train.py experiment=rloo_relstruct
+#     Full scalar Hθ ablation:
+#       model.response_metric_reward.h_angle_reward_metric=d_H_angle
 #   Step 1.8 (d_SVD ablation): add response-SVD bonus
 #     conda run -n freecad python src/train.py experiment=rloo_relstruct \
 #       model.response_metric_reward.use_d_svd=true \
 #       model.response_metric_reward.d_svd_metric=d_SVD_sub_trunc
-#   Step 2 (B3): leak + dimensional parsimony + d_relstruct
+#   Step 2 (B3 legacy): add a separate RelStructReward d_relstruct bonus.
+#     Do not enable together with default d_H_relstruct_angle unless this
+#     double-counting is intentional; prefer changing
+#       model.response_metric_reward.relstruct_distance_mode=mixed_subset
+#       model.response_metric_reward.relstruct_reverse_weight=0.25
+#     for pseudo-GT-tolerant relation structure.
 #     conda run -n freecad python src/train.py experiment=rloo_relstruct \
+#       model.response_metric_reward.h_angle_reward_metric=leak_angle \
 #       model.relstruct_reward.use_relstruct=true
-#     Optional pseudo-GT-tolerant relation structure:
-#       model.relstruct_reward.relstruct_distance_mode=mixed_subset \
-#       model.relstruct_reward.relstruct_reverse_weight=0.25
-#   Step 3 (B4 full A″): + gain_intrinsic
+#   Step 3 (B4 full A″ legacy): + gain_intrinsic
 #     conda run -n freecad python src/train.py experiment=rloo_relstruct \
+#       model.response_metric_reward.h_angle_reward_metric=leak_angle \
 #       model.relstruct_reward.use_relstruct=true \
 #       model.relstruct_reward.use_gain=true
 #

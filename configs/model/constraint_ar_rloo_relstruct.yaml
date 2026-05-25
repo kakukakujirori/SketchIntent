@@ -59,15 +59,19 @@ relstruct_reward:
   use_gain: false        # enable last
   use_dim_penalty: true
 
-# Direct metric-as-reward canary (independent of RelStructReward).
+# Direct response-metric reward canary (independent of RelStructReward).
 response_metric_reward:
   _target_: src.models.components.response_metric_reward.ResponseMetricReward
   context: ${data.context}
   eps: 1.0e-9
-  # d_H_angle: FC gate — main Hθ canary. Keep coefficient modest because
-  # d_sub_angle can carry annotator dim-count noise.
+  # Reward-oriented Hθ: FC gate. Default replaces canonical d_sub_angle with
+  # relation-only d_relstruct to avoid dimensional matching pressure while
+  # keeping canonical d_H_angle/d_sub_angle logged for diagnostics.
   coeff_h_angle: 2.0
   cap_h_angle: 1.0
+  h_angle_reward_metric: d_H_relstruct_angle  # d_H_relstruct_angle | d_relstruct | leak_angle | d_H_angle | d_sub_angle
+  relstruct_distance_mode: symmetric          # symmetric | pred_subset_gt | mixed_subset
+  relstruct_reverse_weight: 0.5               # used only when mode=mixed_subset
   # d_SVD: FC gate — probe-dependent response-SVD diagnostic reward.
   coeff_d_svd: 1.0
   cap_d_svd: 1.0

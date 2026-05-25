@@ -54,14 +54,15 @@ from src.metrics.edit_response_distance import (
     compute_native_response,
     constraint_jacobian,
     edit_response_for_probe,
-    pairwise_distance_observable,
 )
 from src.sketch_handlers.constants import ConstraintToken
 from src.sketch_handlers.context import SketchContext
-from src.sketch_handlers.sketch_solver import compute_null_space
 from src.sketch_handlers.sketch_tokenizer import SketchTokenizer
 from src.sketch_handlers.sketch_utils import complete_constraint_values
 from src.models.components.dfeas_reward import _build_intrinsic_probes
+from src.models.components.relation_subspace_metric import (
+    compute_relation_subspace_distance,
+)
 from src.models.components.solver_feedback import SolverFeedback
 
 
@@ -144,68 +145,21 @@ def _compute_d_relstruct(
 
     Returns (selected_distance, pred_subset_gt, gt_subset_pred, dim_pred, dim_gt).
     """
-    state = pred_native.state
-    n_x = state.num_dof()
-    dtype = state.q.dtype
-
-    pred_rels = [c for c in pred_sketch.constraints.values() if _is_relational(c)]
-    gt_rels = [c for c in gt_sketch.constraints.values() if _is_relational(c)]
-
-    J_R_pred, _ = _stack_relation_jacobians_at(pred_rels, state, context)
-    J_R_gt, _ = _stack_relation_jacobians_at(gt_rels, state, context)
-
-    if J_R_pred is None:
-        J_R_pred = torch.zeros(0, n_x, dtype=dtype)
-    if J_R_gt is None:
-        J_R_gt = torch.zeros(0, n_x, dtype=dtype)
-
-    # Null spaces: (n_x, dim_null_*); empty relations → entire R^{n_x}
-    N_pred = compute_null_space(J_R_pred, eps=eps)
-    N_gt = compute_null_space(J_R_gt, eps=eps)
-
-    # Observable Jacobian: pairwise distances, shape (n_obs, n_x)
-    J_phi = pairwise_distance_observable(pred_sketch).to(dtype=dtype)
-    if J_phi.shape[0] == 0:
-        return 0.0, 0.0, 0.0, 0, 0
-
-    W_pred = J_phi @ N_pred   # (n_obs, dim_null_pred)
-    W_gt = J_phi @ N_gt       # (n_obs, dim_null_gt)
-
-    U_pred, dim_pred = _orthonormal_range(W_pred, eps)
-    U_gt, dim_gt = _orthonormal_range(W_gt, eps)
-
-    d_norm = float(max(dim_pred, dim_gt, 1))
-
-    if dim_pred == 0 or dim_gt == 0:
-        cos2_sum = 0.0
-    else:
-        M = U_gt.T @ U_pred          # (dim_gt, dim_pred)
-        sigmas = torch.linalg.svdvals(M).clamp(0.0, 1.0)
-        cos2_sum = float((sigmas ** 2).sum())
-
-    pred_subset_gt_sq = 0.0
-    if dim_pred > 0:
-        pred_subset_gt_sq = (dim_pred - cos2_sum) / float(dim_pred)
-
-    gt_subset_pred_sq = 0.0
-    if dim_gt > 0:
-        gt_subset_pred_sq = (dim_gt - cos2_sum) / float(dim_gt)
-
-    if distance_mode == "symmetric":
-        d_rs_sq = (dim_pred + dim_gt - 2.0 * cos2_sum) / d_norm
-    elif distance_mode == "pred_subset_gt":
-        d_rs_sq = pred_subset_gt_sq
-    elif distance_mode == "mixed_subset":
-        d_rs_sq = pred_subset_gt_sq + reverse_weight * gt_subset_pred_sq
-    else:
-        raise ValueError(f"unknown relstruct_distance_mode: {distance_mode!r}")
-
+    metrics = compute_relation_subspace_distance(
+        pred_sketch,
+        gt_sketch,
+        pred_native,
+        context,
+        eps,
+        distance_mode,
+        reverse_weight,
+    )
     return (
-        math.sqrt(max(d_rs_sq, 0.0)),
-        math.sqrt(max(pred_subset_gt_sq, 0.0)),
-        math.sqrt(max(gt_subset_pred_sq, 0.0)),
-        dim_pred,
-        dim_gt,
+        float(metrics["d_relstruct"]),
+        float(metrics["d_relstruct_pred_subset_gt"]),
+        float(metrics["d_relstruct_gt_subset_pred"]),
+        int(metrics["relstruct_dim_pred"]),
+        int(metrics["relstruct_dim_gt"]),
     )
 
 
