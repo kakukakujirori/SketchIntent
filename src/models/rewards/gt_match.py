@@ -9,6 +9,9 @@ before comparison.
 """
 from __future__ import annotations
 
+from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import dataclass
+
 import numpy as np
 import torch
 
@@ -21,10 +24,16 @@ from src.sketch_handlers.context import SketchContext
 from src.sketch_handlers.sketch_tokenizer import SketchTokenizer
 
 
+@dataclass
+class GTMatchAsyncHandle:
+    future: Future[RewardOutput]
+
+
 class GTMatchReward(BaseReward):
     """Per-block GT-match bonus placed at each matched block's tail token."""
 
     name = "gt_match"
+    is_async = True
 
     def __init__(
         self,
@@ -39,6 +48,18 @@ class GTMatchReward(BaseReward):
         self.tokenizer = SketchTokenizer(context)
         self._block_size = int(context.align_constraint_token_length_to)
         self._prefix_len = 1  # START
+        self._executor: ThreadPoolExecutor | None = None
+
+    def _get_executor(self) -> ThreadPoolExecutor:
+        if self._executor is None:
+            self._executor = ThreadPoolExecutor(max_workers=1)
+        return self._executor
+
+    def __del__(self):
+        executor = getattr(self, "_executor", None)
+        if executor is not None:
+            executor.shutdown(wait=False)
+            self._executor = None
 
     def _sort_intra_refs(self, cons_tokens: np.ndarray) -> np.ndarray:
         """Canonicalise refs within each constraint block (copy of
@@ -75,24 +96,24 @@ class GTMatchReward(BaseReward):
     def compute(self, ctx: RewardContext) -> RewardOutput:
         if ctx.gt_tokens is None:
             raise ValueError("GTMatchReward requires ctx.gt_tokens (GT constraint sequence)")
-        generated = ctx.cons_tokens
-        gt = ctx.gt_tokens
+        generated = ctx.cons_tokens.detach().cpu()
+        gt = ctx.gt_tokens.detach().cpu()
         BK, L = generated.shape
         bs = self._block_size
         prefix = self._prefix_len
         N = (L - prefix) // bs
         body_end = prefix + N * bs
 
-        gen_np = generated.cpu().numpy()
-        gt_np = gt.cpu().numpy()
+        gen_np = generated.numpy()
+        gt_np = gt.numpy()
         gen_sorted_np = np.stack(
             [self._sort_intra_refs(gen_np[k]) for k in range(BK)], axis=0
         )
         gt_sorted_np = np.stack(
             [self._sort_intra_refs(gt_np[k]) for k in range(BK)], axis=0
         )
-        gen_sorted = torch.from_numpy(gen_sorted_np).to(generated.device)
-        gt_sorted = torch.from_numpy(gt_sorted_np).to(gt.device)
+        gen_sorted = torch.from_numpy(gen_sorted_np)
+        gt_sorted = torch.from_numpy(gt_sorted_np)
 
         gen_body = gen_sorted[:, prefix:body_end].reshape(BK, N, bs)
         gt_body = gt_sorted[:, prefix:body_end].reshape(BK, N, bs)
@@ -109,9 +130,9 @@ class GTMatchReward(BaseReward):
         block_match = block_match & (~gt_invalid.unsqueeze(1))
         block_match = block_match & (~gen_invalid.unsqueeze(2))
 
-        used = torch.zeros(BK, M, dtype=torch.bool, device=generated.device)
-        matched = torch.zeros(BK, N, dtype=torch.bool, device=generated.device)
-        row_idx = torch.arange(BK, device=generated.device)
+        used = torch.zeros(BK, M, dtype=torch.bool)
+        matched = torch.zeros(BK, N, dtype=torch.bool)
+        row_idx = torch.arange(BK)
         for n in range(N):
             cand = block_match[:, n, :] & ~used
             has_match = cand.any(dim=-1)
@@ -119,10 +140,10 @@ class GTMatchReward(BaseReward):
             matched[:, n] = has_match
             used[row_idx[has_match], first_idx[has_match]] = True
 
-        scores = torch.zeros(BK, L, dtype=torch.float32, device=generated.device)
+        scores = torch.zeros(BK, L, dtype=torch.float32)
         if matched.any():
             block_tail_positions = (
-                torch.arange(N, device=generated.device) * bs + (bs - 1) + prefix
+                torch.arange(N) * bs + (bs - 1) + prefix
             )
             reward_to_add = matched.float() * self.coeff
             scores.scatter_add_(
@@ -135,4 +156,11 @@ class GTMatchReward(BaseReward):
             "gt_match_block_count": float(matched.sum().item()),
             "gt_match_block_rate": float(matched.float().mean().item()),
         }
-        return RewardOutput(scores=scores.cpu(), metrics=metrics)
+        return RewardOutput(scores=scores, metrics=metrics)
+
+    def submit_async(self, ctx: RewardContext) -> GTMatchAsyncHandle:
+        """Run GT matching in a background thread while GPU logprobs compute."""
+        return GTMatchAsyncHandle(self._get_executor().submit(self.compute, ctx))
+
+    def collect_results(self, handle: GTMatchAsyncHandle) -> RewardOutput:
+        return handle.future.result()

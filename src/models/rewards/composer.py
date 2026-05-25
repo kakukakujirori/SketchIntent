@@ -1,9 +1,9 @@
 """RewardComposer — single home for reward aggregation.
 
 The composer builds the per-batch ``RewardContext`` once, dispatches async
-rewards (currently only ``SolverReward``) before the GPU forward pass, and
-gathers sync rewards afterwards.  Per_sample_status from the solver is
-written into the context so that downstream rewards can gate on it.
+rewards before the GPU forward pass, and gathers sync rewards afterwards.
+``per_sample_solver_status`` from ``SolverReward`` is written into the context
+so that downstream rewards can gate on it.
 
 Per-reward weights, individual clipping, and a final clip on the aggregated
 tensor are all configurable.  Metrics from each ``RewardOutput`` are
@@ -12,7 +12,6 @@ their own metric keys (``solver_*``, ``relstruct_*``, ``gain_intrinsic_*``…).
 """
 from __future__ import annotations
 
-from collections import Counter
 from typing import Any
 
 import torch
@@ -26,9 +25,9 @@ class RewardComposer(torch.nn.Module):
     """Orchestrates a list of ``BaseReward`` modules.
 
     Args:
-        rewards: ordered list of rewards. ``SolverReward`` (``is_async=True``)
-            should appear first so its ``per_sample_status`` is available
-            to subsequent rewards.
+        rewards: ordered list of rewards. Async rewards are collected before
+            sync rewards; only ``SolverReward`` may populate
+            ``per_sample_solver_status`` for subsequent rewards.
         clip_total: optional ``(lo, hi)`` clamp applied after aggregation.
         clip_per_reward: optional ``{name: (lo, hi)}`` per-reward clamp on
             ``RewardOutput.scores`` before the weighted sum.
@@ -44,7 +43,7 @@ class RewardComposer(torch.nn.Module):
         names = [r.name for r in rewards]
         if len(set(names)) != len(names):
             raise ValueError(f"reward names must be unique, got {names}")
-        # Order async first so per_sample_status propagates correctly.
+        # Order async first so solver status is available to subsequent sync rewards.
         async_rs = [r for r in rewards if r.is_async]
         sync_rs = [r for r in rewards if not r.is_async]
         self.rewards = torch.nn.ModuleList(async_rs + sync_rs)
@@ -77,10 +76,7 @@ class RewardComposer(torch.nn.Module):
         for r in self.rewards:
             if not r.enabled or not r.is_async:
                 continue
-            # SolverReward keeps its legacy positional signature.
-            handles[r.name] = r.submit_async(
-                ctx.prim_tokens, ctx.cons_tokens, ctx.sketch_original_list
-            )
+            handles[r.name] = r.submit_async(ctx)
         return handles
 
     # ------------------------------------------------------------------ #
@@ -98,19 +94,24 @@ class RewardComposer(torch.nn.Module):
             if not r.enabled:
                 continue
             if r.is_async:
-                # SolverReward returns (scores_cpu, metrics, per_sample_status).
                 handle = handles.get(r.name)
-                scores_cpu, metrics, status = r.collect_results(handle)
-                out = RewardOutput(
-                    scores=scores_cpu, metrics=metrics, per_sample_status=status
-                )
+                out = r.collect_results(handle)
+                if not isinstance(out, RewardOutput):
+                    raise TypeError(
+                        f"async reward {r.name!r} collect_results() must return RewardOutput"
+                    )
             else:
                 out = r.compute(ctx)
             outputs[r.name] = out
 
-            # Propagate per_sample_status for downstream gating.
-            if out.per_sample_status is not None:
-                ctx.per_sample_status = out.per_sample_status
+            # Propagate solver status for downstream gating.
+            if out.per_sample_solver_status is not None:
+                if r.name != "solver":
+                    raise ValueError(
+                        f"reward {r.name!r} populated per_sample_solver_status; "
+                        "only SolverReward may do so"
+                    )
+                ctx.per_sample_solver_status = out.per_sample_solver_status
 
             s = out.scores
             if r.name in self.clip_per_reward:
@@ -133,9 +134,8 @@ class RewardComposer(torch.nn.Module):
 
         Reward modules already namespace their own keys (``solver_``,
         ``relstruct_``…), so this just unions them without further prefixing.
-        Non-scalar metric values (e.g. ``Counter`` returned by SolverReward
-        for status / dof histograms) are filtered out — the caller is
-        expected to convert those explicitly.
+        Non-scalar metric values (e.g. raw ``Counter`` histograms) are filtered
+        out.
         """
         merged: dict[str, Any] = {}
         for out in outputs.values():

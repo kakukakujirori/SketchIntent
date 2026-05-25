@@ -177,7 +177,7 @@ class ConstraintARModule(L.LightningModule):
         loss, preds, target = self._compute_loss(batch)
         accuracy = self.accuracy_metric(preds, target)
 
-        self.log('train/loss', loss)
+        self.log('train/ce_loss', loss)
         self.log(f'train/accuracy', accuracy, prog_bar=True)
 
         return loss
@@ -186,7 +186,7 @@ class ConstraintARModule(L.LightningModule):
         loss, preds, ce_target = self._compute_loss(batch)
         accuracy = self.accuracy_metric(preds, ce_target)
 
-        self.log(f'validation/loss', loss, add_dataloader_idx=True, sync_dist=True)
+        self.log(f'validation/ce_loss', loss, add_dataloader_idx=True, sync_dist=True)
         self.log(f'validation/accuracy', accuracy, add_dataloader_idx=True, sync_dist=True)
 
         # Generate sample
@@ -272,7 +272,7 @@ class ConstraintARModule(L.LightningModule):
         loss, preds, ce_target = self._compute_loss(batch)
         accuracy = self.accuracy_metric(preds, ce_target)
 
-        self.log(f'test/loss', loss, add_dataloader_idx=True, sync_dist=True)
+        self.log(f'test/ce_loss', loss, add_dataloader_idx=True, sync_dist=True)
         self.log(f'test/accuracy', accuracy, add_dataloader_idx=True, sync_dist=True)
 
         # Generate sample

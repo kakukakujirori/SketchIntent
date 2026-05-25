@@ -97,7 +97,7 @@ class DimParsimonyReward(BaseReward):
         cons_tokens = ctx.cons_tokens
         gt_tokens = ctx.gt_tokens
         sketches = ctx.sketch_original_list
-        per_sample_status = ctx.per_sample_status
+        per_sample_solver_status = ctx.per_sample_solver_status
         bs = self._block_size
         prefix = self._prefix_len
         B, L = cons_tokens.shape
@@ -136,7 +136,7 @@ class DimParsimonyReward(BaseReward):
         penalty_values: list[float] = []
         applied = 0
         for i in range(B):
-            status = per_sample_status[i] if per_sample_status is not None else None
+            status = per_sample_solver_status[i] if per_sample_solver_status is not None else None
             n_primitives = len(sketches[i].entities) if sketches[i] is not None else 1
             val = self._penalty_value(
                 n_dims_pred[i],

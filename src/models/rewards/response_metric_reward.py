@@ -334,7 +334,7 @@ class ResponseMetricReward(BaseReward):
         prim_tokens: torch.Tensor,
         cons_tokens: torch.Tensor,
         sketch_original_list: list[datalib.Sketch],
-        per_sample_status: list[str] | None = None,
+        per_sample_solver_status: list[str] | None = None,
     ) -> tuple[torch.Tensor, dict[str, float | int]]:
         B, L = cons_tokens.shape
         assert len(sketch_original_list) == B
@@ -343,8 +343,8 @@ class ResponseMetricReward(BaseReward):
         prim_np = prim_tokens.detach().cpu().numpy()
         cons_np = cons_tokens.detach().cpu().numpy()
 
-        if per_sample_status is None:
-            per_sample_status = ["FC"] * B
+        if per_sample_solver_status is None:
+            per_sample_solver_status = ["FC"] * B
 
         reward_vals: list[float] = []
         h_reward_distance_vals: list[float] = []
@@ -375,7 +375,7 @@ class ResponseMetricReward(BaseReward):
         gt_probe_cache: dict[int, list] = {}
 
         for i in range(B):
-            if per_sample_status[i] != "FC":
+            if per_sample_solver_status[i] != "FC":
                 skipped_not_fc += 1
                 continue
 
@@ -542,6 +542,6 @@ class ResponseMetricReward(BaseReward):
             ctx.prim_tokens,
             ctx.cons_tokens,
             ctx.sketch_original_list,
-            per_sample_status=ctx.per_sample_status,
+            per_sample_solver_status=ctx.per_sample_solver_status,
         )
         return RewardOutput(scores=scores, metrics=metrics)

@@ -104,7 +104,7 @@ class GainIntrinsicReward(BaseReward):
         prim_tokens = ctx.prim_tokens
         cons_tokens = ctx.cons_tokens
         sketches = ctx.sketch_original_list
-        per_sample_status = ctx.per_sample_status
+        per_sample_solver_status = ctx.per_sample_solver_status
         B, L = cons_tokens.shape
 
         scores = torch.zeros((B, L), dtype=torch.float32)
@@ -117,7 +117,7 @@ class GainIntrinsicReward(BaseReward):
         applied = 0
 
         for i in range(B):
-            status = per_sample_status[i] if per_sample_status is not None else None
+            status = per_sample_solver_status[i] if per_sample_solver_status is not None else None
             if not self._gate_pass(status):
                 skipped_gate += 1
                 continue

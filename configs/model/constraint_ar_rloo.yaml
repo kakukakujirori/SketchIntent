@@ -15,7 +15,7 @@ model:
 reward_composer:
   _target_: src.models.rewards.composer.RewardComposer
   rewards:
-    - _target_: src.models.components.solver_reward.SolverReward
+    - _target_: src.models.rewards.solver_reward.SolverReward
       context: ${data.context}
       reward_dof_reduction: 10.0
       reward_fully_constrained: 5.0

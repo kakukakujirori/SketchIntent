@@ -16,7 +16,7 @@ reward_composer:
   _target_: src.models.rewards.composer.RewardComposer
   rewards:
     # Solver-derived hard signals (FC / DoF / per-constraint penalties).
-    - _target_: src.models.components.solver_reward.SolverReward
+    - _target_: src.models.rewards.solver_reward.SolverReward
       context: ${data.context}
       reward_dof_reduction: 10.0
       reward_fully_constrained: 5.0
@@ -39,7 +39,7 @@ reward_composer:
       gate: converged
 
     # Response-metric reward (canonical Hθ surrogate d_H_relstruct_angle by default).
-    - _target_: src.models.components.response_metric_reward.ResponseMetricReward
+    - _target_: src.models.rewards.response_metric_reward.ResponseMetricReward
       context: ${data.context}
       eps: 1.0e-9
       coeff_h_angle: 2.0

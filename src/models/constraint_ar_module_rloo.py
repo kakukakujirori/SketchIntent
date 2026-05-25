@@ -10,7 +10,6 @@ from src.models.components.constraint_ar_model import ConstraintARModel
 from src.models.components.solver_feedback import SolverFeedback
 from src.models.components.token_reordering import TokenReordering
 from src.models.components.token_visualizer import visualize_constraint_sequence
-from src.models.rewards.base import RewardContext
 from src.models.rewards.composer import RewardComposer
 from src.sketch_handlers.constants import ConstraintToken, DIMENSIONAL_CONSTRAINT_TOKEN_IDS
 from src.sketch_handlers.context import SketchContext
@@ -68,24 +67,12 @@ class ConstraintARModuleRLOO(L.LightningModule):
         self.entropy_bonus = entropy_bonus
         self.kl_coeff = kl_coeff
         self.sft_coeff = sft_coeff
-        self._block_size: int = context.align_constraint_token_length_to  # tokens per constraint
-        self._prefix_len: int = 1  # START token
 
         # losses and metrics
         self.criterion = torch.nn.CrossEntropyLoss(ignore_index=ConstraintToken.Pad)
         self.tokenizer = SketchTokenizer(context)
         self.token_reordering = TokenReordering(context=context, prefix_len=1)  # NOTE: prefix_len is important
         self.solver_feedback = SolverFeedback(context)
-
-    def _reset_metrics(self):
-        """Reset all metrics to prevent accumulation across epochs."""
-        pass
-
-    def on_train_epoch_start(self):
-        self._reset_metrics()
-
-    def on_validation_epoch_start(self):
-        self._reset_metrics()
 
     def configure_optimizers(self):
         optimizer = self.hparams.optimizer(params=self.trainer.model.parameters())
@@ -199,31 +186,9 @@ class ConstraintARModuleRLOO(L.LightningModule):
             'reward_at_stop': (rewards * stop_mask).sum() / stop_mask.sum().clamp(min=1),
             'entropy':        entropy,
             'ratio':          avg_ratio,
-            **self._scalar_solver_metrics(reward_outputs),
             **self.reward_composer.flatten_metrics(reward_outputs),
         }
         return loss, metrics
-
-    @staticmethod
-    def _scalar_solver_metrics(outputs) -> dict[str, float]:
-        """Convert SolverReward's Counter-valued metrics into scalars for logging."""
-        out = outputs.get("solver") if isinstance(outputs, dict) else None
-        if out is None:
-            return {}
-        scalars: dict[str, float] = {}
-        status = out.metrics.get("status")
-        if status:
-            total = sum(status.values())
-            if total > 0:
-                for s, c in status.items():
-                    s_name = s.split(':')[0].strip() if s.startswith("Error") else s
-                    scalars[f"solver_{s_name.lower()}_rate"] = c / total
-        dof = out.metrics.get("dof")
-        if dof:
-            valid_sum = sum(d * c for d, c in dof.items() if d >= 0)
-            valid_n = sum(c for d, c in dof.items() if d >= 0)
-            scalars["solver_valid_dof_mean"] = valid_sum / valid_n if valid_n > 0 else 0.0
-        return scalars
 
     @torch.no_grad()
     def logits_to_preds(self, logits: torch.Tensor) -> torch.Tensor:
@@ -331,7 +296,7 @@ class ConstraintARModuleRLOO(L.LightningModule):
         loss, logits, ce_target = self._compute_ce_loss(batch)
         preds = self.logits_to_preds(logits)
 
-        self.log(f'validation/loss', loss, add_dataloader_idx=True, sync_dist=True)
+        self.log(f'validation/ce_loss', loss, add_dataloader_idx=True, sync_dist=True)
 
         # Generate sample
         full_target = batch['c_val']
@@ -342,43 +307,23 @@ class ConstraintARModuleRLOO(L.LightningModule):
         generated_sorted, _ = self.token_reordering(generated, None, None, "canonical_with_tail_strip")
         target_sorted, _ = self.token_reordering(full_target, None, None, "canonical_with_tail_strip")
 
-        # Evaluate solver constraints and log solver feedback metrics.
-        # per_sample_status is reused for gating downstream reward components,
-        # so both signals come from a single solver evaluation pass.
-        per_sample_status: list[str] | None = None
-        try:
-            solver_results, per_sample_status = self.solver_feedback.evaluate_constraints_batch(
-                batch['p_val'].cpu().numpy(),
-                generated.cpu().numpy(),
-                batch['sketch'],
-                fully_constrained_dof=2,
-                return_per_sample_status=True,
-            )
-            if solver_results:
-                for metric_name, metric_value in solver_results.items():
-                    self.log(f'validation_gen/solver_{metric_name}', metric_value, add_dataloader_idx=False, sync_dist=True, on_epoch=True)
-        except Exception as e:
-            if self.global_rank == 0:
-                print(f"[validation_step] Solver evaluation failed: {e}")
-
-        # Evaluate each non-async reward in the composer for logging.
+        # Evaluate rewards through the composer so SolverReward remains the
+        # single source of solver-derived status for downstream gating.
         ctx = self.reward_composer.build_context(
             prim_tokens=batch['p_val'],
             cons_tokens=generated,
             sketch_original_list=batch['sketch'],
             gt_tokens=batch['c_val'],
         )
-        ctx.per_sample_status = per_sample_status
-        for r in self.reward_composer.rewards:
-            if r.is_async or not r.enabled:
-                continue
-            try:
-                out = r.compute(ctx)
-            except Exception as e:
-                if self.global_rank == 0:
-                    print(f"[validation_step] {r.name} evaluation failed: {e}")
-                continue
-            for metric_name, metric_value in out.metrics.items():
+        try:
+            reward_handles = self.reward_composer.submit_async(ctx)
+            _, reward_outputs = self.reward_composer.collect(reward_handles, ctx)
+            reward_metrics = self.reward_composer.flatten_metrics(reward_outputs)
+            for metric_name, metric_value in reward_metrics.items():
+                if isinstance(metric_value, torch.Tensor):
+                    if metric_value.ndim != 0:
+                        continue
+                    metric_value = metric_value.item()
                 if not isinstance(metric_value, (int, float)):
                     continue
                 self.log(
@@ -388,6 +333,9 @@ class ConstraintARModuleRLOO(L.LightningModule):
                     sync_dist=True,
                     on_epoch=True,
                 )
+        except Exception as e:
+            if self.global_rank == 0:
+                print(f"[validation_step] reward evaluation failed: {e}")
 
         # Save first batch for wandb visualization
         if batch_idx == 0:
@@ -397,8 +345,6 @@ class ConstraintARModuleRLOO(L.LightningModule):
 
     @torch.no_grad()
     def on_validation_epoch_end(self):
-        # Reset metrics
-        self._reset_metrics()
 
         if not hasattr(self, "_val_samples") or not self._val_samples:
             return
@@ -471,8 +417,6 @@ class ConstraintARModuleRLOO(L.LightningModule):
 
     @torch.no_grad()
     def on_test_epoch_end(self):
-        # Reset metrics
-        self._reset_metrics()
 
         if not hasattr(self, "_test_samples") or not self._test_samples:
             return

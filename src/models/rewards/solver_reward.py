@@ -10,9 +10,9 @@ import torch
 
 import sketchgraphs.data as datalib
 from src.models.components.solver_feedback import SolverFeedback
-from src.models.components.solver_worker import init_worker as _init_worker, evaluate_single as _evaluate_single_worker
 from src.models.components.token_visualizer import visualize_constraint_sequence
 from src.models.rewards.base import BaseReward, RewardContext, RewardOutput
+from src.models.rewards.solver_worker import init_worker as _init_worker, evaluate_single as _evaluate_single_worker
 from src.sketch_handlers.constants import ConstraintToken, CONSTRAINT_VAL_OFFSET
 from src.sketch_handlers.context import SketchContext
 from src.sketch_handlers.sketch_tokenizer import SketchTokenizer
@@ -24,7 +24,7 @@ _worker_solver_feedback: SolverFeedback | None = None
 class SolverAsyncHandle:
     """Opaque handle returned by SolverReward.submit_async().
 
-    Pass to SolverReward.collect_results() to retrieve (scores_cpu, metrics).
+    Pass to SolverReward.collect_results() to retrieve a RewardOutput.
     GPU work can be performed between submit_async() and collect_results() so
     that the CPU solver runs concurrently with GPU logprob / ref-model forward.
     """
@@ -133,6 +133,52 @@ class SolverReward(BaseReward):
                 raise ValueError(f"Unknown entity type: {entity}")
         return dof
 
+    @staticmethod
+    def _scalar_metrics_from_counters(
+        solver_status_counter: Counter[str],
+        solver_dof_counter: Counter[int],
+    ) -> dict[str, float]:
+        """Convert solver-local Counter metrics into stable scalar log keys."""
+        canonical_counts = {
+            "fc": 0,
+            "under": 0,
+            "distorted": 0,
+            "conflicting": 0,
+            "redundant": 0,
+            "malformed": 0,
+            "failed": 0,
+        }
+        for status_name, count in solver_status_counter.items():
+            if status_name == "FC":
+                canonical_counts["fc"] += count
+            elif status_name == "Under":
+                canonical_counts["under"] += count
+            elif status_name == "Distorted":
+                canonical_counts["distorted"] += count
+            elif status_name == "Conflicting":
+                canonical_counts["conflicting"] += count
+            elif status_name == "Redundant":
+                canonical_counts["redundant"] += count
+            elif status_name == "Malformed":
+                canonical_counts["malformed"] += count
+            elif status_name in {"Failed", "Timeout"} or status_name.startswith("Error"):
+                canonical_counts["failed"] += count
+
+        total = sum(solver_status_counter.values())
+        valid_total = total - canonical_counts["failed"]
+        scalars = {
+            f"solver_{name}_rate": (
+                canonical_counts[name] / valid_total if valid_total > 0 else 0.0
+            )
+            for name in ("fc", "under", "distorted", "conflicting", "redundant", "malformed")
+        }
+        scalars["solver_failed_rate"] = canonical_counts["failed"] / total if total > 0 else 0.0
+
+        valid_sum = sum(dof * count for dof, count in solver_dof_counter.items() if dof >= 0)
+        valid_n = sum(count for dof, count in solver_dof_counter.items() if dof >= 0)
+        scalars["solver_valid_dof_mean"] = valid_sum / valid_n if valid_n > 0 else 0.0
+        return scalars
+
     def sort_intra_refs(self, cons_tokens: np.ndarray) -> np.ndarray:
         """
         Sort the refs of each constraint in the (predicted) constraint tokens.
@@ -176,7 +222,7 @@ class SolverReward(BaseReward):
     #  GPU computation in the training loop.                                  #
     # ---------------------------------------------------------------------- #
 
-    def submit_async(
+    def _submit_tokens(
         self,
         prim_tokens: torch.Tensor,
         cons_tokens: torch.Tensor,
@@ -186,7 +232,7 @@ class SolverReward(BaseReward):
 
         Returns immediately with a SolverAsyncHandle — the solver workers run
         concurrently in the background.  Call collect_results(handle) to wait
-        for completion and obtain (scores_cpu, metrics).
+        for completion and obtain a RewardOutput.
 
         Args:
             prim_tokens: (B, L_prim)  — may be on GPU or CPU
@@ -249,17 +295,25 @@ class SolverReward(BaseReward):
             cons_shape=tuple(cons_tokens.shape),
         )
 
+    def submit_async(self, ctx: RewardContext) -> SolverAsyncHandle:
+        """Pre-process a reward context and submit solver jobs to the pool."""
+        return self._submit_tokens(
+            ctx.prim_tokens,
+            ctx.cons_tokens,
+            ctx.sketch_original_list,
+        )
+
     def collect_results(
         self,
         handle: SolverAsyncHandle,
-    ) -> tuple[torch.Tensor, dict[str, Counter], list[str]]:
+    ) -> RewardOutput:
         """Wait for solver workers and compute reward scores.
 
         Blocks until all futures in *handle* have completed (or timed out).
-        Returns (scores_cpu, metrics, per_sample_status) where scores_cpu is
-        a CPU float32 tensor of shape (B, L_cons) and per_sample_status is a
-        list of per-sample status strings (e.g. "FC", "Under", "Conflicting",
-        "Redundant", "Malformed", "Timeout").
+        Returns a ``RewardOutput`` with CPU float32 scores of shape
+        ``(B, L_cons)``.  ``per_sample_solver_status`` is a list of per-sample
+        status strings (e.g. "FC", "Under", "Conflicting", "Redundant",
+        "Malformed", "Timeout").
 
         If called after GPU forward passes have already consumed most of the
         solver latency, this returns almost immediately.
@@ -274,6 +328,7 @@ class SolverReward(BaseReward):
         # Wait for submitted futures (with per-task timeout)
         if handle.futures:
             for fut_idx, f in enumerate(handle.futures):
+                i = handle.indices_to_evaluate[fut_idx]
                 try:
                     res = f.result(timeout=self.worker_timeout)
                 except FutureTimeoutError:
@@ -283,7 +338,6 @@ class SolverReward(BaseReward):
                     print(f"[SolverReward] Worker failed for batch index {i}: {e}")
                     res = None
 
-                i = handle.indices_to_evaluate[fut_idx]
                 evaluation_results[i] = res
 
                 if res is not None:
@@ -296,7 +350,7 @@ class SolverReward(BaseReward):
         scores = torch.zeros(handle.cons_shape, dtype=torch.float32)
         solver_dof_counter: Counter[int] = Counter()
         solver_status_counter: Counter[str] = Counter()
-        per_sample_status: list[str] = ["Timeout"] * handle.B
+        per_sample_solver_status: list[str] = ["Timeout"] * handle.B
 
         for i in range(handle.B):
             res = evaluation_results[i]
@@ -321,7 +375,7 @@ class SolverReward(BaseReward):
                 else:
                     status_name = "Under"
 
-            per_sample_status[i] = status_name
+            per_sample_solver_status[i] = status_name
             solver_dof_counter[solver_status.DoF] += 1
             solver_status_counter[status_name] += 1
 
@@ -399,11 +453,16 @@ class SolverReward(BaseReward):
             ################################################################
             scores[i, first_stop_idx] += seq_reward
 
-        metrics: dict[str, Counter] = {
+        metrics: dict[str, Any] = {
             "dof": solver_dof_counter,
             "status": solver_status_counter,
+            **self._scalar_metrics_from_counters(solver_status_counter, solver_dof_counter),
         }
-        return scores, metrics, per_sample_status
+        return RewardOutput(
+            scores=scores,
+            metrics=metrics,
+            per_sample_solver_status=per_sample_solver_status,
+        )
 
     # ---------------------------------------------------------------------- #
     #  Synchronous API (backward-compatible wrapper)                          #
@@ -414,7 +473,7 @@ class SolverReward(BaseReward):
         prim_tokens: torch.Tensor,
         cons_tokens: torch.Tensor,
         sketch_original_list: list[datalib.Sketch] | None = None,
-    ) -> tuple[torch.Tensor, dict[str, Counter]]:
+    ) -> tuple[torch.Tensor, dict[str, Any]]:
         """Synchronous reward computation (submit + collect in one call).
 
         Kept for backward compatibility (used in validation_step etc.).
@@ -428,19 +487,18 @@ class SolverReward(BaseReward):
 
         Returns:
             scores: (B, L_cons) float tensor on the same device as cons_tokens.
-            metrics: dict with 'dof' and 'status' Counters.
+            metrics: dict with raw 'dof'/'status' Counters and scalar solver_* log keys.
         """
-        handle = self.submit_async(prim_tokens, cons_tokens, sketch_original_list)
-        scores, metrics, _ = self.collect_results(handle)
-        return scores.to(cons_tokens.device), metrics
+        handle = self._submit_tokens(prim_tokens, cons_tokens, sketch_original_list)
+        out = self.collect_results(handle)
+        return out.scores.to(cons_tokens.device), out.metrics
 
     def compute(self, ctx: RewardContext) -> RewardOutput:
         """``BaseReward`` sync entry point.
 
         The ``RewardComposer`` prefers ``submit_async`` / ``collect_results``
-        for async overlap with the GPU forward pass and only falls back to
-        ``compute`` for sync contexts (e.g. validation).
+        for async overlap with the GPU forward pass. This wrapper is kept for
+        callers that need a synchronous ``BaseReward.compute`` entry point.
         """
-        handle = self.submit_async(ctx.prim_tokens, ctx.cons_tokens, ctx.sketch_original_list)
-        scores_cpu, metrics, status = self.collect_results(handle)
-        return RewardOutput(scores=scores_cpu, metrics=metrics, per_sample_status=status)
+        handle = self.submit_async(ctx)
+        return self.collect_results(handle)
