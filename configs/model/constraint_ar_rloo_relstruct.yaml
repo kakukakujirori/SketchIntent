@@ -12,74 +12,60 @@ model:
   num_layers: 12
   dropout: 0.0
 
-reward:
-  _target_: src.models.components.solver_reward.SolverReward
-  context: ${data.context}
-  reward_dof_reduction: 10.0
-  reward_fully_constrained: 5.0
-  penalty_conflicting: -1.0
-  penalty_redundant: -1.0
-  penalty_malformed: -0.5
-  penalty_deformed: -0.25
-  penalty_per_problematic_constraint: -1.0
-  penalty_num_total_constraints: -0.1
-  # Dimensional parsimony is owned by RelStructReward in this experiment.
-  # Legacy solver-side ratio penalty can still be restored via override.
-  penalty_num_dimensional_constraints: 0.0
-  penalty_rigid_dimensional: -0.0
-  fully_constrained_dof: 2
-  distortion_threshold: null
+reward_composer:
+  _target_: src.models.rewards.composer.RewardComposer
+  rewards:
+    # Solver-derived hard signals (FC / DoF / per-constraint penalties).
+    - _target_: src.models.components.solver_reward.SolverReward
+      context: ${data.context}
+      reward_dof_reduction: 10.0
+      reward_fully_constrained: 5.0
+      penalty_conflicting: -1.0
+      penalty_redundant: -1.0
+      penalty_malformed: -0.5
+      penalty_deformed: -0.25
+      penalty_per_problematic_constraint: -1.0
+      penalty_num_total_constraints: -0.1
+      # Dimensional parsimony is owned by DimParsimonyReward below.
+      penalty_num_dimensional_constraints: 0.0
+      penalty_rigid_dimensional: -0.0
+      fully_constrained_dof: 2
+      distortion_threshold: null
 
-# Plan A″ reward (staged rollout — start with leak + dimensional parsimony)
-relstruct_reward:
-  _target_: src.models.components.relstruct_reward.RelStructReward
-  context: ${data.context}
-  eps: 1.0e-9
-  # leak_prime: FC gate — relation preservation (one-sided, safest first component)
-  coeff_leak: 5.0
-  cap_leak: 0.3
-  # d_relstruct: Converged gate — relation structure both-sided match
-  coeff_relstruct: 3.0
-  cap_relstruct: 0.6
-  relstruct_distance_mode: symmetric   # symmetric | pred_subset_gt | mixed_subset
-  relstruct_reverse_weight: 0.5        # used only when mode=mixed_subset
-  # gain_intrinsic: FC gate — dim naturalness (gameable; add after smoke test)
-  coeff_gain: 3.0
-  cap_gain: 0.5
-  # dim penalty: Converged gate. Hinge mode avoids penalising the dimensions
-  # needed for FC and only charges dimensions beyond the source GT budget.
-  coeff_dim_penalty: 0.30
-  dim_penalty_mode: excess_over_gt_per_primitive
-  dim_excess_margin: 1
-  # Staged rollout toggles for relation-structure shaping and dim hinge.
-  # Default keeps only the GT-excess dim hinge here; Hθ lives in
-  # response_metric_reward below.
-  use_leak: false
-  use_relstruct: false   # enable after d_relstruct smoke test passes
-  use_gain: false        # enable last
-  use_dim_penalty: true
+    # Dimensional parsimony — single home for the dim-count penalty that
+    # previously lived in both SolverReward and RelStructReward.
+    - _target_: src.models.rewards.dim_parsimony.DimParsimonyReward
+      context: ${data.context}
+      coeff: 0.30
+      mode: excess_over_gt_per_primitive
+      excess_margin: 1
+      gate: converged
 
-# Direct response-metric reward canary (independent of RelStructReward).
-response_metric_reward:
-  _target_: src.models.components.response_metric_reward.ResponseMetricReward
-  context: ${data.context}
-  eps: 1.0e-9
-  # Reward-oriented Hθ: FC gate. Default replaces canonical d_sub_angle with
-  # relation-only d_relstruct to avoid dimensional matching pressure while
-  # keeping canonical d_H_angle/d_sub_angle logged for diagnostics.
-  coeff_h_angle: 2.0
-  cap_h_angle: 1.0
-  h_angle_reward_metric: d_H_relstruct_angle  # d_H_relstruct_angle | d_relstruct | leak_angle | d_H_angle | d_sub_angle
-  relstruct_distance_mode: symmetric          # symmetric | pred_subset_gt | mixed_subset
-  relstruct_reverse_weight: 0.5               # used only when mode=mixed_subset
-  # d_SVD: FC gate — probe-dependent response-SVD diagnostic reward.
-  coeff_d_svd: 1.0
-  cap_d_svd: 1.0
-  d_svd_metric: d_SVD_sub_trunc        # d_SVD_sub_trunc | d_SVD_top1 | d_SVD_sigma_rel
-  d_svd_probe_source: gt_dim           # gt_dim | intrinsic
-  tau_p: 0.01
-  use_h_angle: true
-  use_d_svd: false                     # ablation only; probe-dependent
+    # Response-metric reward (canonical Hθ surrogate d_H_relstruct_angle by default).
+    - _target_: src.models.components.response_metric_reward.ResponseMetricReward
+      context: ${data.context}
+      eps: 1.0e-9
+      coeff_h_angle: 2.0
+      cap_h_angle: 1.0
+      h_angle_reward_metric: d_H_relstruct_angle  # d_H_relstruct_angle | d_relstruct | leak_angle | d_H_angle | d_sub_angle
+      relstruct_distance_mode: symmetric          # symmetric | pred_subset_gt | mixed_subset
+      relstruct_reverse_weight: 0.5
+      coeff_d_svd: 1.0
+      cap_d_svd: 1.0
+      d_svd_metric: d_SVD_sub_trunc
+      d_svd_probe_source: gt_dim
+      tau_p: 0.01
+      use_h_angle: true
+      use_d_svd: false
+
+    # Intrinsic-size attainability bonus (gain_intrinsic). Disabled by
+    # default; enable after smoke-testing the canonical Hθ surrogate.
+    - _target_: src.models.rewards.gain_intrinsic.GainIntrinsicReward
+      context: ${data.context}
+      coeff: 3.0
+      cap: 0.5
+      gate: fc
+      enabled: false
 
 optimizer:
   _target_: torch.optim.AdamW
@@ -97,5 +83,3 @@ group_sample_size: 8
 entropy_bonus: 0.0
 kl_coeff: 0.01
 sft_coeff: 0.0
-gt_reward_coeff: 0.0
-penalty_duplicate: -1.0

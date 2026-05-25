@@ -12,21 +12,24 @@ model:
   num_layers: 12
   dropout: 0.0
 
-reward:
-  _target_: src.models.components.solver_reward.SolverReward
-  context: ${data.context}
-  reward_dof_reduction: 10.0
-  reward_fully_constrained: 5.0
-  penalty_conflicting: -1.0
-  penalty_redundant: -1.0
-  penalty_malformed: -0.5
-  penalty_deformed: -1.0
-  penalty_per_problematic_constraint: -1.0
-  penalty_num_total_constraints: -0.1
-  penalty_num_dimensional_constraints: -0.1
-  penalty_rigid_dimensional: -0.0
-  fully_constrained_dof: 2
-  distortion_threshold: null
+reward_composer:
+  _target_: src.models.rewards.composer.RewardComposer
+  rewards:
+    - _target_: src.models.components.solver_reward.SolverReward
+      context: ${data.context}
+      reward_dof_reduction: 10.0
+      reward_fully_constrained: 5.0
+      penalty_conflicting: -1.0
+      penalty_redundant: -1.0
+      penalty_malformed: -0.5
+      penalty_deformed: -1.0
+      penalty_per_problematic_constraint: -1.0
+      penalty_num_total_constraints: -0.1
+      # Dimensional parsimony is owned by DimParsimonyReward now.
+      penalty_num_dimensional_constraints: 0.0
+      penalty_rigid_dimensional: -0.0
+      fully_constrained_dof: 2
+      distortion_threshold: null
 
 optimizer:
   _target_: torch.optim.AdamW
@@ -44,5 +47,3 @@ group_sample_size: 8
 entropy_bonus: 0.0
 kl_coeff: 0.01
 sft_coeff: 0.0
-gt_reward_coeff: 0.0
-penalty_duplicate: -1.0

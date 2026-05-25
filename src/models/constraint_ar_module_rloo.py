@@ -1,20 +1,17 @@
 import copy
 import inspect
+from tqdm import tqdm
 from typing import Any, cast
 
-import numpy as np
 import lightning as L
 import torch
-from tqdm import tqdm
 
 from src.models.components.constraint_ar_model import ConstraintARModel
-from src.models.components.dfeas_reward import DFeasReward
-from src.models.components.relstruct_reward import RelStructReward
-from src.models.components.response_metric_reward import ResponseMetricReward
 from src.models.components.solver_feedback import SolverFeedback
-from src.models.components.solver_reward import SolverReward
 from src.models.components.token_reordering import TokenReordering
 from src.models.components.token_visualizer import visualize_constraint_sequence
+from src.models.rewards.base import RewardContext
+from src.models.rewards.composer import RewardComposer
 from src.sketch_handlers.constants import ConstraintToken, DIMENSIONAL_CONSTRAINT_TOKEN_IDS
 from src.sketch_handlers.context import SketchContext
 from src.sketch_handlers.sketch_tokenizer import SketchTokenizer
@@ -27,7 +24,7 @@ class ConstraintARModuleRLOO(L.LightningModule):
         self,
         context: SketchContext,
         model: ConstraintARModel,
-        reward: SolverReward,
+        reward_composer: RewardComposer,
         optimizer: torch.optim.Optimizer,
         scheduler: torch.optim.lr_scheduler._LRScheduler | None,
         ref_update_steps: int = -1,
@@ -35,34 +32,17 @@ class ConstraintARModuleRLOO(L.LightningModule):
         entropy_bonus: float = 0.01,
         kl_coeff: float = 0.01,
         sft_coeff: float = 0.0,
-        gt_reward_coeff: float = 0.0,
-        penalty_duplicate: float = -1.0,
-        dfeas_reward: DFeasReward | None = None,
-        dfeas_apply_to: str = "converged",
-        relstruct_reward: RelStructReward | None = None,
-        response_metric_reward: ResponseMetricReward | None = None,
         relational_only: bool = False,
     ):
         super().__init__()
-        if dfeas_apply_to not in ("converged", "fc"):
-            raise ValueError(f"unknown dfeas_apply_to: {dfeas_apply_to}")
         self.save_hyperparameters(
-            ignore=[
-                'model',
-                'reward',
-                'dfeas_reward',
-                'relstruct_reward',
-                'response_metric_reward',
-            ],
+            ignore=['model', 'reward_composer'],
             logger=False,
         )
 
         # models
         self.model = model
-        self.reward = reward
-        self.dfeas_reward = dfeas_reward
-        self.relstruct_reward = relstruct_reward
-        self.response_metric_reward = response_metric_reward
+        self.reward_composer = reward_composer
         self.ref_model = copy.deepcopy(model)
 
         self.relational_only = relational_only
@@ -73,38 +53,10 @@ class ConstraintARModuleRLOO(L.LightningModule):
                 persistent=False,
             )
 
-        self.reward.eval()
-        for p in self.reward.parameters():
+        # All reward modules are non-trainable.
+        self.reward_composer.eval()
+        for p in self.reward_composer.parameters():
             p.requires_grad_(False)
-
-        if self.dfeas_reward is not None:
-            self.dfeas_reward.eval()
-            for p in self.dfeas_reward.parameters():
-                p.requires_grad_(False)
-
-        if self.relstruct_reward is not None:
-            self.relstruct_reward.eval()
-            for p in self.relstruct_reward.parameters():
-                p.requires_grad_(False)
-
-            # If RelStructReward owns the dim-count penalty, zero out
-            # SolverReward's penalty_num_dimensional_constraints to avoid
-            # double-counting (plan §6.1 / config comment "set
-            # penalty_num_dimensional_constraints=0 when use_dim_penalty=true").
-            if getattr(self.relstruct_reward, "use_dim_penalty", False):
-                prev = getattr(self.reward, "penalty_num_dimensional_constraints", 0.0)
-                if prev != 0.0:
-                    print(
-                        f"[ConstraintARModuleRLOO] RelStructReward.use_dim_penalty=True "
-                        f"-> overriding SolverReward.penalty_num_dimensional_constraints "
-                        f"{prev} -> 0.0 to avoid double penalty."
-                    )
-                    self.reward.penalty_num_dimensional_constraints = 0.0
-
-        if self.response_metric_reward is not None:
-            self.response_metric_reward.eval()
-            for p in self.response_metric_reward.parameters():
-                p.requires_grad_(False)
 
         self.ref_model.eval()
         for p in self.ref_model.parameters():
@@ -116,9 +68,6 @@ class ConstraintARModuleRLOO(L.LightningModule):
         self.entropy_bonus = entropy_bonus
         self.kl_coeff = kl_coeff
         self.sft_coeff = sft_coeff
-        self.gt_reward_coeff = gt_reward_coeff
-        self.penalty_duplicate = penalty_duplicate
-        self.dfeas_apply_to = dfeas_apply_to
         self._block_size: int = context.align_constraint_token_length_to  # tokens per constraint
         self._prefix_len: int = 1  # START token
 
@@ -173,179 +122,6 @@ class ConstraintARModuleRLOO(L.LightningModule):
         loss = self.criterion(logits.reshape(-1, V), target.reshape(-1))
         return loss, logits, target
 
-    @torch.no_grad()
-    def _compute_gt_match_reward(
-        self,
-        generated: torch.Tensor,
-        gt: torch.Tensor,
-    ) -> torch.Tensor:
-        """Compute per-token GT-match reward for each generated sequence.
-
-        For every constraint block in *generated*, checks whether an identical
-        block exists in *gt* (after intra-ref canonical sorting on both sides).
-        Matching is **one-to-one**: each GT block can be consumed by at most one
-        generated block (greedy first-match in scan order).  This prevents
-        duplicate-spam from farming the same GT block N times.
-
-        Args:
-            generated: [BK, L] generated token sequences (includes START token at pos 0).
-            gt: [BK, L] ground-truth token sequences (same shape, already expanded K times).
-
-        Returns:
-            reward: [BK, L] float32 tensor (0 everywhere except matched block tails).
-        """
-        BK, L = generated.shape
-        bs = self._block_size
-        prefix = self._prefix_len
-
-        # ── extract body blocks (skip prefix START token) ────────────────────
-        # body region: [prefix, prefix + N*bs)  where N = (L - prefix) // bs
-        N = (L - prefix) // bs
-        body_end = prefix + N * bs
-
-        # gen_blocks: [BK, N, bs]
-        gen_blocks = generated[:, prefix:body_end].reshape(BK, N, bs)
-        # gt_blocks:  [BK, M, bs]  (M may differ from N in theory, but same L → M == N)
-        gt_blocks = gt[:, prefix:body_end].reshape(BK, N, bs)
-
-        # ── intra-ref sort (canonical ordering within each block) ─────────────
-        # We leverage reward.sort_intra_refs on numpy; it's called once per sequence
-        # so the overhead is acceptable.
-        gen_np = generated.cpu().numpy()
-        gt_np  = gt.cpu().numpy()
-
-        gen_sorted_np = np.stack(
-            [self.reward.sort_intra_refs(gen_np[k]) for k in range(BK)], axis=0
-        )  # [BK, L]
-        gt_sorted_np = np.stack(
-            [self.reward.sort_intra_refs(gt_np[k]) for k in range(BK)], axis=0
-        )  # [BK, L]
-
-        gen_sorted = torch.from_numpy(gen_sorted_np).to(generated.device)
-        gt_sorted  = torch.from_numpy(gt_sorted_np).to(gt.device)
-
-        gen_body = gen_sorted[:, prefix:body_end].reshape(BK, N, bs)  # [BK, N, bs]
-        gt_body  = gt_sorted[:, prefix:body_end].reshape(BK, N, bs)   # [BK, M, bs]
-        M = gt_body.shape[1]  # equals N
-
-        # ── valid-block masks ─────────────────────────────────────────────────
-        # A block is invalid (STOP / PAD) if ANY token == Stop or Pad
-        pad_id  = int(ConstraintToken.Pad)
-        stop_id = int(ConstraintToken.Stop)
-
-        # gen_invalid: [BK, N] — True if the generated block is Stop/Pad
-        gen_invalid = (
-            (gen_body == pad_id) | (gen_body == stop_id)
-        ).any(dim=-1)
-
-        # gt_invalid: [BK, M] — True if the GT block is Stop/Pad
-        gt_invalid = (
-            (gt_body == pad_id) | (gt_body == stop_id)
-        ).any(dim=-1)
-
-        # ── pairwise block match (vectorised) ─────────────────────────────────
-        # Compare every gen block against every gt block for each sample.
-        # gen_exp: [BK, N, 1, bs]  vs  gt_exp: [BK, 1, M, bs]
-        gen_exp = gen_body.unsqueeze(2)  # [BK, N, 1, bs]
-        gt_exp  = gt_body.unsqueeze(1)   # [BK, 1, M, bs]
-
-        # block_match: [BK, N, M]  — True if whole block matches
-        block_match = (gen_exp == gt_exp).all(dim=-1)
-
-        # Disallow matches with invalid blocks on either side
-        block_match = block_match & (~gt_invalid.unsqueeze(1))
-        block_match = block_match & (~gen_invalid.unsqueeze(2))
-
-        # ── greedy one-to-one assignment ──────────────────────────────────────
-        # Each GT block can be matched at most once. Iterate gen blocks in scan
-        # order and consume the first available GT match. N is small (~32), so
-        # the Python loop over N is cheap.
-        used = torch.zeros(BK, M, dtype=torch.bool, device=generated.device)
-        matched = torch.zeros(BK, N, dtype=torch.bool, device=generated.device)
-        row_idx = torch.arange(BK, device=generated.device)
-        for n in range(N):
-            cand = block_match[:, n, :] & ~used          # [BK, M]
-            has_match = cand.any(dim=-1)                  # [BK]
-            first_idx = cand.int().argmax(dim=-1)         # [BK]; 0 if no match
-            matched[:, n] = has_match
-            # Mark consumed GT block (only where a match actually exists)
-            used[row_idx[has_match], first_idx[has_match]] = True
-
-        # ── assign reward to the LAST token of each matched block ─────────────
-        reward = torch.zeros(BK, L, dtype=torch.float32, device=generated.device)
-        if matched.any():
-            # last position of block n in the full sequence:  prefix + n*bs + (bs-1)
-            block_tail_positions = torch.arange(N, device=generated.device) * bs + (bs - 1) + prefix
-            # [BK, N] positions → scatter into reward
-            # For matched blocks, add gt_reward_coeff at the tail position
-            # We scatter a filled coefficient tensor masked by `matched`
-            reward_to_add = matched.float() * self.gt_reward_coeff  # [BK, N]
-            reward.scatter_add_(
-                dim=1,
-                index=block_tail_positions.unsqueeze(0).expand(BK, -1),
-                src=reward_to_add,
-            )
-
-        return reward  # [BK, L]
-
-    @torch.no_grad()
-    def _compute_duplicate_penalty(self, generated: torch.Tensor) -> torch.Tensor:
-        """Penalise duplicate constraint blocks within a sequence.
-
-        FreeCAD's solver returns only a single id in ``RedundantConstraints``
-        even when N identical constraints are added, so SolverReward's
-        ``penalty_per_problematic_constraint`` only fires once regardless of
-        N.  This method closes that loophole by checking the canonical-sorted
-        generated blocks ourselves and applying ``penalty_duplicate`` to every
-        non-first occurrence at the block's tail token.
-
-        Args:
-            generated: [BK, L] generated token sequences.
-
-        Returns:
-            penalty: [BK, L] float32 tensor (<= 0 everywhere).
-        """
-        BK, L = generated.shape
-        bs = self._block_size
-        prefix = self._prefix_len
-        N = (L - prefix) // bs
-        body_end = prefix + N * bs
-
-        pad_id  = int(ConstraintToken.Pad)
-        stop_id = int(ConstraintToken.Stop)
-
-        gen_np = generated.cpu().numpy()
-        gen_sorted_np = np.stack(
-            [self.reward.sort_intra_refs(gen_np[k]) for k in range(BK)], axis=0
-        )
-        gen_sorted = torch.from_numpy(gen_sorted_np).to(generated.device)
-        gen_body = gen_sorted[:, prefix:body_end].reshape(BK, N, bs)
-
-        gen_invalid = (
-            (gen_body == pad_id) | (gen_body == stop_id)
-        ).any(dim=-1)  # [BK, N]
-
-        penalty = torch.zeros(BK, L, dtype=torch.float32, device=generated.device)
-        block_tail_positions = (
-            torch.arange(N, device=generated.device) * bs + (bs - 1) + prefix
-        )
-
-        # Per-sample loop — BK*N ≈ 256*32 = 8k iterations, negligible.
-        gen_body_cpu = gen_body.cpu().numpy()
-        gen_invalid_cpu = gen_invalid.cpu().numpy()
-        tail_cpu = block_tail_positions.cpu().numpy()
-        for k in range(BK):
-            seen: set[tuple[int, ...]] = set()
-            for n in range(N):
-                if gen_invalid_cpu[k, n]:
-                    continue
-                key = tuple(gen_body_cpu[k, n].tolist())
-                if key in seen:
-                    penalty[k, int(tail_cpu[n])] += self.penalty_duplicate
-                else:
-                    seen.add(key)
-        return penalty
-
     def _compute_rloo_loss(self, batch: dict[str, Any]) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         B, K = batch['p_val'].shape[0], self.group_sample_size
         _, max_len = batch['c_val'].shape
@@ -356,12 +132,17 @@ class ConstraintARModuleRLOO(L.LightningModule):
         with torch.no_grad():
             generated, gen_logprobs = self.generate_sample(expanded, max_len, dtype=batch['c_val'].dtype)
 
-        # Step 2: Kick off solver asynchronously (CPU workers start now,
-        # running concurrently with the GPU forward passes below)
+        # Step 2: Build reward context and kick off async rewards (SolverReward)
+        # so the CPU solver runs concurrently with the GPU forward pass below.
         p_val_expanded: torch.Tensor = cast(torch.Tensor, expanded['p_val'])
-        solver_handle = self.reward.submit_async(
-            p_val_expanded, generated, expanded['sketch']
+        gt_expanded: torch.Tensor = cast(torch.Tensor, expanded['c_val'])
+        ctx = self.reward_composer.build_context(
+            prim_tokens=p_val_expanded,
+            cons_tokens=generated,
+            sketch_original_list=expanded['sketch'],
+            gt_tokens=gt_expanded,
         )
+        reward_handles = self.reward_composer.submit_async(ctx)
 
         # Step 3: GPU compute — runs while CPU solver is in flight
         mask = (generated[:, 1:] != ConstraintToken.Pad).float()   # [B*K, L-1]
@@ -380,7 +161,7 @@ class ConstraintARModuleRLOO(L.LightningModule):
         ratio = torch.exp(token_log_probs - gen_logprobs[:, 1:])
         avg_ratio = (ratio * mask).sum() / n_valid
 
-        # KL penalty (computed before collect_results — no dependency on rewards)
+        # KL penalty (computed before reward collection — no dependency on rewards)
         kl_loss_metric = torch.tensor(0.0, device=self.device)
         kl_penalty: torch.Tensor | None = None
         if self.kl_coeff > 0.0:
@@ -392,126 +173,57 @@ class ConstraintARModuleRLOO(L.LightningModule):
                 kl_penalty = token_log_probs.detach() - ref_log_probs
             kl_loss_metric = (kl_penalty * mask).sum() / n_valid
 
-        # Step 4: Collect solver results (blocks only for remaining solver time)
-        rewards_cpu, solver_metrics, per_sample_status = self.reward.collect_results(solver_handle)
+        # Step 4: Collect all reward signals (blocks only on remaining solver time).
+        rewards_cpu, reward_outputs = self.reward_composer.collect(reward_handles, ctx)
         rewards = rewards_cpu.to(self.device).float()  # [B*K, L]
-
-        # Step 4b: GT-match reward (added on top of solver reward)
-        if self.gt_reward_coeff > 0.0:
-            gt_expanded = cast(torch.Tensor, expanded['c_val'])  # [B*K, L]
-            gt_match_reward = self._compute_gt_match_reward(generated, gt_expanded)
-            rewards = rewards + gt_match_reward
-
-        # Step 4b': duplicate-block penalty.  FreeCAD reports only a single
-        # RedundantConstraints id for N identical constraints, so SolverReward's
-        # per-constraint penalty does not scale with N.  This closes the
-        # spam-the-same-constraint loophole regardless of the reward mix.
-        duplicate_penalty: torch.Tensor | None = None
-        if self.penalty_duplicate < 0.0:
-            duplicate_penalty = self._compute_duplicate_penalty(generated)
-            rewards = rewards + duplicate_penalty
-
-        # Step 4c: d_feas reward (first-order edit feasibility / intent preservation)
-        # Conflicting / redundant sketches have ill-defined first-order
-        # responses, so d_feas is only meaningful on solver-converged samples.
-        # For intent shaping, it can also be restricted to FC samples so the
-        # reward does not compete with early DoF closure.
-        dfeas_metrics: dict[str, float | int] = {}
-        if self.dfeas_reward is not None:
-            if self.dfeas_apply_to == "fc":
-                converged_mask = [s == "FC" for s in per_sample_status]
-            else:
-                converged_mask = [s in ("FC", "Under") for s in per_sample_status]
-            dfeas_scores_cpu, dfeas_metrics = self.dfeas_reward(
-                p_val_expanded, generated, expanded['sketch'],
-                converged_mask=converged_mask,
-            )
-            dfeas_scores = dfeas_scores_cpu.to(self.device).float()
-            rewards = rewards + dfeas_scores
-
-        # Step 4d: RelStruct reward (plan A″ — leak_prime + d_relstruct + gain_intrinsic)
-        relstruct_metrics: dict[str, float | int] = {}
-        if self.relstruct_reward is not None:
-            relstruct_scores_cpu, relstruct_metrics = self.relstruct_reward(
-                p_val_expanded, generated, expanded['sketch'],
-                per_sample_status=per_sample_status,
-            )
-            rewards = rewards + relstruct_scores_cpu.to(self.device).float()
-
-        # Step 4e: direct response-metric reward (Hθ / d_SVD).
-        response_metric_metrics: dict[str, float | int] = {}
-        if self.response_metric_reward is not None:
-            response_metric_scores_cpu, response_metric_metrics = self.response_metric_reward(
-                p_val_expanded, generated, expanded['sketch'],
-                per_sample_status=per_sample_status,
-            )
-            rewards = rewards + response_metric_scores_cpu.to(self.device).float()
-
-        # Parse solver metrics (Counter → scalar)
-        parsed_solver_metrics = {}
-        if "status" in solver_metrics:
-            status_counter = solver_metrics["status"]
-            total_status = sum(status_counter.values())
-            if total_status > 0:
-                for s, c in status_counter.items():
-                    # Group all "Error: ..." statuses into a single "Error" key
-                    s_name = s.split(':')[0].strip() if s.startswith("Error") else s
-                    parsed_solver_metrics[f"solver_{s_name.lower()}_rate"] = c / total_status
-
-        if "dof" in solver_metrics:
-            dof_counter = solver_metrics["dof"]
-            # Compute mean DoF only for successful constraint sequences (DoF >= 0)
-            valid_dof_sum = sum(d * c for d, c in dof_counter.items() if d >= 0)
-            valid_dof_count = sum(c for d, c in dof_counter.items() if d >= 0)
-            parsed_solver_metrics["solver_valid_dof_mean"] = valid_dof_sum / valid_dof_count if valid_dof_count > 0 else 0.0
 
         # Step 5: Compute returns / advantages / loss
         adjusted_rewards = rewards.clone()
         if self.kl_coeff > 0.0 and kl_penalty is not None:
-            # Subtract KL penalty from rewards
             adjusted_rewards[:, 1:] -= self.kl_coeff * kl_penalty * mask
 
-        # Compute Returns (cumulative sum of future rewards)
         returns = adjusted_rewards.flip(dims=[1]).cumsum(dim=1).flip(dims=[1])
-
-        # RLOO advantage
         returns_grouped = returns.view(B, K, max_len)
-        baseline   = (returns_grouped.sum(dim=1, keepdim=True) - returns_grouped) / (K - 1)
+        baseline = (returns_grouped.sum(dim=1, keepdim=True) - returns_grouped) / (K - 1)
         advantages = (returns_grouped - baseline).view(B * K, max_len)[:, 1:]  # [B*K, L-1]
 
-        # Policy Gradient loss
         pg_loss = -(advantages.detach() * token_log_probs * mask).sum() / n_valid
-
-        # Entropy bonus
         loss = pg_loss - self.entropy_bonus * entropy
 
         stop_mask = (generated == ConstraintToken.Stop).float()
-
-        gt_match_reward_metric = torch.tensor(0.0, device=self.device)
-        if self.gt_reward_coeff > 0.0:
-            # gt_match_reward was added into rewards already; recover it for logging
-            gt_match_reward_metric = gt_match_reward.sum() / n_valid  # type: ignore[possibly-undefined]
-
-        duplicate_penalty_metric = torch.tensor(0.0, device=self.device)
-        if duplicate_penalty is not None:
-            duplicate_penalty_metric = duplicate_penalty.sum() / n_valid
-
-        metrics = {
-            'pg_loss':            pg_loss,
-            'kl_loss':            kl_loss_metric,
-            'reward_mean':        rewards.mean(),
-            'reward_std':         rewards.std(),
-            'reward_at_stop':     (rewards * stop_mask).sum() / stop_mask.sum().clamp(min=1),
-            'entropy':            entropy,
-            'ratio':              avg_ratio,
-            'gt_match_reward':    gt_match_reward_metric,
-            'duplicate_penalty':  duplicate_penalty_metric,
-            **parsed_solver_metrics,
-            **dfeas_metrics,
-            **relstruct_metrics,
-            **response_metric_metrics,
+        metrics: dict[str, Any] = {
+            'pg_loss':        pg_loss,
+            'kl_loss':        kl_loss_metric,
+            'reward_mean':    rewards.mean(),
+            'reward_std':     rewards.std(),
+            'reward_at_stop': (rewards * stop_mask).sum() / stop_mask.sum().clamp(min=1),
+            'entropy':        entropy,
+            'ratio':          avg_ratio,
+            **self._scalar_solver_metrics(reward_outputs),
+            **self.reward_composer.flatten_metrics(reward_outputs),
         }
         return loss, metrics
+
+    @staticmethod
+    def _scalar_solver_metrics(outputs) -> dict[str, float]:
+        """Convert SolverReward's Counter-valued metrics into scalars for logging."""
+        out = outputs.get("solver") if isinstance(outputs, dict) else None
+        if out is None:
+            return {}
+        scalars: dict[str, float] = {}
+        status = out.metrics.get("status")
+        if status:
+            total = sum(status.values())
+            if total > 0:
+                for s, c in status.items():
+                    s_name = s.split(':')[0].strip() if s.startswith("Error") else s
+                    scalars[f"solver_{s_name.lower()}_rate"] = c / total
+        dof = out.metrics.get("dof")
+        if dof:
+            valid_sum = sum(d * c for d, c in dof.items() if d >= 0)
+            valid_n = sum(c for d, c in dof.items() if d >= 0)
+            scalars["solver_valid_dof_mean"] = valid_sum / valid_n if valid_n > 0 else 0.0
+        return scalars
 
     @torch.no_grad()
     def logits_to_preds(self, logits: torch.Tensor) -> torch.Tensor:
@@ -631,8 +343,8 @@ class ConstraintARModuleRLOO(L.LightningModule):
         target_sorted, _ = self.token_reordering(full_target, None, None, "canonical_with_tail_strip")
 
         # Evaluate solver constraints and log solver feedback metrics.
-        # per_sample_status is reused for gating RelStructReward bonuses, so
-        # both signals come from a single solver evaluation pass.
+        # per_sample_status is reused for gating downstream reward components,
+        # so both signals come from a single solver evaluation pass.
         per_sample_status: list[str] | None = None
         try:
             solver_results, per_sample_status = self.solver_feedback.evaluate_constraints_batch(
@@ -649,49 +361,33 @@ class ConstraintARModuleRLOO(L.LightningModule):
             if self.global_rank == 0:
                 print(f"[validation_step] Solver evaluation failed: {e}")
 
-        # Evaluate d_feas and log
-        if self.dfeas_reward is not None:
+        # Evaluate each non-async reward in the composer for logging.
+        ctx = self.reward_composer.build_context(
+            prim_tokens=batch['p_val'],
+            cons_tokens=generated,
+            sketch_original_list=batch['sketch'],
+            gt_tokens=batch['c_val'],
+        )
+        ctx.per_sample_status = per_sample_status
+        for r in self.reward_composer.rewards:
+            if r.is_async or not r.enabled:
+                continue
             try:
-                _, dfeas_val_results = self.dfeas_reward(
-                    batch['p_val'],
-                    generated,
-                    batch['sketch'],
-                )
-                for metric_name, metric_value in dfeas_val_results.items():
-                    self.log(f'validation_gen/{metric_name}', float(metric_value), add_dataloader_idx=False, sync_dist=True, on_epoch=True)
+                out = r.compute(ctx)
             except Exception as e:
                 if self.global_rank == 0:
-                    print(f"[validation_step] DFeas evaluation failed: {e}")
-
-        # Evaluate RelStruct reward components and log
-        if self.relstruct_reward is not None:
-            try:
-                _, relstruct_val_results = self.relstruct_reward(
-                    batch['p_val'],
-                    generated,
-                    batch['sketch'],
-                    per_sample_status=per_sample_status,
+                    print(f"[validation_step] {r.name} evaluation failed: {e}")
+                continue
+            for metric_name, metric_value in out.metrics.items():
+                if not isinstance(metric_value, (int, float)):
+                    continue
+                self.log(
+                    f'validation_gen/{metric_name}',
+                    float(metric_value),
+                    add_dataloader_idx=False,
+                    sync_dist=True,
+                    on_epoch=True,
                 )
-                for metric_name, metric_value in relstruct_val_results.items():
-                    self.log(f'validation_gen/{metric_name}', float(metric_value), add_dataloader_idx=False, sync_dist=True, on_epoch=True)
-            except Exception as e:
-                if self.global_rank == 0:
-                    print(f"[validation_step] RelStruct evaluation failed: {e}")
-
-        # Evaluate direct response-metric reward components and log
-        if self.response_metric_reward is not None:
-            try:
-                _, response_metric_val_results = self.response_metric_reward(
-                    batch['p_val'],
-                    generated,
-                    batch['sketch'],
-                    per_sample_status=per_sample_status,
-                )
-                for metric_name, metric_value in response_metric_val_results.items():
-                    self.log(f'validation_gen/{metric_name}', float(metric_value), add_dataloader_idx=False, sync_dist=True, on_epoch=True)
-            except Exception as e:
-                if self.global_rank == 0:
-                    print(f"[validation_step] ResponseMetric evaluation failed: {e}")
 
         # Save first batch for wandb visualization
         if batch_idx == 0:

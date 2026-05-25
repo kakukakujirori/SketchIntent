@@ -51,7 +51,6 @@ data:
 model:
   optimizer:
     lr: 1e-5
-  gt_reward_coeff: 0.0
   relational_only: true
 
 trainer:

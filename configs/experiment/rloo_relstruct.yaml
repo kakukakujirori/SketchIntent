@@ -1,48 +1,16 @@
 # @package _global_
 
-# RLOO with reward-Hθ + dimensional parsimony.
+# RLOO with reward-Hθ + dimensional parsimony, composed via RewardComposer.
 #
-# Default reward-Hθ lives in ResponseMetricReward:
-#   sqrt(d_relstruct^2 + leak_angle^2)
-# where d_relstruct is the relation-only substitute for canonical d_sub_angle.
-# RelStructReward owns only the GT-excess dimensional hinge by default.
+# Reward stack defined in configs/model/constraint_ar_rloo_relstruct.yaml:
+#   0. SolverReward          — FC / DoF / per-constraint penalties
+#   1. DimParsimonyReward    — GT-excess dim hinge (Converged gate)
+#   2. ResponseMetricReward  — d_H_relstruct_angle = sqrt(d_relstruct² + leak_angle²)
+#   3. GainIntrinsicReward   — intrinsic-size attainability (disabled by default)
 #
-# Staged rollout:
-#   Step 1 (B2 legacy): leak only
-#     conda run -n freecad python src/train.py experiment=rloo_relstruct \
-#       model.relstruct_reward.use_dim_penalty=false \
-#       model.reward.penalty_num_dimensional_constraints=-0.1
-#   Step 1.5 (B2.5 legacy): leak + weak dimensional parsimony
-#     conda run -n freecad python src/train.py experiment=rloo_relstruct \
-#       model.relstruct_reward.coeff_dim_penalty=0.10 \
-#       model.relstruct_reward.dim_penalty_mode=per_primitive
-#   Step 1.6 (B2.6 stabilizer): leak_prime + GT-excess dimensional hinge
-#     conda run -n freecad python src/train.py experiment=rloo_relstruct \
-#       model.relstruct_reward.use_leak=true \
-#       model.response_metric_reward.use_h_angle=false
-#   Step 1.7 (reward-Hθ canary, default):
-#       sqrt(d_relstruct^2 + leak_angle^2) + GT-excess dim hinge
-#     conda run -n freecad python src/train.py experiment=rloo_relstruct
-#     Full scalar Hθ ablation:
-#       model.response_metric_reward.h_angle_reward_metric=d_H_angle
-#   Step 1.8 (d_SVD ablation): add response-SVD bonus
-#     conda run -n freecad python src/train.py experiment=rloo_relstruct \
-#       model.response_metric_reward.use_d_svd=true \
-#       model.response_metric_reward.d_svd_metric=d_SVD_sub_trunc
-#   Step 2 (B3 legacy): add a separate RelStructReward d_relstruct bonus.
-#     Do not enable together with default d_H_relstruct_angle unless this
-#     double-counting is intentional; prefer changing
-#       model.response_metric_reward.relstruct_distance_mode=mixed_subset
-#       model.response_metric_reward.relstruct_reverse_weight=0.25
-#     for pseudo-GT-tolerant relation structure.
-#     conda run -n freecad python src/train.py experiment=rloo_relstruct \
-#       model.response_metric_reward.h_angle_reward_metric=leak_angle \
-#       model.relstruct_reward.use_relstruct=true
-#   Step 3 (B4 full A″ legacy): + gain_intrinsic
-#     conda run -n freecad python src/train.py experiment=rloo_relstruct \
-#       model.response_metric_reward.h_angle_reward_metric=leak_angle \
-#       model.relstruct_reward.use_relstruct=true \
-#       model.relstruct_reward.use_gain=true
+# Override individual rewards by list index, e.g.
+#   model.reward_composer.rewards.2.h_angle_reward_metric=d_H_angle
+#   model.reward_composer.rewards.3.enabled=true
 #
 # Smoke test (CPU, 2 steps):
 #   conda run -n freecad python src/train.py experiment=rloo_relstruct \
@@ -87,7 +55,6 @@ data:
 model:
   optimizer:
     lr: 1e-5
-  gt_reward_coeff: 0.0
 
 trainer:
   check_val_every_n_epoch: null

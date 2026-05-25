@@ -128,13 +128,20 @@ class RewardComposer(torch.nn.Module):
     def flatten_metrics(
         self,
         outputs: dict[str, RewardOutput],
-    ) -> dict[str, float | int | Counter]:
-        """Flatten metrics from all rewards into a single dict.
+    ) -> dict[str, Any]:
+        """Flatten scalar metrics from all rewards into a single dict.
 
         Reward modules already namespace their own keys (``solver_``,
         ``relstruct_``…), so this just unions them without further prefixing.
+        Non-scalar metric values (e.g. ``Counter`` returned by SolverReward
+        for status / dof histograms) are filtered out — the caller is
+        expected to convert those explicitly.
         """
         merged: dict[str, Any] = {}
         for out in outputs.values():
-            merged.update(out.metrics)
+            for k, v in out.metrics.items():
+                if isinstance(v, (int, float)):
+                    merged[k] = v
+                elif isinstance(v, torch.Tensor) and v.ndim == 0:
+                    merged[k] = v
         return merged
