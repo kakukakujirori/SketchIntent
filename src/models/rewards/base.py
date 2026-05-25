@@ -5,9 +5,10 @@ The ``RewardComposer`` (introduced in a later phase) is responsible for
 building the shared ``RewardContext`` once per batch and invoking each
 reward in order.
 
-Solver-backed rewards override ``submit_async`` / ``collect_results`` to
-keep the async CPU pipeline; sync rewards inherit the default no-op
-implementations.
+Async-backed rewards (currently only ``SolverReward``) set ``is_async = True``
+and keep their existing ``submit_async`` / ``collect_results`` methods.  The
+composer dispatches async work via those methods directly to avoid colliding
+with the abstract sync interface.
 """
 from __future__ import annotations
 
@@ -68,8 +69,9 @@ class BaseReward(torch.nn.Module, abc.ABC):
 
     Subclasses set the class-level ``name`` (used for metrics prefixing and
     config lookups) and implement ``compute(ctx)``.  Async-backed rewards
-    (currently only ``SolverReward``) override ``submit_async`` /
-    ``collect_results``; the default sync flow simply invokes ``compute``.
+    (currently only ``SolverReward``) additionally set ``is_async = True`` and
+    keep their own ``submit_async`` / ``collect_results`` methods; the
+    composer dispatches to those directly.
     """
 
     name: str = ""              # subclass must set
@@ -83,14 +85,3 @@ class BaseReward(torch.nn.Module, abc.ABC):
     @abc.abstractmethod
     def compute(self, ctx: RewardContext) -> RewardOutput:
         """Compute scores + metrics for one batch."""
-
-    # ------------------------------------------------------------------
-    # Async integration — overridden by SolverReward.  For sync rewards the
-    # composer is free to call ``compute`` directly, but exposing the 3-phase
-    # API uniformly lets the composer treat every reward identically.
-    # ------------------------------------------------------------------
-    def submit_async(self, ctx: RewardContext) -> Any:
-        return None
-
-    def collect_results(self, handle: Any, ctx: RewardContext) -> RewardOutput:
-        return self.compute(ctx)

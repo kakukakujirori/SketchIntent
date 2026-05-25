@@ -12,6 +12,7 @@ import sketchgraphs.data as datalib
 from src.models.components.solver_feedback import SolverFeedback
 from src.models.components.solver_worker import init_worker as _init_worker, evaluate_single as _evaluate_single_worker
 from src.models.components.token_visualizer import visualize_constraint_sequence
+from src.models.rewards.base import BaseReward, RewardContext, RewardOutput
 from src.sketch_handlers.constants import ConstraintToken, CONSTRAINT_VAL_OFFSET
 from src.sketch_handlers.context import SketchContext
 from src.sketch_handlers.sketch_tokenizer import SketchTokenizer
@@ -36,7 +37,10 @@ class SolverAsyncHandle:
     cons_shape:          tuple        # scores テンソルの形状
 
 
-class SolverReward(torch.nn.Module):
+class SolverReward(BaseReward):
+    name = "solver"
+    is_async = True
+
     def __init__(
         self,
         context: SketchContext,
@@ -52,8 +56,10 @@ class SolverReward(torch.nn.Module):
         penalty_rigid_dimensional: float = -0.5,
         fully_constrained_dof: int = 2,
         distortion_threshold: float | None = None,
+        weight: float = 1.0,
+        enabled: bool = True,
     ):
-        super().__init__()
+        super().__init__(weight=weight, enabled=enabled)
         self.sketch_tokenizer = SketchTokenizer(context)
         self.fully_constrained_dof = fully_constrained_dof
 
@@ -438,3 +444,14 @@ class SolverReward(torch.nn.Module):
         handle = self.submit_async(prim_tokens, cons_tokens, sketch_original_list)
         scores, metrics, _ = self.collect_results(handle)
         return scores.to(cons_tokens.device), metrics
+
+    def compute(self, ctx: RewardContext) -> RewardOutput:
+        """``BaseReward`` sync entry point.
+
+        The ``RewardComposer`` prefers ``submit_async`` / ``collect_results``
+        for async overlap with the GPU forward pass and only falls back to
+        ``compute`` for sync contexts (e.g. validation).
+        """
+        handle = self.submit_async(ctx.prim_tokens, ctx.cons_tokens, ctx.sketch_original_list)
+        scores_cpu, metrics, status = self.collect_results(handle)
+        return RewardOutput(scores=scores_cpu, metrics=metrics, per_sample_status=status)

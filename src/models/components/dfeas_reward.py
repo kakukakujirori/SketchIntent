@@ -42,6 +42,7 @@ from src.metrics.edit_response_distance import (
     edit_response_for_probe,
 )
 from src.models.components.solver_feedback import SolverFeedback
+from src.models.rewards.base import BaseReward, RewardContext, RewardOutput
 from src.models.rewards.utils.geometry import (
     stack_relation_jacobians_at as _stack_relation_jacobians,
 )
@@ -121,7 +122,7 @@ def _compute_d_feas(
     return d_feas, gain_sum / count, leak_sum / count, count, len(rels)
 
 
-class DFeasReward(torch.nn.Module):
+class DFeasReward(BaseReward):
     """Reward module computing -d_feas(pred, gt) per sample.
 
     The reward is a single scalar per sample placed at the first STOP token of
@@ -148,6 +149,8 @@ class DFeasReward(torch.nn.Module):
             meaningful signal even on under-constrained training data.
     """
 
+    name = "dfeas"
+
     def __init__(
         self,
         context: SketchContext,
@@ -156,8 +159,10 @@ class DFeasReward(torch.nn.Module):
         coeff: float = 1.0,
         reward_mode: str = "penalty",
         probe_source: str = "gt_dim",
+        weight: float = 1.0,
+        enabled: bool = True,
     ):
-        super().__init__()
+        super().__init__(weight=weight, enabled=enabled)
         self.context = context
         self.eps = eps
         self.d_feas_cap = d_feas_cap
@@ -282,3 +287,15 @@ class DFeasReward(torch.nn.Module):
             "d_feas_skipped_not_converged": skipped_not_converged,
         }
         return scores, metrics
+
+    def compute(self, ctx: RewardContext) -> RewardOutput:
+        converged_mask: list[bool] | None = None
+        if ctx.per_sample_status is not None:
+            converged_mask = [s in ("FC", "Under") for s in ctx.per_sample_status]
+        scores, metrics = self.forward(
+            ctx.prim_tokens,
+            ctx.cons_tokens,
+            ctx.sketch_original_list,
+            converged_mask=converged_mask,
+        )
+        return RewardOutput(scores=scores, metrics=metrics)

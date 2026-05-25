@@ -23,6 +23,7 @@ from src.metrics.edit_response_distance import (
     pairwise_distance_observable,
 )
 from src.models.components.solver_feedback import SolverFeedback
+from src.models.rewards.base import BaseReward, RewardContext, RewardOutput
 from src.models.rewards.utils.geometry import (
     observable_subspace as _observable_subspace,
     orthonormal_range as _orthonormal_range,
@@ -231,8 +232,10 @@ def compute_d_svd(
     }
 
 
-class ResponseMetricReward(torch.nn.Module):
+class ResponseMetricReward(BaseReward):
     """Direct reward for Hθ components and optional d_SVD metrics."""
+
+    name = "response_metric"
 
     def __init__(
         self,
@@ -250,8 +253,10 @@ class ResponseMetricReward(torch.nn.Module):
         tau_p: float = 0.01,
         use_h_angle: bool = True,
         use_d_svd: bool = False,
+        weight: float = 1.0,
+        enabled: bool = True,
     ):
-        super().__init__()
+        super().__init__(weight=weight, enabled=enabled)
         self.context = context
         self.eps = eps
         self.coeff_h_angle = coeff_h_angle
@@ -531,3 +536,12 @@ class ResponseMetricReward(torch.nn.Module):
             "response_metric_skipped_d_svd": skipped_d_svd,
         }
         return scores, metrics
+
+    def compute(self, ctx: RewardContext) -> RewardOutput:
+        scores, metrics = self.forward(
+            ctx.prim_tokens,
+            ctx.cons_tokens,
+            ctx.sketch_original_list,
+            per_sample_status=ctx.per_sample_status,
+        )
+        return RewardOutput(scores=scores, metrics=metrics)

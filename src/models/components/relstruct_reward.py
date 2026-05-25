@@ -60,6 +60,7 @@ from src.sketch_handlers.context import SketchContext
 from src.sketch_handlers.sketch_tokenizer import SketchTokenizer
 from src.sketch_handlers.sketch_utils import complete_constraint_values
 from src.models.components.solver_feedback import SolverFeedback
+from src.models.rewards.base import BaseReward, RewardContext, RewardOutput
 from src.models.rewards.utils.geometry import (
     orthonormal_range as _orthonormal_range,
     stack_relation_jacobians_at as _stack_relation_jacobians_at,
@@ -191,7 +192,9 @@ def _compute_gain_intrinsic(
 # Reward class
 # ---------------------------------------------------------------------------
 
-class RelStructReward(torch.nn.Module):
+class RelStructReward(BaseReward):
+    name = "relstruct"
+
     """Plan A″ reward: leak_prime + d_relstruct + gain_intrinsic + dim_penalty.
 
     Args:
@@ -262,8 +265,10 @@ class RelStructReward(torch.nn.Module):
         use_relstruct: bool = True,
         use_gain: bool = False,
         use_dim_penalty: bool = False,
+        weight: float = 1.0,
+        enabled: bool = True,
     ):
-        super().__init__()
+        super().__init__(weight=weight, enabled=enabled)
         self.context = context
         self.eps = eps
         self.coeff_leak = coeff_leak
@@ -554,3 +559,12 @@ class RelStructReward(torch.nn.Module):
             "relstruct_skipped_not_converged":skipped_not_converged,
         }
         return scores, metrics
+
+    def compute(self, ctx: RewardContext) -> RewardOutput:
+        scores, metrics = self.forward(
+            ctx.prim_tokens,
+            ctx.cons_tokens,
+            ctx.sketch_original_list,
+            per_sample_status=ctx.per_sample_status,
+        )
+        return RewardOutput(scores=scores, metrics=metrics)
