@@ -404,7 +404,6 @@ def _compute_h_theta_metrics(
     pred_native: NativeResponse,
     gt_sketch: datalib.Sketch,
     gt_native: NativeResponse,
-    gt_rels: list,
     context,
     eps: float,
     relstruct_distance_mode: str = "symmetric",
@@ -429,6 +428,11 @@ def _compute_h_theta_metrics(
     ``symmetric``, ``sqrt(1 + reverse_weight)`` for ``mixed_subset``, and 1 for
     ``pred_subset_gt``.
     """
+    gt_rels = [
+        c for c in gt_sketch.constraints.values()
+        if not _is_dimensional(c)
+    ]
+
     motion_full_angle, motion_full_angle_sq, dim_P_obs, dim_G_obs = (
         _observable_motion_subspace_angle(
             pred_sketch, pred_native, gt_sketch, gt_native, eps
@@ -456,14 +460,13 @@ def _compute_h_theta_metrics(
         relation_structure_dim_gt,
         relstruct_reverse_weight,
     )
-    response_relational_angle = math.sqrt(
-        max(motion_relational_angle ** 2 + leak_relational_angle_sq, 0.0)
-    )
     return HThetaMetrics(
         response_full_angle=math.sqrt(
             max(motion_full_angle_sq + leak_relational_angle_sq, 0.0)
         ),
-        response_relational_angle=response_relational_angle,
+        response_relational_angle=math.sqrt(
+            max(motion_relational_angle ** 2 + leak_relational_angle_sq, 0.0)
+        ),
         motion_full_angle=motion_full_angle,
         motion_relational_angle=motion_relational_angle,
         leak_relational_angle=leak_relational_angle,
@@ -478,35 +481,6 @@ def _compute_h_theta_metrics(
         observable_dim_pred=dim_P_obs,
         observable_dim_gt=dim_G_obs,
     )
-
-
-def compute_response_intent_metrics(
-    pred_sketch: datalib.Sketch,
-    pred_native: NativeResponse,
-    gt_sketch: datalib.Sketch,
-    gt_native: NativeResponse,
-    gt_rels: list,
-    context,
-    eps: float,
-    relstruct_distance_mode: str = "symmetric",
-    relstruct_reverse_weight: float = 0.5,
-) -> dict[str, float | int]:
-    """Return Htheta/relation-intent metrics as a flat dictionary.
-
-    The dictionary contains only the angle-family names accepted by reward
-    configs plus diagnostic dimension fields.
-    """
-    return _compute_h_theta_metrics(
-        pred_sketch,
-        pred_native,
-        gt_sketch,
-        gt_native,
-        gt_rels,
-        context,
-        eps,
-        relstruct_distance_mode,
-        relstruct_reverse_weight,
-    ).to_dict()
 
 
 class ResponseIntentReward(BaseReward):
@@ -600,16 +574,11 @@ class ResponseIntentReward(BaseReward):
         stats: ResponseIntentBatchStats,
     ) -> float:
         """Compute the selected Htheta-family angle and convert it to reward."""
-        gt_rels = [
-            c for c in gt_sketch.constraints.values()
-            if not _is_dimensional(c)
-        ]
         h_metrics = _compute_h_theta_metrics(
             pred_sketch,
             pred_native,
             gt_sketch,
             gt_native,
-            gt_rels,
             self.context,
             self.eps,
             self.relstruct_distance_mode,

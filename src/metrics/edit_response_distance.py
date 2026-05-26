@@ -222,12 +222,9 @@ def compute_native_response(
     Build the response map of primitive parameters to a constraint set's own
     dimensional values. R = -pinv(J_x) J_p.
 
-    Multi-row dimensional residuals would need per-row p-columns; we currently
-    assume each dimensional constraint contributes a single residual row that
-    couples to a single dimensional parameter (which holds for the standard
-    set: Distance, Length, Diameter, Radius, Angle, ...). Multi-row residuals
-    from such constraints are accepted but their extra rows are treated as
-    relational (no p-column), which is an approximation.
+    Each dimensional constraint is required to contribute exactly one residual
+    row coupled to one native dimensional parameter (holds for the standard set:
+    Distance, Length, Diameter, Radius, Angle, ...).
 
     Singular value threshold for pinv(J_x):
         eps_eff = max(eps, rcond * sigma_max(J_x))
@@ -264,13 +261,19 @@ def compute_native_response(
             continue
 
         if _is_dimensional(constraint):
+            if jac.shape[0] != 1:
+                raise AssertionError(
+                    f"Dimensional constraint {cid} "
+                    f"({constraint.constraint_type.name}) produced "
+                    f"{jac.shape[0]} residual rows; native response assumes "
+                    "exactly 1 row per native dimensional parameter. Update "
+                    "compute_native_response to map row→column explicitly "
+                    "before adding multi-row dimensional handlers."
+                )
             col_idx = len(dim_ids)
             dim_ids.append(cid)
-            jac_rows.append(jac[0:1])
+            jac_rows.append(jac)
             Jp_col_for_row.append(col_idx)
-            for i in range(1, jac.shape[0]):
-                jac_rows.append(jac[i:i + 1])
-                Jp_col_for_row.append(-1)
         else:
             for i in range(jac.shape[0]):
                 jac_rows.append(jac[i:i + 1])
