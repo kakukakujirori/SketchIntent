@@ -38,25 +38,24 @@ reward_composer:
       excess_margin: 1
       gate: converged
 
-    # Response-metric reward (canonical Hθ surrogate d_H_relstruct_angle by default).
-    - _target_: src.models.rewards.response_metric_reward.ResponseMetricReward
+    # Response-intent reward.
+    # Preferred names:
+    #   response_relational_angle = sqrt(motion_relational_angle^2 + leak_relational_angle^2)
+    #   response_full_angle       = canonical response angle
+    #   motion_full_angle         = observable response-subspace angle
+    #   motion_relational_angle   = d_relstruct / mode-specific maximum
+    #   leak_relational_angle     = relation-leak angle
+    - _target_: src.models.rewards.response_metric_reward.ResponseIntentReward
       context: ${data.context}
       eps: 1.0e-9
       coeff_h_angle: 2.0
       cap_h_angle: 1.0
-      h_angle_reward_metric: d_H_relstruct_angle  # d_H_relstruct_angle | d_relstruct | leak_angle | d_H_angle | d_sub_angle
+      h_angle_reward_metric: response_relational_angle
       relstruct_distance_mode: symmetric          # symmetric | pred_subset_gt | mixed_subset
       relstruct_reverse_weight: 0.5
-      coeff_d_svd: 1.0
-      cap_d_svd: 1.0
-      d_svd_metric: d_SVD_sub_trunc
-      d_svd_probe_source: gt_dim
-      tau_p: 0.01
-      use_h_angle: true
-      use_d_svd: false
 
     # Intrinsic-size attainability bonus (gain_intrinsic). Disabled by
-    # default; enable after smoke-testing the canonical Hθ surrogate.
+    # default; enable after smoke-testing the relation-intent reward.
     - _target_: src.models.rewards.gain_intrinsic.GainIntrinsicReward
       context: ${data.context}
       coeff: 3.0

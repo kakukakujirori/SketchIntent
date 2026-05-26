@@ -1,8 +1,7 @@
 """Shared geometry helpers for reward computations.
 
-Single home for the SVD / Jacobian / observable-subspace primitives that were
-previously duplicated across RelStructReward, ResponseMetricReward and
-DFeasReward.
+Single home for the SVD / Jacobian / observable-subspace primitives that were duplicated.
+Current consumers include ResponseIntentReward, ProbeResponseSVDReward, and DFeasReward.
 """
 from __future__ import annotations
 

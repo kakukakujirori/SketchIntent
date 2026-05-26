@@ -5,11 +5,11 @@
 # Reward stack defined in configs/model/constraint_ar_rloo_relstruct.yaml:
 #   0. SolverReward          — FC / DoF / per-constraint penalties
 #   1. DimParsimonyReward    — GT-excess dim hinge (Converged gate)
-#   2. ResponseMetricReward  — d_H_relstruct_angle = sqrt(d_relstruct² + leak_angle²)
+#   2. ResponseIntentReward  — response_relational_angle
 #   3. GainIntrinsicReward   — intrinsic-size attainability (disabled by default)
 #
 # Override individual rewards by list index, e.g.
-#   model.reward_composer.rewards.2.h_angle_reward_metric=d_H_angle
+#   model.reward_composer.rewards.2.h_angle_reward_metric=response_full_angle
 #   model.reward_composer.rewards.3.enabled=true
 #
 # Smoke test (CPU, 2 steps):
