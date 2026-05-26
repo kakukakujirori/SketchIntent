@@ -48,7 +48,9 @@ but is a supplement diagnostic, not part of the default intent reward.
 """
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
+import logging
 import math
 import statistics
 
@@ -60,7 +62,6 @@ import sketchgraphs.data as datalib
 from src.metrics.edit_response_distance import (
     NativeResponse,
     _is_dimensional,
-    compute_native_response,
 )
 from src.models.rewards.base import BaseReward, RewardContext, RewardOutput
 from src.models.rewards.utils.geometry import (
@@ -72,10 +73,16 @@ from src.models.rewards.utils.relation_subspace import (
     RELATION_SUBSPACE_DISTANCE_MODES,
     compute_relation_subspace_distance,
 )
-from src.models.rewards.utils.sketch_builder import build_pred_sketch
+from src.models.rewards.utils.sketch_builder import (
+    get_or_build_pred_native,
+    get_or_compute_gt_native,
+)
 from src.sketch_handlers.constants import ConstraintToken
 from src.sketch_handlers.context import SketchContext
 from src.sketch_handlers.sketch_tokenizer import SketchTokenizer
+
+
+logger = logging.getLogger(__name__)
 
 
 H_THETA_REWARD_METRICS = {
@@ -85,6 +92,15 @@ H_THETA_REWARD_METRICS = {
     "motion_relational_angle",
     "leak_relational_angle",
 }
+
+
+# response_*_angle combines two unit-angle components (motion + leak), so the
+# raw Pythagorean sum saturates at sqrt(2).  We divide by sqrt(2) so that the
+# combined response angle also lives on the [0, 1] scale, matching the
+# component metrics and letting the same ``cap`` config apply to every metric
+# in H_THETA_REWARD_METRICS.  Geometrically this is the RMS of the two
+# component angles rather than their Euclidean sum.
+_RESPONSE_ANGLE_NORM = math.sqrt(2.0)
 
 
 def _validate_h_theta_metric_name(name: str) -> str:
@@ -97,11 +113,11 @@ def _validate_h_theta_metric_name(name: str) -> str:
     return name
 
 
-def _mean(xs: list[float | int]) -> float:
+def _mean(xs: Sequence[float | int]) -> float:
     return float(statistics.fmean(xs)) if xs else 0.0
 
 
-def _median(xs: list[float | int]) -> float:
+def _median(xs: Sequence[float | int]) -> float:
     return float(statistics.median(xs)) if xs else 0.0
 
 
@@ -162,6 +178,11 @@ def _first_stop_and_pad(cons_tokens_np: np.ndarray, length: int) -> tuple[np.nda
     sequence-level signal.  Tokens after STOP are ignored by padding them before
     sketch reconstruction; otherwise stale sampled tokens could create invalid
     constraints that the model did not mean to emit.
+
+    Corner case: if no STOP token appears (the model ran to the maximum
+    generation length without emitting STOP), ``first_stop_idx`` falls back
+    to ``length - 1`` and no padding is applied.  The reward is still placed
+    at the last position so the sample receives a usable training signal.
     """
     cons_i = cons_tokens_np.copy()
     stop_pos = np.where(cons_i == int(ConstraintToken.Stop))[0]
@@ -176,16 +197,19 @@ class HThetaMetrics:
     """Hθ family values for one Pred/GT pair.
 
     Fields:
-        response_full_angle: Canonical Htheta scalar,
-            ``sqrt(motion_full_angle^2 + leak_relational_angle^2)``.
-        response_relational_angle: Reward-oriented scalar,
-            ``sqrt(motion_relational_angle^2 + leak_relational_angle^2)``.
-        motion_full_angle: Observable response-subspace mismatch.
+        response_full_angle: Canonical Htheta scalar — the RMS of
+            ``motion_full_angle`` and ``leak_relational_angle``.  Equal to
+            ``sqrt((motion_full_angle^2 + leak_relational_angle^2) / 2)`` so
+            that the combined scalar shares the [0, 1] range of its components.
+        response_relational_angle: Reward-oriented scalar — the RMS of
+            ``motion_relational_angle`` and ``leak_relational_angle``.  Same
+            ``/ sqrt(2)`` normalization as ``response_full_angle``.
+        motion_full_angle: Observable response-subspace mismatch in [0, 1].
         motion_relational_angle: Relation-only null-space mismatch, normalized
-            by the mode-specific raw maximum.  In symmetric mode this is
-            ``sqrt(2)`` only when Pred and GT relation-motion dimensions match.
+            by the mode-specific raw maximum so that orthogonal subspaces map
+            to 1 even for unequal dimensions.
         leak_relational_angle: Fraction of Pred's allowed motion that enters
-            GT relation-forbidden directions.
+            GT relation-forbidden directions, in [0, 1].
     """
 
     response_full_angle: float
@@ -275,57 +299,56 @@ class ResponseIntentBatchStats:
         self.observable_dim_gt_vals.append(metrics.observable_dim_gt)
 
     def to_metrics_dict(self) -> dict[str, float | int]:
-        """Return flat scalar metrics under ``response_intent_*`` keys."""
+        """Return flat scalar metrics under ``intent_*`` keys.
+
+        The composer flattens reward metrics without further prefixing, so
+        each key already encodes its owning reward (``intent_``) and the
+        metric name without redundant repetition.
+        """
         return {
-            "response_intent_reward_mean": _mean(self.reward_vals),
-            "response_intent_reward_median": _median(self.reward_vals),
-            "response_intent_selected_angle_mean": _mean(self.selected_angle_vals),
-            "response_intent_selected_angle_median": _median(
-                self.selected_angle_vals
-            ),
-            "response_intent_response_full_angle_mean": _mean(
+            "intent_reward_mean": _mean(self.reward_vals),
+            "intent_reward_median": _median(self.reward_vals),
+            "intent_selected_angle_mean": _mean(self.selected_angle_vals),
+            "intent_selected_angle_median": _median(self.selected_angle_vals),
+            "intent_response_full_angle_mean": _mean(
                 self.response_full_angle_vals
             ),
-            "response_intent_response_full_angle_median": _median(
+            "intent_response_full_angle_median": _median(
                 self.response_full_angle_vals
             ),
-            "response_intent_response_relational_angle_mean": _mean(
+            "intent_response_relational_angle_mean": _mean(
                 self.response_relational_angle_vals
             ),
-            "response_intent_response_relational_angle_median": _median(
+            "intent_response_relational_angle_median": _median(
                 self.response_relational_angle_vals
             ),
-            "response_intent_motion_full_angle_mean": _mean(
-                self.motion_full_angle_vals
-            ),
-            "response_intent_motion_relational_angle_mean": _mean(
+            "intent_motion_full_angle_mean": _mean(self.motion_full_angle_vals),
+            "intent_motion_relational_angle_mean": _mean(
                 self.motion_relational_angle_vals
             ),
-            "response_intent_leak_relational_angle_mean": _mean(
+            "intent_leak_relational_angle_mean": _mean(
                 self.leak_relational_angle_vals
             ),
-            "response_intent_relation_structure_pred_subset_gt_mean": _mean(
+            "intent_relation_structure_pred_subset_gt_mean": _mean(
                 self.relation_structure_pred_subset_gt_vals
             ),
-            "response_intent_relation_structure_gt_subset_pred_mean": _mean(
+            "intent_relation_structure_gt_subset_pred_mean": _mean(
                 self.relation_structure_gt_subset_pred_vals
             ),
-            "response_intent_relation_structure_dim_pred_mean": _mean(
+            "intent_relation_structure_dim_pred_mean": _mean(
                 self.relation_structure_dim_pred_vals
             ),
-            "response_intent_relation_structure_dim_gt_mean": _mean(
+            "intent_relation_structure_dim_gt_mean": _mean(
                 self.relation_structure_dim_gt_vals
             ),
-            "response_intent_observable_dim_pred_mean": _mean(
+            "intent_observable_dim_pred_mean": _mean(
                 self.observable_dim_pred_vals
             ),
-            "response_intent_observable_dim_gt_mean": _mean(
-                self.observable_dim_gt_vals
-            ),
-            "response_intent_valid_n": len(self.reward_vals),
-            "response_intent_skipped_build": self.skipped_build,
-            "response_intent_skipped_not_fc": self.skipped_not_fc,
-            "response_intent_skipped_angle": self.skipped_angle,
+            "intent_observable_dim_gt_mean": _mean(self.observable_dim_gt_vals),
+            "intent_valid_n": len(self.reward_vals),
+            "intent_skipped_build": self.skipped_build,
+            "intent_skipped_not_fc": self.skipped_not_fc,
+            "intent_skipped_angle": self.skipped_angle,
         }
 
 
@@ -351,6 +374,11 @@ def _observable_motion_subspace_angle(
     """
     U_W_P, dim_P_obs = _observable_subspace(pred_sketch, pred_native, eps)
     U_W_G, dim_G_obs = _observable_subspace(gt_sketch, gt_native, eps)
+
+    # Both sides have no observable motion (fully constrained with no
+    # dimensional drivers) — their zero subspaces trivially agree.
+    if dim_P_obs == 0 and dim_G_obs == 0:
+        return 0.0, 0.0, 0, 0
 
     d_norm = float(max(dim_P_obs, dim_G_obs, 1))
     if dim_P_obs > 0 and dim_G_obs > 0:
@@ -414,19 +442,25 @@ def _compute_h_theta_metrics(
     Two related scalars are produced:
 
     - ``response_full_angle`` is the paper-style diagnostic:
-      observable response-subspace mismatch + relation leak.
+      RMS of observable response-subspace mismatch and relation leak.
     - ``response_relational_angle`` is the reward default:
-      relation-only structure mismatch + relation leak.
+      RMS of relation-only structure mismatch and relation leak.
 
     The second scalar deliberately avoids directly rewarding agreement with one
     annotator's dimensional constraint placement.  Dimensional parsimony and FC
     are handled by sibling rewards in the composer.
 
-    ``compute_relation_subspace_distance`` returns raw ``d_relstruct`` values.
-    For the new angle-family naming, ``motion_relational_angle`` divides that
-    raw value by the mode-specific maximum: pair-specific symmetric maximum for
-    ``symmetric``, ``sqrt(1 + reverse_weight)`` for ``mixed_subset``, and 1 for
-    ``pred_subset_gt``.
+    All five public angles are kept on the [0, 1] scale:
+
+    - ``motion_full_angle`` and ``leak_relational_angle`` come straight from
+      padded principal-angle / RMS-cosine formulas in [0, 1].
+    - ``motion_relational_angle`` divides the raw ``d_relstruct`` returned by
+      ``compute_relation_subspace_distance`` by the mode-specific maximum so
+      that orthogonal subspaces map to 1.  Maxima are: pair-specific symmetric
+      maximum for ``symmetric``, ``sqrt(1 + reverse_weight)`` for
+      ``mixed_subset``, and 1 for ``pred_subset_gt``.
+    - ``response_*_angle`` divides ``sqrt(motion^2 + leak^2)`` by ``sqrt(2)``
+      to put the combined RMS angle on the same [0, 1] scale as the components.
     """
     gt_rels = [
         c for c in gt_sketch.constraints.values()
@@ -463,10 +497,10 @@ def _compute_h_theta_metrics(
     return HThetaMetrics(
         response_full_angle=math.sqrt(
             max(motion_full_angle_sq + leak_relational_angle_sq, 0.0)
-        ),
+        ) / _RESPONSE_ANGLE_NORM,
         response_relational_angle=math.sqrt(
             max(motion_relational_angle ** 2 + leak_relational_angle_sq, 0.0)
-        ),
+        ) / _RESPONSE_ANGLE_NORM,
         motion_full_angle=motion_full_angle,
         motion_relational_angle=motion_relational_angle,
         leak_relational_angle=leak_relational_angle,
@@ -496,7 +530,7 @@ class ResponseIntentReward(BaseReward):
     solvable in the first place.
     """
 
-    name = "response_intent"
+    name = "intent"
 
     def __init__(
         self,
@@ -538,7 +572,7 @@ class ResponseIntentReward(BaseReward):
                 "relstruct_distance_mode must be one of "
                 f"{sorted(RELATION_SUBSPACE_DISTANCE_MODES)}, got "
                 f"{relstruct_distance_mode!r}"
-        )
+            )
         if relstruct_reverse_weight < 0.0:
             raise ValueError(
                 "relstruct_reverse_weight must be non-negative, got "
@@ -551,19 +585,6 @@ class ResponseIntentReward(BaseReward):
     def _bonus(self, value: float, cap: float, coeff: float) -> float:
         """Instance wrapper for the common clipped angle-to-bonus transform."""
         return _linear_bonus(value, cap, coeff)
-
-    def _get_gt_native(
-        self,
-        gt_sketch: datalib.Sketch,
-        cache: dict[int, NativeResponse],
-    ) -> NativeResponse:
-        """Return cached GT native response for repeated references in a batch."""
-        gt_key = id(gt_sketch)
-        if gt_key not in cache:
-            cache[gt_key] = compute_native_response(
-                gt_sketch, self.context, eps=self.eps
-            )
-        return cache[gt_key]
 
     def _score_h_theta(
         self,
@@ -594,15 +615,20 @@ class ResponseIntentReward(BaseReward):
 
     def _score_sample(
         self,
+        ctx: RewardContext,
+        i: int,
         length: int,
         prim_i: np.ndarray,
         cons_i_raw: np.ndarray,
         gt_sketch: datalib.Sketch,
         solver_status: str,
-        gt_native_cache: dict[int, NativeResponse],
         stats: ResponseIntentBatchStats,
     ) -> tuple[int, float] | None:
         """Score one generated sample.
+
+        Pred sketch and GT/Pred native responses are routed through
+        ``ctx.pred_sketches`` and ``ctx.native_cache`` so that other rewards
+        in the same composer (notably ProbeResponseSVDReward) can share them.
 
         Returns:
             ``(first_stop_idx, reward)`` when sketch reconstruction succeeded
@@ -617,28 +643,45 @@ class ResponseIntentReward(BaseReward):
         try:
             # Reconstruct the generated constraints on top of the original
             # primitive geometry, then build the first-order response map R_C.
-            pred_sketch = build_pred_sketch(
-                self.tokenizer, cons_i, prim_i, gt_sketch
+            pred_sketch, pred_native = get_or_build_pred_native(
+                ctx,
+                i,
+                self.tokenizer,
+                cons_i,
+                prim_i,
+                gt_sketch,
+                self.context,
+                self.eps,
             )
-            pred_native = compute_native_response(
-                pred_sketch, self.context, eps=self.eps
+        except Exception as exc:
+            logger.debug(
+                "intent reward: skipped sample %d (build failure: %s)",
+                i,
+                exc,
             )
-        except Exception:
             stats.skipped_build += 1
             return None
 
         try:
+            gt_native = get_or_compute_gt_native(
+                ctx, gt_sketch, self.context, self.eps
+            )
             sample_reward = self._score_h_theta(
                 pred_sketch,
                 pred_native,
                 gt_sketch,
-                self._get_gt_native(gt_sketch, gt_native_cache),
+                gt_native,
                 stats,
             )
-        except Exception:
+        except Exception as exc:
             # Reward computation runs inside the training loop.  A malformed
             # rare case should be visible in metrics but should not abort
             # the whole rollout batch.
+            logger.debug(
+                "intent reward: skipped sample %d (angle computation failure: %s)",
+                i,
+                exc,
+            )
             stats.skipped_angle += 1
             return None
 
@@ -646,35 +689,30 @@ class ResponseIntentReward(BaseReward):
         return first_stop_idx, sample_reward
 
     @torch.no_grad()
-    def forward(
-        self,
-        prim_tokens: torch.Tensor,
-        cons_tokens: torch.Tensor,
-        sketch_original_list: list[datalib.Sketch],
-        per_sample_solver_status: list[str] | None = None,
-    ) -> tuple[torch.Tensor, dict[str, float | int]]:
+    def compute(self, ctx: RewardContext) -> RewardOutput:
         """Compute sequence-level scores and scalar logging metrics for a batch."""
-        B, L = cons_tokens.shape
-        assert len(sketch_original_list) == B
+        B, L = ctx.cons_tokens.shape
+        assert len(ctx.sketch_original_list) == B
         scores = torch.zeros((B, L), dtype=torch.float32)
 
-        prim_np = prim_tokens.detach().cpu().numpy()
-        cons_np = cons_tokens.detach().cpu().numpy()
+        prim_np = ctx.prim_tokens.detach().cpu().numpy()
+        cons_np = ctx.cons_tokens.detach().cpu().numpy()
 
-        if per_sample_solver_status is None:
-            per_sample_solver_status = ["FC"] * B
+        statuses = ctx.per_sample_solver_status
+        if statuses is None:
+            statuses = ["FC"] * B
 
         stats = ResponseIntentBatchStats()
-        gt_native_cache: dict[int, NativeResponse] = {}
 
         for i in range(B):
             result = self._score_sample(
+                ctx,
+                i,
                 L,
                 prim_np[i],
                 cons_np[i],
-                sketch_original_list[i],
-                per_sample_solver_status[i],
-                gt_native_cache,
+                ctx.sketch_original_list[i],
+                statuses[i],
                 stats,
             )
             if result is None:
@@ -682,13 +720,4 @@ class ResponseIntentReward(BaseReward):
             first_stop_idx, sample_reward = result
             scores[i, first_stop_idx] += sample_reward
 
-        return scores, stats.to_metrics_dict()
-
-    def compute(self, ctx: RewardContext) -> RewardOutput:
-        scores, metrics = self.forward(
-            ctx.prim_tokens,
-            ctx.cons_tokens,
-            ctx.sketch_original_list,
-            per_sample_solver_status=ctx.per_sample_solver_status,
-        )
-        return RewardOutput(scores=scores, metrics=metrics)
+        return RewardOutput(scores=scores, metrics=stats.to_metrics_dict())

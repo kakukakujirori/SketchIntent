@@ -16,7 +16,9 @@ reward.
 """
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
+import logging
 import math
 import statistics
 
@@ -28,7 +30,6 @@ import sketchgraphs.data as datalib
 from src.metrics.edit_response_distance import (
     NativeResponse,
     _is_dimensional,
-    compute_native_response,
     constraint_jacobian,
     pairwise_distance_observable,
 )
@@ -36,10 +37,16 @@ from src.models.rewards.base import BaseReward, RewardContext, RewardOutput
 from src.models.rewards.utils.probes import (
     build_intrinsic_probes as _build_intrinsic_probes,
 )
-from src.models.rewards.utils.sketch_builder import build_pred_sketch
+from src.models.rewards.utils.sketch_builder import (
+    get_or_build_pred_native,
+    get_or_compute_gt_native,
+)
 from src.sketch_handlers.constants import ConstraintToken
 from src.sketch_handlers.context import SketchContext
 from src.sketch_handlers.sketch_tokenizer import SketchTokenizer
+
+
+logger = logging.getLogger(__name__)
 
 
 PROBE_RESPONSE_SVD_METRICS = {
@@ -57,11 +64,11 @@ def _validate_probe_response_svd_metric_name(name: str) -> str:
     return name
 
 
-def _mean(xs: list[float | int]) -> float:
+def _mean(xs: Sequence[float | int]) -> float:
     return float(statistics.fmean(xs)) if xs else 0.0
 
 
-def _median(xs: list[float | int]) -> float:
+def _median(xs: Sequence[float | int]) -> float:
     return float(statistics.median(xs)) if xs else 0.0
 
 
@@ -74,7 +81,19 @@ def _linear_bonus(value: float, cap: float, coeff: float) -> float:
 
 
 def _first_stop_and_pad(cons_tokens_np: np.ndarray, length: int) -> tuple[np.ndarray, int]:
-    """Return a constraint sequence truncated after the first STOP token."""
+    """Return a constraint sequence truncated after the first STOP token.
+
+    Tokens beyond the first STOP are replaced with Pad so they cannot leak
+    spurious constraints into sketch reconstruction.  If the model runs to
+    the max generation length without emitting a STOP, ``first_stop_idx``
+    falls back to ``length - 1`` and no padding is applied — the reward is
+    still placed at the last position.
+
+    A duplicate copy of this helper lives in
+    ``src/models/rewards/response_metric_reward.py``; the two should stay in
+    sync.  Kept duplicated rather than moved to ``utils/`` because no other
+    file currently needs it.
+    """
     cons_i = cons_tokens_np.copy()
     stop_pos = np.where(cons_i == int(ConstraintToken.Stop))[0]
     first_stop_idx = int(stop_pos[0]) if len(stop_pos) > 0 else (length - 1)
@@ -334,23 +353,12 @@ class ProbeResponseSVDReward(BaseReward):
             return status in ("FC", "Under")
         return status == "FC"
 
-    def _get_gt_native(
-        self,
-        gt_sketch: datalib.Sketch,
-        cache: dict[int, NativeResponse],
-    ) -> NativeResponse:
-        gt_key = id(gt_sketch)
-        if gt_key not in cache:
-            cache[gt_key] = compute_native_response(
-                gt_sketch, self.context, eps=self.eps
-            )
-        return cache[gt_key]
-
     def _get_gt_probes(
         self,
         gt_sketch: datalib.Sketch,
         cache: dict[int, list],
     ) -> list:
+        """Cached GT-probe list keyed by ``id(gt_sketch)`` (replicated in RLOO)."""
         gt_key = id(gt_sketch)
         if gt_key in cache:
             return cache[gt_key]
@@ -366,12 +374,13 @@ class ProbeResponseSVDReward(BaseReward):
 
     def _score_sample(
         self,
+        ctx: RewardContext,
+        i: int,
         length: int,
         prim_i: np.ndarray,
         cons_i_raw: np.ndarray,
         gt_sketch: datalib.Sketch,
         solver_status: str | None,
-        gt_native_cache: dict[int, NativeResponse],
         gt_probe_cache: dict[int, list],
         stats: ProbeResponseSVDBatchStats,
     ) -> tuple[int, float] | None:
@@ -381,27 +390,44 @@ class ProbeResponseSVDReward(BaseReward):
 
         cons_i, first_stop_idx = _first_stop_and_pad(cons_i_raw, length)
         try:
-            pred_sketch = build_pred_sketch(
-                self.tokenizer, cons_i, prim_i, gt_sketch
+            pred_sketch, pred_native = get_or_build_pred_native(
+                ctx,
+                i,
+                self.tokenizer,
+                cons_i,
+                prim_i,
+                gt_sketch,
+                self.context,
+                self.eps,
             )
-            pred_native = compute_native_response(
-                pred_sketch, self.context, eps=self.eps
+        except Exception as exc:
+            logger.debug(
+                "probe_response_svd: skipped sample %d (build failure: %s)",
+                i,
+                exc,
             )
-        except Exception:
             stats.skipped_build += 1
             return None
 
         try:
+            gt_native = get_or_compute_gt_native(
+                ctx, gt_sketch, self.context, self.eps
+            )
             probe_response_svd = _compute_probe_response_svd_metrics(
                 pred_sketch,
                 pred_native,
                 gt_sketch,
-                self._get_gt_native(gt_sketch, gt_native_cache),
+                gt_native,
                 self._get_gt_probes(gt_sketch, gt_probe_cache),
                 self.context,
                 self.tau_p,
             )
-        except Exception:
+        except Exception as exc:
+            logger.debug(
+                "probe_response_svd: skipped sample %d (metric failure: %s)",
+                i,
+                exc,
+            )
             stats.skipped_metric += 1
             return None
 
@@ -417,30 +443,29 @@ class ProbeResponseSVDReward(BaseReward):
 
     @torch.no_grad()
     def compute(self, ctx: RewardContext) -> RewardOutput:
-        prim_tokens = ctx.prim_tokens
         cons_tokens = ctx.cons_tokens
         sketches = ctx.sketch_original_list
         statuses = ctx.per_sample_solver_status
         B, L = cons_tokens.shape
         scores = torch.zeros((B, L), dtype=torch.float32)
 
-        prim_np = prim_tokens.detach().cpu().numpy()
+        prim_np = ctx.prim_tokens.detach().cpu().numpy()
         cons_np = cons_tokens.detach().cpu().numpy()
         if statuses is None:
             statuses = ["FC"] * B
 
         stats = ProbeResponseSVDBatchStats()
-        gt_native_cache: dict[int, NativeResponse] = {}
         gt_probe_cache: dict[int, list] = {}
 
         for i in range(B):
             result = self._score_sample(
+                ctx,
+                i,
                 L,
                 prim_np[i],
                 cons_np[i],
                 sketches[i],
                 statuses[i],
-                gt_native_cache,
                 gt_probe_cache,
                 stats,
             )

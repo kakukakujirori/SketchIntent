@@ -5,7 +5,7 @@
 # Reward stack defined in configs/model/constraint_ar_rloo_relstruct.yaml:
 #   0. SolverReward          — FC / DoF / per-constraint penalties
 #   1. DimParsimonyReward    — GT-excess dim hinge (Converged gate)
-#   2. ResponseIntentReward  — response_relational_angle
+#   2. ResponseIntentReward  — response_relational_angle (logged under intent_*)
 #   3. GainIntrinsicReward   — intrinsic-size attainability (disabled by default)
 #
 # Override individual rewards by list index, e.g.

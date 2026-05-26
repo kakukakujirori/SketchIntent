@@ -1,11 +1,17 @@
-"""Shared helper for building a predicted sketch from token tensors."""
+"""Shared helpers for building a predicted sketch (and its native response) from token tensors."""
 from __future__ import annotations
 
 import numpy as np
 
 import sketchgraphs.data as datalib
 
+from src.metrics.edit_response_distance import (
+    NativeResponse,
+    compute_native_response,
+)
 from src.models.components.solver_feedback import SolverFeedback
+from src.models.rewards.base import RewardContext
+from src.sketch_handlers.context import SketchContext
 from src.sketch_handlers.sketch_tokenizer import SketchTokenizer
 from src.sketch_handlers.sketch_utils import complete_constraint_values
 
@@ -36,3 +42,65 @@ def build_pred_sketch(
         pred_sketch, skip_invalid_constraints=True
     )
     return pred_sketch
+
+
+def get_or_build_pred_native(
+    ctx: RewardContext,
+    i: int,
+    tokenizer: SketchTokenizer,
+    cons_tokens_np: np.ndarray,
+    prim_tokens_np: np.ndarray,
+    gt_sketch: datalib.Sketch,
+    sketch_context: SketchContext,
+    eps: float,
+) -> tuple[datalib.Sketch, NativeResponse]:
+    """Return the cached ``(pred_sketch, pred_native)`` pair for sample ``i``.
+
+    Rewards that need the first-order response map (ResponseIntentReward,
+    ProbeResponseSVDReward, ...) share the pred sketch and its native
+    response via ``ctx.pred_sketches`` and ``ctx.native_cache``.  The cache
+    key for pred lives under ``("pred", i)`` because batch indices are stable
+    within one composer pass.  Callers must use a consistent ``eps`` across
+    rewards composed in the same context; mixing different eps values would
+    silently return the cached NativeResponse built under the first caller's
+    eps.
+    """
+    if ctx.pred_sketches is None:
+        ctx.pred_sketches = [None] * int(ctx.cons_tokens.shape[0])
+
+    pred_sketch = ctx.pred_sketches[i]
+    if pred_sketch is None:
+        pred_sketch = build_pred_sketch(
+            tokenizer, cons_tokens_np, prim_tokens_np, gt_sketch
+        )
+        ctx.pred_sketches[i] = pred_sketch
+
+    pred_key = ("pred", i)
+    pred_native = ctx.native_cache.get(pred_key)
+    if pred_native is None:
+        pred_native = compute_native_response(
+            pred_sketch, sketch_context, eps=eps
+        )
+        ctx.native_cache[pred_key] = pred_native
+    return pred_sketch, pred_native
+
+
+def get_or_compute_gt_native(
+    ctx: RewardContext,
+    gt_sketch: datalib.Sketch,
+    sketch_context: SketchContext,
+    eps: float,
+) -> NativeResponse:
+    """Return the cached GT ``NativeResponse`` keyed by ``id(gt_sketch)``.
+
+    RLOO duplicates the same GT sketch instance across the ``K`` rollouts of
+    each prompt, so ``id()`` is a stable in-batch identity that lets every
+    rollout in the group share the GT-side native-response computation.
+    The same eps caveat as :func:`get_or_build_pred_native` applies.
+    """
+    gt_key = ("gt", id(gt_sketch))
+    cached = ctx.native_cache.get(gt_key)
+    if cached is None:
+        cached = compute_native_response(gt_sketch, sketch_context, eps=eps)
+        ctx.native_cache[gt_key] = cached
+    return cached

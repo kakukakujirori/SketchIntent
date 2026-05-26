@@ -38,13 +38,15 @@ reward_composer:
       excess_margin: 1
       gate: converged
 
-    # Response-intent reward.
-    # Preferred names:
-    #   response_relational_angle = sqrt(motion_relational_angle^2 + leak_relational_angle^2)
-    #   response_full_angle       = canonical response angle
-    #   motion_full_angle         = observable response-subspace angle
-    #   motion_relational_angle   = d_relstruct / mode-specific maximum
-    #   leak_relational_angle     = relation-leak angle
+    # Response-intent reward (logs under `intent_*` keys).
+    # All five public metrics live on the [0, 1] scale so the same cap applies
+    # uniformly:
+    #   motion_full_angle         = observable response-subspace angle in [0,1]
+    #   motion_relational_angle   = d_relstruct / mode-specific maximum in [0,1]
+    #   leak_relational_angle     = relation-leak angle in [0,1]
+    #   response_full_angle       = sqrt((motion_full_angle^2 + leak^2) / 2)
+    #   response_relational_angle = sqrt((motion_relational_angle^2 + leak^2) / 2)
+    #   (response_* metrics are normalized by sqrt(2) so they also fit [0,1].)
     - _target_: src.models.rewards.response_metric_reward.ResponseIntentReward
       context: ${data.context}
       eps: 1.0e-9
