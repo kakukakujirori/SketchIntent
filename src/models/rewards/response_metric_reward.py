@@ -30,17 +30,17 @@ The metric names are:
 ``response_full_angle``       -> canonical Htheta response angle
 ``response_relational_angle`` -> reward surrogate that combines relation-only
                                  motion structure and relation leak
-``motion_full_angle``         -> observable response-subspace angle
-``motion_relational_angle``   -> mode-normalized relation-structure angle
+``motion_full_angle``         -> full motion-subspace angle (uses R_C)
+``motion_relational_angle``   -> mode-normalized relation-only motion angle
 ``leak_relational_angle``     -> relation-leak angle
 
 The most important distinction is evaluation metric vs training reward.
 ``response_full_angle`` is the canonical Htheta scalar from the v4 analysis:
-observable motion-subspace mismatch plus angular relation leak.  The default
-training signal, ``response_relational_angle``, replaces the dimensional
-motion-subspace term with relation-only structure angle.  That avoids
-rewarding a model for matching one annotator's particular dimensional-constraint
-placement while still encouraging relational design intent.
+full motion-subspace mismatch plus angular relation leak.  The default training
+signal, ``response_relational_angle``, replaces the dimensional-driver-aware
+motion term with relation-only motion structure.  That avoids rewarding a model
+for matching one annotator's particular dimensional-constraint placement while
+still encouraging relational design intent.
 
 The probe-conditioned response-SVD family lives in
 ``probe_response_svd_reward.py``.  It shares the same first-order response map
@@ -61,17 +61,15 @@ import sketchgraphs.data as datalib
 
 from src.metrics.edit_response_distance import (
     NativeResponse,
-    _is_dimensional,
+    _is_relational,
 )
 from src.models.rewards.base import BaseReward, RewardContext, RewardOutput
 from src.models.rewards.utils.geometry import (
-    observable_subspace as _observable_subspace,
+    motion_full_subspace as _motion_full_subspace,
+    motion_relational_subspace as _motion_relational_subspace,
     orthonormal_range as _orthonormal_range,
+    principal_cos2_sum as _principal_cos2_sum,
     stack_relation_jacobians_at as _stack_relation_jacobians_at,
-)
-from src.models.rewards.utils.relation_subspace import (
-    RELATION_SUBSPACE_DISTANCE_MODES,
-    compute_relation_subspace_distance,
 )
 from src.models.rewards.utils.sketch_builder import (
     get_or_build_pred_native,
@@ -91,6 +89,13 @@ H_THETA_REWARD_METRICS = {
     "motion_full_angle",
     "motion_relational_angle",
     "leak_relational_angle",
+}
+
+
+MOTION_RELATIONAL_ANGLE_MODES = {
+    "symmetric",
+    "pred_subset_gt",
+    "mixed_subset",
 }
 
 
@@ -129,18 +134,18 @@ def _linear_bonus(value: float, cap: float, coeff: float) -> float:
     return coeff * (1.0 - clipped / cap)
 
 
-def _relation_motion_angle_scale(
+def _motion_relational_angle_scale(
     mode: str,
     dim_pred: int,
     dim_gt: int,
     reverse_weight: float,
 ) -> float:
-    """Return the mode-specific maximum of the raw relation-structure metric.
+    """Return the mode-specific maximum of the raw motion-relational angle.
 
-    ``compute_relation_subspace_distance`` returns a raw comparison score whose
-    ceiling depends on the comparison mode.  ``motion_relational_angle`` divides
-    by that ceiling so the relation-motion component is on a [0, 1] angle-like
-    scale before it is combined with leak.
+    ``_motion_relational_angle`` returns a raw comparison score whose ceiling
+    depends on the comparison mode.  ``motion_relational_angle`` (the public,
+    normalized metric) divides by that ceiling so the relation-only motion
+    component is on a [0, 1] angle-like scale before it is combined with leak.
 
     For ``symmetric`` this is the maximum for the current dimension pair.  It
     equals ``sqrt(2)`` when ``dim_pred == dim_gt`` but is smaller for unequal
@@ -148,8 +153,8 @@ def _relation_motion_angle_scale(
     """
     if reverse_weight < 0.0:
         raise ValueError(
-            "reverse_weight must be non-negative for relation-motion scaling, "
-            f"got {reverse_weight}"
+            "reverse_weight must be non-negative for motion-relational "
+            f"scaling, got {reverse_weight}"
         )
     if mode == "symmetric":
         d_norm = float(max(dim_pred, dim_gt, 1))
@@ -159,15 +164,15 @@ def _relation_motion_angle_scale(
     return 1.0
 
 
-def _normalized_relation_motion_angle(
+def _normalized_motion_relational_angle(
     raw_value: float,
     mode: str,
     dim_pred: int,
     dim_gt: int,
     reverse_weight: float,
 ) -> float:
-    """Normalize raw ``d_relstruct`` into the public motion-relational angle."""
-    scale = _relation_motion_angle_scale(mode, dim_pred, dim_gt, reverse_weight)
+    """Normalize the raw motion-relational angle into the public [0, 1] form."""
+    scale = _motion_relational_angle_scale(mode, dim_pred, dim_gt, reverse_weight)
     return min(max(raw_value / scale, 0.0), 1.0)
 
 
@@ -204,12 +209,20 @@ class HThetaMetrics:
         response_relational_angle: Reward-oriented scalar — the RMS of
             ``motion_relational_angle`` and ``leak_relational_angle``.  Same
             ``/ sqrt(2)`` normalization as ``response_full_angle``.
-        motion_full_angle: Observable response-subspace mismatch in [0, 1].
-        motion_relational_angle: Relation-only null-space mismatch, normalized
-            by the mode-specific raw maximum so that orthogonal subspaces map
-            to 1 even for unequal dimensions.
+        motion_full_angle: Full motion-subspace mismatch (uses ``range(J_phi
+            R_C)``) in [0, 1].
+        motion_relational_angle: Relation-only motion-subspace mismatch,
+            normalized by the mode-specific raw maximum so that orthogonal
+            subspaces map to 1 even for unequal dimensions.
         leak_relational_angle: Fraction of Pred's allowed motion that enters
             GT relation-forbidden directions, in [0, 1].
+        motion_relational_pred_subset_gt_angle / motion_relational_gt_subset_pred_angle:
+            Asymmetric inclusion angles of the relation-only motion subspaces,
+            useful for diagnosing which side over- or under-constrains.
+        motion_relational_dim_pred / motion_relational_dim_gt: Dimensions of
+            the Pred and GT relation-only motion subspaces in observable space.
+        motion_full_dim_pred / motion_full_dim_gt: Dimensions of the Pred and
+            GT full motion subspaces ``range(J_phi R_C)`` in observable space.
     """
 
     response_full_angle: float
@@ -217,12 +230,12 @@ class HThetaMetrics:
     motion_full_angle: float
     motion_relational_angle: float
     leak_relational_angle: float
-    relation_structure_pred_subset_gt: float
-    relation_structure_gt_subset_pred: float
-    relation_structure_dim_pred: int
-    relation_structure_dim_gt: int
-    observable_dim_pred: int
-    observable_dim_gt: int
+    motion_relational_pred_subset_gt_angle: float
+    motion_relational_gt_subset_pred_angle: float
+    motion_relational_dim_pred: int
+    motion_relational_dim_gt: int
+    motion_full_dim_pred: int
+    motion_full_dim_gt: int
 
     def value(self, metric_name: str) -> float:
         """Return a metric selected by its config-facing name."""
@@ -237,16 +250,16 @@ class HThetaMetrics:
             "motion_full_angle": self.motion_full_angle,
             "motion_relational_angle": self.motion_relational_angle,
             "leak_relational_angle": self.leak_relational_angle,
-            "relation_structure_pred_subset_gt": (
-                self.relation_structure_pred_subset_gt
+            "motion_relational_pred_subset_gt_angle": (
+                self.motion_relational_pred_subset_gt_angle
             ),
-            "relation_structure_gt_subset_pred": (
-                self.relation_structure_gt_subset_pred
+            "motion_relational_gt_subset_pred_angle": (
+                self.motion_relational_gt_subset_pred_angle
             ),
-            "relation_structure_dim_pred": self.relation_structure_dim_pred,
-            "relation_structure_dim_gt": self.relation_structure_dim_gt,
-            "observable_dim_pred": self.observable_dim_pred,
-            "observable_dim_gt": self.observable_dim_gt,
+            "motion_relational_dim_pred": self.motion_relational_dim_pred,
+            "motion_relational_dim_gt": self.motion_relational_dim_gt,
+            "motion_full_dim_pred": self.motion_full_dim_pred,
+            "motion_full_dim_gt": self.motion_full_dim_gt,
         }
 
 
@@ -267,12 +280,12 @@ class ResponseIntentBatchStats:
     motion_full_angle_vals: list[float] = field(default_factory=list)
     motion_relational_angle_vals: list[float] = field(default_factory=list)
     leak_relational_angle_vals: list[float] = field(default_factory=list)
-    relation_structure_pred_subset_gt_vals: list[float] = field(default_factory=list)
-    relation_structure_gt_subset_pred_vals: list[float] = field(default_factory=list)
-    relation_structure_dim_pred_vals: list[int] = field(default_factory=list)
-    relation_structure_dim_gt_vals: list[int] = field(default_factory=list)
-    observable_dim_pred_vals: list[int] = field(default_factory=list)
-    observable_dim_gt_vals: list[int] = field(default_factory=list)
+    motion_relational_pred_subset_gt_angle_vals: list[float] = field(default_factory=list)
+    motion_relational_gt_subset_pred_angle_vals: list[float] = field(default_factory=list)
+    motion_relational_dim_pred_vals: list[int] = field(default_factory=list)
+    motion_relational_dim_gt_vals: list[int] = field(default_factory=list)
+    motion_full_dim_pred_vals: list[int] = field(default_factory=list)
+    motion_full_dim_gt_vals: list[int] = field(default_factory=list)
     skipped_build: int = 0
     skipped_not_fc: int = 0
     skipped_angle: int = 0
@@ -285,18 +298,18 @@ class ResponseIntentBatchStats:
         self.motion_relational_angle_vals.append(metrics.motion_relational_angle)
         self.leak_relational_angle_vals.append(metrics.leak_relational_angle)
         self.selected_angle_vals.append(selected_angle)
-        self.relation_structure_pred_subset_gt_vals.append(
-            metrics.relation_structure_pred_subset_gt
+        self.motion_relational_pred_subset_gt_angle_vals.append(
+            metrics.motion_relational_pred_subset_gt_angle
         )
-        self.relation_structure_gt_subset_pred_vals.append(
-            metrics.relation_structure_gt_subset_pred
+        self.motion_relational_gt_subset_pred_angle_vals.append(
+            metrics.motion_relational_gt_subset_pred_angle
         )
-        self.relation_structure_dim_pred_vals.append(
-            metrics.relation_structure_dim_pred
+        self.motion_relational_dim_pred_vals.append(
+            metrics.motion_relational_dim_pred
         )
-        self.relation_structure_dim_gt_vals.append(metrics.relation_structure_dim_gt)
-        self.observable_dim_pred_vals.append(metrics.observable_dim_pred)
-        self.observable_dim_gt_vals.append(metrics.observable_dim_gt)
+        self.motion_relational_dim_gt_vals.append(metrics.motion_relational_dim_gt)
+        self.motion_full_dim_pred_vals.append(metrics.motion_full_dim_pred)
+        self.motion_full_dim_gt_vals.append(metrics.motion_full_dim_gt)
 
     def to_metrics_dict(self) -> dict[str, float | int]:
         """Return flat scalar metrics under ``intent_*`` keys.
@@ -329,22 +342,22 @@ class ResponseIntentBatchStats:
             "intent_leak_relational_angle_mean": _mean(
                 self.leak_relational_angle_vals
             ),
-            "intent_relation_structure_pred_subset_gt_mean": _mean(
-                self.relation_structure_pred_subset_gt_vals
+            "intent_motion_relational_pred_subset_gt_angle_mean": _mean(
+                self.motion_relational_pred_subset_gt_angle_vals
             ),
-            "intent_relation_structure_gt_subset_pred_mean": _mean(
-                self.relation_structure_gt_subset_pred_vals
+            "intent_motion_relational_gt_subset_pred_angle_mean": _mean(
+                self.motion_relational_gt_subset_pred_angle_vals
             ),
-            "intent_relation_structure_dim_pred_mean": _mean(
-                self.relation_structure_dim_pred_vals
+            "intent_motion_relational_dim_pred_mean": _mean(
+                self.motion_relational_dim_pred_vals
             ),
-            "intent_relation_structure_dim_gt_mean": _mean(
-                self.relation_structure_dim_gt_vals
+            "intent_motion_relational_dim_gt_mean": _mean(
+                self.motion_relational_dim_gt_vals
             ),
-            "intent_observable_dim_pred_mean": _mean(
-                self.observable_dim_pred_vals
+            "intent_motion_full_dim_pred_mean": _mean(
+                self.motion_full_dim_pred_vals
             ),
-            "intent_observable_dim_gt_mean": _mean(self.observable_dim_gt_vals),
+            "intent_motion_full_dim_gt_mean": _mean(self.motion_full_dim_gt_vals),
             "intent_valid_n": len(self.reward_vals),
             "intent_skipped_build": self.skipped_build,
             "intent_skipped_not_fc": self.skipped_not_fc,
@@ -352,14 +365,44 @@ class ResponseIntentBatchStats:
         }
 
 
-def _observable_motion_subspace_angle(
+@dataclass(frozen=True)
+class SubspaceAngleResult:
+    """Padded principal-angle comparison between two orthonormal subspaces.
+
+    Used as the uniform return type for ``_motion_full_angle``,
+    ``_motion_relational_angle``, and ``_leak_relational_angle`` so all three
+    helpers share one calling convention.
+
+    Fields:
+        angle: Primary angle scalar in [0, 1].  Squaring at the caller is
+            trivial, so the redundant ``angle_sq`` field is intentionally not
+            stored; use ``result.angle ** 2`` when you need the squared form.
+        dim_pred / dim_gt: Subspace dimensions involved in the comparison.
+            For motion-vs-motion helpers both are motion-subspace dims; for
+            relation-leak ``dim_pred`` is the Pred motion-subspace dim and
+            ``dim_gt`` is the rank of the GT relation row space.
+        pred_subset_gt_angle / gt_subset_pred_angle: Asymmetric subset-angle
+            decomposition.  Populated only by ``_motion_relational_angle``
+            (the only helper whose mode menu exposes asymmetric variants);
+            ``None`` for the symmetric / single-side helpers, where the
+            decomposition is not a meaningful diagnostic.
+    """
+
+    angle: float
+    dim_pred: int
+    dim_gt: int
+    pred_subset_gt_angle: float | None = None
+    gt_subset_pred_angle: float | None = None
+
+
+def _motion_full_angle(
     pred_sketch: datalib.Sketch,
-    pred_native: NativeResponse,
     gt_sketch: datalib.Sketch,
+    pred_native: NativeResponse,
     gt_native: NativeResponse,
     eps: float,
-) -> tuple[float, float, int, int]:
-    """Padded principal-angle metric between observable response subspaces.
+) -> SubspaceAngleResult:
+    """Padded principal-angle metric between full motion subspaces.
 
     ``R_C`` maps native dimensional-parameter changes to primitive motion.  Its
     raw primitive coordinates mix positions, radii, angles, etc., so canonical
@@ -368,36 +411,116 @@ def _observable_motion_subspace_angle(
 
         W_C = range(J_phi R_C)
 
+    This is the "full" motion subspace — it includes the contribution of every
+    column of ``R_C`` (dimensional and relational null-space alike).  The
+    relation-only counterpart (``_motion_relational_angle``) uses ``null(J_R)``
+    instead.
+
     Missing dimensions are treated as 90-degree principal angles by normalizing
     with ``max(dim_P, dim_G)``.  This keeps dimension-dropout failures visible
     while putting equal-dimension angular mismatch on a [0, 1] scale.
     """
-    U_W_P, dim_P_obs = _observable_subspace(pred_sketch, pred_native, eps)
-    U_W_G, dim_G_obs = _observable_subspace(gt_sketch, gt_native, eps)
+    U_W_P, dim_P_full = _motion_full_subspace(pred_sketch, pred_native, eps)
+    U_W_G, dim_G_full = _motion_full_subspace(gt_sketch, gt_native, eps)
 
     # Both sides have no observable motion (fully constrained with no
     # dimensional drivers) — their zero subspaces trivially agree.
-    if dim_P_obs == 0 and dim_G_obs == 0:
-        return 0.0, 0.0, 0, 0
+    if dim_P_full == 0 and dim_G_full == 0:
+        return SubspaceAngleResult(angle=0.0, dim_pred=0, dim_gt=0)
 
-    d_norm = float(max(dim_P_obs, dim_G_obs, 1))
-    if dim_P_obs > 0 and dim_G_obs > 0:
-        align = U_W_G.T @ U_W_P
-        sigmas = torch.linalg.svdvals(align).clamp(0.0, 1.0)
-        cos2_sum = float((sigmas ** 2).sum())
+    cos2_sum = _principal_cos2_sum(U_W_P, U_W_G)
+    d_norm = float(max(dim_P_full, dim_G_full, 1))
+    angle_sq = min(max((d_norm - cos2_sum) / d_norm, 0.0), 1.0)
+    return SubspaceAngleResult(
+        angle=math.sqrt(angle_sq),
+        dim_pred=int(dim_P_full),
+        dim_gt=int(dim_G_full),
+    )
+
+
+def _motion_relational_angle(
+    pred_sketch: datalib.Sketch,
+    gt_sketch: datalib.Sketch,
+    pred_native: NativeResponse,
+    context: SketchContext,
+    eps: float,
+    *,
+    angle_mode: str = "symmetric",
+    reverse_weight: float = 0.5,
+) -> SubspaceAngleResult:
+    """Compare relation-only motion subspaces in observable space.
+
+    The reward-oriented sibling of ``_motion_full_angle``: dimensional drivers
+    are deliberately ignored and only the primitive motions allowed by the
+    sketch's relational constraints are compared.  Pred and GT subspaces are
+    both evaluated at ``pred_native.state`` so the principal-angle SVD lives
+    in a common coordinate system.
+
+    The returned ``angle`` is the *raw* motion-relational angle whose ceiling
+    depends on the comparison mode; higher-level callers normalize it into
+    [0, 1] via ``_normalized_motion_relational_angle`` before combining with
+    the leak term.
+
+    Args:
+        pred_sketch / gt_sketch: Sketches to compare.
+        pred_native: NativeResponse providing the configuration at which
+            Jacobians are evaluated.
+        context: Sketch tokenization / solver context.
+        eps: Numerical rank threshold for SVD and null-space computations.
+        angle_mode: How the two inclusions are combined into a single raw
+            angle scalar.  ``symmetric`` uses both inclusions equally;
+            ``pred_subset_gt`` keeps only the Pred ⊄ GT direction;
+            ``mixed_subset`` weights the GT ⊄ Pred direction by
+            ``reverse_weight``.
+        reverse_weight: Weight on the GT-into-Pred subset angle in
+            ``mixed_subset`` mode.
+    """
+    if angle_mode not in MOTION_RELATIONAL_ANGLE_MODES:
+        raise ValueError(
+            f"unknown motion-relational angle mode: {angle_mode!r}"
+        )
+
+    state = pred_native.state
+    U_pred, dim_pred = _motion_relational_subspace(
+        pred_sketch, state, context, eps
+    )
+    U_gt, dim_gt = _motion_relational_subspace(
+        gt_sketch, state, context, eps
+    )
+
+    cos2_sum = _principal_cos2_sum(U_pred, U_gt)
+
+    pred_subset_gt_sq = 0.0
+    if dim_pred > 0:
+        pred_subset_gt_sq = (dim_pred - cos2_sum) / float(dim_pred)
+
+    gt_subset_pred_sq = 0.0
+    if dim_gt > 0:
+        gt_subset_pred_sq = (dim_gt - cos2_sum) / float(dim_gt)
+
+    d_norm = float(max(dim_pred, dim_gt, 1))
+    if angle_mode == "symmetric":
+        angle_sq = (dim_pred + dim_gt - 2.0 * cos2_sum) / d_norm
+    elif angle_mode == "pred_subset_gt":
+        angle_sq = pred_subset_gt_sq
     else:
-        cos2_sum = 0.0
-    angle_sq = (d_norm - cos2_sum) / d_norm
-    angle_sq = min(max(angle_sq, 0.0), 1.0)
-    return math.sqrt(angle_sq), angle_sq, int(dim_P_obs), int(dim_G_obs)
+        angle_sq = pred_subset_gt_sq + reverse_weight * gt_subset_pred_sq
+
+    return SubspaceAngleResult(
+        angle=math.sqrt(max(angle_sq, 0.0)),
+        dim_pred=int(dim_pred),
+        dim_gt=int(dim_gt),
+        pred_subset_gt_angle=math.sqrt(max(pred_subset_gt_sq, 0.0)),
+        gt_subset_pred_angle=math.sqrt(max(gt_subset_pred_sq, 0.0)),
+    )
 
 
 def _leak_relational_angle(
+    gt_sketch: datalib.Sketch,
     pred_native: NativeResponse,
-    gt_rels: list,
-    context,
+    context: SketchContext,
     eps: float,
-) -> tuple[float, float]:
+) -> SubspaceAngleResult:
     """RMS cosine between Pred motion and GT relation-forbidden directions.
 
     ``U_P`` spans the motions Pred allows through its dimensional drivers.  The
@@ -408,23 +531,31 @@ def _leak_relational_angle(
         leak_relational_angle^2 = ||orth(row(J_R_G))^T U_P||_F^2 / dim(U_P)
 
     Jacobians are evaluated at Pred's primitive state, whose geometry has been
-    overwritten with the original sketch geometry during reconstruction.
+    overwritten with the original sketch geometry during reconstruction.  Pred
+    information is fully carried by ``pred_native``; the Pred sketch object is
+    not needed here.
+
+    In the returned ``SubspaceAngleResult``, ``dim_pred`` is the dimension of
+    the Pred motion subspace ``U_P`` and ``dim_gt`` is the rank of the GT
+    relation row space (``rank(J_R_G)``).  Subset-angle fields are ``None``
+    since leak is a one-sided (motion-vs-row-space) comparison.
     """
+    gt_rels = [c for c in gt_sketch.constraints.values() if _is_relational(c)]
     U_P_prim, dim_P_prim = _orthonormal_range(pred_native.R, eps)
     J_R, n_R = _stack_relation_jacobians_at(gt_rels, pred_native.state, context)
+    dim_N = 0
+    leak_sq = 0.0
     if J_R is not None and dim_P_prim > 0 and n_R > 0:
         N_G_prim, dim_N = _orthonormal_range(J_R.T, eps)
         if dim_N > 0:
             overlap = N_G_prim.T @ U_P_prim
-            leak_relational_angle_sq = float((overlap ** 2).sum()) / float(
-                dim_P_prim
-            )
-        else:
-            leak_relational_angle_sq = 0.0
-    else:
-        leak_relational_angle_sq = 0.0
-    leak_relational_angle_sq = min(max(leak_relational_angle_sq, 0.0), 1.0)
-    return math.sqrt(leak_relational_angle_sq), leak_relational_angle_sq
+            leak_sq = float((overlap ** 2).sum()) / float(dim_P_prim)
+    leak_sq = min(max(leak_sq, 0.0), 1.0)
+    return SubspaceAngleResult(
+        angle=math.sqrt(leak_sq),
+        dim_pred=int(dim_P_prim),
+        dim_gt=int(dim_N),
+    )
 
 
 def _compute_h_theta_metrics(
@@ -432,19 +563,19 @@ def _compute_h_theta_metrics(
     pred_native: NativeResponse,
     gt_sketch: datalib.Sketch,
     gt_native: NativeResponse,
-    context,
+    context: SketchContext,
     eps: float,
-    relstruct_distance_mode: str = "symmetric",
-    relstruct_reverse_weight: float = 0.5,
+    motion_relational_angle_mode: str = "symmetric",
+    motion_relational_reverse_weight: float = 0.5,
 ) -> HThetaMetrics:
     """Return canonical Htheta plus the RL-oriented relation-intent substitute.
 
     Two related scalars are produced:
 
     - ``response_full_angle`` is the paper-style diagnostic:
-      RMS of observable response-subspace mismatch and relation leak.
+      RMS of full motion-subspace mismatch and relation leak.
     - ``response_relational_angle`` is the reward default:
-      RMS of relation-only structure mismatch and relation leak.
+      RMS of relation-only motion mismatch and relation leak.
 
     The second scalar deliberately avoids directly rewarding agreement with one
     annotator's dimensional constraint placement.  Dimensional parsimony and FC
@@ -454,66 +585,56 @@ def _compute_h_theta_metrics(
 
     - ``motion_full_angle`` and ``leak_relational_angle`` come straight from
       padded principal-angle / RMS-cosine formulas in [0, 1].
-    - ``motion_relational_angle`` divides the raw ``d_relstruct`` returned by
-      ``compute_relation_subspace_distance`` by the mode-specific maximum so
+    - ``motion_relational_angle`` divides the raw motion-relational angle
+      returned by ``_motion_relational_angle`` by the mode-specific maximum so
       that orthogonal subspaces map to 1.  Maxima are: pair-specific symmetric
       maximum for ``symmetric``, ``sqrt(1 + reverse_weight)`` for
       ``mixed_subset``, and 1 for ``pred_subset_gt``.
     - ``response_*_angle`` divides ``sqrt(motion^2 + leak^2)`` by ``sqrt(2)``
       to put the combined RMS angle on the same [0, 1] scale as the components.
     """
-    gt_rels = [
-        c for c in gt_sketch.constraints.values()
-        if not _is_dimensional(c)
-    ]
-
-    motion_full_angle, motion_full_angle_sq, dim_P_obs, dim_G_obs = (
-        _observable_motion_subspace_angle(
-            pred_sketch, pred_native, gt_sketch, gt_native, eps
-        )
+    motion_full = _motion_full_angle(
+        pred_sketch, gt_sketch, pred_native, gt_native, eps
     )
-    leak_relational_angle, leak_relational_angle_sq = _leak_relational_angle(
-        pred_native, gt_rels, context, eps
+    leak = _leak_relational_angle(
+        gt_sketch, pred_native, context, eps
     )
-    relstruct = compute_relation_subspace_distance(
+    motion_rel = _motion_relational_angle(
         pred_sketch,
         gt_sketch,
         pred_native,
         context,
         eps,
-        relstruct_distance_mode,
-        relstruct_reverse_weight,
+        angle_mode=motion_relational_angle_mode,
+        reverse_weight=motion_relational_reverse_weight,
     )
-    relation_structure_raw = float(relstruct["d_relstruct"])
-    relation_structure_dim_pred = int(relstruct["relstruct_dim_pred"])
-    relation_structure_dim_gt = int(relstruct["relstruct_dim_gt"])
-    motion_relational_angle = _normalized_relation_motion_angle(
-        relation_structure_raw,
-        relstruct_distance_mode,
-        relation_structure_dim_pred,
-        relation_structure_dim_gt,
-        relstruct_reverse_weight,
+    motion_relational_angle = _normalized_motion_relational_angle(
+        motion_rel.angle,
+        motion_relational_angle_mode,
+        motion_rel.dim_pred,
+        motion_rel.dim_gt,
+        motion_relational_reverse_weight,
     )
     return HThetaMetrics(
         response_full_angle=math.sqrt(
-            max(motion_full_angle_sq + leak_relational_angle_sq, 0.0)
+            motion_full.angle ** 2 + leak.angle ** 2
         ) / _RESPONSE_ANGLE_NORM,
         response_relational_angle=math.sqrt(
-            max(motion_relational_angle ** 2 + leak_relational_angle_sq, 0.0)
+            motion_relational_angle ** 2 + leak.angle ** 2
         ) / _RESPONSE_ANGLE_NORM,
-        motion_full_angle=motion_full_angle,
+        motion_full_angle=motion_full.angle,
         motion_relational_angle=motion_relational_angle,
-        leak_relational_angle=leak_relational_angle,
-        relation_structure_pred_subset_gt=float(
-            relstruct["d_relstruct_pred_subset_gt"]
+        leak_relational_angle=leak.angle,
+        motion_relational_pred_subset_gt_angle=float(
+            motion_rel.pred_subset_gt_angle or 0.0
         ),
-        relation_structure_gt_subset_pred=float(
-            relstruct["d_relstruct_gt_subset_pred"]
+        motion_relational_gt_subset_pred_angle=float(
+            motion_rel.gt_subset_pred_angle or 0.0
         ),
-        relation_structure_dim_pred=relation_structure_dim_pred,
-        relation_structure_dim_gt=relation_structure_dim_gt,
-        observable_dim_pred=dim_P_obs,
-        observable_dim_gt=dim_G_obs,
+        motion_relational_dim_pred=motion_rel.dim_pred,
+        motion_relational_dim_gt=motion_rel.dim_gt,
+        motion_full_dim_pred=motion_full.dim_pred,
+        motion_full_dim_gt=motion_full.dim_gt,
     )
 
 
@@ -539,8 +660,8 @@ class ResponseIntentReward(BaseReward):
         coeff_h_angle: float = 2.0,
         cap_h_angle: float = 1.0,
         h_angle_reward_metric: str = "response_relational_angle",
-        relstruct_distance_mode: str = "symmetric",
-        relstruct_reverse_weight: float = 0.5,
+        motion_relational_angle_mode: str = "symmetric",
+        motion_relational_reverse_weight: float = 0.5,
         weight: float = 1.0,
         enabled: bool = True,
     ):
@@ -553,9 +674,10 @@ class ResponseIntentReward(BaseReward):
             cap_h_angle: Angle/metric value at which the bonus reaches 0.
             h_angle_reward_metric: Metric name.  Defaults to
                 ``response_relational_angle``.
-            relstruct_distance_mode: How relation-only subspaces are compared.
-            relstruct_reverse_weight: Reverse-direction weight for
-                ``mixed_subset`` relation-structure comparison.
+            motion_relational_angle_mode: How relation-only motion subspaces
+                are compared.
+            motion_relational_reverse_weight: Reverse-direction weight for the
+                ``mixed_subset`` motion-relational angle.
             weight: Composer-level multiplier from ``BaseReward``.
             enabled: Composer-level on/off switch from ``BaseReward``.
         """
@@ -567,19 +689,19 @@ class ResponseIntentReward(BaseReward):
         self.h_angle_reward_metric = _validate_h_theta_metric_name(
             h_angle_reward_metric
         )
-        if relstruct_distance_mode not in RELATION_SUBSPACE_DISTANCE_MODES:
+        if motion_relational_angle_mode not in MOTION_RELATIONAL_ANGLE_MODES:
             raise ValueError(
-                "relstruct_distance_mode must be one of "
-                f"{sorted(RELATION_SUBSPACE_DISTANCE_MODES)}, got "
-                f"{relstruct_distance_mode!r}"
+                "motion_relational_angle_mode must be one of "
+                f"{sorted(MOTION_RELATIONAL_ANGLE_MODES)}, got "
+                f"{motion_relational_angle_mode!r}"
             )
-        if relstruct_reverse_weight < 0.0:
+        if motion_relational_reverse_weight < 0.0:
             raise ValueError(
-                "relstruct_reverse_weight must be non-negative, got "
-                f"{relstruct_reverse_weight}"
+                "motion_relational_reverse_weight must be non-negative, got "
+                f"{motion_relational_reverse_weight}"
             )
-        self.relstruct_distance_mode = relstruct_distance_mode
-        self.relstruct_reverse_weight = relstruct_reverse_weight
+        self.motion_relational_angle_mode = motion_relational_angle_mode
+        self.motion_relational_reverse_weight = motion_relational_reverse_weight
         self.tokenizer = SketchTokenizer(context)
 
     def _bonus(self, value: float, cap: float, coeff: float) -> float:
@@ -602,8 +724,8 @@ class ResponseIntentReward(BaseReward):
             gt_native,
             self.context,
             self.eps,
-            self.relstruct_distance_mode,
-            self.relstruct_reverse_weight,
+            self.motion_relational_angle_mode,
+            self.motion_relational_reverse_weight,
         )
         selected_angle = h_metrics.value(self.h_angle_reward_metric)
         stats.add_h_theta(h_metrics, selected_angle)

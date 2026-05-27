@@ -8,7 +8,7 @@ so that downstream rewards can gate on it.
 Per-reward weights, individual clipping, and a final clip on the aggregated
 tensor are all configurable.  Metrics from each ``RewardOutput`` are
 flattened into a single dict; reward modules are expected to namespace
-their own metric keys (``solver_*``, ``relstruct_*``, ``gain_intrinsic_*``…).
+their own metric keys (``solver_*``, ``intent_*``, ``gain_intrinsic_*``…).
 """
 from __future__ import annotations
 
@@ -133,7 +133,7 @@ class RewardComposer(torch.nn.Module):
         """Flatten scalar metrics from all rewards into a single dict.
 
         Reward modules already namespace their own keys (``solver_``,
-        ``relstruct_``…), so this just unions them without further prefixing.
+        ``intent_``…), so this just unions them without further prefixing.
         Non-scalar metric values (e.g. raw ``Counter`` histograms) are filtered
         out.
         """

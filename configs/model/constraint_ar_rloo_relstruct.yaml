@@ -41,8 +41,9 @@ reward_composer:
     # Response-intent reward (logs under `intent_*` keys).
     # All five public metrics live on the [0, 1] scale so the same cap applies
     # uniformly:
-    #   motion_full_angle         = observable response-subspace angle in [0,1]
-    #   motion_relational_angle   = d_relstruct / mode-specific maximum in [0,1]
+    #   motion_full_angle         = full motion-subspace angle in [0,1]
+    #   motion_relational_angle   = raw motion-relational angle / mode-specific
+    #                               maximum, in [0,1]
     #   leak_relational_angle     = relation-leak angle in [0,1]
     #   response_full_angle       = sqrt((motion_full_angle^2 + leak^2) / 2)
     #   response_relational_angle = sqrt((motion_relational_angle^2 + leak^2) / 2)
@@ -53,8 +54,8 @@ reward_composer:
       coeff_h_angle: 2.0
       cap_h_angle: 1.0
       h_angle_reward_metric: response_relational_angle
-      relstruct_distance_mode: symmetric          # symmetric | pred_subset_gt | mixed_subset
-      relstruct_reverse_weight: 0.5
+      motion_relational_angle_mode: symmetric     # symmetric | pred_subset_gt | mixed_subset
+      motion_relational_reverse_weight: 0.5
 
     # Intrinsic-size attainability bonus (gain_intrinsic). Disabled by
     # default; enable after smoke-testing the relation-intent reward.
