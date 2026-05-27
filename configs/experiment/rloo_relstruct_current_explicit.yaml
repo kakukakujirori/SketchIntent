@@ -1,0 +1,84 @@
+# @package _global_
+
+# Current relstruct recipe, but with the reward stack written directly here.
+# Use this as the reproduction/control for the earlier run where the intent
+# reward was FC-gated and relatively weak.
+
+defaults:
+  - override /data: constraint_rloo.yaml
+  - override /model: constraint_ar_rloo.yaml
+  - override /trainer: default
+
+tags: ["rloo", "relstruct", "current_explicit"]
+
+callbacks:
+  model_checkpoint_epoch:
+    every_n_train_steps: 100
+    save_top_k: 3
+    filename: "epoch_{epoch}_step_{step}"
+
+  model_checkpoint_loss: null
+
+  model_checkpoint_reward:
+    _target_: lightning.pytorch.callbacks.ModelCheckpoint
+    dirpath: ${paths.output_dir}/checkpoints
+    monitor: "validation_gen/solver_fc_rate"
+    filename: "step_{step}_fc_{validation_gen/solver_fc_rate:.3f}"
+    save_top_k: 3
+    mode: "max"
+    auto_insert_metric_name: false
+    every_n_train_steps: 100
+
+data:
+  train_sequence_file: data_processed/sg_pseudo_rel_167k_unique_valid.npy
+  batch_size: 32
+  num_workers: 1
+
+model:
+  reward_composer:
+    _target_: src.models.rewards.composer.RewardComposer
+    rewards:
+      - _target_: src.models.rewards.solver_reward.SolverReward
+        context: ${data.context}
+        reward_dof_reduction: 10.0
+        reward_fully_constrained: 5.0
+        penalty_conflicting: -1.0
+        penalty_redundant: -1.0
+        penalty_malformed: -0.5
+        penalty_deformed: -0.25
+        penalty_per_problematic_constraint: -1.0
+        penalty_rigid_dimensional: -0.0
+        fully_constrained_dof: 2
+        distortion_threshold: null
+
+      - _target_: src.models.rewards.dim_parsimony.DimParsimonyReward
+        context: ${data.context}
+        coeff: 0.30
+        mode: excess_over_gt_per_primitive
+        excess_margin: 1
+        gate: converged
+
+      - _target_: src.models.rewards.response_metric_reward.ResponseIntentReward
+        context: ${data.context}
+        eps: 1.0e-9
+        coeff_h_angle: 2.0
+        cap_h_angle: 1.0
+        h_angle_reward_metric: response_relational_angle
+        motion_relational_angle_mode: symmetric
+        motion_relational_reverse_weight: 0.5
+        gate: fc
+
+  group_sample_size: 8
+  entropy_bonus: 0.0
+  kl_coeff: 0.01
+  sft_coeff: 0.0
+  optimizer:
+    lr: 1.0e-5
+
+trainer:
+  check_val_every_n_epoch: null
+  val_check_interval: 100
+  devices: 1
+  max_epochs: 3
+
+pretrained_ckpt_path: logs/train/runs/2026-05-02_20-35-42/checkpoints/epoch_29.ckpt
