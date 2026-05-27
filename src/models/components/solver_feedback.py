@@ -58,11 +58,20 @@ class SolverStatus:
 
 
 class SolverFeedback:
-    def __init__(self, context: SketchContext, distortion_threshold: float | None = None):
+    def __init__(
+        self,
+        context: SketchContext,
+        distortion_threshold: float | None = None,
+        check_rigid_dimensional: bool = True,
+    ):
         self.sketch_tokenizer = SketchTokenizer(context)
         self.sketch_freecad_converter = SketchFreecadConverter(context, raise_on_error=False)
         self.distortion_threshold = distortion_threshold or 1 / context.num_quantization_bins
         assert self.distortion_threshold > 0, f"{self.distortion_threshold=}"
+        # Skipping the rigid check avoids 2N extra FreeCAD solves per Converged
+        # sketch (N = number of dimensional constraints), which can otherwise
+        # exceed the per-task timeout and stall the worker pool.
+        self.check_rigid_dimensional = check_rigid_dimensional
 
     @staticmethod
     def overwrite_primitives_with_original(
@@ -414,7 +423,7 @@ class SolverFeedback:
         # ── Dimensional-constraint robustness check ───────────────────────── #
         # Only run when the full sequence is Converged; otherwise we cannot
         # distinguish "rigid" constraints from already-broken ones.
-        if status.Status == "Converged":
+        if self.check_rigid_dimensional and status.Status == "Converged":
             status.RigidDimensionalConstraints = self._check_rigid_dimensional_constraints(
                 sketchgraphs_sketch
             )

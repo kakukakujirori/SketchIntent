@@ -18,14 +18,22 @@ from src.sketch_handlers.context import SketchContext
 _worker_solver_feedback: SolverFeedback | None = None
 
 
-def init_worker(context: SketchContext, distortion_threshold: float) -> None:
+def init_worker(
+    context: SketchContext,
+    distortion_threshold: float,
+    check_rigid_dimensional: bool = True,
+) -> None:
     """Initialize the per-worker SolverFeedback instance.
 
     Called once per worker process by ProcessPoolExecutor(initializer=...).
     Must not trigger any torch/CUDA import.
     """
     global _worker_solver_feedback
-    _worker_solver_feedback = SolverFeedback(context, distortion_threshold)
+    _worker_solver_feedback = SolverFeedback(
+        context,
+        distortion_threshold,
+        check_rigid_dimensional=check_rigid_dimensional,
+    )
 
 
 def evaluate_single(args: tuple[np.ndarray, np.ndarray, datalib.Sketch | None]) -> object:

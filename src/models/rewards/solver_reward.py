@@ -1,7 +1,13 @@
 import os
+import pickle
+import time
 import multiprocessing as mp
 from collections import Counter
-from concurrent.futures import ProcessPoolExecutor, TimeoutError as FutureTimeoutError
+from concurrent.futures import (
+    ALL_COMPLETED,
+    ProcessPoolExecutor,
+    wait as futures_wait,
+)
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -81,13 +87,22 @@ class SolverReward(BaseReward):
         self._evaluation_cache = {}
         self.max_cache_size = 20000
 
-        # Worker timeout per task (seconds). FreeCAD can occasionally hang.
+        # Worker timeout (seconds) — covers the whole batch, not per task.
+        # Individual evaluations measured at ~10-70 ms each, so 60 s is plenty
+        # of headroom for a 256-task batch when workers are healthy.
         self.worker_timeout = 60
 
-        # max_tasks_per_child: each worker is recycled after this many tasks to
-        # prevent FreeCAD's internal memory leaks from accumulating indefinitely.
-        # Set high to minimize respawn frequency (each spawn risks a deadlock).
-        self._max_tasks_per_child = 512
+        # max_tasks_per_child intentionally disabled.  With the rigid-check
+        # disabled (penalty_rigid_dimensional == 0) per-task FreeCAD work
+        # stays in the tens-of-milliseconds range, so memory leaks accumulate
+        # slowly.  More importantly, recycling 8 workers simultaneously
+        # triggers concurrent FreeCAD imports, which deadlocks the pool —
+        # this was the actual cause of the "Worker timeout for batch
+        # indices [192..255]" we observed at step ≈ 16 × max_tasks_per_child
+        # / tasks_per_step.  The timeout-driven _reset_executor below is
+        # the recovery path for the rare cases where a worker really does
+        # hang.
+        self._max_tasks_per_child: int | None = None
         self._executor: ProcessPoolExecutor | None = None
 
 
@@ -107,7 +122,11 @@ class SolverReward(BaseReward):
                 max_workers=self.max_workers,
                 mp_context=mp.get_context("spawn"),
                 initializer=_init_worker,
-                initargs=(self.context, self.distortion_threshold),
+                initargs=(
+                    self.context,
+                    self.distortion_threshold,
+                    self.penalty_rigid_dimensional != 0.0,
+                ),
                 max_tasks_per_child=self._max_tasks_per_child,
             )
         return self._executor
@@ -117,6 +136,63 @@ class SolverReward(BaseReward):
         if executor is not None:
             executor.shutdown(wait=False)
             self._executor = None
+
+    def _dump_timeout_diagnostics(
+        self,
+        handle: "SolverAsyncHandle",
+        not_done,
+        fut_to_idx: dict[int, int],
+    ) -> None:
+        """Persist the prim/cons tokens of every hung task to disk.
+
+        Lets the user reproduce a specific slow sketch offline (without
+        re-running RL) and confirm whether the slowness is FreeCAD getting
+        stuck on a particular constraint pattern.
+        """
+        try:
+            dump_dir = "logs/solver_timeouts"
+            os.makedirs(dump_dir, exist_ok=True)
+            ts = time.strftime("%Y%m%d_%H%M%S")
+            for f in not_done:
+                fut_idx = fut_to_idx[id(f)]
+                batch_idx = handle.indices_to_evaluate[fut_idx]
+                prim, cons, sketch_original = handle.args_list[fut_idx]
+                path = os.path.join(dump_dir, f"{ts}_batch{batch_idx}.pkl")
+                with open(path, "wb") as fp:
+                    pickle.dump(
+                        {
+                            "batch_idx": batch_idx,
+                            "prim_tokens": prim,
+                            "cons_tokens": cons,
+                            "sketch_original": sketch_original,
+                        },
+                        fp,
+                    )
+                print(f"[SolverReward] Dumped hung sketch to {path}", flush=True)
+        except Exception as e:
+            print(f"[SolverReward] Failed to dump timeout diagnostics: {e}", flush=True)
+
+    def _reset_executor(self) -> None:
+        """Tear down a broken executor so the next call spawns a fresh pool.
+
+        ``shutdown(wait=False)`` alone is not enough: it stops the executor
+        from accepting new tasks but lets currently-running tasks finish.
+        Workers that are hung inside a FreeCAD call therefore remain alive
+        and keep accumulating across batches, eventually saturating every
+        worker.  We have to ``terminate()`` each child process directly via
+        the internal ``_processes`` attribute to actually free them.
+        """
+        executor = self._executor
+        self._executor = None
+        if executor is None:
+            return
+        processes = getattr(executor, "_processes", None) or {}
+        for proc in list(processes.values()):
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+        executor.shutdown(wait=False, cancel_futures=True)
 
     def _get_dof_without_constraints(self, sketch: datalib.Sketch) -> int:
         dof = 0
@@ -325,26 +401,56 @@ class SolverReward(BaseReward):
         for i, cached_res in handle.cache_hits:
             evaluation_results[i] = cached_res
 
-        # Wait for submitted futures (with per-task timeout)
+        # Wait for the whole batch with a SHARED budget instead of per-task.
+        # The previous per-future ``f.result(timeout=...)`` loop spent 60s on
+        # every hung task in sequence — a batch with 2 hung tasks blocked the
+        # main thread for 2 minutes even though all other tasks finished long
+        # before. ``futures_wait`` lets us bound the total wall-clock wait
+        # once and treat anything still running as a timeout.
+        timeout_count = 0
         if handle.futures:
-            for fut_idx, f in enumerate(handle.futures):
+            done, not_done = futures_wait(
+                handle.futures,
+                timeout=self.worker_timeout,
+                return_when=ALL_COMPLETED,
+            )
+
+            fut_to_idx = {id(f): k for k, f in enumerate(handle.futures)}
+            for f in done:
+                fut_idx = fut_to_idx[id(f)]
                 i = handle.indices_to_evaluate[fut_idx]
                 try:
-                    res = f.result(timeout=self.worker_timeout)
-                except FutureTimeoutError:
-                    print(f"[SolverReward] Worker timeout ({self.worker_timeout}s) for batch index {i}")
-                    res = None
+                    res = f.result()
                 except Exception as e:
-                    print(f"[SolverReward] Worker failed for batch index {i}: {e}")
+                    print(
+                        f"[SolverReward] Worker failed for batch index {i}: {e}",
+                        flush=True,
+                    )
                     res = None
 
                 evaluation_results[i] = res
-
                 if res is not None:
-                    # Only cache successful evaluations
                     prim, cons, _ = handle.args_list[fut_idx]
                     cache_key = (prim.tobytes(), cons.tobytes())
                     self._evaluation_cache[cache_key] = res
+
+            timeout_count = len(not_done)
+            if not_done:
+                timeout_indices = sorted(
+                    handle.indices_to_evaluate[fut_to_idx[id(f)]] for f in not_done
+                )
+                print(
+                    f"[SolverReward] Worker timeout ({self.worker_timeout}s) for "
+                    f"batch indices {timeout_indices}",
+                    flush=True,
+                )
+                self._dump_timeout_diagnostics(handle, not_done, fut_to_idx)
+                print(
+                    f"[SolverReward] Resetting executor: {timeout_count}/{len(handle.futures)} "
+                    "tasks timed out — terminating worker pool to free hung processes.",
+                    flush=True,
+                )
+                self._reset_executor()
 
         # Step C: Compute reward scores from evaluation results
         scores = torch.zeros(handle.cons_shape, dtype=torch.float32)
