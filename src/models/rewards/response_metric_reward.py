@@ -73,7 +73,10 @@ from src.models.rewards.utils.geometry import (
 )
 from src.models.rewards.utils.sketch_builder import (
     get_or_build_pred_native,
+    get_or_compute_gt_motion_full_subspace,
+    get_or_compute_gt_motion_relational_subspace,
     get_or_compute_gt_native,
+    get_or_compute_gt_relation_nullspace,
     get_or_compute_j_phi,
 )
 from src.sketch_handlers.constants import ConstraintToken
@@ -409,6 +412,7 @@ def _motion_full_angle(
     *,
     J_phi_pred: torch.Tensor | None = None,
     J_phi_gt: torch.Tensor | None = None,
+    gt_motion_full: tuple[torch.Tensor, int] | None = None,
 ) -> SubspaceAngleResult:
     """Padded principal-angle metric between full motion subspaces.
 
@@ -431,9 +435,12 @@ def _motion_full_angle(
     U_W_P, dim_P_full = _motion_full_subspace(
         pred_sketch, pred_native, eps, J_phi=J_phi_pred
     )
-    U_W_G, dim_G_full = _motion_full_subspace(
-        gt_sketch, gt_native, eps, J_phi=J_phi_gt
-    )
+    if gt_motion_full is not None:
+        U_W_G, dim_G_full = gt_motion_full
+    else:
+        U_W_G, dim_G_full = _motion_full_subspace(
+            gt_sketch, gt_native, eps, J_phi=J_phi_gt
+        )
 
     # Both sides have no observable motion (fully constrained with no
     # dimensional drivers) — their zero subspaces trivially agree.
@@ -461,6 +468,7 @@ def _motion_relational_angle(
     reverse_weight: float = 0.5,
     J_phi_pred: torch.Tensor | None = None,
     J_phi_gt: torch.Tensor | None = None,
+    gt_motion_relational: tuple[torch.Tensor, int] | None = None,
 ) -> SubspaceAngleResult:
     """Compare relation-only motion subspaces in observable space.
 
@@ -498,9 +506,12 @@ def _motion_relational_angle(
     U_pred, dim_pred = _motion_relational_subspace(
         pred_sketch, state, context, eps, J_phi=J_phi_pred
     )
-    U_gt, dim_gt = _motion_relational_subspace(
-        gt_sketch, state, context, eps, J_phi=J_phi_gt
-    )
+    if gt_motion_relational is not None:
+        U_gt, dim_gt = gt_motion_relational
+    else:
+        U_gt, dim_gt = _motion_relational_subspace(
+            gt_sketch, state, context, eps, J_phi=J_phi_gt
+        )
 
     cos2_sum = _principal_cos2_sum(U_pred, U_gt)
 
@@ -534,6 +545,8 @@ def _leak_relational_angle(
     pred_native: NativeResponse,
     context: SketchContext,
     eps: float,
+    *,
+    gt_relation_nullspace: tuple[torch.Tensor, int] | None = None,
 ) -> SubspaceAngleResult:
     """RMS cosine between Pred motion and GT relation-forbidden directions.
 
@@ -554,16 +567,21 @@ def _leak_relational_angle(
     relation row space (``rank(J_R_G)``).  Subset-angle fields are ``None``
     since leak is a one-sided (motion-vs-row-space) comparison.
     """
-    gt_rels = [c for c in gt_sketch.constraints.values() if _is_relational(c)]
     U_P_prim, dim_P_prim = _orthonormal_range(pred_native.R, eps)
-    J_R, n_R = _stack_relation_jacobians_at(gt_rels, pred_native.state, context)
-    dim_N = 0
+    if gt_relation_nullspace is not None:
+        N_G_prim, dim_N = gt_relation_nullspace
+    else:
+        gt_rels = [c for c in gt_sketch.constraints.values() if _is_relational(c)]
+        J_R, n_R = _stack_relation_jacobians_at(gt_rels, pred_native.state, context)
+        if J_R is None or n_R == 0:
+            N_G_prim = torch.zeros(pred_native.state.num_dof(), 0, dtype=pred_native.R.dtype)
+            dim_N = 0
+        else:
+            N_G_prim, dim_N = _orthonormal_range(J_R.T, eps)
     leak_sq = 0.0
-    if J_R is not None and dim_P_prim > 0 and n_R > 0:
-        N_G_prim, dim_N = _orthonormal_range(J_R.T, eps)
-        if dim_N > 0:
-            overlap = N_G_prim.T @ U_P_prim
-            leak_sq = float((overlap ** 2).sum()) / float(dim_P_prim)
+    if dim_P_prim > 0 and dim_N > 0:
+        overlap = N_G_prim.T @ U_P_prim
+        leak_sq = float((overlap ** 2).sum()) / float(dim_P_prim)
     leak_sq = min(max(leak_sq, 0.0), 1.0)
     return SubspaceAngleResult(
         angle=math.sqrt(leak_sq),
@@ -584,6 +602,9 @@ def _compute_h_theta_metrics(
     *,
     J_phi_pred: torch.Tensor | None = None,
     J_phi_gt: torch.Tensor | None = None,
+    gt_motion_full: tuple[torch.Tensor, int] | None = None,
+    gt_motion_relational: tuple[torch.Tensor, int] | None = None,
+    gt_relation_nullspace: tuple[torch.Tensor, int] | None = None,
 ) -> HThetaMetrics:
     """Return canonical Htheta plus the RL-oriented relation-intent substitute.
 
@@ -618,9 +639,14 @@ def _compute_h_theta_metrics(
         eps,
         J_phi_pred=J_phi_pred,
         J_phi_gt=J_phi_gt,
+        gt_motion_full=gt_motion_full,
     )
     leak = _leak_relational_angle(
-        gt_sketch, pred_native, context, eps
+        gt_sketch,
+        pred_native,
+        context,
+        eps,
+        gt_relation_nullspace=gt_relation_nullspace,
     )
     motion_rel = _motion_relational_angle(
         pred_sketch,
@@ -632,6 +658,7 @@ def _compute_h_theta_metrics(
         reverse_weight=motion_relational_reverse_weight,
         J_phi_pred=J_phi_pred,
         J_phi_gt=J_phi_gt,
+        gt_motion_relational=gt_motion_relational,
     )
     motion_relational_angle = _normalized_motion_relational_angle(
         motion_rel.angle,
@@ -761,6 +788,9 @@ class ResponseIntentReward(BaseReward):
         *,
         J_phi_pred: torch.Tensor | None = None,
         J_phi_gt: torch.Tensor | None = None,
+        gt_motion_full: tuple[torch.Tensor, int] | None = None,
+        gt_motion_relational: tuple[torch.Tensor, int] | None = None,
+        gt_relation_nullspace: tuple[torch.Tensor, int] | None = None,
     ) -> float:
         """Compute the selected Htheta-family angle and convert it to reward."""
         h_metrics = _compute_h_theta_metrics(
@@ -774,6 +804,9 @@ class ResponseIntentReward(BaseReward):
             self.motion_relational_reverse_weight,
             J_phi_pred=J_phi_pred,
             J_phi_gt=J_phi_gt,
+            gt_motion_full=gt_motion_full,
+            gt_motion_relational=gt_motion_relational,
+            gt_relation_nullspace=gt_relation_nullspace,
         )
         selected_angle = h_metrics.value(self.h_angle_reward_metric)
         stats.add_h_theta(h_metrics, selected_angle)
@@ -846,6 +879,19 @@ class ResponseIntentReward(BaseReward):
             J_phi_gt = get_or_compute_j_phi(
                 ctx, gt_sketch, gt_native.R.dtype
             )
+            # gt-side subspaces are pure functions of gt_sketch and are
+            # reused across the K rollouts of an RLOO group (and across the
+            # motion_full / motion_relational / leak helpers within one
+            # sample).  See get_or_compute_gt_motion_*_subspace docstrings.
+            gt_motion_full = get_or_compute_gt_motion_full_subspace(
+                ctx, gt_sketch, gt_native, self.eps, J_phi_gt
+            )
+            gt_motion_relational = get_or_compute_gt_motion_relational_subspace(
+                ctx, gt_sketch, gt_native, self.context, self.eps, J_phi_gt
+            )
+            gt_relation_nullspace = get_or_compute_gt_relation_nullspace(
+                ctx, gt_sketch, gt_native, self.context, self.eps
+            )
             sample_reward = self._score_h_theta(
                 pred_sketch,
                 pred_native,
@@ -854,6 +900,9 @@ class ResponseIntentReward(BaseReward):
                 stats,
                 J_phi_pred=J_phi_pred,
                 J_phi_gt=J_phi_gt,
+                gt_motion_full=gt_motion_full,
+                gt_motion_relational=gt_motion_relational,
+                gt_relation_nullspace=gt_relation_nullspace,
             )
         except Exception as exc:
             # Reward computation runs inside the training loop.  A malformed

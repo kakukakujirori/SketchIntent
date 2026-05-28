@@ -65,6 +65,16 @@ class RewardContext:
     # multiple subspace computations within one sample and (b) the K rollouts
     # of one RLOO prompt group, where ``gt_sketch`` is the same Python object.
     j_phi_cache: dict[tuple[int, torch.dtype], torch.Tensor] = field(default_factory=dict)
+    # Cache for GT-side subspace results that only depend on ``gt_sketch``:
+    # motion_full subspace U_W_G, motion_relational subspace U_gt at gt's own
+    # state, and the orthonormal range of J_R(gt_rels).T used by the leak
+    # term.  Each entry is keyed by ``(id(gt_sketch), dtype, kind)`` so an
+    # RLOO group with K rollouts hits the cache K-1 times after the first
+    # rollout populates it.  Correctness relies on
+    # ``pred_native.state.q ≡ gt_native.state.q`` (guaranteed by
+    # ``overwrite_primitives_with_original`` deepcopying gt entities into
+    # pred), so J_R(gt_rels) is state-independent in practice.
+    gt_subspace_cache: dict[tuple[int, torch.dtype, str], object] = field(default_factory=dict)
     sketch_tokenizer: "SketchTokenizer | None" = None
 
 

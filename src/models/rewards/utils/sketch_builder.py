@@ -13,6 +13,12 @@ from src.metrics.edit_response_distance import (
 )
 from src.models.components.solver_feedback import SolverFeedback
 from src.models.rewards.base import RewardContext
+from src.models.rewards.utils.geometry import (
+    motion_full_subspace,
+    motion_relational_subspace,
+    orthonormal_range,
+    stack_relation_jacobians_at,
+)
 from src.sketch_handlers.context import SketchContext
 from src.sketch_handlers.sketch_tokenizer import SketchTokenizer
 from src.sketch_handlers.sketch_utils import complete_constraint_values
@@ -111,6 +117,87 @@ def get_or_compute_j_phi(
         cached = pairwise_distance_observable(sketch, dtype=dtype).to(dtype=dtype)
         ctx.j_phi_cache[key] = cached
     return cached
+
+
+def get_or_compute_gt_motion_full_subspace(
+    ctx: RewardContext,
+    gt_sketch: datalib.Sketch,
+    gt_native: NativeResponse,
+    eps: float,
+    J_phi: torch.Tensor,
+) -> tuple[torch.Tensor, int]:
+    """Return the cached ``motion_full_subspace`` result for ``gt_sketch``.
+
+    ``motion_full_subspace(gt_sketch, gt_native, eps, J_phi)`` is a pure
+    function of ``gt_sketch`` (its native response and J_phi are already
+    cached up-thread); caching the SVD result lets the K rollouts of an
+    RLOO group share the gt-side motion-full subspace.
+    """
+    key = (id(gt_sketch), J_phi.dtype, "motion_full")
+    cached = ctx.gt_subspace_cache.get(key)
+    if cached is None:
+        cached = motion_full_subspace(gt_sketch, gt_native, eps, J_phi=J_phi)
+        ctx.gt_subspace_cache[key] = cached
+    return cached  # type: ignore[return-value]
+
+
+def get_or_compute_gt_motion_relational_subspace(
+    ctx: RewardContext,
+    gt_sketch: datalib.Sketch,
+    gt_native: NativeResponse,
+    sketch_context: SketchContext,
+    eps: float,
+    J_phi: torch.Tensor,
+) -> tuple[torch.Tensor, int]:
+    """Return the cached ``motion_relational_subspace`` result for ``gt_sketch``.
+
+    Evaluated at ``gt_native.state``.  Callers that previously passed
+    ``pred_native.state`` get the same numerical result because pred sketches
+    have gt's primitive geometry copied in via
+    ``overwrite_primitives_with_original``, so J_R(gt_rels) is state-
+    independent in practice.
+    """
+    key = (id(gt_sketch), J_phi.dtype, "motion_relational")
+    cached = ctx.gt_subspace_cache.get(key)
+    if cached is None:
+        cached = motion_relational_subspace(
+            gt_sketch, gt_native.state, sketch_context, eps, J_phi=J_phi
+        )
+        ctx.gt_subspace_cache[key] = cached
+    return cached  # type: ignore[return-value]
+
+
+def get_or_compute_gt_relation_nullspace(
+    ctx: RewardContext,
+    gt_sketch: datalib.Sketch,
+    gt_native: NativeResponse,
+    sketch_context: SketchContext,
+    eps: float,
+) -> tuple[torch.Tensor, int]:
+    """Return the cached ``(N_G_prim, dim_N)`` used by the leak term.
+
+    ``N_G_prim`` is the orthonormal range of ``J_R(gt_rels)^T`` evaluated at
+    gt's state — the basis of relation-forbidden directions in primitive
+    space.  Pure function of ``gt_sketch`` so the cache key is
+    ``(id(gt_sketch), dtype)``.  Returns ``(empty_tensor, 0)`` when gt has
+    no relational constraints (matching the empty-J_R branch of
+    ``_leak_relational_angle``).
+    """
+    from src.metrics.edit_response_distance import _is_relational  # local import to avoid cycle
+
+    dtype = gt_native.R.dtype
+    key = (id(gt_sketch), dtype, "relation_nullspace")
+    cached = ctx.gt_subspace_cache.get(key)
+    if cached is None:
+        gt_rels = [c for c in gt_sketch.constraints.values() if _is_relational(c)]
+        J_R, n_R = stack_relation_jacobians_at(gt_rels, gt_native.state, sketch_context)
+        if J_R is None or n_R == 0:
+            n_x = gt_native.state.num_dof()
+            cached = (torch.zeros(n_x, 0, dtype=dtype), 0)
+        else:
+            cached = orthonormal_range(J_R.T, eps)
+        ctx.gt_subspace_cache[key] = cached
+    return cached  # type: ignore[return-value]
 
 
 def get_or_compute_gt_native(
