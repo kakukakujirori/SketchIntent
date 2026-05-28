@@ -49,9 +49,11 @@ but is a supplement diagnostic, not part of the default intent reward.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field
 import logging
 import math
+import multiprocessing as mp
 import statistics
 
 import numpy as np
@@ -296,6 +298,37 @@ class ResponseIntentBatchStats:
     skipped_build: int = 0
     skipped_not_fc: int = 0
     skipped_angle: int = 0
+
+    def extend(self, other: "ResponseIntentBatchStats") -> None:
+        """Merge another per-worker stats buffer into this one."""
+        self.reward_vals.extend(other.reward_vals)
+        self.selected_angle_vals.extend(other.selected_angle_vals)
+        self.response_full_angle_vals.extend(other.response_full_angle_vals)
+        self.response_relational_angle_vals.extend(
+            other.response_relational_angle_vals
+        )
+        self.motion_full_angle_vals.extend(other.motion_full_angle_vals)
+        self.motion_relational_angle_vals.extend(
+            other.motion_relational_angle_vals
+        )
+        self.leak_relational_angle_vals.extend(other.leak_relational_angle_vals)
+        self.motion_relational_pred_subset_gt_angle_vals.extend(
+            other.motion_relational_pred_subset_gt_angle_vals
+        )
+        self.motion_relational_gt_subset_pred_angle_vals.extend(
+            other.motion_relational_gt_subset_pred_angle_vals
+        )
+        self.motion_relational_dim_pred_vals.extend(
+            other.motion_relational_dim_pred_vals
+        )
+        self.motion_relational_dim_gt_vals.extend(
+            other.motion_relational_dim_gt_vals
+        )
+        self.motion_full_dim_pred_vals.extend(other.motion_full_dim_pred_vals)
+        self.motion_full_dim_gt_vals.extend(other.motion_full_dim_gt_vals)
+        self.skipped_build += other.skipped_build
+        self.skipped_not_fc += other.skipped_not_fc
+        self.skipped_angle += other.skipped_angle
 
     def add_h_theta(self, metrics: HThetaMetrics, selected_angle: float) -> None:
         """Record one successful Htheta/relation-intent computation."""
@@ -717,6 +750,7 @@ class ResponseIntentReward(BaseReward):
         motion_relational_angle_mode: str = "symmetric",
         motion_relational_reverse_weight: float = 0.5,
         gate: str = "fc",
+        num_workers: int = 0,
         weight: float = 1.0,
         enabled: bool = True,
     ):
@@ -736,6 +770,8 @@ class ResponseIntentReward(BaseReward):
             gate: Solver-status gate.  ``fc`` scores only fully constrained
                 samples, ``converged`` scores FC and under-constrained samples,
                 and ``always`` scores every reconstructable sample.
+            num_workers: Number of process workers for per-sketch group
+                scoring.  ``0`` keeps the serial in-process path.
             weight: Composer-level multiplier from ``BaseReward``.
             enabled: Composer-level on/off switch from ``BaseReward``.
         """
@@ -763,7 +799,47 @@ class ResponseIntentReward(BaseReward):
         self.motion_relational_angle_mode = motion_relational_angle_mode
         self.motion_relational_reverse_weight = motion_relational_reverse_weight
         self.gate = gate
+        self.num_workers = max(0, int(num_workers))
         self.tokenizer = SketchTokenizer(context)
+        self._executor: ProcessPoolExecutor | None = None
+
+    def __del__(self):
+        executor = getattr(self, "_executor", None)
+        if executor is not None:
+            executor.shutdown(wait=False, cancel_futures=True)
+            self._executor = None
+
+    def _get_executor(self) -> ProcessPoolExecutor:
+        if self._executor is None:
+            self._executor = ProcessPoolExecutor(
+                max_workers=self.num_workers,
+                mp_context=mp.get_context("spawn"),
+                initializer=_init_response_intent_worker,
+                initargs=(
+                    self.context,
+                    self.eps,
+                    self.coeff_h_angle,
+                    self.cap_h_angle,
+                    self.h_angle_reward_metric,
+                    self.motion_relational_angle_mode,
+                    self.motion_relational_reverse_weight,
+                    self.gate,
+                ),
+            )
+        return self._executor
+
+    def _reset_executor(self) -> None:
+        executor = self._executor
+        self._executor = None
+        if executor is None:
+            return
+        processes = getattr(executor, "_processes", None) or {}
+        for proc in list(processes.values()):
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+        executor.shutdown(wait=False, cancel_futures=True)
 
     def _bonus(self, value: float, cap: float, coeff: float) -> float:
         """Instance wrapper for the common clipped angle-to-bonus transform."""
@@ -919,27 +995,23 @@ class ResponseIntentReward(BaseReward):
         stats.reward_vals.append(sample_reward)
         return first_stop_idx, sample_reward
 
-    @torch.no_grad()
-    def compute(self, ctx: RewardContext) -> RewardOutput:
-        """Compute sequence-level scores and scalar logging metrics for a batch."""
-        B, L = ctx.cons_tokens.shape
-        assert len(ctx.sketch_original_list) == B
-        scores = torch.zeros((B, L), dtype=torch.float32)
-
-        prim_np = ctx.prim_tokens.detach().cpu().numpy()
-        cons_np = ctx.cons_tokens.detach().cpu().numpy()
-
-        statuses = ctx.per_sample_solver_status
-        if statuses is None:
-            statuses = ["FC"] * B
-
+    def _score_serial_from_arrays(
+        self,
+        ctx: RewardContext,
+        prim_np: np.ndarray,
+        cons_np: np.ndarray,
+        statuses: list[str],
+        length: int,
+    ) -> tuple[torch.Tensor, ResponseIntentBatchStats]:
+        B = cons_np.shape[0]
+        scores = torch.zeros((B, length), dtype=torch.float32)
         stats = ResponseIntentBatchStats()
 
         for i in range(B):
             result = self._score_sample(
                 ctx,
                 i,
-                L,
+                length,
                 prim_np[i],
                 cons_np[i],
                 ctx.sketch_original_list[i],
@@ -951,4 +1023,168 @@ class ResponseIntentReward(BaseReward):
             first_stop_idx, sample_reward = result
             scores[i, first_stop_idx] += sample_reward
 
+        return scores, stats
+
+    def _score_parallel_from_arrays(
+        self,
+        ctx: RewardContext,
+        prim_np: np.ndarray,
+        cons_np: np.ndarray,
+        statuses: list[str],
+        length: int,
+    ) -> tuple[torch.Tensor, ResponseIntentBatchStats]:
+        B = cons_np.shape[0]
+        scores = torch.zeros((B, length), dtype=torch.float32)
+        stats = ResponseIntentBatchStats()
+
+        grouped: dict[int, tuple[datalib.Sketch, list[int]]] = {}
+        for i, sketch in enumerate(ctx.sketch_original_list):
+            key = id(sketch)
+            if key not in grouped:
+                grouped[key] = (sketch, [])
+            grouped[key][1].append(i)
+
+        if len(grouped) <= 1:
+            return self._score_serial_from_arrays(
+                ctx, prim_np, cons_np, statuses, length
+            )
+
+        payloads = []
+        for sketch, indices in grouped.values():
+            payloads.append(
+                (
+                    indices,
+                    prim_np[indices].copy(),
+                    cons_np[indices].copy(),
+                    sketch,
+                    [statuses[i] for i in indices],
+                    length,
+                )
+            )
+
+        try:
+            executor = self._get_executor()
+            futures = [
+                executor.submit(_score_response_intent_group, payload)
+                for payload in payloads
+            ]
+            for future in as_completed(futures):
+                placements, part_stats = future.result()
+                stats.extend(part_stats)
+                for i, first_stop_idx, sample_reward in placements:
+                    scores[i, first_stop_idx] += sample_reward
+        except Exception as exc:
+            logger.warning(
+                "parallel intent reward failed; falling back to serial: %s",
+                exc,
+            )
+            self._reset_executor()
+            return self._score_serial_from_arrays(
+                ctx, prim_np, cons_np, statuses, length
+            )
+
+        return scores, stats
+
+    @torch.no_grad()
+    def compute(self, ctx: RewardContext) -> RewardOutput:
+        """Compute sequence-level scores and scalar logging metrics for a batch."""
+        B, L = ctx.cons_tokens.shape
+        assert len(ctx.sketch_original_list) == B
+
+        prim_np = ctx.prim_tokens.detach().cpu().numpy()
+        cons_np = ctx.cons_tokens.detach().cpu().numpy()
+
+        statuses = ctx.per_sample_solver_status
+        if statuses is None:
+            statuses = ["FC"] * B
+
+        if self.num_workers > 0:
+            scores, stats = self._score_parallel_from_arrays(
+                ctx, prim_np, cons_np, statuses, L
+            )
+        else:
+            scores, stats = self._score_serial_from_arrays(
+                ctx, prim_np, cons_np, statuses, L
+            )
+
         return RewardOutput(scores=scores, metrics=stats.to_metrics_dict())
+
+
+_RESPONSE_INTENT_WORKER: ResponseIntentReward | None = None
+
+
+def _init_response_intent_worker(
+    context: SketchContext,
+    eps: float,
+    coeff_h_angle: float,
+    cap_h_angle: float,
+    h_angle_reward_metric: str,
+    motion_relational_angle_mode: str,
+    motion_relational_reverse_weight: float,
+    gate: str,
+) -> None:
+    """Initialise one process-pool worker for response-intent scoring."""
+    global _RESPONSE_INTENT_WORKER
+    try:
+        torch.set_num_threads(1)
+    except Exception:
+        pass
+    _RESPONSE_INTENT_WORKER = ResponseIntentReward(
+        context=context,
+        eps=eps,
+        coeff_h_angle=coeff_h_angle,
+        cap_h_angle=cap_h_angle,
+        h_angle_reward_metric=h_angle_reward_metric,
+        motion_relational_angle_mode=motion_relational_angle_mode,
+        motion_relational_reverse_weight=motion_relational_reverse_weight,
+        gate=gate,
+        num_workers=0,
+    )
+
+
+def _score_response_intent_group(
+    payload: tuple[
+        list[int],
+        np.ndarray,
+        np.ndarray,
+        datalib.Sketch,
+        list[str],
+        int,
+    ],
+) -> tuple[list[tuple[int, int, float]], ResponseIntentBatchStats]:
+    """Score one RLOO group in a worker process.
+
+    Grouping the K rollouts for the same GT sketch preserves the GT-side
+    caches inside the local RewardContext while still parallelising across
+    independent sketches.
+    """
+    if _RESPONSE_INTENT_WORKER is None:
+        raise RuntimeError("response-intent worker was not initialised")
+
+    indices, prim_np, cons_np, gt_sketch, statuses, length = payload
+    local_b = len(indices)
+    ctx = RewardContext(
+        prim_tokens=torch.from_numpy(prim_np),
+        cons_tokens=torch.from_numpy(cons_np),
+        sketch_original_list=[gt_sketch] * local_b,
+    )
+    stats = ResponseIntentBatchStats()
+    placements: list[tuple[int, int, float]] = []
+
+    for local_i, global_i in enumerate(indices):
+        result = _RESPONSE_INTENT_WORKER._score_sample(
+            ctx,
+            local_i,
+            length,
+            prim_np[local_i],
+            cons_np[local_i],
+            gt_sketch,
+            statuses[local_i],
+            stats,
+        )
+        if result is None:
+            continue
+        first_stop_idx, sample_reward = result
+        placements.append((global_i, first_stop_idx, sample_reward))
+
+    return placements, stats

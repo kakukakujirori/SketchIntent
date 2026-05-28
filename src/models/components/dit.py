@@ -77,29 +77,28 @@ def modulate_fused(x: torch.Tensor,
 
 
 class Rotary(torch.nn.Module):
-  def __init__(self, dim, base=10_000):
+  def __init__(self, dim, base=10_000, max_seq_len=8192):
     super().__init__()
     inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2).float() / dim))
     self.register_buffer('inv_freq', inv_freq)
-    self.seq_len_cached = None
-    self.cos_cached = None
-    self.sin_cached = None
+
+    # Precompute cos and sin up to max_seq_len to avoid mutating state during forward
+    t = torch.arange(max_seq_len, dtype=inv_freq.dtype)
+    freqs = torch.einsum("i,j->ij", t, inv_freq)
+    emb = torch.cat((freqs, freqs), dim=-1)
+    
+    cos_cached = emb.cos()[None, :, None, None, :].repeat(1, 1, 3, 1, 1)
+    sin_cached = emb.sin()[None, :, None, None, :].repeat(1, 1, 3, 1, 1)
+    cos_cached[:, :, 2, :, :].fill_(1.)
+    sin_cached[:, :, 2, :, :].fill_(0.)
+    
+    self.register_buffer('cos_cached', cos_cached, persistent=False)
+    self.register_buffer('sin_cached', sin_cached, persistent=False)
 
   def forward(self, x, seq_dim=1):
     seq_len = x.shape[seq_dim]
-    if seq_len != self.seq_len_cached:
-      self.seq_len_cached = seq_len
-      t = torch.arange(x.shape[seq_dim], device=x.device).type_as(self.inv_freq)
-      freqs = torch.einsum("i,j->ij", t, self.inv_freq.clone())
-      emb = torch.cat((freqs, freqs), dim=-1).to(x.device)
-      # dims are: batch, seq_len, qkv, head, dim
-      self.cos_cached = emb.cos()[None, :, None, None, :].repeat(1,1,3,1,1)
-      self.sin_cached = emb.sin()[None, :, None, None, :].repeat(1,1,3,1,1)
-      # This makes the transformation on v an identity.
-      self.cos_cached[:,:,2,:,:].fill_(1.)
-      self.sin_cached[:,:,2,:,:].fill_(0.)
-
-    return self.cos_cached, self.sin_cached
+    # Slicing a precomputed buffer is fast in eager mode and safe for torch.compile
+    return self.cos_cached[:, :seq_len], self.sin_cached[:, :seq_len]
 
 
 def rotate_half(x):

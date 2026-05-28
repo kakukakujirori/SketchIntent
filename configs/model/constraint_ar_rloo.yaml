@@ -27,6 +27,7 @@ reward_composer:
       penalty_rigid_dimensional: -0.0
       fully_constrained_dof: 2
       distortion_threshold: null
+      num_workers: null  # null -> auto: min(8, cpu_count // 4)
 
 optimizer:
   _target_: torch.optim.AdamW

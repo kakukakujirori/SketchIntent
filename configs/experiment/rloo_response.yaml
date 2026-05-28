@@ -5,7 +5,7 @@
 # Reward stack:
 #   0. SolverReward          — FC / DoF / per-constraint penalties
 #   1. DimParsimonyReward    — GT-excess dim hinge (Converged gate)
-#   2. ResponseIntentReward  — response_relational_angle (logged under intent_*)
+#   2. ResponseIntentReward  — motion_relational_angle (logged under intent_*)
 #   3. GainIntrinsicReward   — intrinsic-size attainability (disabled by default)
 #
 # Override individual rewards by list index, e.g.
@@ -30,16 +30,17 @@ callbacks:
     every_n_train_steps: 100
     save_top_k: 3
     filename: "epoch_{epoch}_step_{step}"
+    save_last: true
 
   model_checkpoint_loss: null
 
   model_checkpoint_reward:
     _target_: lightning.pytorch.callbacks.ModelCheckpoint
     dirpath: ${paths.output_dir}/checkpoints
-    monitor: "validation_gen/solver_fc_rate"
-    filename: "step_{step}_fc_{validation_gen/solver_fc_rate:.3f}"
+    monitor: "validation_gen/solver_valid_dof_mean"
+    filename: "step_{step}_dof_{validation_gen/solver_valid_dof_mean:.3f}"
     save_top_k: 3
-    mode: "max"
+    mode: "min"
     auto_insert_metric_name: false
     every_n_train_steps: 100
 
@@ -69,6 +70,7 @@ model:
         penalty_rigid_dimensional: -0.0
         fully_constrained_dof: 2
         distortion_threshold: null
+        num_workers: null  # null -> auto: min(8, cpu_count // 4)
 
       # Dimensional parsimony (dim-count penalty)
       - _target_: src.models.rewards.dim_parsimony.DimParsimonyReward
@@ -88,14 +90,21 @@ model:
       #   response_full_angle       = sqrt((motion_full_angle^2 + leak^2) / 2)
       #   response_relational_angle = sqrt((motion_relational_angle^2 + leak^2) / 2)
       #   (response_* metrics are normalized by sqrt(2) so they also fit [0,1].)
+      #
+      # Current canary: reward only the relation-structure motion term.  The
+      # combined response_relational_angle can give no-dimensional / empty
+      # sequences an artificially low leak term, so leak is kept as a diagnostic
+      # but not selected for reward here.
       - _target_: src.models.rewards.response_metric_reward.ResponseIntentReward
         context: ${data.context}
         eps: 1.0e-9
-        coeff_h_angle: 2.0
-        cap_h_angle: 1.0
-        h_angle_reward_metric: response_relational_angle
+        coeff_h_angle: 3.0
+        cap_h_angle: 0.70
+        h_angle_reward_metric: motion_relational_angle
         motion_relational_angle_mode: symmetric     # symmetric | pred_subset_gt | mixed_subset
         motion_relational_reverse_weight: 0.5
+        gate: converged
+        num_workers: 4
 
       # Intrinsic-size attainability bonus (gain_intrinsic). Disabled by
       # default; enable after smoke-testing the relation-intent reward.

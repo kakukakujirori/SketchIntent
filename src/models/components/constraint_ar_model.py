@@ -1,4 +1,3 @@
-import numpy as np
 import torch
 import torch.nn.functional as F
 
@@ -48,8 +47,8 @@ class ConstraintARModel(torch.nn.Module):
         """
         prim_embeddings = self.prim_model(src)  # [B, L_prim, E]
         batch_size = prim_embeddings.shape[0]
-        fixed_tokens = np.tile(range(self.constraint_token_num), (batch_size, 1))
-        fixed_tokens = torch.tensor(fixed_tokens, device=prim_embeddings.device)
+        fixed_tokens = torch.arange(self.constraint_token_num, device=prim_embeddings.device)
+        fixed_tokens = fixed_tokens.unsqueeze(0).expand(batch_size, -1)
         fixed_val_embeddings = self.val_embed(fixed_tokens)  # [B, N_special, E]
         return torch.cat([fixed_val_embeddings, prim_embeddings], dim=1)  # [B, N_special+L_prim, E]
 
@@ -102,7 +101,7 @@ class ConstraintARModel(torch.nn.Module):
         self,
         memory: torch.Tensor,
         token_ids: torch.Tensor,
-        pos: int,
+        pos: int | torch.Tensor,
     ) -> torch.Tensor:
         """Embed a single batch of tokens at position *pos*.
 
@@ -110,7 +109,7 @@ class ConstraintARModel(torch.nn.Module):
         ----------
         memory   : [B, M, E]  — output of compute_memory()
         token_ids: [B]        — integer indices into memory
-        pos      : int        — position in the sequence
+        pos      : int | Tensor  — position in the sequence (scalar tensor OK)
 
         Returns
         -------
@@ -119,10 +118,14 @@ class ConstraintARModel(torch.nn.Module):
         E = self.embed_dim
         idx = token_ids.unsqueeze(-1).unsqueeze(-1).expand(-1, 1, E)  # [B, 1, E]
         val_emb = memory.gather(1, idx)                                # [B, 1, E]
-        pos_idx = torch.full(
-            (token_ids.shape[0], 1), pos,
-            device=memory.device, dtype=torch.long,
-        )
+        if isinstance(pos, torch.Tensor):
+            # Tensor path: broadcast scalar tensor to [B, 1]
+            pos_idx = pos.expand(token_ids.shape[0]).unsqueeze(1)       # [B, 1]
+        else:
+            pos_idx = torch.full(
+                (token_ids.shape[0], 1), pos,
+                device=memory.device, dtype=torch.long,
+            )
         pos_emb = self.pos_embed(pos_idx)                             # [B, 1, E]
         return val_emb + pos_emb
 
@@ -188,9 +191,10 @@ class ConstraintARModel(torch.nn.Module):
     def decoder_step_cached(
         self,
         tgt: torch.Tensor,
-        pos: int,
+        pos: int | torch.Tensor,
         self_kv: list[tuple[torch.Tensor, torch.Tensor]],
         cross_kv: list[tuple[torch.Tensor, torch.Tensor]],
+        causal_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Run one AR step through all decoder layers with KV cache.
 
@@ -199,9 +203,12 @@ class ConstraintARModel(torch.nn.Module):
         Parameters
         ----------
         tgt      : [B, 1, E]  — embedding of the new token at position *pos*
-        pos      : int        — current sequence position (write index)
+        pos      : int | Tensor — current sequence position (write index).
+                   Pass a scalar tensor for torch.compile compatibility.
         self_kv  : list of (k_buf, v_buf) per layer, each [B, H, max_len, d_head]
         cross_kv : list of (k, v) per layer from compute_cross_kv_cache
+        causal_mask  : [1, 1, 1, max_len] attention mask (0 = attend, -inf = ignore).
+                   If None, falls back to dynamic slicing (eager-mode only).
 
         Returns
         -------
@@ -222,21 +229,32 @@ class ConstraintARModel(torch.nn.Module):
 
             # Reshape to SDPA format
             q     = q.view(B, 1, H, d).transpose(1, 2)   # [B, H, 1, d]
-            k_new = k_new.view(B, H, d)                   # [B, H, d]
-            v_new = v_new.view(B, H, d)                   # [B, H, d]
+            k_new = k_new.view(B, 1, H, d).transpose(1, 2)  # [B, H, 1, d]
+            v_new = v_new.view(B, 1, H, d).transpose(1, 2)  # [B, H, 1, d]
 
             # Write new K, V into pre-allocated buffer at position *pos*
+            # When pos is a scalar tensor, dynamo traces it symbolically
+            # (no per-value int guard → single compiled graph for all steps).
+            # Plain index assignment handles dtype conversion automatically.
             k_buf, v_buf = self_kv[i]
-            k_buf[:, :, pos, :] = k_new
-            v_buf[:, :, pos, :] = v_new
-
-            # Read the accumulated cache up to (and including) *pos*
-            k_all = k_buf[:, :, :pos + 1, :]  # [B, H, pos+1, d]
-            v_all = v_buf[:, :, :pos + 1, :]
+            k_buf[:, :, pos, :] = k_new.squeeze(2)
+            v_buf[:, :, pos, :] = v_new.squeeze(2)
 
             # SDPA — automatically uses Flash Attention on CUDA + float16/bfloat16
             attn_dp = sa.dropout if self.training else 0.0
-            sa_out = F.scaled_dot_product_attention(q, k_all, v_all, dropout_p=attn_dp)
+            if causal_mask is not None:
+                # Fixed-shape path: full buffer + mask → static tensor shapes
+                sa_out = F.scaled_dot_product_attention(
+                    q, k_buf, v_buf, attn_mask=causal_mask, dropout_p=attn_dp,
+                )
+            else:
+                # Dynamic-slice path: eager-mode fallback
+                p = pos.item() if isinstance(pos, torch.Tensor) else pos
+                k_all = k_buf[:, :, :p + 1, :]
+                v_all = v_buf[:, :, :p + 1, :]
+                sa_out = F.scaled_dot_product_attention(
+                    q, k_all, v_all, dropout_p=attn_dp,
+                )
             sa_out = sa_out.transpose(1, 2).contiguous().view(B, 1, E)
             sa_out = F.linear(sa_out, sa.out_proj.weight, sa.out_proj.bias)
 
@@ -266,3 +284,62 @@ class ConstraintARModel(torch.nn.Module):
             tgt = layer.norm3(tgt + layer.dropout3(ff_out))  # dropout3: FFN residual
 
         return tgt  # [B, 1, E]
+
+    # ------------------------------------------------------------------ #
+    #  Compiled AR step — single call combining embed + decode + logits   #
+    # ------------------------------------------------------------------ #
+
+    def generate_one_step(
+        self,
+        memory: torch.Tensor,
+        token_ids: torch.Tensor,
+        pos: torch.Tensor,
+        self_kv: list[tuple[torch.Tensor, torch.Tensor]],
+        cross_kv: list[tuple[torch.Tensor, torch.Tensor]],
+        causal_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        """One AR step: embed → decode → pointer logits.
+
+        Designed to be wrapped by torch.compile as a single compilation unit.
+        All tensor shapes are static (KV cache is full-length, masked by causal_mask).
+        ``pos`` is a scalar **tensor** (not int) to avoid per-step recompilation.
+
+        Parameters
+        ----------
+        memory    : [B, M, E]  — output of compute_memory()
+        token_ids : [B]        — token indices into memory
+        pos       : Tensor     — scalar tensor, current position in the sequence
+        self_kv   : KV cache (mutated in-place)
+        cross_kv  : precomputed cross-attention KV
+        causal_mask   : [1, 1, 1, max_len]  — causal mask for this step
+
+        Returns
+        -------
+        next_token_logits : [B, M]  — unnormalised logits over memory tokens
+        """
+        new_emb = self.embed_token_at_pos(memory, token_ids, pos)
+        dec_out = self.decoder_step_cached(new_emb, pos, self_kv, cross_kv, causal_mask)
+        # Pointer dot-product: [B, 1, E] @ [B, E, M] → [B, M]
+        logits = torch.matmul(dec_out, memory.transpose(1, 2)).squeeze(1)
+        return logits
+
+    @staticmethod
+    def build_causal_masks(
+        max_len: int,
+        device: torch.device,
+        dtype: torch.dtype = torch.float32,
+    ) -> torch.Tensor:
+        """Pre-build causal attention masks for all AR positions.
+
+        Returns
+        -------
+        masks : [max_len, 1, 1, max_len]
+            ``masks[pos]`` is the mask for step *pos*: 0 at positions 0..pos,
+            -inf at positions pos+1..max_len-1.  Shape of each slice is
+            [1, 1, max_len] — broadcast-friendly with SDPA's
+            ``[B, H, 1, max_len]``.
+        """
+        return torch.triu(
+            torch.full((max_len, max_len), float('-inf'), device=device, dtype=dtype),
+            diagonal=1,
+        ).unsqueeze(1).unsqueeze(1)  # [max_len, 1, 1, max_len]

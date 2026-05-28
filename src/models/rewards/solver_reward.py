@@ -60,6 +60,7 @@ class SolverReward(BaseReward):
         penalty_rigid_dimensional: float = -0.5,
         fully_constrained_dof: int = 2,
         distortion_threshold: float | None = None,
+        num_workers: int | None = None,
         weight: float = 1.0,
         enabled: bool = True,
     ):
@@ -82,8 +83,13 @@ class SolverReward(BaseReward):
         # Execution and caching
         self.context = context
         self.distortion_threshold = distortion_threshold or 1/context.num_quantization_bins
-        # Limit parallel workers: too many concurrent FreeCAD inits causes deadlocks.
-        self.max_workers = min(8, max(1, (os.cpu_count() or 1) // 4))
+        # Limit parallel workers by default: too many concurrent FreeCAD inits
+        # causes deadlocks.  Expose the value so experiments can coordinate it
+        # with DataLoader / other reward workers.
+        default_workers = min(8, max(1, (os.cpu_count() or 1) // 4))
+        self.max_workers = (
+            default_workers if num_workers is None else max(1, int(num_workers))
+        )
         self._evaluation_cache = {}
         self.max_cache_size = 20000
 
