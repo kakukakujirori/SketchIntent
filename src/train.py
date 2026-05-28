@@ -1,3 +1,6 @@
+import re
+import sys
+from pathlib import Path
 from typing import Any
 
 import hydra
@@ -6,7 +9,7 @@ import rootutils
 import torch
 from lightning import Callback, LightningDataModule, LightningModule, Trainer
 from lightning.pytorch.loggers import Logger
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf, open_dict
 
 rootutils.setup_root(__file__, indicator=".project-root", pythonpath=True)
 # ------------------------------------------------------------------------------------ #
@@ -39,6 +42,150 @@ from src.utils import (
 log = RankedLogger(__name__, rank_zero_only=True)
 
 
+def _override_key(override: str) -> str | None:
+    """Return the left-hand side key of a Hydra override."""
+    if override.startswith("-"):
+        return None
+    item = override.lstrip("+")
+    if item.startswith("~"):
+        item = item[1:]
+    for sep in ("=", ":"):
+        if sep in item:
+            return item.split(sep, 1)[0]
+    return item or None
+
+
+def _pop_resume_from(argv: list[str]) -> tuple[list[str], str | None]:
+    """Accept a friendly ``--resume_from DIR`` flag before Hydra parses argv."""
+    cleaned = [argv[0]]
+    resume_from: str | None = None
+    i = 1
+    while i < len(argv):
+        arg = argv[i]
+        if arg == "--resume_from":
+            if i + 1 >= len(argv):
+                raise SystemExit("--resume_from requires a run directory")
+            resume_from = argv[i + 1]
+            i += 2
+            continue
+        if arg.startswith("--resume_from="):
+            resume_from = arg.split("=", 1)[1]
+            i += 1
+            continue
+        cleaned.append(arg)
+        i += 1
+    return cleaned, resume_from
+
+
+def _prepare_resume_argv(argv: list[str]) -> list[str]:
+    """Replay saved run overrides and force Hydra to reuse the run directory."""
+    cleaned, resume_from = _pop_resume_from(argv)
+    if resume_from is None:
+        return argv
+
+    run_dir = Path(resume_from).expanduser().resolve()
+    if not run_dir.exists():
+        raise SystemExit(f"--resume_from directory does not exist: {run_dir}")
+
+    current_args = cleaned[1:]
+    first_hydra_flag = next(
+        (i for i, arg in enumerate(current_args) if arg.startswith("--")),
+        len(current_args),
+    )
+    override_args = current_args[:first_hydra_flag]
+    hydra_args = current_args[first_hydra_flag:]
+    current_keys = {
+        key for arg in override_args
+        if (key := _override_key(arg)) is not None
+    }
+
+    saved_overrides: list[str] = []
+    overrides_path = run_dir / ".hydra" / "overrides.yaml"
+    if overrides_path.exists():
+        loaded = OmegaConf.load(overrides_path)
+        saved_overrides = [str(x) for x in loaded]
+
+    resume_internal_keys = {"resume_from", "hydra.run.dir", "resume_ckpt_path"}
+    replayed = [
+        item for item in saved_overrides
+        if (
+            (key := _override_key(item)) not in current_keys
+            and key not in resume_internal_keys
+        )
+    ]
+
+    return [
+        cleaned[0],
+        *replayed,
+        *override_args,
+        f"resume_from={run_dir}",
+        f"hydra.run.dir={run_dir}",
+        *hydra_args,
+    ]
+
+
+def _latest_checkpoint(run_dir: Path) -> Path | None:
+    ckpt_dir = run_dir / "checkpoints"
+    if not ckpt_dir.exists():
+        return None
+    last_ckpt = ckpt_dir / "last.ckpt"
+    if last_ckpt.exists():
+        return last_ckpt
+    ckpts = sorted(
+        ckpt_dir.glob("*.ckpt"),
+        key=lambda p: p.stat().st_mtime,
+    )
+    return ckpts[-1] if ckpts else None
+
+
+def _wandb_run_id(run_dir: Path) -> str | None:
+    wandb_dir = run_dir / "wandb"
+    if not wandb_dir.exists():
+        return None
+    candidates = [
+        path for path in wandb_dir.iterdir()
+        if path.is_dir() and path.name.startswith("run-")
+    ]
+    if not candidates:
+        return None
+    latest = max(candidates, key=lambda p: p.stat().st_mtime)
+    match = re.match(r"run-\d{8}_\d{6}-(?P<id>.+)$", latest.name)
+    return match.group("id") if match else None
+
+
+def _configure_resume_from(cfg: DictConfig) -> None:
+    resume_from = cfg.get("resume_from")
+    if not resume_from:
+        return
+
+    run_dir = Path(str(resume_from)).expanduser().resolve()
+    ckpt_path = _latest_checkpoint(run_dir)
+    wandb_id = _wandb_run_id(run_dir)
+
+    with open_dict(cfg):
+        cfg.resume_from = str(run_dir)
+        if cfg.get("resume_ckpt_path") is None and ckpt_path is not None:
+            cfg.resume_ckpt_path = str(ckpt_path)
+        if cfg.get("resume_ckpt_path") is not None:
+            cfg.pretrained_ckpt_path = None
+        if cfg.get("trainer") is not None:
+            cfg.trainer.default_root_dir = str(run_dir)
+        if cfg.get("logger") is not None and cfg.logger.get("wandb") is not None:
+            cfg.logger.wandb.save_dir = str(run_dir)
+            if wandb_id is not None:
+                cfg.logger.wandb.id = wandb_id
+                cfg.logger.wandb.resume = "allow"
+
+    if ckpt_path is None:
+        log.warning(f"No checkpoint found under {run_dir}/checkpoints; starting without trainer resume.")
+    else:
+        log.info(f"Resuming trainer checkpoint from {ckpt_path}")
+    if wandb_id is None:
+        log.warning(f"No wandb run id found under {run_dir}/wandb; starting a new wandb run.")
+    else:
+        log.info(f"Resuming wandb run id {wandb_id}")
+
+
 @task_wrapper
 def train(cfg: DictConfig) -> tuple[dict[str, Any], dict[str, Any]]:
     """Trains the model. Can additionally evaluate on a testset, using best weights obtained during
@@ -50,6 +197,8 @@ def train(cfg: DictConfig) -> tuple[dict[str, Any], dict[str, Any]]:
     :param cfg: A DictConfig configuration composed by Hydra.
     :return: A tuple with metrics and dict with all instantiated objects.
     """
+    _configure_resume_from(cfg)
+
     # set seed for random number generators in pytorch, numpy and python.random
     if cfg.get("seed"):
         L.seed_everything(cfg.seed, workers=True)
@@ -139,4 +288,5 @@ def main(cfg: DictConfig) -> float | None:
 
 
 if __name__ == "__main__":
+    sys.argv = _prepare_resume_argv(sys.argv)
     main()

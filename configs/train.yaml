@@ -46,6 +46,12 @@ test: True
 # simply provide checkpoint path to resume training
 resume_ckpt_path: null
 
+# resume from an existing Hydra run directory.  `src/train.py --resume_from
+# logs/train/runs/...` expands this into the run's saved overrides, reuses the
+# same output directory, resumes the latest checkpoint when present, and
+# attaches to the existing wandb run when possible.
+resume_from: null
+
 # set this if you only load weights but run the training from scratch
 pretrained_ckpt_path: null
 
