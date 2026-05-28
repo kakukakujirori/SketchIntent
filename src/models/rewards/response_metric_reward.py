@@ -99,6 +99,9 @@ MOTION_RELATIONAL_ANGLE_MODES = {
 }
 
 
+_GATE_MODES = ("always", "converged", "fc")
+
+
 # response_*_angle combines two unit-angle components (motion + leak), so the
 # raw Pythagorean sum saturates at sqrt(2).  We divide by sqrt(2) so that the
 # combined response angle also lives on the [0, 1] scale, matching the
@@ -361,6 +364,7 @@ class ResponseIntentBatchStats:
             "intent_valid_n": len(self.reward_vals),
             "intent_skipped_build": self.skipped_build,
             "intent_skipped_not_fc": self.skipped_not_fc,
+            "intent_skipped_gate": self.skipped_not_fc,
             "intent_skipped_angle": self.skipped_angle,
         }
 
@@ -646,9 +650,11 @@ class ResponseIntentReward(BaseReward):
     constraint sequence.
 
     This module assumes solver status has already been computed by
-    ``SolverReward`` and gates itself to ``status == "FC"``.  That keeps the
-    intent reward from competing with the lower-level process of making a sketch
-    solvable in the first place.
+    ``SolverReward`` and can gate itself on solver status.  The default
+    ``gate="fc"`` preserves the original FC-only behavior; ``gate="converged"``
+    also scores under-constrained but solver-converged candidates, which is
+    useful when starting RL from a pretrain checkpoint that has not learned to
+    fully constrain sketches yet.
     """
 
     name = "intent"
@@ -662,6 +668,7 @@ class ResponseIntentReward(BaseReward):
         h_angle_reward_metric: str = "response_relational_angle",
         motion_relational_angle_mode: str = "symmetric",
         motion_relational_reverse_weight: float = 0.5,
+        gate: str = "fc",
         weight: float = 1.0,
         enabled: bool = True,
     ):
@@ -678,6 +685,9 @@ class ResponseIntentReward(BaseReward):
                 are compared.
             motion_relational_reverse_weight: Reverse-direction weight for the
                 ``mixed_subset`` motion-relational angle.
+            gate: Solver-status gate.  ``fc`` scores only fully constrained
+                samples, ``converged`` scores FC and under-constrained samples,
+                and ``always`` scores every reconstructable sample.
             weight: Composer-level multiplier from ``BaseReward``.
             enabled: Composer-level on/off switch from ``BaseReward``.
         """
@@ -700,13 +710,25 @@ class ResponseIntentReward(BaseReward):
                 "motion_relational_reverse_weight must be non-negative, got "
                 f"{motion_relational_reverse_weight}"
             )
+        if gate not in _GATE_MODES:
+            raise ValueError(f"gate must be one of {_GATE_MODES}, got {gate!r}")
         self.motion_relational_angle_mode = motion_relational_angle_mode
         self.motion_relational_reverse_weight = motion_relational_reverse_weight
+        self.gate = gate
         self.tokenizer = SketchTokenizer(context)
 
     def _bonus(self, value: float, cap: float, coeff: float) -> float:
         """Instance wrapper for the common clipped angle-to-bonus transform."""
         return _linear_bonus(value, cap, coeff)
+
+    def _gate_pass(self, status: str | None) -> bool:
+        if self.gate == "always" or status is None:
+            return True
+        if self.gate == "converged":
+            return status in ("FC", "Under")
+        if self.gate == "fc":
+            return status == "FC"
+        return False
 
     def _score_h_theta(
         self,
@@ -754,10 +776,10 @@ class ResponseIntentReward(BaseReward):
 
         Returns:
             ``(first_stop_idx, reward)`` when sketch reconstruction succeeded
-            and the sample passed the FC gate.  ``None`` when the sample should
-            not receive an intent-reward score.
+            and the sample passed the configured solver-status gate.  ``None``
+            when the sample should not receive an intent-reward score.
         """
-        if solver_status != "FC":
+        if not self._gate_pass(solver_status):
             stats.skipped_not_fc += 1
             return None
 
