@@ -1,8 +1,76 @@
 import torch
 import torch.nn.functional as F
 
+from src.models.components import dit
 from src.models.components.primitive_model import PrimitiveModel
 from src.sketch_handlers.constants import ConstraintToken
+
+
+def _apply_rotary_to_qk(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    rotary_cos_sin: tuple[torch.Tensor, torch.Tensor],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    cos, sin = rotary_cos_sin
+    cos = cos[:, :, 0].to(q.dtype)
+    sin = sin[:, :, 0].to(q.dtype)
+    return (
+        q * cos + dit.rotate_half(q) * sin,
+        k * cos + dit.rotate_half(k) * sin,
+    )
+
+
+class RoPECausalDecoderLayer(torch.nn.TransformerDecoderLayer):
+    """TransformerDecoderLayer with RoPE applied only to causal self-attention."""
+
+    def _rope_self_attn(
+        self,
+        tgt: torch.Tensor,
+        rotary_cos_sin: tuple[torch.Tensor, torch.Tensor],
+    ) -> torch.Tensor:
+        B, L, E = tgt.shape
+        H = self.self_attn.num_heads
+        d = E // H
+
+        qkv = F.linear(tgt, self.self_attn.in_proj_weight, self.self_attn.in_proj_bias)
+        qkv = qkv.view(B, L, 3, H, d)
+        q = qkv[:, :, 0]
+        k = qkv[:, :, 1]
+        v = qkv[:, :, 2]
+
+        with torch.amp.autocast('cuda', enabled=False):
+            q, k = _apply_rotary_to_qk(q, k, rotary_cos_sin)
+
+        q = q.transpose(1, 2)  # [B, H, L, d]
+        k = k.transpose(1, 2)
+        v = v.transpose(1, 2)
+
+        dropout_p = self.self_attn.dropout if self.training else 0.0
+        attn_out = F.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            dropout_p=dropout_p,
+            is_causal=True,
+        )
+        attn_out = attn_out.transpose(1, 2).contiguous().view(B, L, E)
+        return F.linear(
+            attn_out,
+            self.self_attn.out_proj.weight,
+            self.self_attn.out_proj.bias,
+        )
+
+    def forward(
+        self,
+        tgt: torch.Tensor,
+        memory: torch.Tensor,
+        rotary_cos_sin: tuple[torch.Tensor, torch.Tensor],
+    ) -> torch.Tensor:
+        x = tgt
+        x = self.norm1(x + self.dropout1(self._rope_self_attn(x, rotary_cos_sin)))
+        x = self.norm2(x + self._mha_block(x, memory, None, None, False))
+        x = self.norm3(x + self._ff_block(x))
+        return x
 
 
 class ConstraintARModel(torch.nn.Module):
@@ -13,26 +81,36 @@ class ConstraintARModel(torch.nn.Module):
     """
     def __init__(self,
                  num_bins: int,
-                 max_token_length: int,
                  embed_dim: int,
                  feedforward_dim: int,
                  num_heads: int,
                  num_layers: int,
                  dropout: float = 0):
         super().__init__()
+        if embed_dim % num_heads != 0 or (embed_dim // num_heads) % 2 != 0:
+            raise ValueError("RoPE requires an even head dimension")
         self.constraint_token_num = len(ConstraintToken)
+        self.embed_dim = embed_dim
+        self.num_heads = num_heads
+        self.head_dim = embed_dim // num_heads
         # Primitive model (for dynamic embeddings)
-        self.prim_model = PrimitiveModel(num_bins, max_token_length, embed_dim, num_heads, num_layers, dropout)
+        self.prim_model = PrimitiveModel(num_bins, embed_dim, num_heads, num_layers, dropout)
         # Value embeddings (only fixed ones)
         num_val_embeddings = self.constraint_token_num
         self.val_embed = torch.nn.Embedding(num_val_embeddings, embed_dim, padding_idx=ConstraintToken.Pad)
-        # Position embeddings
-        num_pos_embeddings = max_token_length
-        self.pos_embed = torch.nn.Embedding(num_pos_embeddings, embed_dim, padding_idx=ConstraintToken.Pad)
+        # RoPE replaces nn.Embedding-based absolute position encoding.
+        self.rotary_emb = dit.Rotary(self.head_dim)
         # Transformer decoder
-        decoder_layers = torch.nn.TransformerDecoderLayer(embed_dim, num_heads, feedforward_dim, dropout=dropout, batch_first=True)
-        self.trans_decoder = torch.nn.TransformerDecoder(decoder_layers, num_layers)
-        self.embed_dim = embed_dim
+        self.layers = torch.nn.ModuleList([
+            RoPECausalDecoderLayer(
+                embed_dim,
+                num_heads,
+                feedforward_dim,
+                dropout=dropout,
+                batch_first=True,
+            )
+            for _ in range(num_layers)
+        ])
 
     def compute_memory(self, src: dict[str, torch.Tensor]) -> torch.Tensor:
         """Compute the decoder memory (primitive + special-token embeddings).
@@ -60,15 +138,10 @@ class ConstraintARModel(torch.nn.Module):
             prim_embeddings = memory  # reuse precomputed memory
 
         # Gather embeddings for constraint tokens
-        batch_size, seq_len = src['c_val'].shape[:2]
         c_val_indices = src['c_val'].unsqueeze(-1).expand(-1, -1, self.embed_dim)
         val_embeddings = torch.gather(prim_embeddings, 1, c_val_indices)
 
-        # Generate position indices internally (0, 1, 2, ..., seq_len-1)
-        pos_indices = torch.arange(seq_len, device=src['c_val'].device).unsqueeze(0).expand(batch_size, -1)
-        pos_embeddings = self.pos_embed(pos_indices)
-        embeddings = val_embeddings + pos_embeddings
-        return embeddings, prim_embeddings
+        return val_embeddings, prim_embeddings
 
     def forward(self, src: dict[str, torch.Tensor], memory: torch.Tensor | None = None):
         """Forward pass.
@@ -84,10 +157,11 @@ class ConstraintARModel(torch.nn.Module):
         """
         # Embed
         c_embeddings, p_embeddings = self._embed_tokens(src, memory=memory)
-        # Pass to transformer with causal mask
-        seq_len = c_embeddings.shape[1]
-        tgt_mask = c_embeddings.new_full((seq_len, seq_len), fill_value=float('-inf')).triu_(diagonal=1)
-        output = self.trans_decoder(c_embeddings, p_embeddings, tgt_mask)
+        # Pass to transformer with causal self-attention.
+        rotary_cos_sin = self.rotary_emb(c_embeddings)
+        output = c_embeddings
+        for layer in self.layers:
+            output = layer(output, p_embeddings, rotary_cos_sin)
         # Pointer dot-product
         p_embeddings = p_embeddings.transpose(1, 2)
         output = torch.matmul(output, p_embeddings)
@@ -97,19 +171,17 @@ class ConstraintARModel(torch.nn.Module):
     #  KV-cache API for efficient autoregressive generation               #
     # ------------------------------------------------------------------ #
 
-    def embed_token_at_pos(
+    def embed_token(
         self,
         memory: torch.Tensor,
         token_ids: torch.Tensor,
-        pos: int | torch.Tensor,
     ) -> torch.Tensor:
-        """Embed a single batch of tokens at position *pos*.
+        """Embed a single batch of tokens.
 
         Parameters
         ----------
         memory   : [B, M, E]  — output of compute_memory()
         token_ids: [B]        — integer indices into memory
-        pos      : int | Tensor  — position in the sequence (scalar tensor OK)
 
         Returns
         -------
@@ -117,17 +189,24 @@ class ConstraintARModel(torch.nn.Module):
         """
         E = self.embed_dim
         idx = token_ids.unsqueeze(-1).unsqueeze(-1).expand(-1, 1, E)  # [B, 1, E]
-        val_emb = memory.gather(1, idx)                                # [B, 1, E]
+        return memory.gather(1, idx)                                    # [B, 1, E]
+
+    def _rotary_at_pos(
+        self,
+        pos: int | torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Fetch RoPE cos/sin for a single cached decoding position."""
         if isinstance(pos, torch.Tensor):
-            # Tensor path: broadcast scalar tensor to [B, 1]
-            pos_idx = pos.expand(token_ids.shape[0]).unsqueeze(1)       # [B, 1]
-        else:
-            pos_idx = torch.full(
-                (token_ids.shape[0], 1), pos,
-                device=memory.device, dtype=torch.long,
+            pos_idx = pos.reshape(1).to(
+                device=self.rotary_emb.cos_cached.device,
+                dtype=torch.long,
             )
-        pos_emb = self.pos_embed(pos_idx)                             # [B, 1, E]
-        return val_emb + pos_emb
+            cos = self.rotary_emb.cos_cached.index_select(1, pos_idx)
+            sin = self.rotary_emb.sin_cached.index_select(1, pos_idx)
+        else:
+            cos = self.rotary_emb.cos_cached[:, pos:pos + 1]
+            sin = self.rotary_emb.sin_cached[:, pos:pos + 1]
+        return cos, sin
 
     def compute_cross_kv_cache(
         self,
@@ -148,7 +227,7 @@ class ConstraintARModel(torch.nn.Module):
         """
         B, M, E = memory.shape
         caches: list[tuple[torch.Tensor, torch.Tensor]] = []
-        for layer in self.trans_decoder.layers:
+        for layer in self.layers:
             ca = layer.multihead_attn
             H  = ca.num_heads
             d  = E // H
@@ -177,7 +256,7 @@ class ConstraintARModel(torch.nn.Module):
         Pre-allocation avoids repeated torch.cat() calls (O(L²) memory copies)
         that would occur with a naive append-each-step approach.
         """
-        layer0 = self.trans_decoder.layers[0]
+        layer0 = self.layers[0]
         H = layer0.self_attn.num_heads
         d = self.embed_dim // H
         return [
@@ -185,7 +264,7 @@ class ConstraintARModel(torch.nn.Module):
                 torch.zeros(batch_size, H, max_len, d, device=device, dtype=dtype),
                 torch.zeros(batch_size, H, max_len, d, device=device, dtype=dtype),
             )
-            for _ in self.trans_decoder.layers
+            for _ in self.layers
         ]
 
     def decoder_step_cached(
@@ -216,7 +295,7 @@ class ConstraintARModel(torch.nn.Module):
         """
         B, _, E = tgt.shape
 
-        for i, layer in enumerate(self.trans_decoder.layers):
+        for i, layer in enumerate(self.layers):
             H = layer.self_attn.num_heads
             d = E // H
 
@@ -224,21 +303,32 @@ class ConstraintARModel(torch.nn.Module):
             sa = layer.self_attn
 
             # Fused QKV projection: one GEMM for all three projections
-            qkv    = F.linear(tgt, sa.in_proj_weight, sa.in_proj_bias)  # [B, 1, 3E]
-            q, k_new, v_new = qkv.split(E, dim=-1)                      # each [B, 1, E]
+            qkv = F.linear(tgt, sa.in_proj_weight, sa.in_proj_bias)  # [B, 1, 3E]
+            qkv = qkv.view(B, 1, 3, H, d)
+            q = qkv[:, :, 0]
+            k_new = qkv[:, :, 1]
+            v_new = qkv[:, :, 2]
+
+            with torch.amp.autocast('cuda', enabled=False):
+                cos, sin = self._rotary_at_pos(pos)
+                q, k_new = _apply_rotary_to_qk(q, k_new, (cos, sin))
 
             # Reshape to SDPA format
-            q     = q.view(B, 1, H, d).transpose(1, 2)   # [B, H, 1, d]
-            k_new = k_new.view(B, 1, H, d).transpose(1, 2)  # [B, H, 1, d]
-            v_new = v_new.view(B, 1, H, d).transpose(1, 2)  # [B, H, 1, d]
+            q     = q.transpose(1, 2)  # [B, H, 1, d]
+            k_new = k_new.transpose(1, 2)
+            v_new = v_new.transpose(1, 2)
 
             # Write new K, V into pre-allocated buffer at position *pos*
             # When pos is a scalar tensor, dynamo traces it symbolically
             # (no per-value int guard → single compiled graph for all steps).
-            # Plain index assignment handles dtype conversion automatically.
             k_buf, v_buf = self_kv[i]
-            k_buf[:, :, pos, :] = k_new.squeeze(2)
-            v_buf[:, :, pos, :] = v_new.squeeze(2)
+            if isinstance(pos, torch.Tensor):
+                pos_idx = pos.reshape(1)
+                k_buf.index_copy_(2, pos_idx, k_new)
+                v_buf.index_copy_(2, pos_idx, v_new)
+            else:
+                k_buf[:, :, pos:pos + 1, :] = k_new
+                v_buf[:, :, pos:pos + 1, :] = v_new
 
             # SDPA — automatically uses Flash Attention on CUDA + float16/bfloat16
             attn_dp = sa.dropout if self.training else 0.0
@@ -317,7 +407,7 @@ class ConstraintARModel(torch.nn.Module):
         -------
         next_token_logits : [B, M]  — unnormalised logits over memory tokens
         """
-        new_emb = self.embed_token_at_pos(memory, token_ids, pos)
+        new_emb = self.embed_token(memory, token_ids)
         dec_out = self.decoder_step_cached(new_emb, pos, self_kv, cross_kv, causal_mask)
         # Pointer dot-product: [B, 1, E] @ [B, E, M] → [B, M]
         logits = torch.matmul(dec_out, memory.transpose(1, 2)).squeeze(1)
