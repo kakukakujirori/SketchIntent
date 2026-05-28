@@ -602,11 +602,16 @@ def pairwise_distance_observable(
     dtype: torch.dtype = torch.float64,
 ) -> torch.Tensor:
     """
-    Build J_φ for φ(x) = pairwise distances between all primitive subnodes
-    (Line.start/end, Circle.center, Arc.start/end/center, Point).
+    Build J_φ for φ(x) = (pairwise distances between all primitive subnodes,
+    Circle/Arc radii).
 
     Pairwise distances are rigid-motion-invariant, so this projects out the
     gauge ambiguity that plain primitive-coordinate comparison would mix in.
+    Circle/Arc radii are scalar invariants under rigid motion, so appending
+    them keeps the invariance property while making intrinsic radius
+    constraints (e.g. Equal between two Circles, Radius itself) visible —
+    without them, Circle.center is the only subnode and radius DOFs sit in
+    the kernel of J_φ.
 
     Returns
     -------
@@ -616,6 +621,7 @@ def pairwise_distance_observable(
     base_set = set(base_eids) if base_eids is not None else None
 
     refs: list[str] = []
+    radius_eids: list[str] = []
     for eid, ent in sketch.entities.items():
         if base_set is not None and eid not in base_set:
             continue
@@ -624,35 +630,48 @@ def pairwise_distance_observable(
             refs.append(f"{eid}.end")
         elif isinstance(ent, datalib.Circle):
             refs.append(f"{eid}.center")
+            radius_eids.append(eid)
         elif isinstance(ent, datalib.Arc):
             refs.append(f"{eid}.start")
             refs.append(f"{eid}.end")
             refs.append(f"{eid}.center")
+            radius_eids.append(eid)
         elif isinstance(ent, datalib.Point):
             refs.append(eid)
 
     n_refs = len(refs)
-    if n_refs < 2:
+    n_radii = len(radius_eids)
+    if n_refs < 2 and n_radii == 0:
         return torch.zeros(0, state.num_dof(), dtype=dtype)
 
-    # Pre-compute pair indices as long tensors once; inside the AD trace we
-    # gather over them so the per-pair Python loop (with its O(num_pairs)
-    # get_point and linalg_norm calls) collapses to a single batched norm.
-    ia = torch.tensor(
-        [i for i in range(n_refs) for _ in range(i + 1, n_refs)],
-        dtype=torch.long,
-    )
-    ib = torch.tensor(
-        [j for i in range(n_refs) for j in range(i + 1, n_refs)],
-        dtype=torch.long,
-    )
+    if n_refs >= 2:
+        # Pre-compute pair indices as long tensors once; inside the AD trace we
+        # gather over them so the per-pair Python loop (with its O(num_pairs)
+        # get_point and linalg_norm calls) collapses to a single batched norm.
+        ia = torch.tensor(
+            [i for i in range(n_refs) for _ in range(i + 1, n_refs)],
+            dtype=torch.long,
+        )
+        ib = torch.tensor(
+            [j for i in range(n_refs) for j in range(i + 1, n_refs)],
+            dtype=torch.long,
+        )
+    else:
+        ia = ib = None
 
     def fn(q: torch.Tensor) -> torch.Tensor:
         s = _StateWithQ(state, q)
-        # One get_point per ref (linear), not per (i, j) pair (quadratic).
-        pts = torch.stack([s.get_point(r) for r in refs], dim=0)  # (n_refs, 2)
-        diffs = pts.index_select(0, ia) - pts.index_select(0, ib)
-        return torch.linalg.norm(diffs, dim=1)
+        parts: list[torch.Tensor] = []
+        if ia is not None:
+            # One get_point per ref (linear), not per (i, j) pair (quadratic).
+            pts = torch.stack([s.get_point(r) for r in refs], dim=0)  # (n_refs, 2)
+            diffs = pts.index_select(0, ia) - pts.index_select(0, ib)
+            parts.append(torch.linalg.norm(diffs, dim=1))
+        if radius_eids:
+            parts.append(torch.stack(
+                [s.get_radius(e) for e in radius_eids], dim=0
+            ))
+        return torch.cat(parts, dim=0) if len(parts) > 1 else parts[0]
 
     J = torch.func.jacfwd(fn)(state.q.detach())
     if J.ndim == 1:

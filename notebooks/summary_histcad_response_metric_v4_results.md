@@ -10,23 +10,48 @@
 > [artifacts/v4_exp/](../artifacts/v4_exp/) および
 > [artifacts/v4_exp_angle/](../artifacts/v4_exp_angle/) 下。
 
+> **2026-05-28 更新 (X6: phi に Circle/Arc radius を追加)**
+> [src/metrics/edit_response_distance.py](../src/metrics/edit_response_distance.py)
+> の `pairwise_distance_observable` が `Circle` の `center` のみを subnode と
+> していたため、`Equal(Circle, Circle)` のような radius のみを束縛する
+> relational constraint が J_phi の kernel に落ち、`d_sub` / `d_H` / `d_H_angle`
+> がそうした design intent を検知できない構造的盲点があった。修正として、
+> radius は rigid-motion-invariant な scalar 量なので
+> `Circle.radius` / `Arc.radius` を phi に scalar observable として append。
+>
+> 修正後の v4 controls フル再走 (n=3846, 6 batches, dim_drop {25,50,75,100} ×
+> rel_drop {50,100}) の artifact は
+> [artifacts/v4_exp_x6/](../artifacts/v4_exp_x6/)。本文書の §3–§5, §5.1, §7,
+> §13.1, §15 の表は再走の数値に上書き済み。
+> §6 (R2 連続性 sweep), §13.2 (sensitivity sweep),
+> §13.3 (R3 subset cohort), §13.4 (PP-Coincident), §13.5 (smatch),
+> §13.6 (strict-gate), §14 (case P d_SVD) は別データセットに依存する
+> ablation のため pre-X6 数値のまま。再走の優先度は本 doc §16 で議論する。
+
 ## TL;DR
 
 **2026-05-24 更新: 最終推奨は Case Hθ (`d_sub_angle` + `leak_angle`)。単一 scalar が必要な
 表では `d_H_angle = sqrt(d_sub_angle^2 + leak_angle^2)` を使う。**
 
+**2026-05-28 更新 (X6): `pairwise_distance_observable` に Circle/Arc radius を
+scalar として append。Equal(Circle, Circle) のような radius-only relation が
+phi の kernel に落ちる構造的盲点を解消。下記の z 値は X6 後の re-run の数値。**
+
 - v4.md §9 で暫定 1 位だった案 K (relation-preserving controllability) と案 M
   (stack 版) は、本実験で **solver_rl に対し sign inversion** を起こすことが判明し
   失格。effort 項 `λ ||u||^2` が "controllable な model 出力" を不当に reward し、
   HistCAD OES が base を不当に reward した failure mode と同型の問題を起こす。
-- 案 H は v3 `d_feas` より paired discrimination が同等以上 (base z: 11.68 →
-  13.62, solver_rl z: 9.06 → 11.23)、かつ per-rotation の連続性 (R2) も改善
+- 案 H は v3 `d_feas` より paired discrimination が同等以上 (base z: 11.59 →
+  13.64, solver_rl z: 9.06 → 11.95)、かつ per-rotation の連続性 (R2) も改善
   (distinct values per rotation: 4 → 6, monotonic transitions: 34% → 49%)。
 - ただし旧 `d_H = sqrt(d_sub^2 + leak_prime^2)` は total score 上ほぼ `d_sub` に支配される。
   `leak_prime` は単独 signal は強いが、scale が小さく scalar 合成に効きにくい。
 - `leak_angle = ||orth(row(J_R))^T U_P||_F / sqrt(dim V_P)` に変更すると、`d_sub_angle`
-  と同じ angular scale に乗る。solver_rl では `d_H_angle` が旧 `d_H` を上回り
-  (`z=+12.36` vs `+11.24`)、`leak_angle` 単独は最強 (`z=+13.25`)。
+  と同じ angular scale に乗る。solver_rl では `d_H_angle` が依然 `d_H` を上回り
+  (`z=+12.59` vs `+11.95`)、`leak_angle` 単独は最強 (`z=+13.25`)。
+- X6 で `d_sub` 単体の solver_rl 識別力が +10.70 → +11.91 と大幅強化されたため、
+  `d_H_angle` との差は従来の z=1.66 → 0.68 まで縮まった (`d_sub` が radius 系
+  relational mismatch を自前で拾えるようになったため)。
 - したがって paper では **`d_sub_angle` / `leak_angle` の 2 軸 report を主診断** とし、
   scalar が必要な場合に `d_H_angle` を使う。最大限 parsimonious な main metric が
   必要なら `d_sub` または `d_sub_angle` main + `leak_angle` mandatory diagnostic。
@@ -68,81 +93,94 @@ v3 と同設定: 6 batches `{0, 4, 6, 8, 9, 11}` × 5 humans
 `{Eko, Johnny, Ryotaro, Sagar, Tanaka}`. 共通 files: 159, 有効
 rotations: 396 (heldout), Vitruvion paired: base=307, solver_rl=366.
 
-## 3. Variant 別 median (full 6 batches, n=396)
+## 3. Variant 別 median (full 6 batches, n=396) — X6 後
 
 | variant | n | d_feas | d_sub | d_H | leak_prime | d_K | d_M | gain_K | leak_K |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | source_self | 396 | 0.0000 | 0.0000 | 0.0000 | 0.0000 | 0.0202 | 0.0129 | 0.0022 | 0.0000 |
-| heldout | 396 | 0.0000 | 0.0000 | 0.0000 | 0.0000 | 0.0226 | 0.0183 | 0.0027 | 0.0000 |
-| dim_drop25 | 396 | 0.0002 | 0.5000 | 0.5107 | 0.0000 | 0.0672 | 0.4590 | 0.0261 | 0.0000 |
-| dim_drop50 | 396 | 0.1476 | 0.7071 | 0.7071 | 0.0000 | 0.4093 | 0.7072 | 0.4083 | 0.0000 |
-| dim_drop75 | 396 | 0.4415 | 0.8660 | 0.8660 | 0.0000 | 0.7087 | 0.8452 | 0.7071 | 0.0000 |
+| heldout | 396 | 0.0000 | 0.0000 | 0.0000 | 0.0000 | 0.0224 | 0.0183 | 0.0027 | 0.0000 |
+| dim_drop25 | 396 | 0.0002 | 0.5348 | 0.5424 | 0.0000 | 0.0665 | 0.4578 | 0.0252 | 0.0000 |
+| dim_drop50 | 396 | 0.1547 | 0.7071 | 0.7071 | 0.0000 | 0.4093 | 0.7072 | 0.4083 | 0.0000 |
+| dim_drop75 | 396 | 0.4430 | 0.8660 | 0.8660 | 0.0000 | 0.7087 | 0.8452 | 0.7071 | 0.0000 |
 | dim_drop100 | 396 | 1.0000 | 1.0000 | 1.0000 | 0.0000 | 1.0000 | 1.0000 | 1.0000 | 0.0000 |
-| rel_drop50 | 396 | 0.2977 | 0.9142 | 0.9405 | 0.1948 | 0.6898 | 0.6725 | 0.6879 | 0.0491 |
-| rel_drop100 | 396 | 0.4296 | 1.0709 | 1.1047 | 0.2532 | 0.7186 | 0.7833 | 0.7148 | 0.0469 |
-| **base** | 309 | 0.1213 | 0.7749 | 0.7749 | 0.0216 | 0.3786 | 0.5277 | 0.3780 | 0.0002 |
-| **solver_rl** | 369 | 0.0426 | 0.5161 | 0.5195 | 0.0732 | **0.0201** | **0.0152** | 0.0026 | 0.0002 |
+| rel_drop50 | 396 | 0.2975 | 0.8783 | 0.9031 | 0.1935 | 0.6895 | 0.6720 | 0.6872 | 0.0482 |
+| rel_drop100 | 396 | 0.4284 | 1.0409 | 1.0834 | 0.2530 | 0.7184 | 0.7843 | 0.7145 | 0.0468 |
+| **base** | 309 | 0.1213 | 0.7188 | 0.7354 | 0.0212 | 0.3786 | 0.5290 | 0.3780 | 0.0002 |
+| **solver_rl** | 369 | 0.0421 | 0.5195 | 0.5321 | 0.0732 | **0.0201** | **0.0151** | 0.0026 | 0.0002 |
 
-`d_K` / `d_M` で **solver_rl が heldout (0.023/0.018) より小さい** ことに注意。
+`d_K` / `d_M` で **solver_rl が heldout (0.022/0.018) より小さい** ことに注意。
 これが下記の sign inversion の原因。
+
+X6 で `d_sub` / `d_H` の絶対値は dim_drop sweep の ceiling 形状 (0.7071, 0.8660,
+1.0000) を完全保存。rel_drop / base は `max(dim_P, dim_G)` 正規化の分母が
+radius 列を含むぶん増えるため median 値が数 % 下がる。dim_drop25 だけは
+0.5000 → 0.5348 と上昇するが、これは radius observable が dim drop の被害を
+受けやすい (Radius constraint が drop されると radius scalar の rank が直接
+減る) ためで、monotonicity / ceiling 性質には影響しない。
 
 ## 4. Paired Wilcoxon (model vs heldout)
 
 `h_better` は人間優位 rotation 数、`m_better` は model 優位 rotation 数、
 `z>0` は人間優位 (lower-is-better).
 
-### 4.1 base モデル (under-constrained gate=Converged を通る)
+### 4.1 base モデル (under-constrained gate=Converged を通る) — X6 後
 
 | metric | n | h | m | t | z | p |
 |---|---:|---:|---:|---:|---:|---:|
-| d_feas | 307 | 217 | 27 | 63 | +11.69 | 1.5e-31 |
-| d_sub | 307 | 257 | 31 | 19 | +13.63 | 2.8e-42 |
-| **d_H** | 307 | 257 | 35 | 15 | **+13.62** | **3.0e-42** |
-| leak_prime | 307 | 167 | 44 | 96 | +9.39 | 6.1e-21 |
-| d_K | 307 | 225 | 69 | 13 | +11.31 | 1.1e-29 |
-| d_M | 307 | 238 | 52 | 17 | +12.00 | 3.4e-33 |
-| gain_I | 307 | 185 | 104 | 18 | +6.85 | 7.5e-12 |
-| gain_J | 307 | 172 | 113 | 22 | +5.52 | 3.3e-08 |
+| d_feas | 306 | 216 | 27 | 63 | +11.59 | 4.5e-31 |
+| d_sub | 306 | 254 | 31 | 21 | +13.67 | 1.6e-42 |
+| **d_H** | 306 | 253 | 35 | 18 | **+13.64** | **2.3e-42** |
+| leak_prime | 306 | 166 | 44 | 96 | +9.33 | 1.1e-20 |
+| d_K | 306 | 224 | 69 | 13 | +11.26 | 2.1e-29 |
+| d_M | 306 | 236 | 53 | 17 | +11.94 | 7.1e-33 |
+| gain_I | 306 | 183 | 105 | 18 | +6.86 | 7.1e-12 |
+| gain_J | 306 | 171 | 113 | 22 | +5.45 | 5.1e-08 |
 
-base に対しては全候補が同方向 (人間優位) で検出。
+base に対しては全候補が同方向 (人間優位) で検出。X6 で `d_sub` の z は
++13.63 → +13.67、`d_H` は +13.62 → +13.64 と僅かに強化。`leak_prime` は
+ほぼ不変 (+9.39 → +9.33、X6 が primitive 空間 leak を変えないため)。
 
-### 4.2 solver_rl モデル (fully-constrained, RL fine-tuned)
+### 4.2 solver_rl モデル (fully-constrained, RL fine-tuned) — X6 後
 
 | metric | n | h | m | t | z | p |
 |---|---:|---:|---:|---:|---:|---:|
-| d_feas | 366 | 195 | 39 | 132 | +9.06 | 1.3e-19 |
-| d_sub | 366 | 243 | 75 | 48 | +10.69 | 1.2e-26 |
-| **d_H** | 366 | **256** | 74 | 36 | **+11.23** | **3.0e-29** |
-| leak_prime | 366 | 230 | 26 | 110 | +12.68 | 7.8e-37 |
-| **d_K** | 366 | **109** | **233** | 24 | **−4.53** | **5.8e-6 (逆方向)** |
-| d_K_pure | 366 | 152 | 182 | 32 | +0.23 | 0.82 (n.s.) |
-| **d_M** | 366 | **106** | **229** | 31 | **−8.41** | **4.0e-17 (逆方向)** |
-| d_M_pure | 366 | 169 | 151 | 46 | −2.69 | 0.007 (弱逆方向) |
-| gain_I | 366 | 137 | 198 | 31 | −2.23 | 0.026 (弱逆方向) |
-| gain_J | 366 | 109 | 221 | 36 | −6.74 | 1.6e-11 (逆方向) |
+| d_feas | 365 | 195 | 38 | 132 | +9.06 | 1.3e-19 |
+| d_sub | 365 | 259 | 66 | 40 | **+11.91** | **1.0e-32** |
+| **d_H** | 365 | 262 | 68 | 35 | **+11.95** | **6.8e-33** |
+| leak_prime | 365 | 229 | 26 | 110 | +12.65 | 1.2e-36 |
+| **d_K** | 365 | **108** | **233** | 24 | **−4.55** | **5.5e-6 (逆方向)** |
+| d_K_pure | 365 | 151 | 182 | 32 | +0.15 | 0.88 (n.s.) |
+| **d_M** | 365 | **104** | **230** | 31 | **−8.62** | **6.6e-18 (逆方向)** |
+| d_M_pure | 365 | 168 | 151 | 46 | −2.82 | 0.005 (弱逆方向) |
+| gain_I | 365 | 140 | 196 | 29 | −1.73 | 0.083 (n.s.) |
+| gain_J | 365 | 110 | 219 | 36 | −6.65 | 3.0e-11 (逆方向) |
 
-**Sign inversion の発見**: `d_K` / `d_M` / `gain_I` / `gain_J` は solver_rl に対して
-**人間より良いと判定** する (z < 0)。具体的に d_M は h=106 vs m=229
-(model_better が 2 倍以上) で **p=4e-17 という強い逆方向シグナル**。
+**Sign inversion 構造は維持** (X6 で probe-free / probe-retaining の本質的差異は
+変わらない)。`d_K` / `d_M` / `gain_J` の逆方向は v3.md §6.1 で HistCAD OES が
+base に対し起こしていた sign inversion (h=75 vs m=204, p=2.2e-19) と同型の
+failure mode で、effort 項 / probe optimization 由来。
 
-これは v3.md §6.1 で HistCAD OES が base に対し起こしていた sign inversion
-(h=75 vs m=204, p=2.2e-19) と同型の failure mode。
+**X6 で `d_sub` の判別力が大幅強化** (z: +10.69 → +11.91, p: 10^−26 →
+10^−33)。これは radius 系 relational mismatch が phi で見えるようになった
+直接の効果で、solver_rl が落とす radius driver / Equal(circle) を `d_sub`
+side で初めて検出できるようになったため。`d_H` も同様 (z: +11.23 → +11.95)。
+`leak_prime` は X6 と独立 (primitive 空間) なのでほぼ不変 (+12.68 → +12.65)。
 
-## 5. d_H decomposition (full 6 batches)
+## 5. d_H decomposition (full 6 batches) — X6 後
 
 | variant | d_sub (subspace) | leak_prime (operator) | d_H |
 |---|---:|---:|---:|
 | source_self | 0.000 | 0.000 | 0.000 |
 | heldout | 0.000 | 0.000 | 0.000 |
 | dim_drop50 | 0.707 | 0.000 | 0.707 |
-| rel_drop50 | 0.914 | 0.195 | 0.941 |
-| **base** | 0.775 | 0.022 | 0.775 |
-| **solver_rl** | 0.516 | **0.073** | 0.520 |
+| rel_drop50 | 0.878 | 0.194 | 0.903 |
+| **base** | 0.719 | 0.021 | 0.735 |
+| **solver_rl** | 0.520 | **0.073** | 0.532 |
 
-base と solver_rl で `leak_prime` を比べると **solver_rl のほうが大きい (0.073 vs 0.022)**。
+base と solver_rl で `leak_prime` を比べると **solver_rl のほうが大きい (0.073 vs 0.021)**。
 これは:
 
-- base は under-constrained で subspace 構造自体が大きく異なる (d_sub=0.78)。
+- base は under-constrained で subspace 構造自体が大きく異なる (d_sub=0.72)。
   relational 情報を持つ次元自体が少ないため leak_prime が小さくなる
 - solver_rl は dim 構造を人間に近付けたが (d_sub=0.52)、追加された relations が
   source GT の relations とは異なるため leak_prime が増えた
@@ -150,10 +188,13 @@ base と solver_rl で `leak_prime` を比べると **solver_rl のほうが大�
 これは v3.md §7 の「solver_rl は gain は閉じるが leak は閉じない、むしろ若干悪化
 (0.059 → 0.068)」観察と整合する。
 
-**leak_prime 単独でも solver_rl 検出力が最強 (z=+12.68, p=7.8e-37)**。
-d_H が d_sub より優位なのは leak_prime の追加情報による。
+**leak_prime 単独でも solver_rl 検出力が最強 (z=+12.65, p=1.2e-36)**。
+X6 で `d_sub` の z は base で +13.63 → +13.67、solver_rl で +10.69 → +11.91 に
+強化されたため、`d_sub` 単独で見ても solver_rl の relational mismatch を旧よりも
+強く拾うようになっている。それでも solver_rl では `leak_prime` 単独が依然
+最強で、`d_H` ≈ `d_sub` < `leak_prime` という順序は維持。
 
-### 5.1 2026-05-24 追試: angular leak 版
+### 5.1 2026-05-24 追試: angular leak 版 (2026-05-28 X6 反映)
 
 上記の解釈は component diagnostic としては正しいが、scalar `d_H` では
 `leak_prime` の絶対値が小さく、total score はほぼ `d_sub` になる。そこで
@@ -164,39 +205,45 @@ angular scale に揃えた。
 |---|---:|---:|---:|---:|---:|---:|
 | source_self | 0.0000 | 0.0000 | 0.0000 | 0.0000 | 0.0000 | 0.0000 |
 | heldout | 0.0000 | 0.0000 | 0.0000 | 0.0000 | 0.0000 | 0.0000 |
-| dim_drop25 | 0.5000 | 0.5129 | 0.0000 | 0.5000 | 0.0000 | 0.5333 |
+| dim_drop25 | 0.5348 | 0.5424 | 0.0000 | 0.5000 | 0.0000 | 0.5613 |
 | dim_drop50 | 0.7071 | 0.7071 | 0.0000 | 0.7071 | 0.0000 | 0.7071 |
-| rel_drop50 | 0.9133 | 0.9396 | 0.1935 | 0.7000 | 0.6584 | 0.9606 |
-| rel_drop100 | 1.0707 | 1.1046 | 0.2530 | 0.8179 | 0.7921 | 1.1380 |
-| **base** | 0.7640 | 0.7667 | 0.0212 | 0.7071 | 0.2634 | 0.8637 |
-| **solver_rl** | 0.5130 | 0.5130 | 0.0732 | 0.5000 | 0.4472 | 0.6883 |
+| rel_drop50 | 0.8783 | 0.9031 | 0.1935 | 0.6616 | 0.6584 | 0.9387 |
+| rel_drop100 | 1.0409 | 1.0834 | 0.2530 | 0.7863 | 0.7921 | 1.1167 |
+| **base** | 0.7188 | 0.7354 | 0.0212 | 0.6602 | 0.2634 | 0.8202 |
+| **solver_rl** | 0.5195 | 0.5321 | 0.0732 | 0.5000 | 0.4472 | 0.6831 |
 
 `leak_angle` は `leak_prime` と違い、solver_rl / rel_drop で `d_sub_angle` と同程度の
 スケールに乗る。したがって `d_H_angle` では relation mismatch が total score に
 実際に効く。
 
-Paired Wilcoxon の主要比較:
+Paired Wilcoxon の主要比較 (X6 後):
 
 | model | metric | n | h | m | t | z | p |
 |---|---|---:|---:|---:|---:|---:|---:|
-| base | d_sub | 306 | 254 | 30 | 22 | +13.57 | 5.7e-42 |
-| base | d_sub_angle | 306 | 249 | 35 | 22 | +13.28 | 3.0e-40 |
-| base | d_H | 306 | 254 | 33 | 19 | +13.57 | 6.2e-42 |
-| base | d_H_angle | 306 | 257 | 30 | 19 | +13.46 | 2.6e-41 |
+| base | d_sub | 306 | 254 | 31 | 21 | +13.67 | 1.6e-42 |
+| base | d_sub_angle | 306 | 248 | 37 | 21 | +13.34 | 1.5e-40 |
+| base | d_H | 306 | 253 | 35 | 18 | +13.64 | 2.3e-42 |
+| base | d_H_angle | 306 | 256 | 32 | 18 | +13.49 | 1.7e-41 |
 | base | leak_angle | 306 | 167 | 45 | 94 | +9.31 | 1.3e-20 |
-| solver_rl | d_sub | 365 | 243 | 73 | 49 | +10.70 | 1.1e-26 |
-| solver_rl | d_sub_angle | 365 | 245 | 72 | 48 | +10.73 | 7.2e-27 |
-| solver_rl | d_H | 365 | 256 | 72 | 37 | +11.24 | 2.7e-29 |
-| solver_rl | d_H_angle | 365 | 266 | 61 | 38 | +12.36 | 4.6e-35 |
+| solver_rl | d_sub | 365 | 259 | 66 | 40 | +11.91 | 1.0e-32 |
+| solver_rl | d_sub_angle | 365 | 260 | 66 | 39 | +11.96 | 6.1e-33 |
+| solver_rl | d_H | 365 | 262 | 68 | 35 | +11.95 | 6.8e-33 |
+| solver_rl | d_H_angle | 365 | 267 | 63 | 35 | +12.59 | 2.4e-36 |
 | solver_rl | leak_angle | 365 | 239 | 15 | 111 | +13.25 | 4.6e-40 |
 
-結論:
+結論 (X6 後の更新):
 
-- base では `d_H_angle` は `d_sub` / 旧 `d_H` とほぼ同水準だが、わずかに弱い。
-- solver_rl では `d_H_angle` が `d_sub` と旧 `d_H` を明確に上回る。
-- `leak_angle` 単独は solver_rl の relational mismatch 検出で最強。
-- よって `d_sub` だけで十分とは言い切れない。特に solver_rl の failure mode を
-  評価するなら、`leak_angle` を mandatory diagnostic として残すべき。
+- base では `d_H_angle` は `d_sub` / 旧 `d_H` とほぼ同水準で、僅かに弱い (X6 前と
+  同じ性質)。
+- solver_rl では `d_H_angle` が依然 `d_sub` を上回る (+12.59 vs +11.91) が、
+  X6 で `d_sub` 自身が +10.70 → +11.91 と大幅強化されたため、両者の差は
+  従来の 1.66 → 0.68 まで縮まった。これは「X6 後の `d_sub` が radius 系
+  relational mismatch をだいぶ自前で拾えるようになった」ことの数値的裏付け。
+- `leak_angle` 単独は solver_rl の relational mismatch 検出で依然最強 (z=+13.25)。
+  X6 と独立 (primitive 空間) なため数値も完全保持。
+- 推奨は維持: 主診断は `d_sub_angle` / `leak_angle` の 2 軸、scalar が必要な
+  場合に `d_H_angle`。X6 後は `d_sub` (angular でない素朴版) も solver_rl
+  identification に対しほぼ同等の強さを持つ。
 
 ## 6. R2 連続性 (dim_drop sweep, 10% 刻み, batch 0+9)
 
@@ -213,32 +260,35 @@ Paired Wilcoxon の主要比較:
 (distinct=4, monotonic 34%) より明確に改善 (distinct=6, monotonic 49%) し、かつ
 frac↓ は v3 と同じ 11% を維持。
 
-## 7. Annotator variance absorption (heldout 分布)
+## 7. Annotator variance absorption (heldout 分布) — X6 後
 
 | metric | median | Q75 | Q90 | frac<1e-4 |
 |---|---:|---:|---:|---:|
-| d_feas | 0.0000 | 0.0010 | 0.1224 | 0.730 |
-| d_sub | 0.0000 | 0.4083 | 0.5774 | 0.583 |
-| **d_H** | 0.0000 | 0.4169 | 0.5774 | **0.524** |
-| d_K | 0.0226 | 0.0470 | 0.3440 | 0.000 |
-| d_M | 0.0183 | 0.2099 | 0.4566 | 0.000 |
+| d_feas | 0.0000 | 0.0009 | 0.1226 | 0.735 |
+| d_sub | 0.0000 | 0.4082 | 0.5774 | 0.577 |
+| **d_H** | 0.0000 | 0.4123 | 0.5774 | **0.526** |
+| d_K | 0.0224 | 0.0460 | 0.3445 | 0.000 |
+| d_M | 0.0183 | 0.2099 | 0.4573 | 0.000 |
 
-Hθ 追試での angular 版:
+Hθ 追試での angular 版 (X6 後):
 
 | metric | median | Q75 | Q90 | frac<1e-4 |
 |---|---:|---:|---:|---:|
-| d_sub | 0.0000 | 0.4083 | 0.5774 | 0.584 |
-| d_H | 0.0000 | 0.4184 | 0.5774 | 0.526 |
+| d_sub | 0.0000 | 0.4082 | 0.5774 | 0.577 |
+| d_H | 0.0000 | 0.4123 | 0.5774 | 0.526 |
 | leak_prime | 0.0000 | 0.0015 | 0.0872 | 0.727 |
-| d_sub_angle | 0.0000 | 0.4082 | 0.5490 | 0.584 |
+| d_sub_angle | 0.0000 | 0.4082 | 0.5345 | 0.577 |
 | leak_angle | 0.0000 | 0.1313 | 0.4472 | 0.709 |
-| d_H_angle | 0.0000 | 0.5000 | 0.6705 | 0.523 |
+| d_H_angle | 0.0000 | 0.4971 | 0.6364 | 0.526 |
 
-**Trade-off**:
-- `d_feas` は heldout の frac<1e-4=0.73 (annotator variance を強く吸収)
-- `d_H` は frac<1e-4=0.52 (約 1/4 の human-human ペアに非ゼロ d_H を与える)
-- `d_H_angle` も near-zero 率は旧 `d_H` と同程度だが、Q75/Q90 は広がる。
-  relation mismatch を強く見る代わりに human-human tail もやや強く罰する。
+**Trade-off** (X6 後でも構造は維持):
+- `d_feas` は heldout の frac<1e-4=0.735 (annotator variance を強く吸収)
+- `d_H` は frac<1e-4=0.53 (約 1/2 の human-human ペアに near-zero、残りに非ゼロ
+  tail)。X6 前 (0.524) とほぼ同じ
+- `d_H_angle` の Q90 は X6 で 0.671 → 0.636 と僅かに縮小 (radius observable で
+  共通土俵が広がるため human-human の subspace mismatch が相対的に小さくなる)。
+  near-zero 率は X6 と無関係に旧 `d_H` と同水準
+- `leak_angle` 系は X6 と独立 (primitive 空間)、絶対値も完全同一
 
 `d_H` の heldout 上位 tail は dim count mismatch (一方の human が 4 obs dims、
 他方が 16 obs dims) の場合に発生する。これは **intent-equivalent でない真の
@@ -263,19 +313,23 @@ human-human distance 分布が広がるのは事実。
 
 `d_K` / `d_M` は **N3b** および **N13** で失格。
 
-### R (degree) 評価
+### R (degree) 評価 — X6 後の R1 / R11 更新
 
 | criterion | d_feas | d_sub | **d_H** | **d_H_angle** |
 |---|---|---|---|---|
-| R1 paired \|z\| (base / solver_rl) | 11.7 / 9.1 | 13.6 / 10.7 | 13.6 / 11.2 | **13.5 / 12.4** |
+| R1 paired \|z\| (base / solver_rl) | 11.6 / 9.1 | **13.7 / 11.9** | **13.6 / 11.9** | **13.5 / 12.6** |
 | R2 連続性 (distinct/rotation, monotonic↑) | 4 / 34% | 5 / 47% | **6 / 49%** | (要 R2 sweep) |
-| R3 subset cohort discrimination | (要追加実験) | (要追加実験) | (要追加実験) | (要追加実験) |
+| R3 subset cohort discrimination | (pre-X6) | (pre-X6) | (pre-X6) | (pre-X6) |
 | R4 分解 richness | gain/leak (gain binary) | rank/align (rank integer) | gain' / leak' | **subspace angle / leak angle** |
 | R5 ablation robustness | ✓ (v3 で確認) | (要検証) | (要検証) | (要検証) |
 | R6 design parsimony | 中 (probe必要) | **高** | **高** | **高** |
 | R10 finite consistency | (v3 で部分検証) | (要検証) | (要検証) | (要検証) |
-| R11 human-distribution calibration | heldout frac<1e-4=0.73 | 0.58 | 0.52 | 0.52 |
+| R11 human-distribution calibration | heldout frac<1e-4=0.735 | 0.577 | 0.526 | 0.526 |
 | R12 computational usability | (probe LS) | SVD のみ | **SVD のみ** | **SVD のみ** |
+
+X6 で R1 が顕著に動いた: solver_rl `d_sub` z が 10.7 → 11.9、`d_H` z が
+11.2 → 11.9。`d_H_angle` の優位はやや薄まる (12.4 → 12.6、`d_sub` との差が
+1.7 → 0.7 に)。base 側はほぼ同水準。
 
 ## 9. 結論と推奨
 
@@ -590,26 +644,26 @@ cohort / smatch correlation のすべてで主結果 (人間 > model, p << 1e-10
 なる。本セクションでは §3 / §4 で出していない 2 表 — **`d_H` decomposition
 table per drop rate** と **OES-`d_H` divergent cases per model** — のみ追加する。
 
-#### 13.1.1 §6.2 dropout sweep の連続値分解 (n=396)
+#### 13.1.1 §6.2 dropout sweep の連続値分解 (n=396) — X6 後
 
 | variant | `d_feas` | `d_H` | `d_sub` (gain') | `leak_prime` (leak') |
 |---|---:|---:|---:|---:|
 | source_self | 0.0000 | 0.0000 | 0.0000 | 0.0000 |
 | heldout | 0.0000 | 0.0000 | 0.0000 | 0.0000 |
-| dim_drop25 | 0.0002 | 0.5107 | 0.5000 | 0.0000 |
-| dim_drop50 | 0.1476 | 0.7071 | 0.7071 | 0.0000 |
-| dim_drop75 | 0.4415 | 0.8660 | 0.8660 | 0.0000 |
+| dim_drop25 | 0.0002 | 0.5424 | 0.5348 | 0.0000 |
+| dim_drop50 | 0.1547 | 0.7071 | 0.7071 | 0.0000 |
+| dim_drop75 | 0.4430 | 0.8660 | 0.8660 | 0.0000 |
 | dim_drop100 | 1.0000 | 1.0000 | 1.0000 | 0.0000 |
-| rel_drop50 | 0.2977 | 0.9405 | 0.9142 | 0.1948 |
-| rel_drop100 | 0.4296 | 1.1047 | 1.0709 | 0.2532 |
-| **base** | 0.1213 | 0.7749 | 0.7749 | 0.0216 |
-| **solver_rl** | 0.0426 | 0.5195 | 0.5161 | 0.0732 |
+| rel_drop50 | 0.2975 | 0.9031 | 0.8783 | 0.1935 |
+| rel_drop100 | 0.4284 | 1.0834 | 1.0409 | 0.2530 |
+| **base** | 0.1213 | 0.7354 | 0.7188 | 0.0212 |
+| **solver_rl** | 0.0421 | 0.5321 | 0.5195 | 0.0732 |
 
 `d_sub` / `leak_prime` 分解は v3 の `gain`/`leak` (binary 的) と等価な
 診断軸を **連続・微分可能** な形で提供する。base→solver_rl で
-`d_sub` 0.77→0.52 (subspace は人間に接近) / `leak_prime` 0.022→0.073
+`d_sub` 0.72→0.52 (subspace は人間に接近) / `leak_prime` 0.021→0.073
 (relational mismatch は悪化) という、v3 §7 の「RL は gain を直すが leak は
-閉じない」構造を再現。
+閉じない」構造を維持。
 
 #### 13.1.2 §9 OES vs `d_H` divergent cases (base, top-5)
 
@@ -1067,7 +1121,7 @@ paired Wilcoxon では `d_SVD_sub_trunc` / `d_SVD_top1` が sigma_rel を上回�
   study を追加するかは paper revision の判断
 
 
-## 15. Hθ angular leak 追試まとめ (2026-05-24)
+## 15. Hθ angular leak 追試まとめ (2026-05-24, 2026-05-28 X6 反映)
 
 `leak_prime` は単独では強いが、`d_H = sqrt(d_sub^2 + leak_prime^2)` の total score では
 絶対値が小さく、実質的に `d_sub` が支配的になる。この scale mismatch を解消するため、
@@ -1081,21 +1135,63 @@ paired Wilcoxon では `d_SVD_sub_trunc` / `d_SVD_top1` が sigma_rel を上回�
 - [exp_v4_controls.py](v4_exp/exp_v4_controls.py): CSV 出力キー追加
 - [analyze_v4.py](v4_exp/analyze_v4.py): quantile / paired / dropout sweep 集計に追加
 
-Artifacts:
+Artifacts (X6 後の full re-run):
 
-- [v4_controls_scores_full.csv](../artifacts/v4_exp_angle/v4_controls_scores_full.csv)
-- [v4_controls_details_full.csv](../artifacts/v4_exp_angle/v4_controls_details_full.csv)
-- [v4_quantile_table.csv](../artifacts/v4_exp_angle/v4_quantile_table.csv)
-- [v4_paired_stats.csv](../artifacts/v4_exp_angle/v4_paired_stats.csv)
-- [v4_dropout_sweep.csv](../artifacts/v4_exp_angle/v4_dropout_sweep.csv)
+- [v4_controls_scores_full.csv](../artifacts/v4_exp_x6/v4_controls_scores_full.csv)
+- [v4_controls_details_full.csv](../artifacts/v4_exp_x6/v4_controls_details_full.csv)
+- [v4_quantile_table.csv](../artifacts/v4_exp_x6/v4_quantile_table.csv)
+- [v4_paired_stats.csv](../artifacts/v4_exp_x6/v4_paired_stats.csv)
+- [v4_dropout_sweep.csv](../artifacts/v4_exp_x6/v4_dropout_sweep.csv)
 
-結論:
+(pre-X6 の artifact は [v4_exp_angle/](../artifacts/v4_exp_angle/) に保持。)
+
+結論 (X6 後の更新):
 
 - `leak_angle` は `leak_prime` と違い、solver_rl / rel_drop で `d_sub_angle` と同程度の
-  scale に乗る。
-- solver_rl paired discrimination は `d_sub` z=+10.70、旧 `d_H` z=+11.24、
-  `d_H_angle` z=+12.36、`leak_angle` z=+13.25。
-- base では `d_H_angle` は旧 `d_H` / `d_sub` とほぼ同水準で、わずかに弱い。
-- heldout tail は旧 `d_H` よりやや広がる (`d_H_angle` Q90=0.6705 vs `d_H` Q90=0.5774)。
-- したがって **`d_sub` だけで十分とは判断しない**。`leak_angle` を mandatory diagnostic
-  として残し、単一 scalar が必要なら `d_H_angle` を使う。
+  scale に乗る。X6 と独立 (primitive 空間) なため絶対値も完全保持。
+- solver_rl paired discrimination は `d_sub` z=+11.91 (X6 で +10.70 → +11.91)、
+  旧 `d_H` z=+11.95 (+11.24 → +11.95)、`d_H_angle` z=+12.59 (+12.36 → +12.59)、
+  `leak_angle` z=+13.25 (不変)。
+- X6 で `d_sub` が大きく強化された結果、`d_H_angle` の優位は縮まった
+  (旧 1.66 差 → 0.68 差)。それでも solver_rl では `d_H_angle` > `d_sub` の順序は維持。
+- base では `d_H_angle` は旧 `d_H` / `d_sub` とほぼ同水準で、わずかに弱い (X6 前と同じ)。
+- heldout tail は X6 で僅かに縮小 (`d_H_angle` Q90=0.6364 vs X6 前 0.6705)。
+- 推奨は維持: **`d_sub` だけで十分とは判断しない**。`leak_angle` を mandatory diagnostic
+  として残し、単一 scalar が必要なら `d_H_angle` を使う。X6 後の `d_sub` 単体強化は
+  scalar simplification のオプションを広げるが、failure mode 分解 (gain' / leak')
+  の有用性は変わらない。
+
+## 16. X6 以降の pending re-run (2026-05-28)
+
+X6 で `pairwise_distance_observable` に Circle/Arc radius を append した結果、
+J_phi に依存する metric (= `d_sub`, `d_H`, `d_H_angle`, `d_K`, `d_M`, `d_SVD_*`
+全変種) の数値が変化する。本 doc §3, §4, §5, §5.1, §7, §13.1, §15 は再走後の
+数値で更新済みだが、以下の ablation は別途追加データセットを生成する必要があるため
+pre-X6 の数値のまま残してある:
+
+| 節 | 内容 | 再走に必要な追加 run |
+|---|---|---|
+| §6 | R2 連続性 sweep (10% 刻み dim/rel drop) | `exp_v4_controls.py --dim-drop-rates 10,20,...,90,100 --rel-drop-rates 50 --no-eval-models` |
+| §13.2 | Sensitivity sweep (eps / delta-scale / bbox を ±1 桁) | 6 full runs (eps={1e-7,1e-11} × delta-scale={0.005,0.05} × bbox={0.5,2.0}) |
+| §13.3 | R3 subset cohort (`n_dim_G ≤ 3`) | `analyze_dH_paper.py` 系の再走 |
+| §13.4 | PP-Coincident 除外 ablation | `exp_v4_controls.py --exclude-pp-coincident` 1 run |
+| §13.5 | smatch correlation | `exp_smatch_metric.py` 出力との join |
+| §13.6 | Strict-gate cohort | 旧 OES CSV cohort restrict |
+| §14 | 案 P (d_SVD) フル評価 | tau sweep / R3 cohort / PP / strict-gate の各 dedicated run |
+
+優先度:
+
+1. **§13.3 (R3 subset cohort)** — fully-constrained regime での `d_sub` 強化が
+   `d_H_angle` の優位を完全に消すか確認。X6 後の `d_sub` z 強化 (+10.70 → +11.91)
+   が cohort restrict 後にも保持されるかが paper claim の根幹に影響する
+2. **§13.4 (PP-Coincident 除外)** — X6 と直交する ablation だが、X6 後の z 上昇が
+   PP-Coincident に支えられていないことを確認するために必要
+3. §13.2 (sensitivity sweep) — X6 後の `d_sub` z 強化が hyperparameter 設定に
+   依存しないことの確認。±0.15 程度の swing で収まるはず
+4. §6 (R2 連続性) — radius observable で per-rotation 連続性がさらに改善するか確認
+5. §14 (d_SVD) — Case P は appendix supplement 扱いなので優先度低
+6. §13.5 (smatch correlation), §13.6 (Strict-gate) — paper supplement 用なので
+   余力があれば実施
+
+再走スクリプトは sequential で 1 run あたり ~4 min なので、全部やっても
+1 時間以内で完了する。

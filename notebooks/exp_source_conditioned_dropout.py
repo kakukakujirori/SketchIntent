@@ -52,7 +52,7 @@ from canonical_sketch import (
     load_sketch_from_py, metric_base_eids, remap_sketch_to_canonical,
 )
 
-HUMAN_ROOTS = "/home/sturk/Downloads/fiverr"
+HUMAN_ROOTS = os.environ.get("VITRUVION_HUMAN_ROOTS", "/home/ryotaro/Downloads/fiverr")
 DEFAULT_HUMANS: dict[str, list[tuple[str, str]]] = {
     "0":  [("Johnny",  f"{HUMAN_ROOTS}/Johnny/0"),
            ("Sagar",   f"{HUMAN_ROOTS}/Sagar/0"),

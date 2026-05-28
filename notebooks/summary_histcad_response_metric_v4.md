@@ -677,6 +677,18 @@ Vit vs heldout の paired Wilcoxon の `|z|` (大きいほど良い)。base / so
    Hθ では `orth(row(J_{R_G}))` と `U_P` の subspace overlap を `leak_angle` として測る。
 4. **観測空間版**: `J_phi` を bbox 正規化された vertex Jacobian として、`J_phi U_C` の
    range で同じことを繰り返す。
+   > **2026-05-28 追記 (X6)**: `J_phi` の subnode 構成では Circle が `{eid}.center`
+   > のみだったため、radius DOF が `J_phi` の kernel に落ち `Equal(Circle, Circle)`
+   > のような radius-only relation が観測空間で見えない構造的盲点があった。
+   > Circle / Arc radius は rigid-motion-invariant な scalar 量なので
+   > `state.get_radius(eid)` を scalar observable として append すれば不変性は
+   > 保たれ盲点が解消される ([src/metrics/edit_response_distance.py:599-678](../src/metrics/edit_response_distance.py#L599-L678))。
+   > `center + (r, 0)` のような virtual perimeter point を ref に加える方式は
+   > offset 方向が sketch frame に固定されているため pairwise distance の
+   > rigid-motion invariance を破る — scalar radius を append するのが clean な
+   > 唯一の道。実験結果は
+   > [`summary_histcad_response_metric_v4_results.md`](summary_histcad_response_metric_v4_results.md)
+   > 冒頭の "2026-05-28 更新" を参照。
 5. **paired 統計**: 現 `d_feas` の dataset (`v3_controls_scores_full.csv` の cohort) を
    そのまま再利用。新指標を同 CSV にカラム追加 (`d_sub`, `gain_prime`, `leak_prime`,
    `d_H`, `d_sub_angle`, `leak_angle`, `d_H_angle`, `d_obs`)。
