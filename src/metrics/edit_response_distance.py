@@ -197,6 +197,77 @@ def constraint_jacobian(
     return jac
 
 
+def _constraint_refs_resolvable(constraint: datalib.Constraint, state: SketchState) -> bool:
+    """Mirror :func:`constraint_jacobian`'s missing-ref bailout."""
+    for ref in _ref_strings(constraint):
+        eid = ref.split(".", 1)[0]
+        if eid.startswith("-"):
+            continue
+        if eid not in state.slices:
+            return False
+    return True
+
+
+def _probe_residual_width(
+    constraint: datalib.Constraint,
+    handler,
+    state: SketchState,
+) -> int | None:
+    """Forward-only probe of the residual's flat length.
+
+    Returns ``None`` if ``handler.residual`` raises or yields an empty tensor —
+    matching how :func:`constraint_jacobian` skips such constraints.  This lets
+    callers pre-filter the constraint list before issuing a single batched
+    ``jacfwd``, so AD only runs over constraints that are guaranteed to
+    contribute a positive-width Jacobian block.
+    """
+    try:
+        r = handler.residual(constraint, state)
+    except Exception:
+        return None
+    w = int(r.reshape(-1).shape[0])
+    return w if w > 0 else None
+
+
+def _jacfwd_stacked_residuals(
+    entries: list[tuple[datalib.Constraint, "object", int]],
+    state: SketchState,
+) -> torch.Tensor:
+    """Return the Jacobian of all entry residuals stacked, via one ``jacfwd``.
+
+    ``entries`` is a sequence of ``(constraint, handler, width)`` tuples that
+    have already been pre-filtered by :func:`_probe_residual_width` so each
+    contributes ``width`` rows to the stacked output.  The fall-back path of
+    the per-entry residual is to emit a ``width``-row zero block; this keeps
+    a single mid-trace handler failure from corrupting the row layout that
+    the caller assumes.
+
+    Replaces the N individual ``jacfwd`` calls that
+    :func:`constraint_jacobian` would otherwise issue inside
+    :func:`compute_native_response` and :func:`stack_relation_jacobians_at`.
+    """
+    dtype = state.q.dtype
+    n_x = state.num_dof()
+    if not entries:
+        return torch.zeros(0, n_x, dtype=dtype)
+
+    def fn(q: torch.Tensor) -> torch.Tensor:
+        s = _StateWithQ(state, q)
+        rows: list[torch.Tensor] = []
+        for c, h, w in entries:
+            try:
+                r = h.residual(c, s)
+                rows.append(r.reshape(-1))
+            except Exception:
+                rows.append(torch.zeros(w, dtype=q.dtype, device=q.device))
+        return torch.cat(rows, dim=0)
+
+    jac = torch.func.jacfwd(fn)(state.q.detach())
+    if jac.ndim == 1:
+        jac = jac.unsqueeze(0)
+    return jac
+
+
 # ---------------------------------------------------------------------------
 # Native dimension response  R_C = -pinv(J_x) J_p
 # ---------------------------------------------------------------------------
@@ -248,44 +319,50 @@ def compute_native_response(
     if constraint_ids is None:
         constraint_ids = list(sketch.constraints.keys())
 
-    jac_rows: list[torch.Tensor] = []
+    # Pre-filter constraints exactly like the per-constraint loop did:
+    # skip missing constraints, unknown handlers, unresolvable refs, and
+    # residuals that raise / are empty.  Probing residual widths up-front lets
+    # the AD pass run as a single ``jacfwd`` over the stacked residual vector.
     Jp_col_for_row: list[int] = []
     dim_ids: list[str] = []
-
+    entries: list[tuple[datalib.Constraint, object, int]] = []
     for cid in constraint_ids:
         constraint = sketch.constraints.get(cid)
         if constraint is None:
             continue
-        jac = constraint_jacobian(constraint, state, context)
-        if jac is None or jac.shape[0] == 0:
+        handler = context.get_constraint_handler(constraint.constraint_type.name)
+        if handler is None:
+            continue
+        if not _constraint_refs_resolvable(constraint, state):
+            continue
+        width = _probe_residual_width(constraint, handler, state)
+        if width is None:
             continue
 
         if _is_dimensional(constraint):
-            if jac.shape[0] != 1:
+            if width != 1:
                 raise AssertionError(
                     f"Dimensional constraint {cid} "
                     f"({constraint.constraint_type.name}) produced "
-                    f"{jac.shape[0]} residual rows; native response assumes "
+                    f"{width} residual rows; native response assumes "
                     "exactly 1 row per native dimensional parameter. Update "
                     "compute_native_response to map row→column explicitly "
                     "before adding multi-row dimensional handlers."
                 )
             col_idx = len(dim_ids)
             dim_ids.append(cid)
-            jac_rows.append(jac)
             Jp_col_for_row.append(col_idx)
         else:
-            for i in range(jac.shape[0]):
-                jac_rows.append(jac[i:i + 1])
-                Jp_col_for_row.append(-1)
+            Jp_col_for_row.extend([-1] * width)
+        entries.append((constraint, handler, width))
 
-    if not jac_rows:
+    if not entries:
         J_x = torch.zeros(0, n_x, dtype=dtype)
         J_p = torch.zeros(0, 0, dtype=dtype)
         R = torch.zeros(n_x, 0, dtype=dtype)
         return NativeResponse(state, J_x, J_p, R, [])
 
-    J_x = torch.cat(jac_rows, dim=0)
+    J_x = _jacfwd_stacked_residuals(entries, state)
     n_p = len(dim_ids)
     J_p = torch.zeros(J_x.shape[0], n_p, dtype=dtype)
     for row_idx, col in enumerate(Jp_col_for_row):

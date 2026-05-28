@@ -15,7 +15,10 @@ import sketchgraphs.data as datalib
 
 from src.metrics.edit_response_distance import (
     NativeResponse,
+    _constraint_refs_resolvable,
     _is_relational,
+    _jacfwd_stacked_residuals,
+    _probe_residual_width,
     constraint_jacobian,
     pairwise_distance_observable,
 )
@@ -42,16 +45,30 @@ def stack_relation_jacobians_at(
     state: SketchState,
     context: SketchContext,
 ) -> tuple[torch.Tensor | None, int]:
-    """Concatenate relation-constraint Jacobians evaluated at the given state."""
-    rows: list[torch.Tensor] = []
+    """Concatenate relation-constraint Jacobians evaluated at the given state.
+
+    Pre-filters constraints with the same checks as
+    :func:`constraint_jacobian` (handler lookup, ref resolvability, residual
+    probe) and then issues a single ``jacfwd`` over the stacked residual
+    vector instead of one call per relation.
+    """
+    entries: list[tuple[object, object, int]] = []
     for rel in rels:
-        j = constraint_jacobian(rel, state, context)
-        if j is None or j.shape[0] == 0:
+        handler = context.get_constraint_handler(rel.constraint_type.name)
+        if handler is None:
             continue
-        rows.append(j)
-    if not rows:
+        if not _constraint_refs_resolvable(rel, state):
+            continue
+        width = _probe_residual_width(rel, handler, state)
+        if width is None:
+            continue
+        entries.append((rel, handler, width))
+
+    if not entries:
         return None, 0
-    Jr = torch.cat(rows, dim=0)
+    Jr = _jacfwd_stacked_residuals(entries, state)
+    if Jr.shape[0] == 0:
+        return None, 0
     return Jr, int(Jr.shape[0])
 
 
