@@ -4,12 +4,6 @@ For each primitive whose intrinsic size is a natural driving parameter
 (Line → Length, Arc/Circle → Radius), build a synthetic probe and measure
 how reachable that probe is via the predicted edit response.  Lower gain
 means better attainability; the reward is a linear bonus on (cap - gain).
-
-This is the standalone home for the ``gain_intrinsic`` signal previously
-embedded in ``RelStructReward``.  The relation-leak and relation-motion terms
-move to ``ResponseIntentReward`` (``leak_relational_angle`` /
-``motion_relational_angle``) and ``dim_penalty`` moves to
-``DimParsimonyReward``.
 """
 from __future__ import annotations
 

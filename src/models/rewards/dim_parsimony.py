@@ -1,9 +1,4 @@
 """DimParsimonyReward — penalty on the number of dimensional constraints.
-
-Single home for the dim-count parsimony term that previously lived in both
-``SolverReward`` (``penalty_num_dimensional_constraints``) and
-``RelStructReward`` (``dim_penalty``).  Modes mirror the legacy
-``RelStructReward.dim_penalty_mode`` values.
 """
 from __future__ import annotations
 

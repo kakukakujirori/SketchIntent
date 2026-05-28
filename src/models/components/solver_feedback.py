@@ -541,7 +541,7 @@ class SolverFeedback:
             If True, also return a per-sample status string list with the same
             naming convention as SolverReward.collect_results
             ({"FC","Under","Distorted","Conflicting","Redundant","Malformed",
-            "Failed"}).  Used by downstream rewards (e.g. RelStructReward) that
+            "Failed"}).  Used by downstream rewards (e.g. ResponseIntentReward) that
             gate by per-sample status.
 
         Returns
