@@ -40,6 +40,7 @@ from src.models.rewards.utils.probes import (
 from src.models.rewards.utils.sketch_builder import (
     get_or_build_pred_native,
     get_or_compute_gt_native,
+    get_or_compute_j_phi,
 )
 from src.sketch_handlers.constants import ConstraintToken
 from src.sketch_handlers.context import SketchContext
@@ -213,6 +214,9 @@ def _compute_probe_response_svd_metrics(
     edit_probes: list,
     context,
     tau_p: float,
+    *,
+    J_phi_pred: torch.Tensor | None = None,
+    J_phi_gt: torch.Tensor | None = None,
 ) -> ProbeResponseSVDMetrics | None:
     """Return probe-response SVD metrics for a single Pred/GT pair.
 
@@ -220,14 +224,18 @@ def _compute_probe_response_svd_metrics(
     empty observable space, no native dimensional response columns, or no probe
     whose Jacobian can be evaluated on both Pred and GT.
     """
-    J_phi_P = pairwise_distance_observable(
-        pred_sketch,
-        dtype=pred_native.R.dtype,
-    ).to(dtype=pred_native.R.dtype)
-    J_phi_G = pairwise_distance_observable(
-        gt_sketch,
-        dtype=gt_native.R.dtype,
-    ).to(dtype=gt_native.R.dtype)
+    if J_phi_pred is None:
+        J_phi_pred = pairwise_distance_observable(
+            pred_sketch,
+            dtype=pred_native.R.dtype,
+        ).to(dtype=pred_native.R.dtype)
+    if J_phi_gt is None:
+        J_phi_gt = pairwise_distance_observable(
+            gt_sketch,
+            dtype=gt_native.R.dtype,
+        ).to(dtype=gt_native.R.dtype)
+    J_phi_P = J_phi_pred
+    J_phi_G = J_phi_gt
     if J_phi_P.shape[0] != J_phi_G.shape[0] or J_phi_P.shape[0] == 0:
         return None
     if pred_native.R.shape[1] == 0 or gt_native.R.shape[1] == 0:
@@ -413,6 +421,12 @@ class ProbeResponseSVDReward(BaseReward):
             gt_native = get_or_compute_gt_native(
                 ctx, gt_sketch, self.context, self.eps
             )
+            J_phi_pred = get_or_compute_j_phi(
+                ctx, pred_sketch, pred_native.R.dtype
+            )
+            J_phi_gt = get_or_compute_j_phi(
+                ctx, gt_sketch, gt_native.R.dtype
+            )
             probe_response_svd = _compute_probe_response_svd_metrics(
                 pred_sketch,
                 pred_native,
@@ -421,6 +435,8 @@ class ProbeResponseSVDReward(BaseReward):
                 self._get_gt_probes(gt_sketch, gt_probe_cache),
                 self.context,
                 self.tau_p,
+                J_phi_pred=J_phi_pred,
+                J_phi_gt=J_phi_gt,
             )
         except Exception as exc:
             logger.debug(

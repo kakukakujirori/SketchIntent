@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import numpy as np
+import torch
 
 import sketchgraphs.data as datalib
 
 from src.metrics.edit_response_distance import (
     NativeResponse,
     compute_native_response,
+    pairwise_distance_observable,
 )
 from src.models.components.solver_feedback import SolverFeedback
 from src.models.rewards.base import RewardContext
@@ -83,6 +85,32 @@ def get_or_build_pred_native(
         )
         ctx.native_cache[pred_key] = pred_native
     return pred_sketch, pred_native
+
+
+def get_or_compute_j_phi(
+    ctx: RewardContext,
+    sketch: datalib.Sketch,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    """Return the cached pairwise-distance Jacobian ``J_phi`` for ``sketch``.
+
+    ``pairwise_distance_observable`` is invoked twice per (sample, sketch)
+    pair via the v4 motion-subspace family — once inside ``motion_full_subspace``
+    and once inside ``motion_relational_subspace`` — and additionally K times
+    for the same ``gt_sketch`` across an RLOO rollout group.  Caching by
+    ``(id(sketch), dtype)`` collapses all of that to a single computation per
+    sketch object and dtype.
+
+    The same eps caveat as :func:`get_or_build_pred_native` applies: callers in
+    one composer pass must agree on dtype (and any future J_phi parameters)
+    since the first caller's tensor is what subsequent ones receive.
+    """
+    key = (id(sketch), dtype)
+    cached = ctx.j_phi_cache.get(key)
+    if cached is None:
+        cached = pairwise_distance_observable(sketch, dtype=dtype).to(dtype=dtype)
+        ctx.j_phi_cache[key] = cached
+    return cached
 
 
 def get_or_compute_gt_native(

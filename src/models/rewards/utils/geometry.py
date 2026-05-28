@@ -59,6 +59,8 @@ def motion_full_subspace(
     sketch: datalib.Sketch,
     native: NativeResponse,
     eps: float,
+    *,
+    J_phi: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, int]:
     """Orthonormal basis of the *full* motion subspace in observable space.
 
@@ -73,12 +75,19 @@ def motion_full_subspace(
     Contrast this with ``motion_relational_subspace``, which uses only
     ``null(J_R)`` and ignores the placement of dimensional drivers.
 
+    ``J_phi`` may be passed in by the caller so that one pre-computed
+    pairwise-distance Jacobian is shared between this helper and
+    :func:`motion_relational_subspace` (and, in RLOO, between the K rollouts
+    that share the same ``gt_sketch``).  When ``None``, J_phi is recomputed
+    from ``sketch`` — the original standalone behavior used by tests.
+
     Returns the orthonormal basis ``U`` of ``W_C`` and its dimension ``k``.
     """
-    J_phi = pairwise_distance_observable(
-        sketch,
-        dtype=native.R.dtype,
-    ).to(dtype=native.R.dtype)
+    if J_phi is None:
+        J_phi = pairwise_distance_observable(
+            sketch,
+            dtype=native.R.dtype,
+        ).to(dtype=native.R.dtype)
     if J_phi.shape[0] == 0 or native.R.shape[1] == 0:
         return torch.zeros(J_phi.shape[0], 0, dtype=native.R.dtype), 0
     return orthonormal_range(J_phi @ native.R, eps)
@@ -89,6 +98,8 @@ def motion_relational_subspace(
     state: SketchState,
     context: SketchContext,
     eps: float,
+    *,
+    J_phi: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, int]:
     """Orthonormal basis of the *relational* motion subspace in observable space.
 
@@ -108,6 +119,9 @@ def motion_relational_subspace(
     Contrast with ``motion_full_subspace``, which uses the full first-order
     response map ``R_C`` and therefore mixes dimensional-driver placement into
     the comparison.
+
+    ``J_phi`` may be passed in by the caller for the same caching reason
+    described in :func:`motion_full_subspace`.
     """
     n_x = state.num_dof()
     dtype = state.q.dtype
@@ -118,7 +132,8 @@ def motion_relational_subspace(
         J_R = torch.zeros(0, n_x, dtype=dtype)
     N_C = compute_null_space(J_R, eps=eps)
 
-    J_phi = pairwise_distance_observable(sketch).to(dtype=dtype)
+    if J_phi is None:
+        J_phi = pairwise_distance_observable(sketch).to(dtype=dtype)
     if J_phi.shape[0] == 0:
         return torch.zeros(0, 0, dtype=dtype), 0
     return orthonormal_range(J_phi @ N_C, eps)

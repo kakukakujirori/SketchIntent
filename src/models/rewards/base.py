@@ -60,6 +60,11 @@ class RewardContext:
     per_sample_solver_status: list[str] | None = None           # written by SolverReward
     pred_sketches: list[datalib.Sketch | None] | None = None    # built on demand
     native_cache: dict[tuple[str, int], "NativeResponse"] = field(default_factory=dict)
+    # Cache for pairwise-distance Jacobian J_phi.  Keyed by ``(id(sketch),
+    # dtype)`` so the same sketch object reuses its J_phi across (a) the
+    # multiple subspace computations within one sample and (b) the K rollouts
+    # of one RLOO prompt group, where ``gt_sketch`` is the same Python object.
+    j_phi_cache: dict[tuple[int, torch.dtype], torch.Tensor] = field(default_factory=dict)
     sketch_tokenizer: "SketchTokenizer | None" = None
 
 

@@ -74,6 +74,7 @@ from src.models.rewards.utils.geometry import (
 from src.models.rewards.utils.sketch_builder import (
     get_or_build_pred_native,
     get_or_compute_gt_native,
+    get_or_compute_j_phi,
 )
 from src.sketch_handlers.constants import ConstraintToken
 from src.sketch_handlers.context import SketchContext
@@ -405,6 +406,9 @@ def _motion_full_angle(
     pred_native: NativeResponse,
     gt_native: NativeResponse,
     eps: float,
+    *,
+    J_phi_pred: torch.Tensor | None = None,
+    J_phi_gt: torch.Tensor | None = None,
 ) -> SubspaceAngleResult:
     """Padded principal-angle metric between full motion subspaces.
 
@@ -424,8 +428,12 @@ def _motion_full_angle(
     with ``max(dim_P, dim_G)``.  This keeps dimension-dropout failures visible
     while putting equal-dimension angular mismatch on a [0, 1] scale.
     """
-    U_W_P, dim_P_full = _motion_full_subspace(pred_sketch, pred_native, eps)
-    U_W_G, dim_G_full = _motion_full_subspace(gt_sketch, gt_native, eps)
+    U_W_P, dim_P_full = _motion_full_subspace(
+        pred_sketch, pred_native, eps, J_phi=J_phi_pred
+    )
+    U_W_G, dim_G_full = _motion_full_subspace(
+        gt_sketch, gt_native, eps, J_phi=J_phi_gt
+    )
 
     # Both sides have no observable motion (fully constrained with no
     # dimensional drivers) — their zero subspaces trivially agree.
@@ -451,6 +459,8 @@ def _motion_relational_angle(
     *,
     angle_mode: str = "symmetric",
     reverse_weight: float = 0.5,
+    J_phi_pred: torch.Tensor | None = None,
+    J_phi_gt: torch.Tensor | None = None,
 ) -> SubspaceAngleResult:
     """Compare relation-only motion subspaces in observable space.
 
@@ -486,10 +496,10 @@ def _motion_relational_angle(
 
     state = pred_native.state
     U_pred, dim_pred = _motion_relational_subspace(
-        pred_sketch, state, context, eps
+        pred_sketch, state, context, eps, J_phi=J_phi_pred
     )
     U_gt, dim_gt = _motion_relational_subspace(
-        gt_sketch, state, context, eps
+        gt_sketch, state, context, eps, J_phi=J_phi_gt
     )
 
     cos2_sum = _principal_cos2_sum(U_pred, U_gt)
@@ -571,6 +581,9 @@ def _compute_h_theta_metrics(
     eps: float,
     motion_relational_angle_mode: str = "symmetric",
     motion_relational_reverse_weight: float = 0.5,
+    *,
+    J_phi_pred: torch.Tensor | None = None,
+    J_phi_gt: torch.Tensor | None = None,
 ) -> HThetaMetrics:
     """Return canonical Htheta plus the RL-oriented relation-intent substitute.
 
@@ -598,7 +611,13 @@ def _compute_h_theta_metrics(
       to put the combined RMS angle on the same [0, 1] scale as the components.
     """
     motion_full = _motion_full_angle(
-        pred_sketch, gt_sketch, pred_native, gt_native, eps
+        pred_sketch,
+        gt_sketch,
+        pred_native,
+        gt_native,
+        eps,
+        J_phi_pred=J_phi_pred,
+        J_phi_gt=J_phi_gt,
     )
     leak = _leak_relational_angle(
         gt_sketch, pred_native, context, eps
@@ -611,6 +630,8 @@ def _compute_h_theta_metrics(
         eps,
         angle_mode=motion_relational_angle_mode,
         reverse_weight=motion_relational_reverse_weight,
+        J_phi_pred=J_phi_pred,
+        J_phi_gt=J_phi_gt,
     )
     motion_relational_angle = _normalized_motion_relational_angle(
         motion_rel.angle,
@@ -737,6 +758,9 @@ class ResponseIntentReward(BaseReward):
         gt_sketch: datalib.Sketch,
         gt_native: NativeResponse,
         stats: ResponseIntentBatchStats,
+        *,
+        J_phi_pred: torch.Tensor | None = None,
+        J_phi_gt: torch.Tensor | None = None,
     ) -> float:
         """Compute the selected Htheta-family angle and convert it to reward."""
         h_metrics = _compute_h_theta_metrics(
@@ -748,6 +772,8 @@ class ResponseIntentReward(BaseReward):
             self.eps,
             self.motion_relational_angle_mode,
             self.motion_relational_reverse_weight,
+            J_phi_pred=J_phi_pred,
+            J_phi_gt=J_phi_gt,
         )
         selected_angle = h_metrics.value(self.h_angle_reward_metric)
         stats.add_h_theta(h_metrics, selected_angle)
@@ -810,12 +836,24 @@ class ResponseIntentReward(BaseReward):
             gt_native = get_or_compute_gt_native(
                 ctx, gt_sketch, self.context, self.eps
             )
+            # Cache J_phi by (id(sketch), dtype): pred is reused across the
+            # motion_full / motion_relational helpers within this sample, and
+            # the gt entry survives across the K rollouts of an RLOO group
+            # since the same gt_sketch object is shared.
+            J_phi_pred = get_or_compute_j_phi(
+                ctx, pred_sketch, pred_native.R.dtype
+            )
+            J_phi_gt = get_or_compute_j_phi(
+                ctx, gt_sketch, gt_native.R.dtype
+            )
             sample_reward = self._score_h_theta(
                 pred_sketch,
                 pred_native,
                 gt_sketch,
                 gt_native,
                 stats,
+                J_phi_pred=J_phi_pred,
+                J_phi_gt=J_phi_gt,
             )
         except Exception as exc:
             # Reward computation runs inside the training loop.  A malformed
