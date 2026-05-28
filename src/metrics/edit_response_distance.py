@@ -631,18 +631,28 @@ def pairwise_distance_observable(
         elif isinstance(ent, datalib.Point):
             refs.append(eid)
 
-    pairs = [(refs[i], refs[j]) for i in range(len(refs)) for j in range(i + 1, len(refs))]
-    if not pairs:
+    n_refs = len(refs)
+    if n_refs < 2:
         return torch.zeros(0, state.num_dof(), dtype=dtype)
+
+    # Pre-compute pair indices as long tensors once; inside the AD trace we
+    # gather over them so the per-pair Python loop (with its O(num_pairs)
+    # get_point and linalg_norm calls) collapses to a single batched norm.
+    ia = torch.tensor(
+        [i for i in range(n_refs) for _ in range(i + 1, n_refs)],
+        dtype=torch.long,
+    )
+    ib = torch.tensor(
+        [j for i in range(n_refs) for j in range(i + 1, n_refs)],
+        dtype=torch.long,
+    )
 
     def fn(q: torch.Tensor) -> torch.Tensor:
         s = _StateWithQ(state, q)
-        ds: list[torch.Tensor] = []
-        for a, b in pairs:
-            pa = s.get_point(a)
-            pb = s.get_point(b)
-            ds.append(torch.linalg.norm(pa - pb))
-        return torch.stack(ds)
+        # One get_point per ref (linear), not per (i, j) pair (quadratic).
+        pts = torch.stack([s.get_point(r) for r in refs], dim=0)  # (n_refs, 2)
+        diffs = pts.index_select(0, ia) - pts.index_select(0, ib)
+        return torch.linalg.norm(diffs, dim=1)
 
     J = torch.func.jacfwd(fn)(state.q.detach())
     if J.ndim == 1:
