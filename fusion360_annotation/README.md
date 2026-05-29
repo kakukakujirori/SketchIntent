@@ -50,31 +50,30 @@ python fusion360_annotation/check_submission.py --dir path_to_annotated_folder
 
 ## Annotators (New)
 
-| Filename | Annotator1  |  Annotator2  |  Annotator3 |
-| :--- | :--- | :--- | :--- |
-| 0.zip |
-| 1.zip |
-| 2.zip |
-| 3.zip |
-| 4.zip |
-| 5.zip |
-| 6.zip | Eko |  |  |
-| 7.zip | Eko |  |  |
-| 8.zip | Eko |  |  |
-| 9.zip | Eko |  |  |
-| 10.zip | Eko |  |  |
-| 11.zip | Eko |  |  |
-| 12.zip | Eko |  |  |
+| Filename | Eko  |  Ryotaro  | Johnny | Sagar | Dany | Tanaka
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| 0.zip | | Ryotaro | Johnny | Sagar
+| 1.zip | | | Johnny | Sagar | Dany
+| 2.zip | | | | Sagar | Dany | Tanaka
+| 3.zip | | Ryotaro | Johnny | | Dany
+| 4.zip | | | Johnny | Sagar | | Tanaka
+| 5.zip | | Ryotaro | | | Dany | Tanaka
+| 6.zip | Eko | Ryotaro | Johnny
+| 7.zip | Eko | | | | Dany | Tanaka
+| 8.zip | Eko | Ryotaro | | | | Tanaka
+| 9.zip | Eko | Ryotaro | | Sagar
+| 10.zip | Eko | | | Sagar | Dany
+| 11.zip | Eko | | Johnny | | | Tanaka
 
 
 ## Annotators (Initial Test)
 
 | Filename | Spare Filename | Worker Name | Time (min) | Skip Count | Reject Count  |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| 0.zip | 61.zip | Sam @abdusslaamajid | | | |
-| 1.zip | 60.zip | sagar_poojary | 2h20m | 0 | Moderate (Fixed) |
-| 2.zip | 59.zip | Eko Wahyudi | 5h | 0 | Minor (Fixed) |
+| 0.zip | 61.zip | Sam | | | |
+| 1.zip | 60.zip | Sagar | 2h20m | 0 | Moderate (Fixed) |
+| 2.zip | 59.zip | Eko | 5h | 0 | Minor (Fixed) |
 | 3.zip | 58.zip | av9525 | 20h | 0 | MANY (Fixed) |
 | 4.zip | | | | | |
-| 5.zip | 57.zip | Volodymyr R | 5h | ? | So-so (Not Yet Fixed) |
-| 6.zip | 56.zip | Johnny Web | | | |
+| 5.zip | 57.zip | Volodymyr | 5h | ? | So-so (Not Yet Fixed) |
+| 6.zip | 56.zip | Johnny | | | |

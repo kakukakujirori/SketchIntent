@@ -12,15 +12,16 @@ rootutils.setup_root(__file__, indicator=".project-root", pythonpath=True)
 import sketchgraphs.data as datalib
 from sketchgraphs.data import flat_array
 from src.sketch_handlers.context import SketchContext
-from src.sketch_handlers.freecad_utils import ensure_freecad_imported
+from src.sketch_handlers.freecad_utils import ensure_freecad_imported, load_FCStd_sketch
 from src.sketch_handlers.sketch_freecad_converter import SketchFreecadConverter
 
 FreeCAD, Part, Sketcher = ensure_freecad_imported()
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description="Convert a batch of FreeCAD python command data into a single npy file.")
-    parser.add_argument("--data_dir", type=str, help="Path to the folder containing FreeCAD python command data.")
+    parser = argparse.ArgumentParser(description="Convert a batch of FreeCAD data into a single npy file.")
+    parser.add_argument("--data_dir", type=str, help="Path to the folder containing FreeCAD data.")
+    parser.add_argument("--data_ext", type=str, choices=["py", "FCStd"], default="py", help="Extension of the input data (either py or FCStd)")
     parser.add_argument("--out_path", type=str, help="Path to output the npy file.")
     parser.add_argument("--num_quant_bins", type=int, default=64, help="FreeCAD conversion should work under this quantization lelvel.")
     args = parser.parse_args()
@@ -36,20 +37,32 @@ if __name__ == '__main__':
     converter = SketchFreecadConverter(context, raise_on_error=True)
 
     # Process
-    files = sorted([os.path.join(args.data_dir, f) for f in os.listdir(args.data_dir) if f.endswith(".py")])
+    ext = "." + args.data_ext
+    files = sorted([os.path.join(args.data_dir, f) for f in os.listdir(args.data_dir) if f.endswith(ext)])
     sequences = []
     sketch_ids = []
     source_files = []
     error_list = []
 
     for i, f in enumerate(tqdm(files)):
+        doc = None
         try:
-            sketch_or_error = converter.from_freecad_commands(f)
+            if ext == ".py":
+                sketch_or_error = converter.from_freecad_commands(f)
+            else:  # .FCStd
+                doc, fc_sketch = load_FCStd_sketch(f)
+                sketch_or_error = converter.from_freecad(fc_sketch)
         except Exception:
             print(f"Error processing {f}:")
             traceback.print_exc()
             error_list.append((f, traceback.format_exc()))
             continue
+        finally:
+            if doc is not None:
+                try:
+                    FreeCAD.closeDocument(doc.Name)
+                except Exception:
+                    pass
 
         try:
             seq = datalib.sequence.sketch_to_sequence(sketch_or_error)
