@@ -107,14 +107,10 @@ class GainIntrinsicReward(BaseReward):
         cons_np = cons_tokens.detach().cpu().numpy()
 
         gain_vals: list[float] = []
-        skipped_build = 0
-        skipped_gate = 0
-        applied = 0
 
         for i in range(B):
             status = per_sample_solver_status[i] if per_sample_solver_status is not None else None
             if not self._gate_pass(status):
-                skipped_gate += 1
                 continue
 
             cons_i = cons_np[i].copy()
@@ -128,7 +124,6 @@ class GainIntrinsicReward(BaseReward):
                 pred_sketch = build_pred_sketch(self.tokenizer, cons_i, prim_np[i], gt_sketch)
                 pred_native = compute_native_response(pred_sketch, self.context, eps=self.eps)
             except Exception:
-                skipped_build += 1
                 continue
 
             gain, _ = _compute_gain_intrinsic_value(
@@ -136,12 +131,8 @@ class GainIntrinsicReward(BaseReward):
             )
             gain_vals.append(gain)
             scores[i, first_stop_idx] += self._bonus(gain)
-            applied += 1
 
         metrics: dict[str, float | int] = {
             "gain_intrinsic_mean": _mean(gain_vals),
-            "gain_intrinsic_applied_n": applied,
-            "gain_intrinsic_skipped_build": skipped_build,
-            "gain_intrinsic_skipped_gate": skipped_gate,
         }
         return RewardOutput(scores=scores, metrics=metrics)

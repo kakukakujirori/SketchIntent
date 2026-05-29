@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import torch
 
+from src.metrics.constraint_stats import constraint_type_counts
 from src.models.rewards.base import BaseReward, RewardContext, RewardOutput
 from src.sketch_handlers.constants import (
     ConstraintToken,
@@ -97,24 +98,20 @@ class DimParsimonyReward(BaseReward):
         prefix = self._prefix_len
         B, L = cons_tokens.shape
 
-        # Per-sample dim counts via head-of-block tokens (one row per constraint).
-        # cons_id is at the first position of each block.
-        N = (L - prefix) // bs
-        head_idx = prefix + torch.arange(N, device=cons_tokens.device) * bs
-        heads = cons_tokens[:, head_idx]                                   # (B, N)
-        dim_mask = (heads.unsqueeze(-1) == self._dim_token_ids.to(heads.device)).any(dim=-1)
-        stop_mask = (heads == int(ConstraintToken.Stop)).cumsum(dim=-1) >= 1
-        valid_mask = ~stop_mask & (heads != int(ConstraintToken.Pad))
-        n_dims_pred = (dim_mask & valid_mask).sum(dim=-1).tolist()        # list[int], len B
-        n_total_pred = valid_mask.sum(dim=-1).tolist()
+        # Per-sample relational / dimensional / total counts via the shared
+        # head-of-block counter (same logic the eval metrics use).
+        _, n_dims_pred_t, n_total_pred_t = constraint_type_counts(
+            cons_tokens, bs, self._dim_token_ids, prefix_len=prefix
+        )
+        n_dims_pred = n_dims_pred_t.tolist()                              # list[int], len B
+        n_total_pred = n_total_pred_t.tolist()
 
         # GT dim counts (used by excess_over_gt modes).
         if gt_tokens is not None:
-            gt_heads = gt_tokens[:, head_idx]
-            gt_dim_mask = (gt_heads.unsqueeze(-1) == self._dim_token_ids.to(gt_heads.device)).any(dim=-1)
-            gt_stop = (gt_heads == int(ConstraintToken.Stop)).cumsum(dim=-1) >= 1
-            gt_valid = ~gt_stop & (gt_heads != int(ConstraintToken.Pad))
-            n_dims_gt = (gt_dim_mask & gt_valid).sum(dim=-1).tolist()
+            _, n_dims_gt_t, _ = constraint_type_counts(
+                gt_tokens, bs, self._dim_token_ids, prefix_len=prefix
+            )
+            n_dims_gt = n_dims_gt_t.tolist()
         else:
             n_dims_gt = [0] * B
 
@@ -129,7 +126,6 @@ class DimParsimonyReward(BaseReward):
 
         scores = torch.zeros((B, L), dtype=torch.float32)
         penalty_values: list[float] = []
-        applied = 0
         for i in range(B):
             status = per_sample_solver_status[i] if per_sample_solver_status is not None else None
             n_primitives = len(sketches[i].entities) if sketches[i] is not None else 1
@@ -143,12 +139,8 @@ class DimParsimonyReward(BaseReward):
             if not self._gate_pass(status):
                 continue
             scores[i, int(first_stop[i].item())] += -self.coeff * val
-            applied += 1
 
         metrics: dict[str, float | int] = {
-            "dim_parsimony_n_dims_mean": float(sum(n_dims_pred) / max(1, B)),
-            "dim_parsimony_n_gt_dims_mean": float(sum(n_dims_gt) / max(1, B)),
-            "dim_parsimony_value_mean": float(sum(penalty_values) / max(1, B)),
-            "dim_parsimony_applied_n": applied,
+            "dim_parsimony_penalty_mean": float(sum(penalty_values) / max(1, B)),
         }
         return RewardOutput(scores=scores, metrics=metrics)

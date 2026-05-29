@@ -32,6 +32,7 @@ callbacks:
     every_n_train_steps: 1000
 
 data:
+  train_sequence_file: data_processed/sg_pseudo_rel_167k_unique_valid.npy
   batch_size: 32
   num_workers: 1  # Less is better since this RL training is compute-bound
 

@@ -283,7 +283,6 @@ class ResponseIntentBatchStats:
     """
 
     reward_vals: list[float] = field(default_factory=list)
-    selected_angle_vals: list[float] = field(default_factory=list)
     response_full_angle_vals: list[float] = field(default_factory=list)
     response_relational_angle_vals: list[float] = field(default_factory=list)
     motion_full_angle_vals: list[float] = field(default_factory=list)
@@ -295,14 +294,10 @@ class ResponseIntentBatchStats:
     motion_relational_dim_gt_vals: list[int] = field(default_factory=list)
     motion_full_dim_pred_vals: list[int] = field(default_factory=list)
     motion_full_dim_gt_vals: list[int] = field(default_factory=list)
-    skipped_build: int = 0
-    skipped_not_fc: int = 0
-    skipped_angle: int = 0
 
     def extend(self, other: "ResponseIntentBatchStats") -> None:
         """Merge another per-worker stats buffer into this one."""
         self.reward_vals.extend(other.reward_vals)
-        self.selected_angle_vals.extend(other.selected_angle_vals)
         self.response_full_angle_vals.extend(other.response_full_angle_vals)
         self.response_relational_angle_vals.extend(
             other.response_relational_angle_vals
@@ -326,18 +321,14 @@ class ResponseIntentBatchStats:
         )
         self.motion_full_dim_pred_vals.extend(other.motion_full_dim_pred_vals)
         self.motion_full_dim_gt_vals.extend(other.motion_full_dim_gt_vals)
-        self.skipped_build += other.skipped_build
-        self.skipped_not_fc += other.skipped_not_fc
-        self.skipped_angle += other.skipped_angle
 
-    def add_h_theta(self, metrics: HThetaMetrics, selected_angle: float) -> None:
+    def add_h_theta(self, metrics: HThetaMetrics) -> None:
         """Record one successful Htheta/relation-intent computation."""
         self.response_full_angle_vals.append(metrics.response_full_angle)
         self.response_relational_angle_vals.append(metrics.response_relational_angle)
         self.motion_full_angle_vals.append(metrics.motion_full_angle)
         self.motion_relational_angle_vals.append(metrics.motion_relational_angle)
         self.leak_relational_angle_vals.append(metrics.leak_relational_angle)
-        self.selected_angle_vals.append(selected_angle)
         self.motion_relational_pred_subset_gt_angle_vals.append(
             metrics.motion_relational_pred_subset_gt_angle
         )
@@ -361,8 +352,6 @@ class ResponseIntentBatchStats:
         return {
             "intent_reward_mean": _mean(self.reward_vals),
             "intent_reward_median": _median(self.reward_vals),
-            "intent_selected_angle_mean": _mean(self.selected_angle_vals),
-            "intent_selected_angle_median": _median(self.selected_angle_vals),
             "intent_response_full_angle_mean": _mean(
                 self.response_full_angle_vals
             ),
@@ -398,11 +387,6 @@ class ResponseIntentBatchStats:
                 self.motion_full_dim_pred_vals
             ),
             "intent_motion_full_dim_gt_mean": _mean(self.motion_full_dim_gt_vals),
-            "intent_valid_n": len(self.reward_vals),
-            "intent_skipped_build": self.skipped_build,
-            "intent_skipped_not_fc": self.skipped_not_fc,
-            "intent_skipped_gate": self.skipped_not_fc,
-            "intent_skipped_angle": self.skipped_angle,
         }
 
 
@@ -885,7 +869,7 @@ class ResponseIntentReward(BaseReward):
             gt_relation_nullspace=gt_relation_nullspace,
         )
         selected_angle = h_metrics.value(self.h_angle_reward_metric)
-        stats.add_h_theta(h_metrics, selected_angle)
+        stats.add_h_theta(h_metrics)
         return self._bonus(
             selected_angle,
             self.cap_h_angle,
@@ -915,7 +899,6 @@ class ResponseIntentReward(BaseReward):
             when the sample should not receive an intent-reward score.
         """
         if not self._gate_pass(solver_status):
-            stats.skipped_not_fc += 1
             return None
 
         cons_i, first_stop_idx = _first_stop_and_pad(cons_i_raw, length)
@@ -938,7 +921,6 @@ class ResponseIntentReward(BaseReward):
                 i,
                 exc,
             )
-            stats.skipped_build += 1
             return None
 
         try:
@@ -989,7 +971,6 @@ class ResponseIntentReward(BaseReward):
                 i,
                 exc,
             )
-            stats.skipped_angle += 1
             return None
 
         stats.reward_vals.append(sample_reward)

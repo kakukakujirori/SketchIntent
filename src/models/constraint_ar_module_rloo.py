@@ -10,7 +10,7 @@ from src.models.components.constraint_ar_model import ConstraintARModel
 from src.models.components.solver_feedback import SolverFeedback
 from src.models.components.token_reordering import TokenReordering
 from src.models.components.token_visualizer import visualize_constraint_sequence
-from src.models.rewards.composer import RewardComposer
+from src.models.rewards.composer import RewardComposer, RewardValComposer
 from src.sketch_handlers.constants import ConstraintToken, DIMENSIONAL_CONSTRAINT_TOKEN_IDS
 from src.sketch_handlers.context import SketchContext
 from src.sketch_handlers.sketch_tokenizer import SketchTokenizer
@@ -24,6 +24,7 @@ class ConstraintARModuleRLOO(L.LightningModule):
         context: SketchContext,
         model: ConstraintARModel,
         reward_composer: RewardComposer,
+        reward_val_composer: RewardValComposer,
         optimizer: torch.optim.Optimizer,
         scheduler: torch.optim.lr_scheduler._LRScheduler | None,
         ref_update_steps: int = -1,
@@ -35,13 +36,14 @@ class ConstraintARModuleRLOO(L.LightningModule):
     ):
         super().__init__()
         self.save_hyperparameters(
-            ignore=['model', 'reward_composer'],
+            ignore=['model', 'reward_composer', 'reward_val_composer'],
             logger=False,
         )
 
         # models
         self.model = model
         self.reward_composer = reward_composer
+        self.reward_val_composer = reward_val_composer
         self.ref_model = copy.deepcopy(model)
 
         self.relational_only = relational_only
@@ -52,10 +54,11 @@ class ConstraintARModuleRLOO(L.LightningModule):
                 persistent=False,
             )
 
-        # All reward modules are non-trainable.
-        self.reward_composer.eval()
-        for p in self.reward_composer.parameters():
-            p.requires_grad_(False)
+        # All reward / eval modules are non-trainable.
+        for composer in (self.reward_composer, self.reward_val_composer):
+            composer.eval()
+            for p in composer.parameters():
+                p.requires_grad_(False)
 
         self.ref_model.eval()
         for p in self.ref_model.parameters():
@@ -368,25 +371,11 @@ class ConstraintARModuleRLOO(L.LightningModule):
         generated_sorted, _ = self.token_reordering(generated, None, None, "canonical_with_tail_strip")
         target_sorted, _ = self.token_reordering(full_target, None, None, "canonical_with_tail_strip")
 
-        # Evaluate rewards through the composer so SolverReward remains the
-        # single source of solver-derived status for downstream gating.
-        ctx = self.reward_composer.build_context(
-            prim_tokens=batch['p_val'],
-            cons_tokens=generated,
-            sketch_original_list=batch['sketch'],
-            gt_tokens=batch['c_val'],
-        )
         try:
-            reward_handles = self.reward_composer.submit_async(ctx)
-            _, reward_outputs = self.reward_composer.collect(reward_handles, ctx)
-            reward_metrics = self.reward_composer.flatten_metrics(reward_outputs)
-            for metric_name, metric_value in reward_metrics.items():
-                if isinstance(metric_value, torch.Tensor):
-                    if metric_value.ndim != 0:
-                        continue
-                    metric_value = metric_value.item()
-                if not isinstance(metric_value, (int, float)):
-                    continue
+            eval_metrics = self.reward_val_composer.compute(
+                batch['p_val'], generated, batch['sketch'], batch['c_val']
+            )
+            for metric_name, metric_value in eval_metrics.items():
                 self.log(
                     f'validation_gen/{metric_name}',
                     float(metric_value),

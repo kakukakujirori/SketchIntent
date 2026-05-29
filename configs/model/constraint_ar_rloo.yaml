@@ -29,6 +29,21 @@ reward_composer:
       distortion_threshold: null
       num_workers: null  # null -> auto: min(8, cpu_count // 4)
 
+reward_val_composer:
+  _target_: src.models.rewards.composer.RewardValComposer
+  context: ${data.context}
+  metrics:
+    - _target_: src.models.rewards.solver_reward.SolverReward
+      context: ${data.context}
+      fully_constrained_dof: 2
+      num_workers: null
+    - _target_: src.models.rewards.response_metric_reward.ResponseIntentReward
+      context: ${data.context}
+      eps: 1.0e-9
+      gate: always
+      h_angle_reward_metric: response_full_angle
+      num_workers: 0
+
 optimizer:
   _target_: torch.optim.AdamW
   _partial_: true

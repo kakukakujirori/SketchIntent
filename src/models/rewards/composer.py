@@ -18,7 +18,10 @@ import torch
 
 import sketchgraphs.data as datalib
 
+from src.metrics.constraint_stats import constraint_type_counts
 from src.models.rewards.base import BaseReward, RewardContext, RewardOutput
+from src.sketch_handlers.constants import DIMENSIONAL_CONSTRAINT_TOKEN_IDS
+from src.sketch_handlers.context import SketchContext
 
 
 class RewardComposer(torch.nn.Module):
@@ -118,6 +121,12 @@ class RewardComposer(torch.nn.Module):
                 lo, hi = self.clip_per_reward[r.name]
                 s = s.clamp(lo, hi)
             weighted = r.weight * s
+
+            # Per-reward logging
+            n_seq = max(1, int(s.shape[0]))
+            out.metrics[f"reward_contrib_{r.name}_seq_mean"] = (
+                float(weighted.sum().item()) / n_seq
+            )
             total = weighted if total is None else total + weighted
 
         if total is None:
@@ -144,4 +153,92 @@ class RewardComposer(torch.nn.Module):
                     merged[k] = v
                 elif isinstance(v, torch.Tensor) and v.ndim == 0:
                     merged[k] = v
+        # Total reward contribution = sum of the per-reward contributions, so the
+        # breakdown and the total always agree by construction.
+        contribs = [
+            float(v)
+            for k, v in merged.items()
+            if k.startswith("reward_contrib_") and k.endswith("_seq_mean")
+        ]
+        if contribs:
+            merged["reward_contrib_total_seq_mean"] = sum(contribs)
+        return merged
+
+
+class RewardValComposer(torch.nn.Module):
+    """Validation-time metric composer — the eval-side sibling of RewardComposer.
+
+    Holds a configurable list of ``BaseReward`` modules run purely for their
+    metrics — typically the SAME reward classes the trainer uses (``SolverReward``
+    for ``solver_*`` rates, ``ResponseIntentReward`` for ``intent_*_angle`` incl.
+    the canonical ``response_full_angle``), so eval never reimplements a reward.
+    Each module's ``compute(ctx)`` runs over a shared context and its scalar
+    ``metrics`` are merged; there is no weighting, no aggregated score, and no
+    ``reward_contrib`` (those are training concerns owned by RewardComposer).
+    Keeping evaluation in its own composer means ``validation_gen/*`` never
+    duplicates the ``train/*`` reward diagnostics.
+
+    In addition, the composer always computes the relational constraint mix
+    (``eval_rel_ratio_mean``) itself — it is a trivial token-level quantity that
+    no reward produces, so it does not warrant its own module.
+
+    ``per_sample_solver_status`` produced by a solver module is propagated into
+    the context so later modules may gate on it if they choose.
+    """
+
+    def __init__(self, metrics: list[BaseReward], context: Any):
+        super().__init__()
+        names = [m.name for m in metrics]
+        if len(set(names)) != len(names):
+            raise ValueError(f"val-metric names must be unique, got {names}")
+        # Async modules (e.g. SolverReward) first so solver status is available
+        # to any later module that wants to gate on it.
+        async_ms = [m for m in metrics if m.is_async]
+        sync_ms = [m for m in metrics if not m.is_async]
+        self.metrics = torch.nn.ModuleList(async_ms + sync_ms)
+        # For the built-in constraint-mix metric.
+        self._block_size = int(context.align_constraint_token_length_to)
+        self._prefix_len = 1
+        self.register_buffer(
+            "_dim_token_ids",
+            torch.tensor(DIMENSIONAL_CONSTRAINT_TOKEN_IDS, dtype=torch.long),
+            persistent=False,
+        )
+
+    @torch.no_grad()
+    def compute(
+        self,
+        prim_tokens: torch.Tensor,
+        cons_tokens: torch.Tensor,
+        sketch_original_list: list[datalib.Sketch],
+        gt_tokens: torch.Tensor | None = None,
+    ) -> dict[str, Any]:
+        """Run every enabled module and return their merged scalar metrics."""
+        ctx = RewardContext(
+            prim_tokens=prim_tokens,
+            cons_tokens=cons_tokens,
+            sketch_original_list=sketch_original_list,
+            gt_tokens=gt_tokens,
+        )
+        merged: dict[str, Any] = {}
+        for m in self.metrics:
+            if not m.enabled:
+                continue
+            out = m.compute(ctx)
+            if out.per_sample_solver_status is not None:
+                ctx.per_sample_solver_status = out.per_sample_solver_status
+            for k, v in out.metrics.items():
+                if isinstance(v, (int, float)):
+                    merged[k] = float(v)
+                elif isinstance(v, torch.Tensor) and v.ndim == 0:
+                    merged[k] = float(v.item())
+
+        # Built-in: relational fraction of the generated set (no reward emits it).
+        n_rel, _n_dim, n_total = constraint_type_counts(
+            cons_tokens, self._block_size, self._dim_token_ids,
+            prefix_len=self._prefix_len,
+        )
+        merged["eval_rel_ratio_mean"] = float(
+            (n_rel.float() / n_total.clamp(min=1).float()).mean()
+        )
         return merged
