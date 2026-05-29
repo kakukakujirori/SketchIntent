@@ -126,6 +126,9 @@ model:
           Perpendicular: 0.046
           Tangent: 0.048
           Coincident: 0.012
+          Horizontal: 0.042
+          Vertical: 0.05
+          Midpoint: 0.112
         # neglog (-log p) alternative:
         # coeff_by_type:
         #   Mirror: 0.15
@@ -135,6 +138,9 @@ model:
         #   Perpendicular: 0.085
         #   Tangent: 0.088
         #   Coincident: 0.013
+        #   Horizontal: 0.08
+        #   Vertical: 0.09
+        #   Midpoint: 0.134
 
   optimizer:
     lr: 1e-5

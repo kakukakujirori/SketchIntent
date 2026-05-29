@@ -74,6 +74,7 @@ from src.models.rewards.utils.geometry import (
     stack_relation_jacobians_at as _stack_relation_jacobians_at,
 )
 from src.models.rewards.utils.sketch_builder import (
+    first_stop_and_pad,
     get_or_build_pred_native,
     get_or_compute_gt_motion_full_subspace,
     get_or_compute_gt_motion_relational_subspace,
@@ -81,7 +82,6 @@ from src.models.rewards.utils.sketch_builder import (
     get_or_compute_gt_relation_nullspace,
     get_or_compute_j_phi,
 )
-from src.sketch_handlers.constants import ConstraintToken
 from src.sketch_handlers.context import SketchContext
 from src.sketch_handlers.sketch_tokenizer import SketchTokenizer
 
@@ -183,27 +183,6 @@ def _normalized_motion_relational_angle(
     """Normalize the raw motion-relational angle into the public [0, 1] form."""
     scale = _motion_relational_angle_scale(mode, dim_pred, dim_gt, reverse_weight)
     return min(max(raw_value / scale, 0.0), 1.0)
-
-
-def _first_stop_and_pad(cons_tokens_np: np.ndarray, length: int) -> tuple[np.ndarray, int]:
-    """Return a constraint sequence truncated after the first STOP token.
-
-    The reward is placed at the first STOP position because this is a
-    sequence-level signal.  Tokens after STOP are ignored by padding them before
-    sketch reconstruction; otherwise stale sampled tokens could create invalid
-    constraints that the model did not mean to emit.
-
-    Corner case: if no STOP token appears (the model ran to the maximum
-    generation length without emitting STOP), ``first_stop_idx`` falls back
-    to ``length - 1`` and no padding is applied.  The reward is still placed
-    at the last position so the sample receives a usable training signal.
-    """
-    cons_i = cons_tokens_np.copy()
-    stop_pos = np.where(cons_i == int(ConstraintToken.Stop))[0]
-    first_stop_idx = int(stop_pos[0]) if len(stop_pos) > 0 else (length - 1)
-    if 0 <= first_stop_idx < length - 1:
-        cons_i[first_stop_idx + 1:] = int(ConstraintToken.Pad)
-    return cons_i, first_stop_idx
 
 
 @dataclass(frozen=True)
@@ -901,7 +880,7 @@ class ResponseIntentReward(BaseReward):
         if not self._gate_pass(solver_status):
             return None
 
-        cons_i, first_stop_idx = _first_stop_and_pad(cons_i_raw, length)
+        cons_i, first_stop_idx = first_stop_and_pad(cons_i_raw, length)
         try:
             # Reconstruct the generated constraints on top of the original
             # primitive geometry, then build the first-order response map R_C.

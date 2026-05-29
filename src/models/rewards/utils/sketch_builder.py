@@ -19,6 +19,7 @@ from src.models.rewards.utils.geometry import (
     orthonormal_range,
     stack_relation_jacobians_at,
 )
+from src.sketch_handlers.constants import ConstraintToken
 from src.sketch_handlers.context import SketchContext
 from src.sketch_handlers.sketch_tokenizer import SketchTokenizer
 from src.sketch_handlers.sketch_utils import complete_constraint_values
@@ -52,6 +53,56 @@ def build_pred_sketch(
     return pred_sketch
 
 
+def first_stop_and_pad(cons_tokens_np: np.ndarray, length: int) -> tuple[np.ndarray, int]:
+    """Return a constraint sequence truncated after the first STOP token.
+
+    Sequence-level rewards are placed at the first STOP position.  Tokens after
+    STOP are ignored by padding them before sketch reconstruction; otherwise
+    stale sampled tokens could create invalid constraints the model did not mean
+    to emit.
+
+    Corner case: if no STOP token appears (the model ran to the maximum
+    generation length without emitting STOP), ``first_stop_idx`` falls back to
+    ``length - 1`` and no padding is applied, so the sample still receives a
+    usable training signal at the last position.
+    """
+    cons_i = cons_tokens_np.copy()
+    stop_pos = np.where(cons_i == int(ConstraintToken.Stop))[0]
+    first_stop_idx = int(stop_pos[0]) if len(stop_pos) > 0 else (length - 1)
+    if 0 <= first_stop_idx < length - 1:
+        cons_i[first_stop_idx + 1:] = int(ConstraintToken.Pad)
+    return cons_i, first_stop_idx
+
+
+def get_or_build_pred_sketch(
+    ctx: RewardContext,
+    i: int,
+    tokenizer: SketchTokenizer,
+    cons_tokens_np: np.ndarray,
+    prim_tokens_np: np.ndarray,
+    gt_sketch: datalib.Sketch,
+) -> datalib.Sketch:
+    """Return the cached predicted ``Sketch`` for sample ``i``, building on miss.
+
+    The reconstructed sketch is shared across rewards in one composer pass via
+    ``ctx.pred_sketches`` (keyed by stable in-batch index), so a reward that only
+    needs the sketch (e.g. ``RelationalClassPriorReward`` sub-type counting) and
+    one that also needs the native response (``ResponseIntentReward``) never
+    decode the same sample twice.  Callers must pass a ``cons_tokens_np`` already
+    truncated by :func:`first_stop_and_pad` so the cached sketch is identical
+    regardless of which reward populates it first.
+    """
+    if ctx.pred_sketches is None:
+        ctx.pred_sketches = [None] * int(ctx.cons_tokens.shape[0])
+    pred_sketch = ctx.pred_sketches[i]
+    if pred_sketch is None:
+        pred_sketch = build_pred_sketch(
+            tokenizer, cons_tokens_np, prim_tokens_np, gt_sketch
+        )
+        ctx.pred_sketches[i] = pred_sketch
+    return pred_sketch
+
+
 def get_or_build_pred_native(
     ctx: RewardContext,
     i: int,
@@ -73,15 +124,9 @@ def get_or_build_pred_native(
     silently return the cached NativeResponse built under the first caller's
     eps.
     """
-    if ctx.pred_sketches is None:
-        ctx.pred_sketches = [None] * int(ctx.cons_tokens.shape[0])
-
-    pred_sketch = ctx.pred_sketches[i]
-    if pred_sketch is None:
-        pred_sketch = build_pred_sketch(
-            tokenizer, cons_tokens_np, prim_tokens_np, gt_sketch
-        )
-        ctx.pred_sketches[i] = pred_sketch
+    pred_sketch = get_or_build_pred_sketch(
+        ctx, i, tokenizer, cons_tokens_np, prim_tokens_np, gt_sketch
+    )
 
     pred_key = ("pred", i)
     pred_native = ctx.native_cache.get(pred_key)
