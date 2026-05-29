@@ -1,11 +1,8 @@
 _target_: src.data.constraint_datamodule.ConstraintDataModule
 
 train_sequence_file: data_processed/sg_filtered_unique_valid.npy
-# Validation/test = authentic human GT (Ryotaro's fiverr annotations, all 157
-# sketches, converted from FreeCAD via scripts/convert_freecad_to_seq.py).
-# Replaces the older data_ryotaro_prim5 subset so eval reflects real design intent.
-val_sequence_file: data_processed/data_ryotaro_fiverr_val.npy
-test_sequence_file: data_processed/data_ryotaro_fiverr_val.npy
+val_sequence_file: data_processed/data_fiverr_ryotaro_unique_valid.npy
+test_sequence_file: data_processed/data_fiverr_ryotaro_unique_valid.npy
 
 context:
   _target_: src.sketch_handlers.context.SketchContext
