@@ -1,0 +1,1044 @@
+# ResponseMetric Reward RLOO 研究計画
+
+作成日: 2026-05-29
+
+## 0. この文書の目的
+
+`d_H_angle` / `ResponseMetric` は、すでに
+[summary_histcad_response_metric_v4_results.md](summary_histcad_response_metric_v4_results.md)
+で **評価指標としての有効性** が示されている。本計画の目的は、それとは別に、
+この指標を RLOO の報酬にしたときに、探索の足場を与えた上で追加効果が見えるかを
+切り分けることである。
+
+ここで重要なのは、RL の成功を `ResponseMetric` の唯一の証拠にしないこと。
+RL は補助実験であり、失敗した場合でも `ResponseMetric` evaluator としての主張は
+`v4_results` 側に残る。
+
+## 1. 現状認識
+
+現在の問題は、単に `ResponseIntentReward` の係数を上げ下げすれば解ける種類では
+なさそうである。
+
+- `gate=fc` では、序盤に FC サンプルが少ないため `ResponseIntentReward` が効く前に
+  SolverReward が dimensional constraints 多めの方策を形作る。
+- `gate=converged` にして強めると、設定によっては `[START], [STOP]` の短系列に逃げる。
+- 現在の `motion_relational_angle` 単体報酬では FC rate の上昇を鈍らせる効果はあるが、
+  qualitative にはまだ Distance 系 dimensional constraints が過剰。
+- 特に `Distance=0` やそれに近い dimensional constraints が、Coincident 的な
+  relational intent の代用品として出ている。
+- Coincident 以外の基本 relational constraints、特に `Equal`, `Tangent`, `Mirror`
+  (Symmetric 相当), `Parallel`, `Perpendicular` がほとんど出ない。
+
+したがって、今後の実験では `ResponseMetric` 報酬そのものと、良い候補を探索空間に
+出すための補助施策を分離する。
+
+## 2. 中心仮説
+
+今見るべき問いは次の形にする。
+
+> relational constraints がそもそも出るような探索足場を置いたとき、
+> `ResponseMetric` 由来の報酬は、同じ足場だけの場合よりも human-response-compatible な
+> constraint set を選ぶか？
+
+ここで「探索足場」とは、以下のような `ResponseMetric` ではない補助施策の総称である。
+
+- `Distance≈0` や `Angle≈90/180°` を罰する hygiene reward
+- rare relational token を出す class prior reward
+- rel-only warm start
+- sampling temperature / entropy / KL / SFT の調整
+
+この足場そのものが design intent を証明するわけではない。足場は、`Equal` や
+`Tangent` などの候補を方策分布に乗せるためのものと割り切る。
+
+## 3. 実験の基本構造
+
+比較は必ず同じ足場の上で行う。
+
+| 条件 | 意味 | 目的 |
+|---|---|---|
+| `S` | scaffold only | 足場だけでどこまで良くなるか |
+| `S + R` | scaffold + ResponseIntentReward | `ResponseMetric` 報酬の追加効果 |
+| `S + R_shuffled` | scaffold + 対応関係を壊した ResponseIntentReward | 報酬スケールだけで効いていないかの負例 |
+| `S + class_proxy` | scaffold + type/count 系 proxy | 単純な relational prior との差 |
+
+最初から全条件を走らせる必要はない。第一段階では `S` と `S + R` を優先する。
+差が見えた場合に `R_shuffled` と `class_proxy` を追加して主張を強化する。
+
+`R_shuffled` の意味は「別 sketch の GT をそのまま使う」ことではない。ResponseMetric は
+基本的に同じ primitive geometry 上の Pred/GT 比較を仮定するため、primitive 構造が違う GT を
+渡すと metric 自体が壊れやすい。ここでの負例は、報酬値の分布とスケールは保ったまま、
+「このサンプルにこの response reward が対応している」という対応だけを壊すことである。
+具体的には、通常の ResponseIntentReward を各 sample で計算した後、batch または RLOO group 内で
+sample reward scalar を permutation してから STOP 位置に置く方式を優先する。
+
+## 4. 実装計画
+
+実装は「学習に効く reward」と「validation に出す metric」を混同しないように分ける。
+`RewardComposer` に入れた reward は train 側の score を作る。一方、
+`validation_gen/*` に出したい値は `RewardValComposer.metrics` にも同じ module を入れる必要がある。
+この点を config 作成時の必須条件にする。
+
+### 4.1 まず見るための validation ログを増やす
+
+目的は、定性観察を WandB 上で追えるようにすること。現状の solver / response metric
+だけでは、何の constraint type が増減したかが見えにくい。
+ただし type ごとの scalar をすべて `validation_gen/*` に並列で出すと dashboard が
+読みにくくなる。したがって、scalar は集約値だけに絞り、type-wise distribution は
+W&B の Table + bar chart として出す。
+
+W&B は `wandb.Table` と `wandb.plot.bar()` で bar chart を script から直接 log できる。
+また、Vega custom chart を `wandb.plot_table()` で作れば pie / donut 風の chart も可能だが、
+type 数が多い場合は pie chart より bar chart の方が読みやすい。したがって本計画では
+bar chart を標準にする。
+
+参考:
+
+- W&B custom charts: https://docs.wandb.ai/guides/app/features/custom-charts/
+- W&B plots: https://docs.wandb.ai/guides/track/log/plots
+
+編集候補:
+
+- [src/metrics/constraint_stats.py](../src/metrics/constraint_stats.py)
+- [src/models/rewards/composer.py](../src/models/rewards/composer.py)
+- [src/models/constraint_ar_module_rloo.py](../src/models/constraint_ar_module_rloo.py)
+
+scalar として残すログ:
+
+- `validation_gen/eval_rel_ratio_mean` 既存
+- `validation_gen/eval_key_rel_ratio_mean`
+  - `(Coincident + Equal + Tangent + Parallel + Perpendicular + Mirror) / n_total`
+- `validation_gen/eval_distance_family_ratio_mean`
+  - `(Distance + DistanceX + DistanceY) / n_total`
+- `validation_gen/eval_angle_family_ratio_mean`
+  - `Angle / n_total`
+
+bar chart / table として出すもの:
+
+- `validation/constraint_type_mix_table`
+- `validation/constraint_type_mix_bar`
+
+table columns:
+
+| column | 内容 |
+|---|---|
+| `step` | global step |
+| `constraint_type` | `Coincident`, `Distance`, ... |
+| `family` | `relational` or `dimensional` |
+| `mean_count` | 1 sketch あたり平均 count |
+| `fraction` | total constraints 中の割合 |
+
+実装の具体案:
+
+- `constraint_stats.py` に `constraint_head_counts(...)` を追加する。
+- 入力は `cons_tokens`, `block_size`, `token_ids`, `prefix_len=1`。
+- STOP 以降と PAD head は数えない。
+- 戻り値は `(B, n_types)` tensor と token 名リスト、または `{name: (B,) tensor}` のどちらでもよい。
+  `RewardValComposer` 側の呼び出しが簡単になるなら dict 形式を優先する。
+- `RewardValComposer.compute()` では compact scalar と、chart 用の raw summary dict を返す。
+- 現在の `validation_step()` は scalar を `self.log()` するだけなので、W&B Table / bar chart は
+  [src/models/constraint_ar_module_rloo.py](../src/models/constraint_ar_module_rloo.py) 側で
+  rank 0 のときだけ直接 `self.logger.experiment.log(...)` する。
+- W&B 以外の logger では table/bar chart は skip し、scalar だけ出ればよい。
+
+この段階で、既存 run の比較対象として次を見られるようになる。
+
+- dimensional constraints が本当に増えているか
+- `Distance`, `DistanceX`, `DistanceY` のどれが支配的か
+- `Equal`, `Tangent`, `Mirror` がゼロ付近のままか
+- `ResponseIntentReward` ありで relation count は増えているのか
+
+### 4.2 SolverReward 内の dimensional shortcut hygiene penalty
+
+目的は、`Distance=0` 付近を Coincident 代替として使う failure mode と、
+`Angle=90/180°` を Perpendicular / Parallel 代替として使う failure mode を塞ぐこと。
+これは design intent を直接注入する施策ではなく、明らかな dimensional hack の除去として扱う。
+
+結論として、ここは新規 `DimensionalHygieneReward` class ではなく
+[src/models/rewards/solver_reward.py](../src/models/rewards/solver_reward.py) 内の optional penalty
+として実装する方を推奨する。
+
+理由:
+
+- `SolverReward` worker はすでに generated tokens を detokenize し、
+  `complete_constraint_values` 済みの `sketch` を返している。
+- 新規 reward class にすると同じ detokenize / value completion をもう一度行うため遅い。
+- near-zero dimensional は solver-derived hygiene signal なので、SolverReward の optional
+  penalty として扱う方が責務として自然。
+- default を `0.0` にすれば既存 SolverReward の挙動は変わらない。
+
+追加する SolverReward config:
+
+```yaml
+penalty_near_zero_distance: -0.30
+near_zero_distance_threshold: 0.001
+near_zero_distance_cap: 3
+near_zero_distance_gate: converged
+penalty_axis_angle: -0.30
+axis_angle_tolerance_rad: 0.001
+axis_angle_cap: 3
+axis_angle_gate: converged
+```
+
+対象:
+
+- `Distance`
+- `DistanceX`
+- `DistanceY`
+- `Angle`
+
+判定:
+
+- `SolverReward.collect_results()` で worker から返ってくる `sketch` を使う。
+- 対象 dimensional constraint の `QuantityParameter.value` を読む。
+- `Distance` family は `abs(value) < near_zero_distance_threshold` なら 1 count。
+- `DistanceX=0` / `DistanceY=0` も Coincident / alignment の dimensional 代替として扱い、
+  意図的 CAD constraint としては許容しない方針にする。
+- `Angle` は `90°` または `180°` に近いものを 1 count とする。
+  これらは `Perpendicular` / `Parallel` の dimensional 代替として扱う。
+
+reward:
+
+```text
+distance_penalty =
+  penalty_near_zero_distance * min(near_zero_distance_count, near_zero_distance_cap)
+
+angle_penalty =
+  penalty_axis_angle * min(axis_angle_count, axis_angle_cap)
+```
+
+ログ:
+
+- `solver_near_zero_distance_rate`
+- `solver_axis_angle_rate`
+
+rate の定義:
+
+```text
+near_zero_distance_rate
+  = near_zero_distance_count / max(1, distance_family_count)
+
+axis_angle_rate
+  = axis_angle_count / max(1, angle_count)
+```
+
+`near_zero_count_mean` は出さない。count は sketch size と生成 constraint 数に引っ張られるため、
+run 比較では rate の方が読みやすい。
+
+`Distance=0` / `Angle=90/180°` を Malformed 扱いにする案もあるが、初期実装では
+soft penalty を推奨する。理由は、これらはトークン列としては構文的に有効で、FreeCAD solver
+上も解ける場合があるため、Malformed に混ぜると「構文失敗」と「design-intent 的 shortcut」が
+同じ error bucket に入って診断しづらくなるからである。まずは soft penalty + rate logging で
+挙動を見る。明らかに hack として残り続ける場合だけ、後段で hard invalid / Malformed 相当の
+扱いに切り替える。
+
+不明瞭だった点の整理:
+
+- `Distance=0` を完全禁止するのではなく、near-zero を罰する。
+- `DistanceX/Y=0` も罰する。
+- 係数が強すぎて FC が崩れた場合は `penalty_near_zero_distance` の絶対値を下げるか
+  `near_zero_distance_gate=fc` にする。
+- `Angle=90/180°` も同様に罰する。ただし最初は hard invalid ではなく soft penalty にする。
+
+### 4.3 RelationalClassPriorReward
+
+目的は、rare relational token を探索空間に出すこと。これは `ResponseMetric` 由来の
+報酬ではないため、必ず `ResponseIntentReward` あり/なし両方の条件に入れる。
+
+新規ファイル候補:
+
+- `src/models/rewards/relational_class_prior.py`
+
+reward 名:
+
+```python
+name = "rel_prior"
+```
+
+初期仕様:
+
+```yaml
+_target_: src.models.rewards.relational_class_prior.RelationalClassPriorReward
+context: ${data.context}
+gate: converged
+cap_total: 0.50
+cap_per_type: 2
+coeff_by_type:
+  Coincident: 0.03
+  Parallel: 0.05
+  Perpendicular: 0.05
+  Equal: 0.10
+  Tangent: 0.10
+  Mirror: 0.15
+```
+
+実装:
+
+- detokenize は不要。
+- token head を数えるだけでよい。
+- `constraint_head_counts(...)` を再利用する。
+- `gate=converged` の場合、SolverReward status が `FC` または `Under` のサンプルだけに効かせる。
+- train 側だけでなく validation 側にも入れ、`validation_gen/rel_prior_*` を見る。
+
+reward:
+
+```text
+bonus_raw = Σ_t coeff_by_type[t] * min(count_t, cap_per_type)
+bonus = min(bonus_raw, cap_total)
+```
+
+ログ:
+
+- `rel_prior_bonus_mean`
+- `rel_prior_key_rel_bonus_mean`
+
+type-wise counts は scalar として並べない。4.1 の `constraint_type_mix_bar` に集約する。
+
+semantic spam について:
+
+- training scaffold としては、多少の semantic spam は許容する。
+- ただし最終主張では、この prior 自体を design intent の証拠にしない。
+- 必ず `scaffold only` と `scaffold + ResponseIntentReward` の両方に同じ prior を入れる。
+- `scaffold + ResponseIntentReward` だけに class prior を入れる比較はしない。
+
+### 4.4 sampling temperature / entropy / SFT knob
+
+目的は、RLOO 後や rel-only warm start 後に entropy が落ちすぎているとき、候補多様性を
+少し戻すこと。
+
+編集候補:
+
+- [src/models/constraint_ar_module_rloo.py](../src/models/constraint_ar_module_rloo.py)
+
+追加する引数:
+
+```python
+train_sample_temperature: float = 1.0
+val_sample_temperature: float = 1.0
+```
+
+変更:
+
+- `_compute_rloo_loss()` 内の `generate_sample(...)` に
+  `temperature=self.train_sample_temperature` を渡す。
+- `validation_step()` 内の `generate_sample(...)` に
+  `temperature=self.val_sample_temperature` を渡す。
+
+初期値:
+
+- 通常 run: `train_sample_temperature=1.0`, `val_sample_temperature=1.0`
+- rel-only warm start 後の full RLOO: `train_sample_temperature=1.2`
+
+関連 hyperparameter:
+
+- `entropy_bonus=0.001`
+- `sft_coeff=0.01`
+- `kl_coeff=0.005`
+
+ログ方針:
+
+- ここで新しい scalar を大量に増やさない。
+- 基本は既存の `train/entropy`, `train/kl_loss`, `train/ratio` と、
+  4.1 の `constraint_type_mix_bar` で挙動を見る。
+- sampling diversity を追加で見たい場合だけ、`validation/sample_length_hist` や
+  `validation/unique_sequence_rate` のような compact scalar / histogram を後から足す。
+
+注意:
+
+- temperature だけで解決しようとしない。
+- rel-only warm start 後は dimensional token の確率が死んでいる可能性があるため、
+  SFT や KL の参照先も併せて見る。
+
+## 5. Config 計画
+
+第一段階では 4 本に絞る。
+
+全 config 共通で、`model.reward_composer.rewards` と `model.reward_val_composer.metrics` の
+両方を確認する。dimensional shortcut hygiene は SolverReward 内の optional config として有効化する。
+`RelationalClassPriorReward` は train reward として使わない対照条件でも、validation metric
+としては入れてよい。
+
+### 5.1 Hygiene-only scaffold
+
+`configs/experiment/rloo_response_hygiene_no_intent.yaml`
+
+train rewards:
+
+- SolverReward
+  - `penalty_near_zero_distance: -0.30`
+  - `near_zero_distance_threshold: 0.001`
+  - `penalty_axis_angle: -0.30`
+  - `axis_angle_tolerance_rad: 0.001`
+- DimParsimonyReward
+- ResponseIntentReward disabled
+
+validation metrics:
+
+- SolverReward
+  - `penalty_near_zero_distance: 0.0`
+  - `penalty_axis_angle: 0.0`
+  - `near_zero_distance_threshold` は train と同じ
+  - `axis_angle_tolerance_rad` は train と同じ
+- ResponseIntentReward (`gate=always`, `h_angle_reward_metric=response_full_angle`)
+- RelationalClassPriorReward は metric-only として入れてもよい
+
+目的:
+
+- `Distance≈0` / `Angle≈90/180°` を減らしただけで、dimensional 過剰や response metric が
+  どこまで改善するかを見る。
+
+### 5.2 Hygiene + ResponseIntent
+
+`configs/experiment/rloo_response_hygiene_intent.yaml`
+
+train rewards:
+
+- SolverReward
+  - `penalty_near_zero_distance: -0.30`
+  - `near_zero_distance_threshold: 0.001`
+  - `penalty_axis_angle: -0.30`
+  - `axis_angle_tolerance_rad: 0.001`
+- DimParsimonyReward
+- ResponseIntentReward enabled
+- `h_angle_reward_metric: motion_relational_angle`
+- `gate: converged`
+
+validation metrics:
+
+- Hygiene-only と同じ
+
+目的:
+
+- hygiene を入れた土俵で `ResponseIntentReward` の追加効果を見る。
+
+### 5.3 Full scaffold without ResponseIntent
+
+`configs/experiment/rloo_response_scaffold_no_intent.yaml`
+
+train rewards:
+
+- SolverReward
+  - `penalty_near_zero_distance: -0.30`
+  - `near_zero_distance_threshold: 0.001`
+  - `penalty_axis_angle: -0.30`
+  - `axis_angle_tolerance_rad: 0.001`
+- DimParsimonyReward
+- RelationalClassPriorReward
+- ResponseIntentReward disabled
+
+validation metrics:
+
+- SolverReward
+- ResponseIntentReward (`gate=always`, `h_angle_reward_metric=response_full_angle`)
+- RelationalClassPriorReward
+
+目的:
+
+- rare relational token prior だけで qualitative がどこまで改善するかを見る。
+
+### 5.4 Full scaffold with ResponseIntent
+
+`configs/experiment/rloo_response_scaffold_intent.yaml`
+
+train rewards:
+
+- SolverReward
+  - `penalty_near_zero_distance: -0.30`
+  - `near_zero_distance_threshold: 0.001`
+  - `penalty_axis_angle: -0.30`
+  - `axis_angle_tolerance_rad: 0.001`
+- DimParsimonyReward
+- RelationalClassPriorReward
+- ResponseIntentReward enabled
+
+validation metrics:
+
+- Full scaffold without ResponseIntent と同じ
+
+目的:
+
+- 同じ scaffold の上で、`ResponseMetric` reward が追加で効くかを見る。
+
+## 6. 実験順序
+
+### Phase 0: smoke test
+
+CPU 2 step:
+
+```bash
+conda run -n freecad python src/train.py experiment=rloo_response_scaffold_intent \
+  trainer.accelerator=cpu trainer.devices=1 trainer.strategy=auto trainer.precision=32 \
+  data.batch_size=1 model.group_sample_size=2 \
+  +trainer.max_steps=2 +trainer.limit_val_batches=0 +trainer.num_sanity_val_steps=0
+```
+
+確認:
+
+- 新規 reward が instantiate できる
+- reward tensor shape が合う
+- WandB / stdout に新規 metric が出る
+- solver worker と reward gate が壊れていない
+
+### Phase 1: short canary
+
+各 config 300-500 step 程度。
+
+見る指標:
+
+- `train/reward_contrib_*_seq_mean`
+- `train/entropy`
+- `validation_gen/solver_fc_rate`
+- `validation_gen/solver_under_rate`
+- `validation_gen/eval_rel_ratio_mean`
+- `validation_gen/eval_key_rel_ratio_mean`
+- `validation_gen/eval_distance_family_ratio_mean`
+- `validation_gen/eval_angle_family_ratio_mean`
+- `validation_gen/solver_near_zero_distance_rate`
+- `validation_gen/solver_axis_angle_rate`
+- `validation/constraint_type_mix_bar`
+- `validation/samples_0`
+
+中止条件:
+
+- `[START], [STOP]` collapse
+- `solver_fc_rate` が 0 近くに張り付く
+- `solver_redundant_rate` / `solver_conflicting_rate` が大きく悪化
+- class prior の reward contribution が SolverReward を食いすぎる
+
+推奨実行例:
+
+```bash
+conda run -n freecad python src/train.py experiment=rloo_response_scaffold_intent \
+  trainer.devices=1 trainer.max_epochs=1 +trainer.max_steps=500 \
+  trainer.val_check_interval=100
+```
+
+### Phase 2: full run
+
+第一優先:
+
+1. `rloo_response_hygiene_no_intent`
+2. `rloo_response_hygiene_intent`
+3. `rloo_response_scaffold_no_intent`
+4. `rloo_response_scaffold_intent`
+
+第二優先:
+
+5. `rloo_response_scaffold_shuffled_intent`
+6. `rloo_response_scaffold_class_proxy`
+
+## 7. 評価指標
+
+### 7.1 Solver validity
+
+- `validation_gen/solver_fc_rate`
+- `validation_gen/solver_under_rate`
+- `validation_gen/solver_redundant_rate`
+- `validation_gen/solver_conflicting_rate`
+- `validation_gen/solver_malformed_rate`
+- `validation_gen/solver_valid_dof_mean`
+
+### 7.2 ResponseMetric family
+
+- `validation_gen/intent_response_full_angle_mean`
+- `validation_gen/intent_motion_full_angle_mean`
+- `validation_gen/intent_motion_relational_angle_mean`
+- `validation_gen/intent_leak_relational_angle_mean`
+- `validation_gen/intent_response_relational_angle_mean`
+
+解釈:
+
+- `response_full_angle` は canonical `d_H_angle` 系の proxy。
+- `motion_relational_angle` は reward target として使う場合がある。
+- `leak_relational_angle` は solver_rl 型の relational mismatch を拾いやすいので重要。
+
+### 7.3 Constraint mix
+
+- `validation_gen/eval_rel_ratio_mean`
+- `validation_gen/eval_key_rel_ratio_mean`
+- `validation_gen/eval_distance_family_ratio_mean`
+- `validation_gen/eval_angle_family_ratio_mean`
+- `validation/constraint_type_mix_bar`
+
+### 7.4 Hygiene
+
+- `validation_gen/solver_near_zero_distance_rate`
+- `validation_gen/solver_axis_angle_rate`
+
+### 7.5 Qualitative
+
+- `validation/samples_0` の Ground Truth / Generated
+- `src/test.py` による FreeCAD script dump
+- 重点観察:
+  - Distance の連打が減っているか
+  - `DistanceX/Y=0` が Coincident 相当として残っていないか
+  - Equal/Tangent/Mirror が自然な場所に出ているか
+  - relational class prior だけの spam に見えないか
+
+## 8. 成功・失敗の解釈
+
+### 8.1 強い成功
+
+`scaffold_intent` が `scaffold_no_intent` と比べて:
+
+- FC rate が同程度
+- `response_full_angle` または `leak_relational_angle` が改善
+- dimensional count が増えない
+- near-zero distance が増えない
+- qualitative に relational structure が自然
+
+解釈:
+
+- 探索足場の上で、`ResponseMetric` reward が候補選択に追加効果を持つ。
+- 論文では「RL は補助的証拠」として使える。
+
+次のアクション:
+
+- `R_shuffled` を追加して、GT 対応の意味が効いているか確認する。
+- `response_full_angle` reward や leak-safe `response_relational_angle` を検討する。
+
+### 8.2 弱い成功
+
+- FC は少し落ちる
+- しかし response metric と qualitative は改善
+
+解釈:
+
+- `ResponseMetric` は design intent 側には効いているが、SolverReward との trade-off が残る。
+
+次のアクション:
+
+- SolverReward schedule を検討する。
+- `reward_dof_reduction` / `reward_fully_constrained` の序盤係数を弱める。
+- ただし config 数を増やしすぎない。
+
+### 8.3 Scaffold-only で十分改善
+
+`scaffold_no_intent` と `scaffold_intent` がほぼ同じ。
+
+解釈:
+
+- 改善は class prior / hygiene / sampling によるもので、`ResponseMetric` reward の追加効果は弱い。
+- evaluator としての `ResponseMetric` の有効性は残るが、RL reward としての主張は弱める。
+
+次のアクション:
+
+- RL 補助実験は negative result として早めに整理する。
+- `v4_results` を主軸に戻す。
+
+### 8.4 Intent ありで collapse
+
+`scaffold_intent` だけ `[START], [STOP]` や under-constrained に逃げる。
+
+解釈:
+
+- 報酬 gate / cap / selected metric がまだ hackable。
+
+次のアクション:
+
+- `h_angle_reward_metric=motion_relational_angle` を維持。
+- `coeff_h_angle` を下げる。
+- `gate=fc` と `gate=converged` の中間設計を検討する。
+- empty / very-short sequence penalty を別途入れる。
+
+### 8.5 Class prior で invalid が増える
+
+解釈:
+
+- rare relation を出す prior が強すぎる。
+
+次のアクション:
+
+- `cap_total` を下げる。
+- `Equal/Tangent/Mirror` coeff を半分にする。
+- `gate=fc` にする。
+
+### 8.6 Class prior でも rare relations が出ない
+
+解釈:
+
+- 方策の token distribution がすでに硬すぎる。
+
+次のアクション:
+
+- `train_sample_temperature=1.2`
+- `entropy_bonus=0.001` から試す。
+- それでも無理なら rel-only warm start へ進む。
+
+## 9. 第二段階: Rel-only warm start → high-entropy full RLOO
+
+この section は、Sections 4–8 の第一段階実験を走らせた後の第二段階の追加施策である。
+第一段階では、full constraint space のまま hygiene, class prior, ResponseIntentReward の
+ablation を行う。その結果、`Equal`, `Tangent`, `Mirror`, `Parallel`, `Perpendicular`
+などの rare relational constraints が依然としてほとんど出ない場合、方策分布そのものが
+硬すぎると判断し、この rel-only warm start curriculum に進む。
+
+逆に、第一段階の full-space scaffold だけで rare relational constraints が十分出るなら、
+section 9 は実行しない。まず `scaffold only` と `scaffold + ResponseIntentReward` の比較を
+優先し、`ResponseMetric` reward の追加効果を切り分ける。
+
+この curriculum では、まず dimensional constraint token を禁止した relational-only RLOO を行い、
+その checkpoint を初期重みとして、本来の full constraint space で RLOO を再開する。
+Phase B では、rel-only training で落ちた探索 entropy を戻すために、通常より高い
+`entropy_bonus` と sampling temperature を使う。
+
+### Phase A: rel-only RLOO
+
+既存:
+
+- [configs/experiment/rloo_rel_only.yaml](../configs/experiment/rloo_rel_only.yaml)
+
+目的:
+
+- relational token の局所方策を作る。
+- `Coincident` 以外の `Equal`, `Tangent`, `Mirror`, `Parallel`, `Perpendicular` が
+  方策分布に乗る状態を作る。
+- ここでは dimensional constraints を出せないため、最終性能を判断しない。
+
+checkpoint 選択:
+
+- FC rate だけで選ばない。
+- `eval_rel_ratio_mean`
+- `eval_key_rel_ratio_mean`
+- `constraint_type_mix_bar`
+- qualitative samples
+- collapse していないこと
+- entropy が完全に潰れていないこと。ただし rel-only で多少 entropy が下がるのは許容する。
+
+### Phase B: high-entropy full RLOO
+
+設定:
+
+```yaml
+pretrained_ckpt_path: <rel_only_ckpt>
+model.relational_only: false
+data.relational_only: false
+model.train_sample_temperature: 1.2
+model.entropy_bonus: 0.003  # canary: 0.001, 0.003, 0.005
+model.sft_coeff: 0.01
+model.kl_coeff: 0.005
+```
+
+意図:
+
+- rel-only checkpoint から始めると、dimensional token の logits が弱くなりやすい。
+- そのまま full RLOO をすると、relation-only 方策の低 entropy 状態から抜けられず、
+  dimensional constraints が必要な場面で候補が出ない可能性がある。
+- そこで `train_sample_temperature` と `entropy_bonus` を高めにし、必要なら `sft_coeff` で
+  full constraint distribution を少し思い出させる。
+- `entropy_bonus` は通常 run より明確に高めを試す。最初の grid は `0.001`, `0.003`,
+  `0.005` 程度で十分。
+
+比較:
+
+- relwarm + scaffold only
+- relwarm + scaffold + ResponseIntentReward
+
+注意:
+
+- rel-only 後は dimensional token の確率がかなり低い可能性がある。
+- temperature だけではなく、SFT と KL も併用する。
+- ここでも `ResponseMetric` の有無以外を揃える。
+- `relwarm + scaffold only` でも十分改善する場合、改善は curriculum / prior 由来であり、
+  `ResponseMetric` reward の追加効果とは言いにくい。
+
+## 10. 実装順序
+
+1. `constraint_head_counts` と validation type-count logging
+2. SolverReward 内の dimensional shortcut penalty
+3. `RelationalClassPriorReward`
+4. `train_sample_temperature` / `val_sample_temperature`
+5. 4 config 作成
+6. CPU smoke test
+7. 300-500 step canary
+8. full run
+9. 必要なら `R_shuffled`
+10. rare relations が出ない場合は rel-only warm start → high-entropy full RLOO
+
+各実装後に最低限確認すること:
+
+- type-count logging 追加後:
+  - `eval_rel_ratio_mean`, `eval_key_rel_ratio_mean`, `eval_distance_family_ratio_mean`,
+    `eval_angle_family_ratio_mean` が出る。
+  - `constraint_type_mix_bar` が出る。
+- SolverReward dimensional shortcut penalty 追加後:
+  - `validation_gen/solver_near_zero_distance_rate` が出る。
+  - `validation_gen/solver_axis_angle_rate` が出る。
+  - `penalty_near_zero_distance=0.0` で既存 SolverReward と reward が一致する。
+  - `penalty_near_zero_distance<0` または `penalty_axis_angle<0` で
+    `reward_contrib_solver_seq_mean` に反映される。
+- `RelationalClassPriorReward` 追加後:
+  - `reward_contrib_rel_prior_seq_mean` が train に出る。
+  - validation に `rel_prior_bonus_mean` が出る。
+  - type-wise distribution は `constraint_type_mix_bar` に出る。
+- temperature knob 追加後:
+  - default `1.0` で既存挙動が変わらない。
+
+## 11. この計画でまだ不明瞭な箇所と推敲結果
+
+### 11.1 dimensional shortcut thresholds
+
+不明瞭:
+
+- `Distance≈0` と `Angle≈90/180°` の正しい tolerance がデータスケールと数値誤差に依存する。
+
+具体化:
+
+- `near_zero_distance_threshold` の初期値は `0.001`。
+- `axis_angle_tolerance_rad` の初期値も `0.001`。
+- canary で `solver_near_zero_distance_rate` / `solver_axis_angle_rate` がほぼ変わらなければ、
+  まず penalty の絶対値を上げる。threshold は安易に広げない。
+- FC が崩れたら threshold ではなく penalty の絶対値を下げるか、gate を `fc` にする。
+- 最初は Malformed 扱いにはしない。soft penalty でも残り続ける場合だけ hard invalid 化を検討する。
+
+### 11.2 class prior の係数
+
+不明瞭:
+
+- `Tangent +1` のような大きい bonus は SolverReward とのスケール差が危険。
+
+具体化:
+
+- 初期値は 0.03-0.15 の小さい補助にする。
+- `cap_total=0.5` で sequence-level に上限を置く。
+- `reward_contrib_rel_prior_seq_mean` が SolverReward contribution に近づいたら強すぎる。
+
+### 11.3 ResponseIntentReward の選択 metric
+
+不明瞭:
+
+- `response_relational_angle` は leak=0 問題で empty sequence に甘くなる可能性がある。
+
+具体化:
+
+- 第一段階は `motion_relational_angle` 固定。
+- `leak_relational_angle` は diagnostic として見る。
+- `response_relational_angle` に戻すのは、empty / no-dim hack を塞いだ後。
+
+### 11.4 qualitative の扱い
+
+不明瞭:
+
+- qualitative は主観的になりやすい。
+
+具体化:
+
+- qualitative は以下の checklist で見る。
+  - Distance 系が減っているか
+  - zero Distance が減っているか
+  - Coincident / Equal / Tangent / Mirror が増えているか
+  - redundant/conflicting ではないか
+  - source geometry に対して不自然な relation spam ではないか
+
+### 11.5 「scaffold」の言葉
+
+不明瞭:
+
+- scaffold が何を含むのか曖昧だった。
+
+具体化:
+
+- 本文書では「探索足場」と呼び、具体的には hygiene, class prior, sampling knobs,
+  rel-only warm start を指す。
+- `ResponseMetric` reward は scaffold には含めない。
+
+### 11.6 train reward と validation metric の混同
+
+不明瞭:
+
+- train に reward を入れれば validation にも自動で出るように見えがちだが、このコードでは
+  `RewardComposer` と `RewardValComposer` は別である。
+
+具体化:
+
+- 学習に使う module は `model.reward_composer.rewards` に入れる。
+- validation でログだけ見たい module は `model.reward_val_composer.metrics` に入れる。
+- 対照条件で ResponseIntentReward を disabled にしても、validation metric としての
+  ResponseIntentReward は残す。そうしないと `S` と `S + R` の比較指標が欠ける。
+- SolverReward 内 near-zero metric は、train では penalty あり、validation では penalty 0 でも
+  metric だけ出せるようにする。
+
+### 11.7 `R_shuffled` の実装時期
+
+不明瞭:
+
+- `GT をシャッフル` という表現だと、別 sketch の GT constraints を ResponseMetric に
+  渡すように読める。しかし ResponseMetric は基本的に同じ primitive geometry 上の比較を
+  仮定するため、それは壊れやすい。
+
+具体化:
+
+- 第一段階では実装しない。
+- `S + R` が `S` より良い結果を示した場合にだけ、主張補強として実装する。
+- 実装する場合は GT sketch 自体を入れ替えるのではなく、通常の ResponseIntentReward を
+  各 sample について計算した後、STOP に置く reward scalar だけを batch / RLOO group 内で
+  permutation する。
+- これにより、報酬の分布・スケール・計算コストは保ったまま、sample と reward の意味的対応を壊せる。
+- `S + R_shuffled` で改善するなら、ResponseMetric の意味ではなく、報酬スケールや regularization が
+  効いている疑いが強い。
+
+## 12. 最終的な研究上の言い方
+
+成功した場合:
+
+> We first introduce solver- and exploration-oriented safeguards shared by all
+> RL variants, preventing degenerate dimensional shortcuts and encouraging
+> relational candidates to appear.  Under this controlled scaffold, adding the
+> response-metric reward improves response compatibility relative to the same
+> scaffold without the metric reward.
+
+失敗した場合:
+
+> The proposed response metric remains effective as an evaluator, but in the
+> current RLOO setup it did not provide a robust enough optimization signal once
+> the candidate distribution and solver reward dynamics were taken into account.
+> This suggests that metric learning / reranking / supervised relational priors
+> may be more appropriate than direct sparse RL optimization for this stage.
+
+## 13. 実装ログと次セッションへの引き継ぎ (2026-05-29)
+
+第一段階 (§4–§5) の infra と config を実装し、学習を開始した。本セクションは
+数日後に結果が出たときに作業を再開するための自己完結な引き継ぎである。
+
+### 13.1 実装の意図 (なぜこの形にしたか)
+
+- **中心**: scaffold (hygiene + class prior + sampling temperature + 将来の
+  rel-only warm start) と ResponseMetric 報酬を分離し、**同一 scaffold 上で
+  `S` vs `S+R` を比較**する (§2–§3)。これが「改善は本当に我々の指標由来か」と
+  いう帰属問題を解く唯一の clean な方法。RL はあくまで補助証拠で、evaluator
+  としての主張は `v4_results` 側に残す (§0)。
+- **hygiene を SolverReward 内 optional penalty にした理由** (§4.2): solver worker
+  が既に detokenize + `complete_constraint_values` 済みの sketch を返すため、
+  新規 reward class にすると同じ処理を二重に行う。near-zero は solver 由来の
+  hygiene signal なので責務上も SolverReward が自然。default `0.0` で既存挙動不変。
+- **train 報酬を `motion_relational_angle` にした理由** (§11.3, experiment_notes
+  失敗例 sa2167a5): `response_relational_angle` は Pred に dimensional driver が
+  無いと leak→0 となり `[START],[STOP]` 空系列を誤って報酬する。`motion_relational`
+  は空系列を「relation 不足」方向に罰せる。leak は診断としてのみ残す。
+- **class prior が必要な理由** (§4.3, 観察#2): 選択型報酬 (ResponseMetric) は
+  方策がサンプルしない候補を浮上させられない。`Equal/Tangent/Mirror` は確率
+  ~0 なので、まず探索分布に乗せてから metric 報酬に選ばせる、の2段構え。
+- **train/val composer 分離** (§11.6): 本コードでは `RewardComposer` (学習) と
+  `RewardValComposer` (検証) が別。報酬を `validation_gen/*` に出すには **両方**の
+  list に入れる必要がある。これが最大の落とし穴。
+
+ユーザー決定 (2026-05-29):
+
+- 初回フル run は **5.3 (scaffold_no_intent) vs 5.4 (scaffold_intent)** を先行。
+  canary は4本とも回す。
+- 判定は**全指標を横並び**で見る (leak を特権化しない)。
+- `class_proxy` 対照と `R_shuffled` は **Phase 2 に保留** (S+R が勝った場合のみ)。
+
+### 13.2 実装済みの内容と検証状況
+
+実装 (branch `histcad_refactor`, 2026-05-29 時点で未コミット):
+
+| 項目 | 主な変更ファイル | 備考 |
+|---|---|---|
+| `constraint_head_counts` + token-id 群 | `src/metrics/constraint_stats.py`, `src/sketch_handlers/constants.py` | per-type head カウント。`KEY_RELATIONAL_*` 等 |
+| `RelationalClassPriorReward` | `src/models/rewards/relational_class_prior.py` | name=`rel_prior`, cap_per_type/cap_total/gate |
+| SolverReward hygiene penalty | `src/models/rewards/solver_reward.py` | near-zero Distance / axis Angle, default 0.0, rate 常時 log |
+| temperature knob | `src/models/constraint_ar_module_rloo.py` | `train_/val_sample_temperature`, default 1.0 |
+| val 指標 + chart | `src/models/rewards/composer.py`, `constraint_ar_module_rloo.py` | `eval_*_ratio_mean` + `validation/constraint_type_mix_{table,bar}` |
+| 4 config | `configs/experiment/rloo_response_{hygiene,scaffold}_{no_intent,intent}.yaml` | train/val composer 両方を定義 |
+
+検証: 3ヘルパーの単体テスト (カウント/cap/gate/Angle周期性で 0/90/180/270 検出)、
+`scaffold_intent` の CPU smoke (train 2step + val、exit 0、reward失敗0/chart失敗0)、
+全 val 新指標の実値ダンプ。残り3 config は compose 検証のみ。
+
+**実装上の重要な性質 (再開時に忘れないこと)**:
+
+- hygiene は **geometry 補完値**を読む。`Distance≈0` = 参照プリミティブが幾何的に
+  一致 (= Coincident 代替) を正確に検出。Angle は **radians** を mod π で畳んで
+  0/90/180 を判定 (270 も含む)。
+- 閾値 `near_zero_distance_threshold=0.001` / `axis_angle_tolerance_rad=0.001` は
+  **初期値**。効きが弱ければ §11.1 通り **penalty 絶対値を上げる (閾値は広げない)**。
+- 新 val 指標は加算的なので既存 `rloo_response.yaml` にも自動で出る (後方互換)。
+
+### 13.3 学習中に見る指標 (結果読み取りのチェックリスト)
+
+最重要の比較は **5.3 (scaffold_no_intent) vs 5.4 (scaffold_intent)**。同一 scaffold
+なので差分が ResponseMetric 報酬の純効果。5.1/5.2 は hygiene 単体の寄与を見る診断。
+
+- 妥当性: `validation_gen/solver_fc_rate`, `solver_under_rate`,
+  `solver_redundant_rate`, `solver_conflicting_rate`, `solver_valid_dof_mean`
+- ResponseMetric family (全部横並び):
+  `intent_response_full_angle_mean`, `intent_motion_full_angle_mean`,
+  `intent_motion_relational_angle_mean`, `intent_leak_relational_angle_mean`
+- constraint mix: `eval_rel_ratio_mean`, `eval_key_rel_ratio_mean`,
+  `eval_distance_family_ratio_mean`, `eval_angle_family_ratio_mean`,
+  `validation/constraint_type_mix_bar` (Equal/Tangent/Mirror がゼロ付近か)
+- hygiene: `solver_near_zero_distance_rate`, `solver_axis_angle_rate`
+- 探索/崩壊: `train/entropy`, `validation/samples_0` (空系列 collapse の有無)
+- 寄与: `train/reward_contrib_{solver,dim_parsimony,rel_prior,intent}_seq_mean`
+  (rel_prior が solver を食い過ぎていないか)
+
+### 13.4 結果が出た後の次手 (分岐別の実装方策)
+
+§8 の解釈を「次に何を実装するか」に落とした版。観測 → 実装アクションの形。
+
+**(1) 強い成功** — 5.4 が 5.3 比で: FC 同等 / `response_full_angle` または
+`leak_relational_angle` 改善 / dim count 増えず / near-zero 増えず。
+→ 主張補強の対照を実装 (Phase 2):
+
+  - **`R_shuffled`** (§11.7): GT を入替えるのではなく、通常の ResponseIntentReward
+    を計算後、**RLOO group 内で STOP 位置の reward scalar を permutation** する。
+    実装場所は `response_metric_reward.py`。`shuffle_within_group: bool` フラグを
+    足し、`_score_parallel_from_arrays` / `_score_serial_from_arrays` が
+    `placements` を作った後、同一 `id(sketch)` group 内で reward 値だけ並べ替える。
+    `S+R_shuffled` で改善するなら指標の意味でなく報酬スケールが効いている疑い。
+  - **`class_proxy`** (§3, 保留中): GT の relational type histogram に一致させる
+    count-matching reward (ResponseMetric ではない単純 prior)。新規ファイル
+    `src/models/rewards/relational_count_match.py` 想定。`constraint_head_counts`
+    で Pred と GT(`ctx.gt_tokens`) の type 別 count を取り、overlap をボーナス化。
+    これと S+R を比較し「単純 prior 超えの効果」を示す。
+
+**(2) 弱い成功** — response/qualitative は改善するが FC が落ちる。
+→ SolverReward の schedule を実装 (§8.2)。序盤の `reward_dof_reduction` /
+  `reward_fully_constrained` を弱める step-based schedule を SolverReward に追加
+  (現在は定数)。config 数は増やさない。
+
+**(3) scaffold-only で十分** — 5.3 ≈ 5.4。
+→ ResponseMetric 報酬の追加効果は弱い、と結論。ただし結論前に「intent 報酬が
+  実際に効いていたか」を確認: `reward_contrib_intent_seq_mean` が非ゼロか、gate を
+  通る FC/Under サンプルが十分あったか。本当に差が無ければ RL は negative result
+  として早期に整理し (§8.3)、`v4_results` を主軸に戻す。
+
+**(4) intent collapse** — 5.4 だけ `[START],[STOP]` / under に逃げる (§8.4)。
+→ `coeff_h_angle` を下げる / **empty・very-short sequence penalty を実装**
+  (新規 or SolverReward 内で n_total==0 を罰する) / gate を `fc` と `converged`
+  の中間 (例: FC のみだが warmup 後に converged へ切替) 設計。
+
+**(5) rare relations が依然出ない** — `eval_key_rel_ratio_mean` が低いまま /
+  `constraint_type_mix_bar` で Equal/Tangent/Mirror がゼロ付近 (class prior でも不可)。
+→ §9 の **rel-only warm start → high-entropy full RLOO** に進む。infra
+  (`relational_only`, temperature knob) は実装済みなので主に config 作業:
+
+  - Phase A: `rloo_rel_only.yaml` で rel-only RLOO。ckpt 選択は FC でなく
+    `eval_key_rel_ratio_mean` / `constraint_type_mix_bar` / collapse していない /
+    entropy が潰れていない で選ぶ。
+  - Phase B: 新規 config (scaffold_intent ベース) に
+    `pretrained_ckpt_path=<A の ckpt>`, `model.train_sample_temperature=1.2`,
+    `model.entropy_bonus` を {0.001, 0.003, 0.005} で grid, `model.sft_coeff=0.01`,
+    `model.kl_coeff=0.005`。`relwarm + scaffold only` と
+    `relwarm + scaffold + intent` を比較 (ResponseMetric 有無以外を揃える)。
+
+**(6) class prior で invalid 増加** (§8.5) → `cap_total` を下げる /
+  `Equal/Tangent/Mirror` coeff を半分 / `gate=fc`。config のみ。
+
+**(7) hygiene が効かない** — `solver_near_zero_distance_rate` /
+  `solver_axis_angle_rate` が S と変わらない。
+→ まず penalty 絶対値を上げる (config)。それでも near-zero が hack として残るなら
+  §4.2 後段の **hard invalid / Malformed 相当**への切替を実装 (SolverReward で
+  near-zero Distance を Malformed bucket に入れる)。最初は soft のまま様子見。
+
+### 13.5 未実装の TODO (優先度順、結果次第で着手)
+
+1. `R_shuffled` (permutation 対照) — 分岐(1)。`response_metric_reward.py` にフラグ追加。
+2. Phase B warm-start config — 分岐(5)。config のみ (infra 済)。
+3. `class_proxy` count-match reward — 分岐(1)。新規 reward ファイル。
+4. empty/very-short sequence penalty — 分岐(4)。collapse 防御。
+5. SolverReward の reward schedule — 分岐(2)。FC trade-off 緩和。
+6. near-zero の hard-invalid 化 — 分岐(7)。soft で足りない場合のみ。
+
+コミットはユーザー指示後に行う。学習完了後、本ファイルに run 別の結果と採用した
+分岐を追記してから次の実装に進むこと。

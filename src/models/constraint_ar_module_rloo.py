@@ -10,7 +10,11 @@ from src.models.components.constraint_ar_model import ConstraintARModel
 from src.models.components.solver_feedback import SolverFeedback
 from src.models.components.token_reordering import TokenReordering
 from src.models.components.token_visualizer import visualize_constraint_sequence
-from src.models.rewards.composer import RewardComposer, RewardValComposer
+from src.models.rewards.composer import (
+    CONSTRAINT_MIX_KEY,
+    RewardComposer,
+    RewardValComposer,
+)
 from src.sketch_handlers.constants import ConstraintToken, DIMENSIONAL_CONSTRAINT_TOKEN_IDS
 from src.sketch_handlers.context import SketchContext
 from src.sketch_handlers.sketch_tokenizer import SketchTokenizer
@@ -33,6 +37,8 @@ class ConstraintARModuleRLOO(L.LightningModule):
         kl_coeff: float = 0.01,
         sft_coeff: float = 0.0,
         relational_only: bool = False,
+        train_sample_temperature: float = 1.0,
+        val_sample_temperature: float = 1.0,
     ):
         super().__init__()
         self.save_hyperparameters(
@@ -70,6 +76,11 @@ class ConstraintARModuleRLOO(L.LightningModule):
         self.entropy_bonus = entropy_bonus
         self.kl_coeff = kl_coeff
         self.sft_coeff = sft_coeff
+        # Sampling temperature for RLOO rollouts (train) and validation
+        # generation.  Raised above 1.0 to restore candidate diversity after a
+        # rel-only warm start collapses the dimensional-token logits.
+        self.train_sample_temperature = float(train_sample_temperature)
+        self.val_sample_temperature = float(val_sample_temperature)
 
         # losses and metrics
         self.criterion = torch.nn.CrossEntropyLoss(ignore_index=ConstraintToken.Pad)
@@ -162,6 +173,7 @@ class ConstraintARModuleRLOO(L.LightningModule):
                 expanded,
                 max_len,
                 dtype=batch['c_val'].dtype,
+                temperature=self.train_sample_temperature,
                 memory=sample_memory,
             )
             del sample_memory
@@ -365,7 +377,12 @@ class ConstraintARModuleRLOO(L.LightningModule):
         # Generate sample
         full_target = batch['c_val']
         max_len = full_target.shape[1]
-        generated, _ = self.generate_sample(batch, max_len, dtype=full_target.dtype)
+        generated, _ = self.generate_sample(
+            batch,
+            max_len,
+            dtype=full_target.dtype,
+            temperature=self.val_sample_temperature,
+        )
 
         # Compute constraint-level metrics
         generated_sorted, _ = self.token_reordering(generated, None, None, "canonical_with_tail_strip")
@@ -376,6 +393,13 @@ class ConstraintARModuleRLOO(L.LightningModule):
                 batch['p_val'], generated, batch['sketch'], batch['c_val']
             )
             for metric_name, metric_value in eval_metrics.items():
+                # Keys starting with "_" carry non-scalar payloads (e.g. the
+                # per-type constraint-mix for the bar chart); accumulate those
+                # separately instead of logging them as scalars.
+                if metric_name.startswith("_"):
+                    if metric_name == CONSTRAINT_MIX_KEY:
+                        self._accumulate_constraint_mix(metric_value)
+                    continue
                 self.log(
                     f'validation_gen/{metric_name}',
                     float(metric_value),
@@ -393,8 +417,76 @@ class ConstraintARModuleRLOO(L.LightningModule):
                 self._val_samples = []
             self._val_samples.append((target_sorted, generated_sorted, dataloader_idx))
 
+    def _accumulate_constraint_mix(self, payload: dict[str, Any]) -> None:
+        """Sum the per-type constraint-mix payload across validation batches."""
+        acc = getattr(self, "_val_constraint_mix", None)
+        if acc is None:
+            acc = {
+                "names": list(payload["names"]),
+                "families": list(payload["families"]),
+                "counts": [float(c) for c in payload["counts"]],
+                "n_total": 0,
+                "n_sketches": 0,
+            }
+            self._val_constraint_mix = acc
+        for j, c in enumerate(payload["counts"]):
+            acc["counts"][j] += float(c)
+        acc["n_total"] += int(payload["n_total"])
+        acc["n_sketches"] += int(payload["n_sketches"])
+
+    def _log_constraint_mix_chart(self) -> None:
+        """Log the per-type constraint-mix Table + bar chart to W&B (rank 0).
+
+        Scalars (``eval_*_ratio_mean``) already cover the aggregate families; this
+        chart shows the full per-type distribution without flooding the dashboard
+        with one scalar per constraint type.  Non-W&B loggers (or a charting
+        failure) are skipped so validation never breaks on visualization.
+        """
+        acc = getattr(self, "_val_constraint_mix", None)
+        self._val_constraint_mix = None
+        if acc is None or self.global_rank != 0:
+            return
+        logger = self.logger
+        if logger is None or not hasattr(logger, "experiment"):
+            return
+        try:
+            import wandb
+
+            n_sketches = max(1, int(acc["n_sketches"]))
+            n_total = max(1, int(acc["n_total"]))
+            step = int(self.global_step)
+            rows = []
+            bar_rows = []
+            for name, family, count in zip(
+                acc["names"], acc["families"], acc["counts"]
+            ):
+                mean_count = float(count) / n_sketches
+                fraction = float(count) / n_total
+                rows.append([step, name, family, mean_count, fraction])
+                bar_rows.append([name, fraction])
+            table = wandb.Table(
+                columns=["step", "constraint_type", "family", "mean_count", "fraction"],
+                data=rows,
+            )
+            bar = wandb.plot.bar(
+                wandb.Table(columns=["constraint_type", "fraction"], data=bar_rows),
+                "constraint_type",
+                "fraction",
+                title="Generated constraint type mix (fraction)",
+            )
+            logger.experiment.log(  # type: ignore[attr-defined]
+                {
+                    "validation/constraint_type_mix_table": table,
+                    "validation/constraint_type_mix_bar": bar,
+                }
+            )
+        except Exception as e:  # pragma: no cover - visualization must never break val
+            print(f"[on_validation_epoch_end] constraint-mix chart logging failed: {e}")
+
     @torch.no_grad()
     def on_validation_epoch_end(self):
+
+        self._log_constraint_mix_chart()
 
         if not hasattr(self, "_val_samples") or not self._val_samples:
             return
@@ -436,7 +528,12 @@ class ConstraintARModuleRLOO(L.LightningModule):
         # Generate sample
         full_target = batch['c_val']
         max_len = full_target.shape[1]
-        generated, _ = self.generate_sample(batch, max_len, dtype=full_target.dtype)
+        generated, _ = self.generate_sample(
+            batch,
+            max_len,
+            dtype=full_target.dtype,
+            temperature=self.val_sample_temperature,
+        )
 
         # Compute constraint-level metrics
         generated_sorted, _ = self.token_reordering(generated, None, None, "canonical_with_tail_strip")

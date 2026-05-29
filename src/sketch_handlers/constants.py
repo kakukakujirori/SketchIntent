@@ -95,5 +95,52 @@ DIMENSIONAL_CONSTRAINT_TOKEN_IDS: tuple[int, ...] = (
     ConstraintToken.Radius,
 )
 
+# Every real constraint-type head token (relational + dimensional), i.e. the
+# ConstraintToken members that can appear as a constraint block's head, with the
+# special tokens (Pad/Mask/Start/Stop/InnerPad) removed.  Used for per-type head
+# counting in the constraint-mix logging and the relational class prior reward.
+_NON_CONSTRAINT_TYPE_TOKENS = frozenset(
+    (
+        ConstraintToken.Pad,
+        ConstraintToken.Mask,
+        ConstraintToken.Start,
+        ConstraintToken.Stop,
+        ConstraintToken.InnerPad,
+    )
+)
+CONSTRAINT_TYPE_TOKEN_IDS: tuple[int, ...] = tuple(
+    int(t) for t in ConstraintToken if t not in _NON_CONSTRAINT_TYPE_TOKENS
+)
+
+# "Key" relational constraints whose design intent we most want to surface:
+# Coincident plus the structurally rare relations (Equal/Tangent/Parallel/
+# Perpendicular/Mirror/Concentric) that the policy almost never samples on its
+# own.  Concentric is included because it is a genuine, fairly common human
+# relation (~3% of human-GT constraints) that the model-generated pseudo-rel GT
+# lacks entirely.
+KEY_RELATIONAL_CONSTRAINT_TOKEN_IDS: tuple[int, ...] = (
+    ConstraintToken.Coincident,
+    ConstraintToken.Equal,
+    ConstraintToken.Tangent,
+    ConstraintToken.Parallel,
+    ConstraintToken.Perpendicular,
+    ConstraintToken.Mirror,
+    ConstraintToken.Concentric,
+)
+
+# Distance-family dimensional tokens.  Near-zero values of these act as
+# Coincident / alignment dimensional substitutes (see SolverReward hygiene).
+DISTANCE_FAMILY_CONSTRAINT_TOKEN_IDS: tuple[int, ...] = (
+    ConstraintToken.Distance,
+    ConstraintToken.DistanceX,
+    ConstraintToken.DistanceY,
+)
+
+# Angle-family dimensional tokens.  Values near 0/90/180 deg act as
+# Parallel / Perpendicular dimensional substitutes (see SolverReward hygiene).
+ANGLE_FAMILY_CONSTRAINT_TOKEN_IDS: tuple[int, ...] = (
+    ConstraintToken.Angle,
+)
+
 # FreeCAD constants
 FC_GEO_UNDEF = -2000

@@ -558,6 +558,7 @@ def main():
     module = hydra.utils.instantiate(cfg.model)
     ckpt = torch.load(args.ckpt, map_location="cpu", weights_only=False)
     state_dict = ckpt.get("state_dict", ckpt)
+    state_dict = {k.replace("_orig_mod.", ""): v for k, v in state_dict.items()}  # torch.compile artifact
     module.load_state_dict(state_dict)
     context = module.hparams.context
 

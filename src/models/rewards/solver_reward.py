@@ -1,3 +1,4 @@
+import math
 import os
 import pickle
 import time
@@ -15,6 +16,7 @@ import numpy as np
 import torch
 
 import sketchgraphs.data as datalib
+from sketchgraphs.data import QuantityParameter
 from src.models.components.solver_feedback import SolverFeedback
 from src.models.components.token_visualizer import visualize_constraint_sequence
 from src.models.rewards.base import BaseReward, RewardContext, RewardOutput
@@ -24,6 +26,8 @@ from src.sketch_handlers.context import SketchContext
 from src.sketch_handlers.sketch_tokenizer import SketchTokenizer
 
 _worker_solver_feedback: SolverFeedback | None = None
+
+_HYGIENE_GATE_MODES = ("always", "converged", "fc")
 
 
 @dataclass
@@ -60,6 +64,14 @@ class SolverReward(BaseReward):
         penalty_rigid_dimensional: float = -0.5,
         fully_constrained_dof: int = 2,
         distortion_threshold: float | None = None,
+        penalty_near_zero_distance: float = 0.0,
+        near_zero_distance_threshold: float = 0.001,
+        near_zero_distance_cap: int = 3,
+        near_zero_distance_gate: str = "converged",
+        penalty_axis_angle: float = 0.0,
+        axis_angle_tolerance_rad: float = 0.001,
+        axis_angle_cap: int = 3,
+        axis_angle_gate: str = "converged",
         num_workers: int | None = None,
         weight: float = 1.0,
         enabled: bool = True,
@@ -68,8 +80,10 @@ class SolverReward(BaseReward):
         self.sketch_tokenizer = SketchTokenizer(context)
         self.fully_constrained_dof = fully_constrained_dof
 
-        assert all(v <= 0 for v in [penalty_conflicting, penalty_redundant, penalty_malformed, penalty_deformed, penalty_per_problematic_constraint, penalty_rigid_dimensional]), \
-            f"{penalty_conflicting=}, {penalty_redundant=}, {penalty_malformed=}, {penalty_deformed=}, {penalty_per_problematic_constraint=}, {penalty_rigid_dimensional=}"
+        assert all(v <= 0 for v in [penalty_conflicting, penalty_redundant, penalty_malformed, penalty_deformed, penalty_per_problematic_constraint, penalty_rigid_dimensional, penalty_near_zero_distance, penalty_axis_angle]), \
+            f"{penalty_conflicting=}, {penalty_redundant=}, {penalty_malformed=}, {penalty_deformed=}, {penalty_per_problematic_constraint=}, {penalty_rigid_dimensional=}, {penalty_near_zero_distance=}, {penalty_axis_angle=}"
+        assert near_zero_distance_gate in _HYGIENE_GATE_MODES, f"{near_zero_distance_gate=}"
+        assert axis_angle_gate in _HYGIENE_GATE_MODES, f"{axis_angle_gate=}"
 
         self.reward_dof_reduction = reward_dof_reduction
         self.reward_fully_constrained = reward_fully_constrained
@@ -79,6 +93,22 @@ class SolverReward(BaseReward):
         self.penalty_deformed = penalty_deformed
         self.penalty_per_problematic_constraint = penalty_per_problematic_constraint
         self.penalty_rigid_dimensional = penalty_rigid_dimensional
+
+        # Dimensional shortcut hygiene (optional; default off — penalty 0.0).
+        # Penalises Distance constraints whose completed value is ~0 (a
+        # Coincident substitute) and Angle constraints whose value is near
+        # 0/90/180 deg (Parallel / Perpendicular substitutes).  These are
+        # solver-derived signals on the already-detokenized, value-completed
+        # sketch, so they live here rather than in a separate reward that would
+        # repeat the detokenize + value completion.
+        self.penalty_near_zero_distance = float(penalty_near_zero_distance)
+        self.near_zero_distance_threshold = float(near_zero_distance_threshold)
+        self.near_zero_distance_cap = int(near_zero_distance_cap)
+        self.near_zero_distance_gate = near_zero_distance_gate
+        self.penalty_axis_angle = float(penalty_axis_angle)
+        self.axis_angle_tolerance_rad = float(axis_angle_tolerance_rad)
+        self.axis_angle_cap = int(axis_angle_cap)
+        self.axis_angle_gate = axis_angle_gate
 
         # Execution and caching
         self.context = context
@@ -214,6 +244,73 @@ class SolverReward(BaseReward):
             else:
                 raise ValueError(f"Unknown entity type: {entity}")
         return dof
+
+    @staticmethod
+    def _quantity_value(constr: datalib.Constraint) -> float | None:
+        """Return the constraint's completed QuantityParameter value, or None.
+
+        ``complete_constraint_values`` stores Distance values (parameterId
+        ``'length'``) and Angle values (parameterId ``'angle'``, in radians) as
+        floats on the reconstructed sketch.  Unfilled / invalid completions leave
+        a non-float value, which we treat as "no readable value".
+        """
+        for p in constr.parameters:
+            if isinstance(p, QuantityParameter):
+                try:
+                    return float(p.value)
+                except (TypeError, ValueError):
+                    return None
+        return None
+
+    def _is_axis_angle(self, value_rad: float) -> bool:
+        """True if an Angle value is ~0/90/180 deg (parallel/perpendicular proxy).
+
+        Angle values are periodic, so fold into ``[0, pi)`` and flag values near
+        0/180 deg (Parallel substitute) or 90 deg (Perpendicular substitute).
+        """
+        a = abs(value_rad) % math.pi                  # fold into [0, pi)
+        tol = self.axis_angle_tolerance_rad
+        near_parallel = min(a, math.pi - a) < tol     # 0 or 180 deg
+        near_perpendicular = abs(a - math.pi / 2.0) < tol
+        return near_parallel or near_perpendicular
+
+    def _count_dimensional_shortcuts(
+        self, sketch: datalib.Sketch
+    ) -> tuple[int, int, int, int]:
+        """Count near-zero Distance and axis-aligned Angle dimensional shortcuts.
+
+        Returns ``(near_zero_distance, distance_family_total, axis_angle,
+        angle_total)`` for one reconstructed sketch.  ``ConstraintType.Distance``
+        covers Distance / DistanceX / DistanceY (the X/Y variants differ only by
+        a ``'direction'`` enum), matching the token-level distance family.
+        """
+        near_zero_distance = distance_total = axis_angle = angle_total = 0
+        for constr in sketch.constraints.values():
+            if constr.type == datalib.ConstraintType.Distance:
+                value = self._quantity_value(constr)
+                if value is None:
+                    continue
+                distance_total += 1
+                if abs(value) < self.near_zero_distance_threshold:
+                    near_zero_distance += 1
+            elif constr.type == datalib.ConstraintType.Angle:
+                value = self._quantity_value(constr)
+                if value is None:
+                    continue
+                angle_total += 1
+                if self._is_axis_angle(value):
+                    axis_angle += 1
+        return near_zero_distance, distance_total, axis_angle, angle_total
+
+    @staticmethod
+    def _hygiene_gate_pass(status: str, gate: str) -> bool:
+        if gate == "always":
+            return True
+        if gate == "converged":
+            return status in ("FC", "Under")
+        if gate == "fc":
+            return status == "FC"
+        return False
 
     @staticmethod
     def _scalar_metrics_from_counters(
@@ -464,6 +561,14 @@ class SolverReward(BaseReward):
         solver_status_counter: Counter[str] = Counter()
         per_sample_solver_status: list[str] = ["Timeout"] * handle.B
 
+        # Dimensional shortcut hygiene tallies (rates over the reconstructed set,
+        # independent of the per-penalty gate so the diagnostic reflects the full
+        # generation distribution).
+        hyg_near_zero_distance = 0
+        hyg_distance_family = 0
+        hyg_axis_angle = 0
+        hyg_angle_family = 0
+
         for i in range(handle.B):
             res = evaluation_results[i]
             first_stop_idx = handle.first_stop_indices[i]
@@ -490,6 +595,39 @@ class SolverReward(BaseReward):
             per_sample_solver_status[i] = status_name
             solver_dof_counter[solver_status.DoF] += 1
             solver_status_counter[status_name] += 1
+
+            ################################################################
+            # 0. Dimensional shortcut hygiene (optional soft penalty)
+            ################################################################
+            # Count near-zero Distance / axis-aligned Angle dimensional
+            # substitutes for every reconstructed sketch (the rate is a
+            # generation diagnostic), but only apply the penalty when enabled
+            # and the per-penalty gate passes.
+            nz_dist, dist_total, ax_angle, angle_total = (
+                self._count_dimensional_shortcuts(sketch)
+            )
+            hyg_near_zero_distance += nz_dist
+            hyg_distance_family += dist_total
+            hyg_axis_angle += ax_angle
+            hyg_angle_family += angle_total
+
+            if (
+                self.penalty_near_zero_distance != 0.0
+                and nz_dist > 0
+                and self._hygiene_gate_pass(status_name, self.near_zero_distance_gate)
+            ):
+                scores[i, first_stop_idx] += (
+                    self.penalty_near_zero_distance
+                    * min(nz_dist, self.near_zero_distance_cap)
+                )
+            if (
+                self.penalty_axis_angle != 0.0
+                and ax_angle > 0
+                and self._hygiene_gate_pass(status_name, self.axis_angle_gate)
+            ):
+                scores[i, first_stop_idx] += (
+                    self.penalty_axis_angle * min(ax_angle, self.axis_angle_cap)
+                )
 
             ################################################################
             # 1. Constraint-wise penalty
@@ -569,6 +707,10 @@ class SolverReward(BaseReward):
             "dof": solver_dof_counter,
             "status": solver_status_counter,
             **self._scalar_metrics_from_counters(solver_status_counter, solver_dof_counter),
+            "solver_near_zero_distance_rate": (
+                hyg_near_zero_distance / max(1, hyg_distance_family)
+            ),
+            "solver_axis_angle_rate": hyg_axis_angle / max(1, hyg_angle_family),
         }
         return RewardOutput(
             scores=scores,

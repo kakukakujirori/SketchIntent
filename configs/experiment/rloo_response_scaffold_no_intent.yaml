@@ -1,0 +1,176 @@
+# @package _global_
+
+# Research plan §5.3 — Full scaffold WITHOUT ResponseIntentReward (control).
+#
+# Scaffold = SolverReward(+dimensional shortcut hygiene) + DimParsimonyReward
+#            + RelationalClassPriorReward.  This is the control arm for
+# rloo_response_scaffold_intent.yaml: identical scaffold, no ResponseMetric
+# reward.  The difference between the two arms isolates the added effect of the
+# ResponseMetric reward.
+#
+# The validation metrics are identical across all four scaffold configs (incl.
+# the response-metric family logged at gate=always here even though it is not a
+# training reward) so the arms are compared on the same eval axes.
+#
+# Smoke test (CPU, 2 steps):
+#   conda run -n freecad python src/train.py experiment=rloo_response_scaffold_no_intent \
+#     trainer.accelerator=cpu trainer.devices=1 trainer.strategy=auto trainer.precision=32 \
+#     data.batch_size=1 model.group_sample_size=2 \
+#     +trainer.max_steps=2 +trainer.limit_val_batches=0 +trainer.num_sanity_val_steps=0
+
+defaults:
+  - override /data: constraint_rloo.yaml
+  - override /model: constraint_ar_rloo.yaml
+  - override /trainer: default
+
+tags: ["rloo", "response", "scaffold", "no_intent"]
+
+callbacks:
+  model_checkpoint_epoch:
+    every_n_train_steps: 100
+    save_top_k: 3
+    filename: "epoch_{epoch}_step_{step}"
+    save_last: true
+
+  model_checkpoint_loss: null
+
+  model_checkpoint_reward:
+    _target_: lightning.pytorch.callbacks.ModelCheckpoint
+    dirpath: ${paths.output_dir}/checkpoints
+    monitor: "validation_gen/solver_valid_dof_mean"
+    filename: "step_{step}_dof_{validation_gen/solver_valid_dof_mean:.3f}"
+    save_top_k: 3
+    mode: "min"
+    auto_insert_metric_name: false
+    every_n_train_steps: 100
+
+data:
+  train_sequence_file: data_processed/sg_pseudo_rel_167k_unique_valid.npy
+  batch_size: 32
+  num_workers: 1
+
+model:
+  reward_composer:
+    _target_: src.models.rewards.composer.RewardComposer
+    rewards:
+      # Solver-derived hard signals + dimensional shortcut hygiene penalty.
+      - _target_: src.models.rewards.solver_reward.SolverReward
+        context: ${data.context}
+        reward_dof_reduction: 10.0
+        reward_fully_constrained: 5.0
+        penalty_conflicting: -1.0
+        penalty_redundant: -1.0
+        penalty_malformed: -0.5
+        penalty_deformed: -0.25
+        penalty_per_problematic_constraint: -1.0
+        penalty_rigid_dimensional: -0.0
+        fully_constrained_dof: 2
+        distortion_threshold: null
+        penalty_near_zero_distance: -0.30
+        near_zero_distance_threshold: 0.001
+        near_zero_distance_cap: 3
+        near_zero_distance_gate: converged
+        penalty_axis_angle: -0.30
+        axis_angle_tolerance_rad: 0.001
+        axis_angle_cap: 3
+        axis_angle_gate: converged
+        num_workers: null  # null -> auto: min(8, cpu_count // 4)
+
+      # Dimensional parsimony (dim-count penalty)
+      - _target_: src.models.rewards.dim_parsimony.DimParsimonyReward
+        context: ${data.context}
+        coeff: 0.30
+        mode: excess_over_gt_per_primitive
+        excess_margin: 1
+        gate: converged
+
+      # Relational class prior — exploration scaffold for rare relations.
+      - _target_: src.models.rewards.relational_class_prior.RelationalClassPriorReward
+        context: ${data.context}
+        gate: converged
+        cap_total: 0.50
+        cap_per_type: 2
+        # Coeffs derived from human-GT relation frequency via
+        # scripts/derive_relational_class_prior_coeffs.py (ceiling=0.15).
+        # Active = invsqrt (1/sqrt(freq)); to try neglog (-log p), swap in the
+        # commented block below.
+        coeff_by_type:
+          Mirror: 0.15
+          Equal: 0.129
+          Concentric: 0.055
+          Parallel: 0.053
+          Perpendicular: 0.046
+          Tangent: 0.048
+          Coincident: 0.012
+        # neglog (-log p) alternative:
+        # coeff_by_type:
+        #   Mirror: 0.15
+        #   Equal: 0.142
+        #   Concentric: 0.096
+        #   Parallel: 0.093
+        #   Perpendicular: 0.085
+        #   Tangent: 0.088
+        #   Coincident: 0.013
+
+  reward_val_composer:
+    _target_: src.models.rewards.composer.RewardValComposer
+    context: ${data.context}
+    metrics:
+      # Solver rates + hygiene rates.  Penalty 0 in val; the near-zero /
+      # axis-angle RATES are logged regardless of penalty, with the SAME
+      # thresholds as train so the diagnostic is comparable.
+      - _target_: src.models.rewards.solver_reward.SolverReward
+        context: ${data.context}
+        fully_constrained_dof: 2
+        penalty_near_zero_distance: 0.0
+        near_zero_distance_threshold: 0.001
+        penalty_axis_angle: 0.0
+        axis_angle_tolerance_rad: 0.001
+        num_workers: null
+      # Canonical response-metric family (gate=always): logs response_full_angle,
+      # motion_full_angle, motion_relational_angle, leak_relational_angle, ...
+      # Logged here even though intent is NOT a training reward in this arm.
+      - _target_: src.models.rewards.response_metric_reward.ResponseIntentReward
+        context: ${data.context}
+        eps: 1.0e-9
+        gate: always
+        h_angle_reward_metric: response_full_angle
+        num_workers: 0
+      # Relational class prior as a metric-only diagnostic (rel_prior_*).
+      - _target_: src.models.rewards.relational_class_prior.RelationalClassPriorReward
+        context: ${data.context}
+        gate: always
+        cap_total: 0.50
+        cap_per_type: 2
+        # Coeffs derived from human-GT relation frequency via
+        # scripts/derive_relational_class_prior_coeffs.py (ceiling=0.15).
+        # Active = invsqrt (1/sqrt(freq)); to try neglog (-log p), swap in the
+        # commented block below.
+        coeff_by_type:
+          Mirror: 0.15
+          Equal: 0.129
+          Concentric: 0.055
+          Parallel: 0.053
+          Perpendicular: 0.046
+          Tangent: 0.048
+          Coincident: 0.012
+        # neglog (-log p) alternative:
+        # coeff_by_type:
+        #   Mirror: 0.15
+        #   Equal: 0.142
+        #   Concentric: 0.096
+        #   Parallel: 0.093
+        #   Perpendicular: 0.085
+        #   Tangent: 0.088
+        #   Coincident: 0.013
+
+  optimizer:
+    lr: 1e-5
+
+trainer:
+  check_val_every_n_epoch: null
+  val_check_interval: 100
+  devices: 1
+  max_epochs: 3
+
+pretrained_ckpt_path: logs/train/runs/2026-05-02_20-35-42/checkpoints/epoch_29.ckpt

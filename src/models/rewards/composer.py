@@ -18,10 +18,25 @@ import torch
 
 import sketchgraphs.data as datalib
 
-from src.metrics.constraint_stats import constraint_type_counts
+from src.metrics.constraint_stats import (
+    constraint_head_counts,
+    constraint_type_counts,
+)
 from src.models.rewards.base import BaseReward, RewardContext, RewardOutput
-from src.sketch_handlers.constants import DIMENSIONAL_CONSTRAINT_TOKEN_IDS
+from src.sketch_handlers.constants import (
+    ANGLE_FAMILY_CONSTRAINT_TOKEN_IDS,
+    CONSTRAINT_TYPE_TOKEN_IDS,
+    ConstraintToken,
+    DIMENSIONAL_CONSTRAINT_TOKEN_IDS,
+    DISTANCE_FAMILY_CONSTRAINT_TOKEN_IDS,
+    KEY_RELATIONAL_CONSTRAINT_TOKEN_IDS,
+)
 from src.sketch_handlers.context import SketchContext
+
+# Reserved key under which RewardValComposer.compute() returns the non-scalar
+# per-type constraint-mix payload for the W&B Table / bar chart.  The validation
+# loop peels off any ``_``-prefixed key before scalar logging.
+CONSTRAINT_MIX_KEY = "_constraint_mix"
 
 
 class RewardComposer(torch.nn.Module):
@@ -204,6 +219,37 @@ class RewardValComposer(torch.nn.Module):
             torch.tensor(DIMENSIONAL_CONSTRAINT_TOKEN_IDS, dtype=torch.long),
             persistent=False,
         )
+        # Token-id groups for the family-ratio scalars (key relations, distance
+        # family, angle family) and the full per-type constraint-mix chart.
+        self.register_buffer(
+            "_key_rel_token_ids",
+            torch.tensor(KEY_RELATIONAL_CONSTRAINT_TOKEN_IDS, dtype=torch.long),
+            persistent=False,
+        )
+        self.register_buffer(
+            "_distance_family_token_ids",
+            torch.tensor(DISTANCE_FAMILY_CONSTRAINT_TOKEN_IDS, dtype=torch.long),
+            persistent=False,
+        )
+        self.register_buffer(
+            "_angle_family_token_ids",
+            torch.tensor(ANGLE_FAMILY_CONSTRAINT_TOKEN_IDS, dtype=torch.long),
+            persistent=False,
+        )
+        self.register_buffer(
+            "_all_type_token_ids",
+            torch.tensor(CONSTRAINT_TYPE_TOKEN_IDS, dtype=torch.long),
+            persistent=False,
+        )
+        # Parallel name / family labels for the chart payload (CPU-side, static).
+        dim_id_set = set(int(t) for t in DIMENSIONAL_CONSTRAINT_TOKEN_IDS)
+        self._all_type_names = [
+            ConstraintToken(int(t)).name for t in CONSTRAINT_TYPE_TOKEN_IDS
+        ]
+        self._all_type_families = [
+            "dimensional" if int(t) in dim_id_set else "relational"
+            for t in CONSTRAINT_TYPE_TOKEN_IDS
+        ]
 
     @torch.no_grad()
     def compute(
@@ -238,7 +284,43 @@ class RewardValComposer(torch.nn.Module):
             cons_tokens, self._block_size, self._dim_token_ids,
             prefix_len=self._prefix_len,
         )
+        n_total_f = n_total.clamp(min=1).float()
         merged["eval_rel_ratio_mean"] = float(
-            (n_rel.float() / n_total.clamp(min=1).float()).mean()
+            (n_rel.float() / n_total_f).mean()
         )
+
+        # Family ratios: which structural relations / dimensional substitutes
+        # dominate the generated set.  Each is mean over samples of
+        # (family head count) / n_total.  type-wise breakdown goes to the chart
+        # below rather than a wall of parallel scalars.
+        def _family_ratio(token_ids: torch.Tensor) -> float:
+            fam = constraint_head_counts(
+                cons_tokens, self._block_size, token_ids,
+                prefix_len=self._prefix_len,
+            ).sum(dim=1)                                          # (B,)
+            return float((fam.float() / n_total_f).mean())
+
+        merged["eval_key_rel_ratio_mean"] = _family_ratio(self._key_rel_token_ids)
+        merged["eval_distance_family_ratio_mean"] = _family_ratio(
+            self._distance_family_token_ids
+        )
+        merged["eval_angle_family_ratio_mean"] = _family_ratio(
+            self._angle_family_token_ids
+        )
+
+        # Non-scalar payload for the per-type constraint-mix Table / bar chart.
+        # The validation loop accumulates this across batches and logs it on
+        # rank 0; it is keyed with a leading underscore so scalar logging skips
+        # it.  ``per_type_counts`` is summed over the batch.
+        per_type_counts = constraint_head_counts(
+            cons_tokens, self._block_size, self._all_type_token_ids,
+            prefix_len=self._prefix_len,
+        ).sum(dim=0)                                             # (n_types,)
+        merged[CONSTRAINT_MIX_KEY] = {
+            "names": self._all_type_names,
+            "families": self._all_type_families,
+            "counts": per_type_counts.detach().cpu().tolist(),
+            "n_total": int(n_total.sum().item()),
+            "n_sketches": int(cons_tokens.shape[0]),
+        }
         return merged
