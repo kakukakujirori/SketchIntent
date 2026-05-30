@@ -400,8 +400,19 @@ class ConstraintARModuleRLOO(L.LightningModule):
                     if metric_name == CONSTRAINT_MIX_KEY:
                         self._accumulate_constraint_mix(metric_value)
                     continue
+                # The polymorphic sub-type counts (rel_prior_subtype_*) are a
+                # per-type *distribution*, not a headline diagnostic.  Route them
+                # to their own collapsible section so the ~7 of them do not crowd
+                # validation_gen/*, while still being tracked as time-series (a
+                # snapshot bar chart cannot show their evolution over training —
+                # see _log_constraint_mix_chart).
+                section = (
+                    "validation_submix"
+                    if metric_name.startswith("rel_prior_subtype_")
+                    else "validation_gen"
+                )
                 self.log(
-                    f'validation_gen/{metric_name}',
+                    f'{section}/{metric_name}',
                     float(metric_value),
                     add_dataloader_idx=False,
                     sync_dist=True,
@@ -457,6 +468,7 @@ class ConstraintARModuleRLOO(L.LightningModule):
             step = int(self.global_step)
             rows = []
             bar_rows = []
+            mix_series: dict[str, float] = {}
             for name, family, count in zip(
                 acc["names"], acc["families"], acc["counts"]
             ):
@@ -464,6 +476,12 @@ class ConstraintARModuleRLOO(L.LightningModule):
                 fraction = float(count) / n_total
                 rows.append([step, name, family, mean_count, fraction])
                 bar_rows.append([name, fraction])
+                # Per-type fraction as a scalar time-series.  The Table / bar
+                # panels below are re-logged under the same key each validation,
+                # so W&B renders only the most recent one; these scalars give the
+                # per-step history that the snapshot chart cannot (collapsible
+                # under the val_cmix/ section).
+                mix_series[f"val_cmix/{name}"] = fraction
             table = wandb.Table(
                 columns=["step", "constraint_type", "family", "mean_count", "fraction"],
                 data=rows,
@@ -478,6 +496,7 @@ class ConstraintARModuleRLOO(L.LightningModule):
                 {
                     "validation/constraint_type_mix_table": table,
                     "validation/constraint_type_mix_bar": bar,
+                    **mix_series,
                 }
             )
         except Exception as e:  # pragma: no cover - visualization must never break val

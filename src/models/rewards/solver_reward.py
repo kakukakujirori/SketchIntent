@@ -276,31 +276,65 @@ class SolverReward(BaseReward):
 
     def _count_dimensional_shortcuts(
         self, sketch: datalib.Sketch
-    ) -> tuple[int, int, int, int]:
-        """Count near-zero Distance and axis-aligned Angle dimensional shortcuts.
+    ) -> tuple[list, int, list, int]:
+        """Find near-zero Distance and axis-aligned Angle dimensional shortcuts.
 
-        Returns ``(near_zero_distance, distance_family_total, axis_angle,
-        angle_total)`` for one reconstructed sketch.  ``ConstraintType.Distance``
-        covers Distance / DistanceX / DistanceY (the X/Y variants differ only by
-        a ``'direction'`` enum), matching the token-level distance family.
+        Returns ``(near_zero_ids, distance_family_total, axis_angle_ids,
+        angle_total)`` for one reconstructed sketch.  The first and third
+        elements are the offending shortcuts' *constraint ids* (so the penalty
+        can be localized to their own token block, like the problematic-constraint
+        path, rather than dumped diffusely at STOP), not just counts.
+        ``ConstraintType.Distance`` covers Distance / DistanceX / DistanceY (the
+        X/Y variants differ only by a ``'direction'`` enum), matching the
+        token-level distance family.  Magnitude uses ``abs`` so negative
+        DistanceX/Y near zero are caught too.
         """
-        near_zero_distance = distance_total = axis_angle = angle_total = 0
-        for constr in sketch.constraints.values():
+        near_zero_ids: list = []
+        axis_angle_ids: list = []
+        distance_total = angle_total = 0
+        for c_id, constr in sketch.constraints.items():
             if constr.type == datalib.ConstraintType.Distance:
                 value = self._quantity_value(constr)
                 if value is None:
                     continue
                 distance_total += 1
                 if abs(value) < self.near_zero_distance_threshold:
-                    near_zero_distance += 1
+                    near_zero_ids.append(c_id)
             elif constr.type == datalib.ConstraintType.Angle:
                 value = self._quantity_value(constr)
                 if value is None:
                     continue
                 angle_total += 1
                 if self._is_axis_angle(value):
-                    axis_angle += 1
-        return near_zero_distance, distance_total, axis_angle, angle_total
+                    axis_angle_ids.append(c_id)
+        return near_zero_ids, distance_total, axis_angle_ids, angle_total
+
+    def _apply_shortcut_penalty(
+        self,
+        scores,
+        i: int,
+        offending_ids: list,
+        constraint_to_token_start,
+        first_stop_idx: int,
+        penalty: float,
+        cap: int,
+    ) -> None:
+        """Add ``penalty`` at each offending shortcut's last token (capped at ``cap``).
+
+        Mirrors the problematic-constraint path so the signal lands on the
+        offending dimensional constraint's own 4-token block, letting the policy
+        credit the specific shortcut.  Any constraint whose token start is
+        unknown falls back to the STOP token so no penalty is silently dropped.
+        """
+        block = self.sketch_tokenizer.align_constraint_token_length_to
+        for c_id in offending_ids[: max(0, cap)]:
+            start = None
+            if hasattr(constraint_to_token_start, "get"):
+                start = constraint_to_token_start.get(c_id)
+            if start is not None and block > 0:
+                scores[i, start + block - 1] += penalty
+            else:
+                scores[i, first_stop_idx] += penalty
 
     @staticmethod
     def _hygiene_gate_pass(status: str, gate: str) -> bool:
@@ -603,9 +637,11 @@ class SolverReward(BaseReward):
             # substitutes for every reconstructed sketch (the rate is a
             # generation diagnostic), but only apply the penalty when enabled
             # and the per-penalty gate passes.
-            nz_dist, dist_total, ax_angle, angle_total = (
+            nz_ids, dist_total, ax_ids, angle_total = (
                 self._count_dimensional_shortcuts(sketch)
             )
+            nz_dist = len(nz_ids)
+            ax_angle = len(ax_ids)
             hyg_near_zero_distance += nz_dist
             hyg_distance_family += dist_total
             hyg_axis_angle += ax_angle
@@ -616,17 +652,18 @@ class SolverReward(BaseReward):
                 and nz_dist > 0
                 and self._hygiene_gate_pass(status_name, self.near_zero_distance_gate)
             ):
-                scores[i, first_stop_idx] += (
-                    self.penalty_near_zero_distance
-                    * min(nz_dist, self.near_zero_distance_cap)
+                self._apply_shortcut_penalty(
+                    scores, i, nz_ids, constraint_to_token_start, first_stop_idx,
+                    self.penalty_near_zero_distance, self.near_zero_distance_cap,
                 )
             if (
                 self.penalty_axis_angle != 0.0
                 and ax_angle > 0
                 and self._hygiene_gate_pass(status_name, self.axis_angle_gate)
             ):
-                scores[i, first_stop_idx] += (
-                    self.penalty_axis_angle * min(ax_angle, self.axis_angle_cap)
+                self._apply_shortcut_penalty(
+                    scores, i, ax_ids, constraint_to_token_start, first_stop_idx,
+                    self.penalty_axis_angle, self.axis_angle_cap,
                 )
 
             ################################################################

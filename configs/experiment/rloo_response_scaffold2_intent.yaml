@@ -1,0 +1,173 @@
+# @package _global_
+
+# scaffold-v2 (M1) — Full scaffold WITH ResponseIntentReward, EXPLORATION-STRENGTHENED.
+#
+# Diff vs rloo_response_scaffold_intent.yaml (the v1 scaffold), motivated by the
+# 2026-05-30 step-matched analysis (see notebooks/rloo_response_metric_reward_
+# research_plan.md and the scaffold-results memory):
+#   * entropy_bonus 0.0 -> 0.005 and train_sample_temperature 1.0 -> 1.2
+#     (v1 had NO exploration regularization at all -> the policy mode-collapsed
+#      onto Coincident; rare relations that ARE in the reward GT — Equal/Tangent/
+#      Parallel/Perp — were never sampled). This is the primary diversity lever.
+#   * SolverReward near-zero-distance / axis-angle penalty -0.30 -> -1.5, now
+#     placed on the offending constraint's own token block (localized credit
+#     assignment, see solver_reward._apply_shortcut_penalty), to actually deter
+#     the tiny-Distance (1e-16) Coincident-substitute that survived v1 (the +5
+#     FC bonus dwarfed -0.30).
+#   * RelationalClassPrior cap_total 0.5 -> 1.0, cap_per_type 2 -> 3 (give the
+#     human-GT-grounded coeffs head-room so a richer relational set is not
+#     clipped). Coeffs unchanged (still human-GT invsqrt).
+# The scaffold is IDENTICAL in scaffold2_no_intent.yaml so S vs S+R stays a clean
+# controlled comparison (research plan §11.6). Start from the SAME abs-pos
+# pretrain as v1 (no warm start -> dimensional tokens stay alive).
+
+defaults:
+  - override /data: constraint_rloo.yaml
+  - override /model: constraint_ar_rloo.yaml
+  - override /trainer: default
+
+tags: ["rloo", "response", "scaffold2", "intent"]
+
+callbacks:
+  model_checkpoint_epoch:
+    every_n_train_steps: 100
+    save_top_k: 3
+    filename: "epoch_{epoch}_step_{step}"
+    save_last: true
+
+  model_checkpoint_loss: null
+
+  model_checkpoint_reward:
+    _target_: lightning.pytorch.callbacks.ModelCheckpoint
+    dirpath: ${paths.output_dir}/checkpoints
+    monitor: "validation_gen/solver_valid_dof_mean"
+    filename: "step_{step}_dof_{validation_gen/solver_valid_dof_mean:.3f}"
+    save_top_k: 3
+    mode: "min"
+    auto_insert_metric_name: false
+    every_n_train_steps: 100
+
+data:
+  train_sequence_file: data_processed/sg_pseudo_rel_167k_unique_valid.npy
+  batch_size: 32
+  num_workers: 1
+
+model:
+  # Exploration knobs (scaffold-v2): v1 ran with entropy_bonus=0 / temp=1.0.
+  entropy_bonus: 0.005
+  train_sample_temperature: 1.2
+  val_sample_temperature: 1.0
+
+  reward_composer:
+    _target_: src.models.rewards.composer.RewardComposer
+    rewards:
+      # Solver-derived hard signals + dimensional shortcut hygiene penalty.
+      - _target_: src.models.rewards.solver_reward.SolverReward
+        context: ${data.context}
+        reward_dof_reduction: 10.0
+        reward_fully_constrained: 5.0
+        penalty_conflicting: -1.0
+        penalty_redundant: -1.0
+        penalty_malformed: -0.5
+        penalty_deformed: -0.25
+        penalty_per_problematic_constraint: -1.0
+        penalty_rigid_dimensional: -0.0
+        fully_constrained_dof: 2
+        distortion_threshold: null
+        # scaffold-v2: -0.30 -> -1.5, now localized to the offending token block.
+        penalty_near_zero_distance: -1.5
+        near_zero_distance_threshold: 0.001
+        near_zero_distance_cap: 3
+        near_zero_distance_gate: converged
+        penalty_axis_angle: -1.5
+        axis_angle_tolerance_rad: 0.001
+        axis_angle_cap: 3
+        axis_angle_gate: converged
+        num_workers: null  # null -> auto: min(8, cpu_count // 4)
+
+      # Dimensional parsimony (dim-count penalty)
+      - _target_: src.models.rewards.dim_parsimony.DimParsimonyReward
+        context: ${data.context}
+        coeff: 0.30
+        mode: excess_over_gt_per_primitive
+        excess_margin: 1
+        gate: converged
+
+      # Relational class prior — exploration scaffold for rare relations.
+      # scaffold-v2: cap_total 0.5 -> 1.0, cap_per_type 2 -> 3 (head-room).
+      - _target_: src.models.rewards.relational_class_prior.RelationalClassPriorReward
+        context: ${data.context}
+        gate: converged
+        cap_total: 1.0
+        cap_per_type: 3
+        coeff_by_type:
+          Mirror: 0.15
+          Equal: 0.129
+          Concentric: 0.055
+          Parallel: 0.053
+          Perpendicular: 0.046
+          Tangent: 0.048
+          Coincident: 0.012
+          Horizontal: 0.042
+          Vertical: 0.05
+          Midpoint: 0.112
+
+      # ResponseMetric reward (the treatment).  Reward only the relation-only
+      # motion term; leak stays a diagnostic (logged via the val composer).
+      - _target_: src.models.rewards.response_metric_reward.ResponseIntentReward
+        context: ${data.context}
+        eps: 1.0e-9
+        coeff_h_angle: 3.0
+        cap_h_angle: 0.70
+        h_angle_reward_metric: motion_relational_angle
+        motion_relational_angle_mode: symmetric
+        motion_relational_reverse_weight: 0.5
+        gate: converged
+        num_workers: 4
+
+  reward_val_composer:
+    _target_: src.models.rewards.composer.RewardValComposer
+    context: ${data.context}
+    metrics:
+      - _target_: src.models.rewards.solver_reward.SolverReward
+        context: ${data.context}
+        fully_constrained_dof: 2
+        penalty_near_zero_distance: 0.0
+        near_zero_distance_threshold: 0.001
+        penalty_axis_angle: 0.0
+        axis_angle_tolerance_rad: 0.001
+        num_workers: null
+      - _target_: src.models.rewards.response_metric_reward.ResponseIntentReward
+        context: ${data.context}
+        eps: 1.0e-9
+        gate: always
+        h_angle_reward_metric: response_full_angle
+        num_workers: 0
+      # Metric-only diagnostic; caps matched to train for a comparable bonus.
+      - _target_: src.models.rewards.relational_class_prior.RelationalClassPriorReward
+        context: ${data.context}
+        gate: always
+        cap_total: 1.0
+        cap_per_type: 3
+        coeff_by_type:
+          Mirror: 0.15
+          Equal: 0.129
+          Concentric: 0.055
+          Parallel: 0.053
+          Perpendicular: 0.046
+          Tangent: 0.048
+          Coincident: 0.012
+          Horizontal: 0.042
+          Vertical: 0.05
+          Midpoint: 0.112
+
+  optimizer:
+    lr: 1e-5
+
+trainer:
+  check_val_every_n_epoch: null
+  val_check_interval: 100
+  devices: 1
+  max_epochs: 3
+
+pretrained_ckpt_path: logs/train/runs/2026-05-02_20-35-42/checkpoints/epoch_29.ckpt
