@@ -68,7 +68,7 @@ class TangentHandler(ConstraintHandler):
             is_arc2 = isinstance(e2, (datalib.Circle, datalib.Arc))
 
             if is_line1 and is_arc2:
-                # dist(center2, line1) - r2
+                # abs(dist(center2, line1)) - r2
                 c = state.get_point(eid2 + '.center')
                 s = state.get_point(eid1 + '.start')
                 e = state.get_point(eid1 + '.end')
@@ -78,7 +78,7 @@ class TangentHandler(ConstraintHandler):
                 n = torch.stack([-d[1], d[0]])
                 dist = torch.dot(c - s, n) / (torch.linalg.norm(d) + 1e-15)
                 r = state.get_radius(eid2)
-                return (dist - r).unsqueeze(0)
+                return (torch.abs(dist) - r).unsqueeze(0)
 
             elif is_arc1 and is_line2:
                 c = state.get_point(eid1 + '.center')
@@ -88,7 +88,7 @@ class TangentHandler(ConstraintHandler):
                 n = torch.stack([-d[1], d[0]])
                 dist = torch.dot(c - s, n) / (torch.linalg.norm(d) + 1e-15)
                 r = state.get_radius(eid1)
-                return (dist - r).unsqueeze(0)
+                return (torch.abs(dist) - r).unsqueeze(0)
 
             elif is_arc1 and is_arc2:
                 c1 = state.get_point(eid1 + '.center')

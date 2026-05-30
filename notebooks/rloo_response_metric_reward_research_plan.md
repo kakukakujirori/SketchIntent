@@ -1202,3 +1202,239 @@ step 302→1037 で単調に持続。
 
 実行順: M1 起動済み → M1 完走後に本章へ最終結果を追記 → 規則付与器+fiverr test → RoPE 列挙器。
 各段で本ファイルを更新する。
+
+## 15. 規則付与器の実装と「列挙器は後回し」の判断 (2026-05-30)
+
+この章は §14.6 の第二段階を実装に落とす過程で得た判断を、**この章だけで完結して読める**よう、
+用語を逐一定義して記す。
+
+### 15.0 結論（先に）と用語
+
+- 狙い: 人間の CAD 図面には現れるのにモデルがほとんど出さない関係（Parallel=平行,
+  Perpendicular=直交, Equal=等寸, Tangent=接, Mirror=対称 …）を、学習・報酬の「正解(GT)」に
+  十分入れること。
+- §14.6 では2つの道具が候補だった:
+  - **(A) 規則付与器(rule augmenter)**: 座標から幾何関係を機械的に検出して付与する、
+    **学習モデル不要**のプログラム。
+  - **(B) 列挙器(enumerator)**: 関係のみを RLOO で学習させ、関係を多めに吐かせる**学習モデル**。
+- **判断: (A) を作る。(B) は明示ゲートの後ろに後回し**（理由は §15.2）。
+- 本章では (A) を実装・テストし（§15.3）、人間データ(fiverr)で精度を測った（§15.4）。
+  (B) は今は実行しない前提で、必要時のみ §15.5 の最後に戻る。
+
+**用語（既出だが再掲。この章で繰り返す）**
+
+- **primitive**: スケッチの基本図形 = 点 / 線分 / 円 / 円弧。
+- **relational constraint（関係制約）**: 数値を持たない関係（Coincident=一致, Horizontal/Vertical,
+  Parallel, Perpendicular, Tangent, Equal, Concentric=同心, Midpoint=中点, Mirror=対称）。本章の対象。
+- **dimensional constraint（寸法制約）**: 数値を持つ（Distance, Radius, Angle）。本章の対象外。
+- **DoF（自由度）**: その図形がまだ自由に動ける独立な方向の数（点=2, 線分=4, 円=3）。制約はこれを
+  減らす。全部 0 = **FC（完全拘束）**。
+- **GT（正解データ）**: 学習・報酬が参照する制約集合。現状は `sg_pseudo_rel_167k`（モデル生成の
+  関係集合 = pseudo-GT v1）。
+- **SolverReward**: 主報酬。制約が DoF をどれだけ減らしたか・FC に達したかで点を付ける。
+- **d_H_angle / ResponseIntentReward**: 本研究の指標兼報酬。「生成した制約が許す動き」と
+  「人間 GT が許す動き」のズレを測る（小さいほど人間意図に整合）。
+- **class prior**: 特定の関係タイプを出すとボーナスを与える補助報酬（出現頻度を底上げするだけ）。
+
+### 15.1 解きたい問題: 「代替可能な」関係はモデルが出さない
+
+ユーザの問い「列挙器(B)で Parallel / Perpendicular / Mirror を出せるのか」への答えは **No**。
+鍵は **代替可能性(substitutability)** で、具体例で示す。
+
+**代替可能とは**: ある関係が、別の（多くはより一般的な）制約の組合せで自動的に成り立ち、
+わざわざ書く必要がない状態。
+
+- 例1: 線 L1, L2 を**両方 Horizontal** にすると、2本は自動で **Parallel** になる
+  → Horizontal を2回書くモデルは Parallel を書く動機がない。
+- 例2: L1=Horizontal, L2=Vertical なら自動で **Perpendicular**。
+- 例3: **Mirror(対称)** も、対応点の Coincident や辺の Equal を並べれば近いことが言える。
+
+**なぜ DoF ベースの報酬では出ないか**: `SolverReward` は「DoF をどれだけ減らしたか」で点を付ける。
+ところが Horizontal+Horizontal（DoF を2削る）は Parallel（1削る）の上位互換で、しかも事前学習で頻出。
+DoF で測る限りモデルは常に H+H を選び、Parallel を選ぶ理由がない。class prior で頻度は水増しできるが、
+それは「正しい場所に置く」ことではなく単なる出現増(spam)。
+
+→ つまり **代替可能な関係は「DoF を減らすか」を見るどんな方法（列挙器を含む）でも出てこない**。
+出すには「DoF と無関係に、幾何的に成り立っているかだけを見る」検出が要る = 規則付与器。
+
+### 15.2 なぜ列挙器(B)でなく規則付与器(A)か（律速の切り分け）
+
+「rare relation が出ない」原因は3つに分解でき、**列挙器(B)はどれにも効かない**。
+
+**決定的な事実**: 報酬 GT (v1) は既に Parallel 8.7% / Perpendicular 5.0% を含む。にもかかわらず
+生成側はほぼ0 → **「GT に無いから出ない」のではない**。残る律速と対処:
+
+| # | 律速（原因） | 中身 | 効く対処 |
+|---|---|---|---|
+| 1 | 探索の崩壊 | v1 は探索のばらつき(entropy)=0 で安全な Coincident に固まる | scaffold-v2（entropy/温度↑） |
+| 2 | GT の図ごとの不完全さ | 集計%はあっても、その図の平行な「その2本」に実際付いているとは限らない | **規則付与器**（幾何的に真な全ペアに付与） |
+| 3 | 報酬バランス | `SolverReward` が H+H(DoF−2) を Parallel(DoF−1) より高評価。意図報酬がこれを上回らない限り、GT が完璧でも H+H が勝つ | 報酬係数の調整（規則でも列挙器でも直らない） |
+
+列挙器(B) は新しい GT 生成器を学習で作るものだが、上の 1–3 を直さない（むしろ #3 の DoF 偏重を
+抱えたまま）。よって**後回し**にし、#2 に効く規則付与器(A) を先に作る。
+
+**規則付与器が効く道筋（修正版）**:
+
+1. 規則付与器は、幾何的に真なら **Horizontal 2本と Parallel を両方出す**。同様に、
+   Vertical/Horizontal と Perpendicular も同時に出る。これは実装として正しい。
+2. そのため、前版の「GT に Parallel を足せば d_H_angle が H+H を罰して Parallel を選ばせる」
+   という説明は強すぎた。GT 側が `H1 + H2 + Parallel(H1,H2)` を含むなら、exact Jacobian の
+   motion subspace は基本的に `H1 + H2` と同じで、追加された Parallel は row-space 冗長になる。
+   現行の `motion_relational_angle` はこの冗長性を吸収するので、H+H と H+H+Parallel はほぼ区別しない。
+3. 逆に、GT が `Parallel` だけで Pred が `H1 + H2` なら motion subspace は違う。H+H は全体回転を
+   余計に禁止するため、d_H_angle は「拘束しすぎ」として差を出せる。
+4. よって規則付与器の直接の役割は、**rare relation を選ばせること**ではなく、
+   **人間 GT の sparse annotation を relational closure に近づけ、motion metric が表記ゆれを吸収できる
+   ターゲットを作ること**である。Parallel を H/H より選ばせたい場合は、別途
+   `H/H -> Parallel` の canonicalization、H/V の downweight、class prior、または sequence-level reward が要る。
+
+Mirror も「既存 Line を対称軸にする」範囲では規則検出に入れた。未知の潜在対称軸を新しく探す検出は
+まだ入れていない。
+
+### 15.3 規則付与器の実装（branch `rule_augmenter`）
+
+ファイル: `src/sketch_handlers/rule_augmenter.py`（本体）/ `tests/test_rule_augmenter.py`（15 tests, green）
+/ `scripts/eval_rule_augmenter_recall.py`（fiverr 較正）。
+
+**何をするか（1 文）**: スケッチの**実座標**を見て、「点 P は線 L 上か」「線 A と線 B は平行か」等の
+候補を総当たりで作り、**実際に成り立つものだけ**を制約として残す。
+
+**判定の仕組み — residual の再利用**: このコードには各関係タイプごとに **residual（残差）**
+=「その関係が成り立つとき 0 になる数値」関数が既にある（例: Parallel の residual は2線方向の外積で
+平行なら 0。Coincident(点-点) は2点の座標差で一致なら 0）。検出器はこれを**そのまま流用**するので、
+ソルバや d_H_angle と幾何の定義が必ず一致する。residual を実座標で評価するために **`SketchState`**
+（スケッチの実座標を保持し端点・半径を取り出す補助オブジェクト）を使う。
+
+**生 residual → 解釈できる margin（正規化）**: 生 residual は型ごとに**単位がバラバラ**（外積っぽい量・
+長さ・長さの差…）で1つの閾値では比較できない。そこで型を3グループ(family)に分け各々を無単位量に
+正規化する。この正規化後の値を **margin** と呼ぶ（0=完璧に成立、大きいほど外れている）。
+
+| family | 含む型 | 生 residual | ÷ 正規化スケール | margin の意味 |
+|---|---|---|---|---|
+| orientation | Horizontal, Vertical, Parallel, Perpendicular | `\|d1\|\|d2\|·sinθ`(or cosθ) | 線長の積 | `\|sinΔθ\|`（角度ズレの sin） |
+| position | Coincident, Concentric, Midpoint, Tangent, Mirror | 長さ。Tangent.point の接線成分だけ長さ² | bbox 対角長。Tangent.point の接線成分は線長×半径など | 図全体サイズに対する割合、または接線角ズレ |
+| size | Equal(長さ/半径) | 長さの差 | 大きい方の長さ/半径 | 相対差 |
+
+（bbox = スケッチ全体の外接矩形。bbox 対角長 = 図の大きさの代表値。）
+
+**tolerance（許容閾値）= margin の上限**。`margin < tolerance` の候補だけ採用する。family ごとの既定値:
+orientation = sin(2°) ≈ 0.035, position = 0.01(=図サイズの1%), size = 0.02(=相対2%)。
+
+**無限直線とガード**（PointOnObject=点が辺上 / Tangent=接）: これらの residual は線分を**無限延長
+した直線**への距離で定義されている（コード元来の仕様）ので**外挿（線分の外側の延長線上）も有効**。
+当初「線分内に限る」ガードを足したが仕様違反で**撤去**した。残すガードは1つ — 点が**辺の端点ぴったり**
+に乗る場合のみ除外（それは頂点どうしの一致=角で、point-point Coincident として別に出るため二重計上を防ぐ）。
+
+**Mirror の扱い**: 既存の Line entity を対称軸にする場合だけ検出する。まだ「データには軸が無いが、
+点集合から潜在対称軸を発見する」ことはしない。
+
+**対象外（意図的に検出しない）**: line-line Coincident（= Collinear/共線。ほぼ Parallel と重複・希少・
+residual が混合単位）。
+
+**公開 API**:
+- `detect_candidates(sketch)` → 全候補（margin 付き、閾値適用前）。較正用。
+- `filter_candidates(cands, tolerances)` → margin で間引いた採用集合。
+- `augment_sketch(sketch)` → 採用候補を制約として書き戻したスケッチ（既存との重複は除外）。
+
+### 15.4 fiverr 較正結果と pseudo-GT v2 への含意
+
+再実行コマンド:
+`conda run -n freecad python -m scripts.eval_rule_augmenter_recall --fiverr-root /home/ryotaro/Downloads/fiverr --annotators Eko Johnny Ryotaro Sagar Tanaka`
+
+まず、ここでの **scale は座標スケールでも報酬係数でもない**。`scripts/eval_rule_augmenter_recall.py`
+が `DEFAULT_TOLERANCES` に掛ける tolerance multiplier である。
+
+| scale | orientation | position | size |
+|---:|---:|---:|---:|
+| 0.25 | `sin(0.5°)` 相当 | bbox 対角の 0.25% | 相対 0.5% |
+| 1.0 | `sin(2°)` 相当 | bbox 対角の 1.0% | 相対 2.0% |
+| 4.0 | `sin(8°)` 相当 | bbox 対角の 4.0% | 相対 8.0% |
+
+したがって scale を下げるほど「より厳密に幾何が成立する候補だけを採る」。この scale は
+`margin = |residual| / family_scale` の上限を動かすだけで、候補の選択方針や報酬の強さは変えない。
+
+再検証で見つけた実装修正:
+- `TangentHandler` の line-circle edge tangency が signed distance のまま `dist - r` を使っていたため、
+  線の片側にある真の接円を落としていた。`abs(dist) - r` に修正し、
+  `tests/test_rule_augmenter.py` に両側接線の回帰テストを追加した。
+- `Tangent.point`（接点を明示した Tangent）を列挙に追加した。line endpoint が circle に接するケースなどを
+  `tests/test_rule_augmenter.py` に追加。
+- `Mirror` は、既存 Line を対称軸とする候補だけ追加した。未知の潜在軸探索は未実装。
+- `Midpoint` の未検出 12件を調べると、すべて「Circle.center が Line の中点」だった。そこで midpoint の点候補に
+  Circle/Arc center を追加した。
+- 3-ref Midpoint は `Arc.start, Arc.end, midpoint` の構造的ケースだけ追加した。任意2点+中点の全列挙は
+  空間ハッシュで計算量は抑えられるが、fiverr では TP を増やさず FP を約7,700件増やしたため採用しない。
+- 修正後: `tests/test_rule_augmenter.py` は 15 passed、`tests/test_relational_class_prior.py` は 12 passed。
+- この修正により `Tangent.edge` recall は scale 0.25 で 0.609 → **1.000** になった。
+- `Midpoint` recall も scale 0.25 で 0.864 → **1.000** になった。
+
+全件結果（771 sketches, 11,740 human constraints, 5 annotators, errors=0; Tangent.point/Mirror/Midpoint center+arc 3-ref 追加後）:
+
+| label | support | recall@0.25 | precision@0.25 | 解釈 |
+|---|---:|---:|---:|---|
+| Coincident.point_point | 6008 | 0.954 | 0.883 | かなり信頼できる。角の stitching は全採用候補。 |
+| Coincident.point_on_object | 1052 | 0.933 | 0.184 | 幾何検出は強いが人間よりかなり密。 |
+| Horizontal | 634 | 0.987 | 0.283 | 幾何的 H は多く、人間 annotation は疎。 |
+| Vertical | 437 | 0.993 | 0.213 | H と同じく密度調整が必要。 |
+| Perpendicular | 529 | 1.000 | 0.067 | recall は完璧だが過剰列挙が大きい。 |
+| Tangent.point | 434 | 1.000 | 0.420 | human support が大きく、追加実装の価値が高い。 |
+| Parallel | 381 | 1.000 | 0.055 | 本目的には有用だが、全ペア投入は危険。 |
+| Concentric | 358 | 1.000 | 0.754 | 高信頼。全採用候補。 |
+| Midpoint | 88 | 1.000 | 0.116 | center-as-midpoint を足して recall 解決。任意3点 midpoint は入れない。 |
+| Equal.radius | 61 | 1.000 | 0.057 | 幾何的には拾えるが、人間密度は非常に低い。 |
+| Tangent.edge | 46 | 1.000 | 0.034 | 修正後 recall は解決。ただし大量に追加される。 |
+| Mirror | 37 | 1.000 | 0.006 | 既存軸だけで recall は出るが、候補爆発が非常に大きい。 |
+| Equal.length | 5 | 0.600 | 0.001 | support が小さく、等長ペアの全列挙はほぼ使えない。 |
+
+構造的に拾えない、または意図的に拾っていないもの:
+- `Midpoint` の任意3点形式: `A, B, M` が幾何的に中点になる全組合せは、座標ハッシュで計算量は
+  O(P² + hits) にできる。しかし grid/対称図形では「幾何的には真だが人間 intent としては書かない」
+  候補が大量に出る。fiverr では recall 改善なし・FP 大増だったため、default では検出しない。
+- `Mirror` の潜在軸: 既存 Line を軸にするものは拾うが、軸 Line がデータに無い対称性は拾わない。
+- `Coincident.collinear`: support 6。line-line Coincident は Parallel と重複しやすく、現状は除外。
+- dimensional constraints: `Distance` 820 / `Radius` 568 / `Angle` 74。本章の対象外。
+
+scale sweep の読み:
+- detectable types の micro recall は 0.25→4.0 で **0.964→0.967** とほぼ動かない。
+- 一方で micro precision は **0.210→0.133** に落ち、FP は **36,546→63,433** に増える。
+- つまり tolerance は recall の律速ではない。`scale=0.25` で既にほぼ拾えており、緩めると
+  ほぼ FP だけが増える。運用点は **scale=0.25** が自然。
+
+重要な解釈:
+- 低 precision は「幾何判定が間違っている」という意味ではない。評価スクリプトの precision は
+  **人間が同じ subtype と同じ base entity set に制約を書いたか**で測る。規則付与器は
+  幾何的に真な候補を最大列挙するので、人間 annotation が疎なら precision は必ず低くなる。
+- したがって precision の低さだけで候補を切るのは早い。特に `Parallel/Perpendicular` は
+  H/V で代用されているだけ、`PointOnObject` や `Tangent.edge` も他の intent constraints から
+  結果的に導かれるだけ、という可能性がある。この場合、`motion_relational_angle` は row-space
+  冗長性として吸収する。
+- ただし **全ての幾何的真が冗長とは限らない**。`Equal.length`、遠い点同士の `Mirror`、
+  偶然の `PointOnObject` は motion subspace を実際に狭めうる。低 precision は discard 理由ではなく、
+  over-closure のリスク指標として読む。
+
+**pseudo-GT v2 方針**:
+- precision で候補を落とす前に、まず **full relational closure @ scale=0.25** を試す価値がある。
+  これは「recall 最大化」仮説の検証であり、ユーザ指摘の通り、motion subspace が冗長性を吸収できるなら
+  低 precision は実害にならない。
+- ただし full closure の安全性は仮定しない。`full_all`, `full_no_mirror`, `high_precision_only`
+  を分け、追加後の relation Jacobian rank / null-space 次元 / d_H_angle 対 human GT を見る。
+- 特に `Mirror` は recall 1.0 だが precision 0.006 なので、full_all の中でも別スイッチにする。
+
+### 15.5 次手
+
+1. ✅ 全件 fiverr スイープ完了（§15.4）。運用点 = scale 0.25。型別方針は precision cut ではなく、
+   full relational closure を第一 ablation として試し、rank/null-space で over-closure を診断する。
+2. **検出器の穴埋め（任意・優先度順）**:
+   - ✅ **Tangent.point**（human support 434）: 実装済み。scale 0.25 で recall 1.0 / precision 0.420。
+   - **Tangent.edge**: signed distance bug は修正済みで recall 1.0。残る問題は recall でなく
+     precision 0.034 の密度選択。
+   - ✅ **Mirror(existing-axis)**: 実装済み。scale 0.25 で recall 1.0 / precision 0.006。
+     precision が極端に低いので `full_no_mirror` ablation も必ず切る。
+   - ✅ **Midpoint center / arc endpoint 3-ref**: 実装済み。scale 0.25 で recall 1.0 / precision 0.116。
+     任意2点+中点の3-refは FP 爆発に近い over-closure だったため default では採用しない。
+3. **pseudo-GT v2 生成**: augmenter を学習側 primitives（`sg_filtered` 等）に適用。
+   ※ 現状 detect は候補ごとに handler.residual を呼ぶため 167k 件には遅い → numpy 高速 path
+   へ最適化が要る（既知 TODO）。
+4. scaffold-v2 + intent を **v2 GT** で回し、§14.6 のゲートで判定（Parallel がサンプルに
+   乗るか / v1 比で response_full_angle・leak 改善か / 残差が報酬バランス #3 か）。
+5. **必要時のみ** RoPE rel-only 列挙器（§15.1 の union 採取構成）。
