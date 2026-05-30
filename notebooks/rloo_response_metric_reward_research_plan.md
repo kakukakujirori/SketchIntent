@@ -1042,3 +1042,163 @@ model.kl_coeff: 0.005
 
 コミットはユーザー指示後に行う。学習完了後、本ファイルに run 別の結果と採用した
 分岐を追記してから次の実装に進むこと。
+
+## 14. 第一段階の結果と第二段階の計画 (2026-05-30)
+
+この章は、これまでの経緯を知らない読者が単独で読んでも追えるように、前提・用語・
+数値・解釈・次段階の計画を省略せずに記述する。
+
+### 14.1 実験設定（前提）
+
+- タスク: 2D CAD sketch の primitive（点・線・円・弧）が与えられたとき、その間に入る
+  constraints を生成する。constraints は relational（Coincident, Horizontal, Vertical,
+  Parallel, Perpendicular, Tangent, Equal, Midpoint, Mirror=対称, Concentric=同心 …）と
+  dimensional（Distance, DistanceX, DistanceY, Radius, Diameter, Length, Angle）に大別。
+- 学習法: RLOO（policy が constraint 系列を K=8 サンプルし、報酬の group 相対 advantage で
+  方策勾配）。報酬は `RewardComposer` で合成。
+- 比較する2条件（同一 scaffold 上の ablation。scaffold = SolverReward + hygiene +
+  DimParsimony + RelationalClassPrior という「探索の足場」。詳細は §2–§5）:
+  - **S (no_intent)**: scaffold のみ。run `7u6kwzhf`（config `rloo_response_scaffold_no_intent.yaml`）。
+  - **S+R (intent)**: scaffold + ResponseIntentReward（`motion_relational_angle` を報酬化）。
+    run `oiytlo2x`（config `rloo_response_scaffold_intent.yaml`）。
+  - 両者とも開始重みは `logs/train/runs/2026-05-02_20-35-42/checkpoints/epoch_29.ckpt`
+    （絶対位置エンコーディング版、データ `sg_filtered_unique_valid.npy` で pretrain）。
+    RLOO の学習データ兼「報酬の比較対象 GT」は `sg_pseudo_rel_167k_unique_valid.npy`。
+- 主要指標の意味:
+  - `solver_fc_rate`: FreeCAD ソルバが fully-constrained と判定した生成の割合（高い=拘束完備）。
+  - `solver_valid_dof_mean`: 残自由度の平均（低い=より拘束されている）。
+  - `intent_response_full_angle_mean`: canonical な `d_H_angle`（motion-subspace 不一致と
+    relation leak の RMS）。低い=人間 response により整合。**これが評価器としての本指標**。
+  - `intent_leak_relational_angle_mean`: Pred の許す運動が GT の関係禁止方向へ漏れる量（低い=良）。
+  - `eval_distance_family_ratio_mean`: 生成 constraints のうち Distance/DistanceX/DistanceY の
+    割合（Radius/Length/Diameter は含まない）。
+  - `eval_key_rel_ratio_mean`: Coincident+Equal+Tangent+Parallel+Perpendicular+Mirror+
+    Concentric の割合。
+- **重要な注意（比較の公平性）**: 2 run は学習途中で wandb step が一致していなかったため、
+  途中の「最新値どうし」の比較は交絡する。本章の比較はすべて **同一 step** で行う。
+  両 run は最終的に step 1037（最後の validation）で finished。
+
+### 14.2 学習データ／生成物の constraint 分布（実測）
+
+報酬がそもそも何を「正解」として比較しているかを確認するため、3つの分布を実測した
+（% は全 constraints に対する割合）。
+
+| type | 報酬GT `sg_pseudo_rel_167k`(後処理後) | pretrain `sg_filtered`(epoch_29が学習) | 生成 S+R intent @step1035 |
+|---|---|---|---|
+| Coincident | 40.8 | 44.6 | 42.3 |
+| Horizontal | 16.5 | 9.0 | 14.7 |
+| Vertical | 10.7 | 5.4 | 14.7 |
+| **Equal** | **11.9** | **1.8** | **1.6** |
+| Parallel | 8.7 | 8.0 | ~0 |
+| Perpendicular | 5.0 | 5.4 | 1.1 |
+| Tangent | 4.2 | 3.0 | 1.5 |
+| Midpoint | 2.3 | 3.4 | 1.7 |
+| dimensional 計 | **0** | ~19 | ~43 (DistX14.7/DistY14.1/Radius7.8/Dist6.6) |
+| Mirror / Concentric | **0 / 0** | ~0 / 0.05 | 0 / 0 |
+
+読み取り（ここが従来の認識を覆した点）:
+- **報酬GT(`sg_pseudo_rel_167k`)は relational が「渋い」どころか Equal 11.9%（全体3位）・
+  Parallel 8.7%・Perp 5.0%・Tangent 4.2% と豊富**。欠けているのは **Mirror/Concentric と
+  全 dimensional のみ**。したがって「報酬GTに Equal/Tangent が無いから学習が伸びない」という
+  仮説は誤り。
+- **生成側で Equal/Parallel/Tangent がほぼ消える**のは報酬GTのせいではなく、**pretrain
+  (`sg_filtered`) が Equal 1.8% と希少**で、その事前分布を引き継いだ policy が RLOO で
+  Coincident へ mode-collapse するため（後述 §14.4）。
+- **Mirror/Concentric は報酬GTに 0%** なので、`motion_relational_angle` 報酬は構造的に
+  これらを「狙う」ことができない。ユーザーが「Symmetric をほぼ見ない」と感じる根本原因。
+
+### 14.3 S vs S+R の結果（同一 step、最終）
+
+scalar（step 1037、両 run finished）と、生成 constraint mix（`constraint_type_mix_table`、
+同一 step 1035）:
+
+| 指標 | S+R intent (oiytlo2x) | S no_intent (7u6kwzhf) | 向き |
+|---|---|---|---|
+| intent_response_full_angle ↓ | **0.495** | 0.526 | intent 良 |
+| intent_leak_relational_angle ↓ | **0.487** | 0.519 | intent 良 |
+| intent_motion_relational_angle ↓ | **0.446** | 0.464 | intent 良 |
+| solver_fc_rate ↑ | 0.658 | **0.711** | no_intent 良(+5.3pt) |
+| solver_valid_dof_mean ↓ | 3.85 | **3.57** | no_intent 良 |
+| eval_distance_family_ratio ↓ | 0.284 | 0.287 | ほぼ同 |
+| 生成 total dimensional(@1035) ↓ | **0.431** | 0.454 | intent 良(−2.3pt) |
+| 生成 Radius(@1035) | 0.078 | 0.100 | intent 少 |
+| 生成 Equal(@1035) | **0.016** | 0.000 | intent 復活/対照ゼロ |
+| 生成 Perpendicular(@1035) | **0.011** | 0.003 | intent ~3.4× |
+| 生成 rare rel 計(Eq+Tan+Par+Perp) | **0.042** | 0.019 | intent ~2.2× |
+| eval_key_rel_ratio ↑ | **0.390** | 0.365 | intent 良 |
+| near_zero_distance_rate | 0.029 | 0.025 | ほぼ同(共有hygiene) |
+
+中間 step でも傾向は一貫（例 @867: total dim 0.395 vs 0.451、Equal 0.025 vs 0.000;
+@517: 0.388 vs 0.393、Equal 0.019 vs 0.000）。response_full_angle の intent 優位は
+step 302→1037 で単調に持続。
+
+### 14.4 解釈: 「弱い成功」（§8.2、§8.1 寄り）
+
+- **ResponseMetric 報酬は意図通りに効いている**: canonical な `response_full_angle` と
+  （報酬対象でない）`leak_relational_angle` の両方を一貫して改善し、生成側で
+  **dimensional（特に Radius）を抑え、Equal を復活させ Perpendicular を増やす**。
+  これは報酬が Equal 豊富な pseudo-GT を参照しているため自然な帰結。
+- **ただし FC は約5pt 低い**: no_intent は **Radius などの dimensional を足して
+  fully-constrained を稼ぐ**（FC 0.711 / DoF 3.57）。S+R はそれを報酬で抑えるので、
+  同じ拘束を relational で賄いきれない分 FC が下がる（0.658 / DoF 3.85）。
+  → 典型的な §8.2「response 指標と質は改善するが FC が少し落ちる」。
+- **絶対品質はまだ不十分**（ユーザーの定性確認と整合）: 生成は依然 dimensional 過多、
+  Equal 1.6%（GT 12% に遠い）、Parallel/Tangent.edge ~0、Mirror/Concentric 皆無、
+  かつ極小 Distance（例 1e-16 mm）が残存。相対改善は明確だが、単独の説得材料としては弱い。
+- **律速の特定（3点）**:
+  1. **探索が事実上オフ**: 当時の config は `entropy_bonus=0.0`・`train_sample_temperature=1.0`
+     で探索正則化が無く、Coincident への mode-collapse が起きる。報酬GTに Equal/Tangent が
+     あっても policy がサンプルしなければ選択型報酬は浮上させられない。
+  2. **hygiene が弱く信用割当も拡散**: 極小 Distance ペナルティ `-0.30`（cap3）に対し、
+     その極小 Distance が Under→FC を達成すると FC bonus `+5` を稼ぐため相殺できず、しかも
+     ペナルティを STOP 位置にまとめ加算していた（違反トークンに局所化されていない）。
+  3. **報酬GTに Mirror/Concentric が無い**: 報酬が構造的にこれらを狙えない（§14.2）。
+
+### 14.5 本結果を受けて実装した是正（commit `594cf67`, branch `rloo_response_scaffold`）
+
+- **探索の有効化**: scaffold-v2 config で `entropy_bonus 0→0.005`,
+  `train_sample_temperature 1.0→1.2`。
+- **hygiene escalation**（`solver_reward.py`）: 極小 Distance / axis-Angle ペナルティを
+  `-0.30→-1.5` に強化し、**違反 constraint の4トークン末尾へ局所化**（redundant/malformed と
+  同経路）。`abs()` は既存で正しく、DistanceX/Y の負値も検出済み。
+- **class prior の頭打ち緩和**: `cap_total 0.5→1.0`, `cap_per_type 2→3`（係数は人間GT由来の
+  ままで据え置き）。
+- **検証ログの改善**: per-type mix を `val_cmix/<type>` の **時系列スカラー**として記録
+  （スナップショット棒グラフは最新 validation しか描画しないため）。polymorphic な subtype
+  カウント（`rel_prior_subtype_*`）は `validation_submix/` セクションへ分離。
+- 新 config: `configs/experiment/rloo_response_scaffold2_{intent,no_intent}.yaml`
+  （= scaffold-v2 / M1。abs-pos・現 pretrain から開始）。
+
+### 14.6 第二段階の計画
+
+判断: §8.6/§14.4 の通り「rare relation の絶対量不足」と「Mirror/Concentric の構造的欠落」が
+残課題。前者は探索（scaffold 強化）、後者は報酬GTの充足で対処する。fiverr 人間データは
+**ベンチマーク（評価専用）**で、学習・報酬GTには一切使わない（read-only の頻度照合のみ可）。
+
+- **(M1) scaffold-v2 を実行中**（`rloo_response_scaffold2_intent`, GPU1 で起動済み）。
+  狙いは「`entropy_bonus=0` を解除＋temperature↑＋hygiene 強化で rare relation の探索が
+  回復し、FC を犠牲にせず relational に拘束できるか」。no_intent は別マシンで対照実行。
+- **(規則付与器 + fiverr recall テスト)**: モデル不要・純幾何のデータ処理。Coincident/
+  Horizontal/Vertical/Parallel/Perpendicular/Tangent/Midpoint/Concentric/Equal は幾何述語で
+  決定的に検出可能（Mirror は対称軸探索が必要で困難→保留）。fiverr 人間 sketch の
+  constraints を剥がして primitives だけ残し、規則付与器で復元 → 人間GTと照合して
+  **type 別 recall/precision** を測り、tolerance 較正と「信頼できる type」を選別する
+  （fiverr は評価専用の使い方）。recall/precision が高ければ、これで報酬GTを充足（特に
+  Concentric の穴埋め）し、pseudo-GT v2 を生成できる。
+- **(RoPE + rel-only RLOO 列挙器)**: 規則で取れない分と一般的な relational richness 用。
+  `motion_relational_angle`/`leak` は部分空間/ランク量なので、**冗長な関係そのものは
+  指標を強めない**——強めるのは**独立な関係が増えること**。現生成器は redundant ペナルティで
+  関係を sparse に省くので、`penalty_redundant=0`（Conflicting/Malformed フィルタは維持）+
+  強 class prior + 高 entropy にして独立関係を最大化した rel-only 列挙器を作り、richer な
+  pseudo-GT v2 を生成する。列挙は系列が長くなるため、`max_token_length` 非依存の **RoPE**
+  が有効。RoPE はベース差し替え（abs 版 ckpt と非互換）なので現スレッドの比較を壊さないよう、
+  この段で初めて導入する。ブランチは `rloo_response_scaffold` から派生し RoPE の単一 commit
+  `1a607af` を cherry-pick（reward/scaffold 基盤は tokenizer 共通でそのまま移植可能、
+  `pretrained_ckpt_path` は RoPE 版へ差し替え）。規則付与器とこの列挙器は同一新ブランチで、
+  規則付与器を先に実装・テスト→その後 RoPE 導入→rel-only RLOO の順で進める。
+- **(任意) M2 warm-start**: rel-only ckpt から本丸 RLOO を始めると dimensional 出力が
+  死んでいるため高 entropy/SFT で復活させる必要があり、`sg_filtered` 始点の M1 より不利。
+  M1 の結果次第で要否を判断。
+
+実行順: M1 起動済み → M1 完走後に本章へ最終結果を追記 → 規則付与器+fiverr test → RoPE 列挙器。
+各段で本ファイルを更新する。
