@@ -1824,6 +1824,9 @@ metadata 長も `sequences/sketch_ids/sequence_lengths = 166,254` で揃って�
       leak・response_full_angle が v1 比改善か / 残差が報酬バランス #3 か)。**C5-d** の
       rank/null-space/d_H_angle(対 human)over-closure 診断を併走。`full_all` 対 `full_no_mirror` で
       Mirror over-completion の影響を切り分ける。
+      - 起動済み (2026-05-31 13:13, group `pseudo_rel_v2_scaffold2_intent`):
+        `full_all=qa5ph3me` (GPU0, `/tmp/rloo_v2_full_all.log`) /
+        `no_mirror=akrzzgn4` (GPU1, `/tmp/rloo_v2_no_mirror.log`)。
    - (config) `train_sequence_file` を v2 npy に差し替え。SFT/gt_tokens を使う場合のみ §C5-a の
       `max_token_length` 対応が要る(現 RLOO 設定では不要)。
 4. scaffold-v2 + intent を **v2 GT** で回し、§14.6 のゲートで判定（Parallel がサンプルに
