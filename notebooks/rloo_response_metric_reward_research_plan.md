@@ -1109,6 +1109,15 @@ model.kl_coeff: 0.005
 
 ### 14.3 S vs S+R の結果（同一 step、最終）
 
+学習ログ：
+```
+[rloo_response_scaffold_intent]
+run = api.run("/kakuda40611-nanyang-technological-university-singapore/vitruvion/runs/oiytlo2x")
+
+[rloo_response_scaffold_no_intent]
+run = api.run("/kakuda40611-nanyang-technological-university-singapore/vitruvion/runs/7u6kwzhf")
+```
+
 scalar（step 1037、両 run finished）と、生成 constraint mix（`constraint_type_mix_table`、
 同一 step 1035）:
 
@@ -1203,6 +1212,154 @@ step 302→1037 で単調に持続。
 実行順: M1 起動済み → M1 完走後に本章へ最終結果を追記 → 規則付与器+fiverr test → RoPE 列挙器。
 各段で本ファイルを更新する。
 
+### 14.7 scaffold-v2（M1）の結果と考察 (2026-05-31)
+
+§14.6 の M1（scaffold-v2 = 探索ノブ ON + hygiene 強化）が両 arm とも完走した（共に
+`epoch=3`, `global_step=14898`、v1 と **step 一致**）。本節はその結果・考察・判定を、
+§14 の他節と同じく単独で追える形で記す。データは wandb から実測（同一 step 比較）。
+
+- 比較対象 run:
+  - `base_solver` = SolverReward 単体（`s2ibmbil`、scaffold なし。FC/DoF の基準点）。
+  - v1（scaffold-v1）: `v1_noint=7u6kwzhf`, `v1_int=oiytlo2x`（§14.3 の run）。
+  - v2（scaffold-v2 = M1）: `v2_noint=uywjlizh`, `v2_int=0csbzpdm`。
+- M1 の差分（§14.5）: `entropy_bonus 0→0.005`, `train_sample_temperature 1.0→1.2`,
+  hygiene 極小Distance/axisAngle `-0.30→-1.5`＋違反トークン局所化, rel-prior `cap_total
+  0.5→1.0 / cap_per_type 2→3`。GT・pretrained_ckpt は v1 と同一。
+
+学習ログ：
+```
+[rloo_response_scaffold_v2_intent]
+run = api.run("/kakuda40611-nanyang-technological-university-singapore/vitruvion/runs/0csbzpdm")
+
+[rloo_response_scaffold_v2_no_intent]
+run = api.run("/kakuda40611-nanyang-technological-university-singapore/vitruvion/runs/uywjlizh")
+```
+
+**14.7.1 主要数値（同一 step、最終 / 後期10val平均）**
+
+スカラーは validation が step ごとに揺れるため、**後期10 validation の平均**を頑健値とし、
+括弧内に最終1点を付す（最終1点は端点ノイズを含む——後述）。
+
+| 指標 | base | v1_noint | v1_int | v2_noint | v2_int | 向き |
+|---|---|---|---|---|---|---|
+| response_full ↓（後期10平均） | – | 0.534 | 0.491 | 0.493 | **0.464** | v2_int 最良 |
+| 〃（最終1点） | – | 0.526 | 0.495 | 0.482 | 0.477 | （端点ノイズ大） |
+| leak_relational ↓（最終） | – | 0.519 | 0.487 | 0.454 | **0.447** | v2_int 最良 |
+| motion_relational ↓（最終） | – | 0.464 | 0.446 | 0.434 | **0.426** | v2_int 最良 |
+| solver_fc_rate ↑（後期10平均） | **0.806** | 0.691 | 0.651 | 0.623 | 0.580 | v2 で更に低下 |
+| solver_valid_dof ↓（最終） | **3.375** | 3.570 | 3.852 | 4.698 | 4.685 | v2 で大幅悪化 |
+| solver_under ↑（最終） | 0.111 | 0.248 | 0.282 | 0.309 | 0.322 | v2 で増 |
+| near_zero_distance（最終val） | – | 0.025 | 0.029 | **0.006** | 0.013 | v2 で半減（hygiene 成功） |
+| eval_key_rel_ratio ↑（最終） | – | 0.365 | 0.390 | 0.378 | **0.406** | v2_int 最良 |
+| eval_distance_family ↓（最終） | – | 0.287 | 0.284 | 0.254 | **0.247** | v2 で減 |
+| train/entropy（後期10平均） | 0.373 | 0.370 | 0.371 | 0.386 | 0.377 | ほぼ不変 |
+
+生成 constraint mix（`val_cmix/*`、後期10val平均。**注: これは type 別 per-family 比率で
+和は1にならない**。相対比較のみ意味を持つ）:
+
+| type | v2_noint | v2_int | （参考）v1_int @1035 |
+|---|---|---|---|
+| Coincident | 0.433 | 0.436 | 0.423 |
+| Horizontal / Vertical | 0.183 / 0.166 | 0.168 / 0.161 | 0.147 / 0.147 |
+| dimensional 計 | 0.392 | 0.382 | ~0.43 |
+| Radius | 0.079 | 0.074 | 0.078 |
+| **Equal** | 0.0065 | **0.024** | 0.016 |
+| **Perpendicular** | 0.0008 | 0.004 | 0.011 |
+| **Parallel** | **0.000**（max 0.016） | **0.000**（max 0.032） | ~0 |
+| **Tangent** | 0.0088 | 0.019 | 0.015 |
+| rare rel 計（Eq+Perp+Par+Tan） | 0.018 | **0.047** | 0.042 |
+| Mirror / Concentric | 0 / 0 | 0 / 0 | 0 / 0 |
+
+**14.7.2 読み取り**
+
+1. **2つのレバーはほぼ加算的に効く**。response_full は v1_noint 0.534 →（scaffold-v2 単独で）
+   v2_noint 0.493（**−0.041**）→（intent 上乗せで）v2_int 0.464（さらに **−0.029**）。
+   注目すべきは **v2_noint(0.493) ≈ v1_int(0.491)**——「scaffold-v2 の探索/hygiene 強化だけで、
+   v1 で intent 報酬が稼いだのと同等の response 改善が得られる」。intent 報酬の限界寄与は
+   強 scaffold 上で 0.043→0.029 と**減衰したが消えてはいない**。
+2. **0.005 は端点ノイズ。頑健差は 0.029**。最終1点だけ見ると v2 の intent 差は 0.482−0.477=0.005
+   に見えるが、これは v2_noint の最終 val がたまたま良値（後期平均 0.493 に対し 0.482）だった
+   ため。後期10val の std は両 run とも ≈0.006 で、差 0.029 は **約5σ**。intent 効果は単一 seed
+   ながら統計的に実在する（seed 分散は未測——§14.7.4 の検証課題）。
+3. **FC/DoF の代償が拡大した**。base 0.806/DoF3.375 → v1_int 0.651/3.85 → **v2_int 0.580/DoF4.69**。
+   探索（温度↑）と hygiene 強化（極小 Distance に −1.5）は、**FC を稼いでいた dimensional の
+   水増しを抑える**ため、その分だけ拘束が緩み DoF が増える。near_zero_distance は実際に半減
+   （val 0.029→0.013、train 末 0.0007）で hygiene は意図通り効いたが、副作用として FC が
+   base 比 −22pt・v1 比 −7pt 低下した。
+4. **これがユーザの「per-sketch 推論漏れ」の正体**。集計では Coincident 0.436・H 0.168・V 0.161 と
+   豊富なのに、定性的には個別 sketch で Coincident/H/V/Tangent が抜けて見える——これは矛盾でなく、
+   **DoF=4.69 が「各 sketch で必要な制約が平均4.7自由度ぶん欠落」**を意味するため。集計頻度（type
+   分布）と per-sketch 完全性（その図に必要な制約が付いているか）は別問題で、後者が悪化している。
+   per-sketch 完全性は §15.2 の律速 **#2**（規則付与器の担当）。
+5. **探索ノブは定量的にほぼ no-op だった**。entropy は v1 後期 0.371 → v2 後期 0.377（**+0.006**）で
+   ほとんど動かず（中盤 0.33 まで沈み末で 0.38 へ戻るのは両 version 共通）。response/dimensional の
+   改善は entropy 増ではなく **hygiene 強化＋温度**が主因と見られる。`entropy_bonus=0.005` /
+   `temp=1.2` は steady-state entropy を 0.01 も上げられていない＝探索は名目 ON・実質弱い。
+6. **Parallel の決定的所見——サンプルされても報酬で淘汰される**。Parallel は中盤に max 0.032
+   （intent）/0.016（no_intent）まで出るが、**収束時は両 arm とも 0**。つまり「探索不足で一度も
+   出ない」のではなく、**出たものが RLOO advantage で消される**。一方 Equal/Tangent/Perp は intent で
+   部分的に生存（Equal 0.024 vs no_intent 0.0065、Tangent 0.019 vs 0.0088、Perp 0.004 vs 0.0008）。
+   この **Parallel だけ死に、Equal/Tangent は生き残る**非対称は §15.1–15.2 の予測そのもの:
+   d_H_angle は **Parallel と H+H の運動部分空間をほぼ同一**と見るため両者を区別できず、SolverReward の
+   DoF 選好（H+H は DoF−2 > Parallel の DoF−1）が勝つ。逆に Equal/Tangent は代替制約と部分空間が
+   **異なる**ので d_H_angle が区別でき、intent 報酬が浮上させられる。**律速 #3（報酬バランス）の直接実証**。
+   なお rel_prior の Parallel/Perp 係数は 0.053/0.046 で、SolverReward の `reward_dof_reduction=10` に
+   対し桁違いに小さく、#3 を埋める力がない。
+
+**14.7.3 M1 ゲート判定（§14.6 の問いへの回答）**
+
+§14.6 M1 の問いは「`entropy_bonus=0` 解除＋温度↑＋hygiene 強化で **rare relation の探索が回復し、
+FC を犠牲にせず relational に拘束できるか**」だった。判定:
+
+- **rare relation 回復: 否**。rare rel 計は v1 0.042 → v2 0.047 とほぼ横ばい。Parallel は依然 0
+  （サンプルされるが淘汰）。Mirror/Concentric は構造的に 0（報酬 GT に無い）。
+- **FC 非犠牲: 否**。むしろ FC −7pt・DoF +0.83 と悪化。
+- **唯一の成功**: hygiene による near-zero distance のほぼ消去（ユーザ定性と一致）、dimensional 比率の
+  微減、response 系指標の単調改善。ただしこれらは「拘束を緩める」方向の改善で、rare relation の
+  絶対量を増やしていない。
+- **結論**: 現強度の探索ノブだけでは rare relation 問題は解けない。残る律速は **#3 報酬バランス**
+  （Parallel に関しては「指標の非分離性 × SolverReward の DoF 選好」）と **#2 per-sketch 完全性**
+  であり、いずれも探索ノブの担当外。これは §15 の「列挙器ではなく規則付与器＋報酬バランス」という
+  判断を強める実証データになった。
+
+**14.7.4 次アクション（規則付与器の pseudo-GT 生成・学習とは独立に検証可能な事項）**
+
+規則付与器による pseudo-GT v2 生成＋再学習は長ポール（167k で ~5h、1.67M で ~53h）だが、その完成を
+待たずに律速を確定でき、かつ v2 GT を活かす報酬設定を前もって決められる検証が複数ある。優先度順:
+
+1. **［学習不要・既存 ckpt から数時間］サンプル vs 採択の分解**。`v2_int` ckpt で val sketch に
+   K=8 サンプルし、**生サンプルの type 別カウント**（報酬前）と **advantage>0 で採択された側**を分けて
+   記録。Parallel が「生では出るが advantage が負で消える」ことを直接確認すれば、#3（報酬バランス）か
+   探索不足かが確定する（14.7.2-6 の状況証拠を一次証拠に格上げ）。
+2. **［学習不要］SolverReward の H+H vs Parallel を実測**。真に平行な辺対を持つ sketch で
+   `{H,H}` と `{Parallel}` の2候補を作り、RewardComposer 全体（DoF 削減・FC bonus・rel_prior・intent）の
+   スカラーを測る。§15.2 #3 の「H+H が勝つ」差を**数値化**し、coeff をどれだけ動かせば選好が反転するかを
+   決める。これにより v2 GT 投入時の報酬設定（intent coeff↑ / H,V downweight / Parallel,Perp prior↑ の
+   いずれをどれだけ）が事前に決まる。
+3. **［学習不要・fiverr eval-only］d_H_angle の分離能監査**。fiverr 人間 GT で、Parallel と H+H 代替、
+   Equal とその代替、Tangent とその代替について d_H_angle を計算し、「Parallel/H+H は不分離・Equal/Tangent は
+   分離」を定量確認。これは**どの rare type なら報酬で浮上させられるか**（=規則付与器で GT に入れても
+   intent で選ばせられる type）を type 別に切り分け、規則付与器の type 別方針（§15.4）と接続する。
+   d_H_angle が評価器として妥当かという本研究の基盤主張（`summary_histcad_response_metric_v4_results.md`）の
+   独立再検証も兼ねる。
+4. **［学習要・1日・v1 GT のまま config だけ］報酬バランス probe**。GT・ckpt を変えずに、
+   (i) Parallel/Perp の rel_prior 係数を ×5–10（0.05→0.3–0.5）かつ H,V を downweight、(ii) `coeff_h_angle
+   3→6–8`、(iii) `{H,H}` への redundant penalty もしくは H+H→Parallel canonicalization、のいずれかで
+   **Parallel が収束時 >0 になるか**を見る。v1 GT のままでも Parallel が立てば「律速は GT 完全性 #2 でなく
+   報酬バランス #3」が確定し、**規則付与器だけでは Parallel 生成は直らない**ことの裏取りになる。
+   （augmenter の長時間生成に着手する前に、活かす報酬設定を確定できる＝de-risk）。
+5. **［学習要・1日・v1 GT のまま］探索強度 probe**。`entropy_bonus 0.005→0.02–0.05`, `temp→1.5`。
+   14.7.2-5 で entropy がほぼ動いていないため、本当に entropy を上げた時に rare rel が出るか／FC だけ
+   崩れるかを見る（#1 と #3 の切り分け）。あわせて温度のみ 1.0 に戻した変種で v2 の DoF 悪化（4.69）が
+   どのノブ由来かを切り分け、v2 GT 学習に不要な FC 欠損を持ち込まないようにする。
+6. **［学習不要・eval］報酬 GT と人間 GT の整合**。`v2_int` 予測の response_full を pseudo-GT v1 と
+   fiverr 人間 GT の両方で計算し、両者が予測の良し悪しを**同順位に並べるか**を確認。並ばなければ報酬
+   ターゲット（pseudo-GT v1）が評価（人間意図）と別物を最適化していることになり、これは augmenter の
+   有無に関わらず効く根本論点。
+
+優先実行: **1→2→3 を先に（全て学習不要、数時間で律速 #3 を一次証拠で確定）**、次に **4**（活かす報酬設定を
+確定して augmenter 生成を de-risk）。これらは規則付与器の生成・再学習パイプラインと完全に独立で、並行可能。
+
 ## 15. 規則付与器の実装と「列挙器は後回し」の判断 (2026-05-30)
 
 この章は §14.6 の第二段階を実装に落とす過程で得た判断を、**この章だけで完結して読める**よう、
@@ -1277,19 +1434,13 @@ DoF で測る限りモデルは常に H+H を選び、Parallel を選ぶ理由�
 
 1. 規則付与器は、幾何的に真なら **Horizontal 2本と Parallel を両方出す**。同様に、
    Vertical/Horizontal と Perpendicular も同時に出る。これは実装として正しい。
-2. そのため、前版の「GT に Parallel を足せば d_H_angle が H+H を罰して Parallel を選ばせる」
-   という説明は強すぎた。GT 側が `H1 + H2 + Parallel(H1,H2)` を含むなら、exact Jacobian の
-   motion subspace は基本的に `H1 + H2` と同じで、追加された Parallel は row-space 冗長になる。
-   現行の `motion_relational_angle` はこの冗長性を吸収するので、H+H と H+H+Parallel はほぼ区別しない。
-3. 逆に、GT が `Parallel` だけで Pred が `H1 + H2` なら motion subspace は違う。H+H は全体回転を
+2. 現行の `motion_relational_angle` はこの冗長性を吸収するので、H+H と H+H+Parallel はほぼ区別しない。
+3. ただしGT が `Parallel` だけで Pred が `H1 + H2` なら motion subspace は違う。H+H は全体回転を
    余計に禁止するため、d_H_angle は「拘束しすぎ」として差を出せる。
 4. よって規則付与器の直接の役割は、**rare relation を選ばせること**ではなく、
    **人間 GT の sparse annotation を relational closure に近づけ、motion metric が表記ゆれを吸収できる
    ターゲットを作ること**である。Parallel を H/H より選ばせたい場合は、別途
    `H/H -> Parallel` の canonicalization、H/V の downweight、class prior、または sequence-level reward が要る。
-
-Mirror も「既存 Line を対称軸にする」範囲では規則検出に入れた。未知の潜在対称軸を新しく探す検出は
-まだ入れていない。
 
 ### 15.3 規則付与器の実装（branch `rule_augmenter`）
 
@@ -1420,7 +1571,232 @@ scale sweep の読み:
   を分け、追加後の relation Jacobian rank / null-space 次元 / d_H_angle 対 human GT を見る。
 - 特に `Mirror` は recall 1.0 だが precision 0.006 なので、full_all の中でも別スイッチにする。
 
-### 15.5 次手
+### 15.5 pseudo-GT v2 npy生成・学習推論パイプラインのトレースと安全性判断
+
+Q: 規則付与器(`src/sketch_handlers/rule_augmenter.py`)で pseudo-GT を作るのに
+`scripts/generate_pseudo_rel_dataset.py` を**素朴に**使ってよいか。relational constraints は
+大量に冗長で、その冗長性を持つ GT がパイプラインのどこかで想定外の挙動を起こさないか。
+
+---
+
+**0. 結論(TL;DR)**
+
+- **素朴な流用は不可**。理由は2つ:
+  1. `generate_pseudo_rel_dataset.py` は *rel-only RLOO モデル* を走らせて関係を予測する
+     スクリプトで、規則付与器を一切呼ばない。そのままでは augmenter pseudo-GT を作れない。
+  2. 仮に差し替えても、既定の solver 検証 (`:168 if status.Status != 'Converged'`) が
+     **Redundant を却下**する。`get_solver_status` は Converged+redundant を `'Redundant'` に
+     再分類する(`solver_feedback.py:299–305`)ため、規則付与器の **full closure はほぼ全件が
+     Redundant 判定 → ほぼ全却下**になる(コメント「Redundant tolerated」は誤り。メモリ既知)。
+- **一方、冗長 GT 自体はダウンストリームで安全**。これは静的トレース＋実データで確認した(§2–§3)。
+  - 報酬は GT を **`datalib.Sketch` オブジェクト**(`batch['sketch']`)として受け取り、関係を
+    **SVD ランクで motion subspace に縮約**する。冗長行は特異値≈0で**ランクに寄与せず吸収**される。
+  - tokenizer の `max_token_length` 切り詰めは **GT subspace 経路に無関係**(後述の二経路)。
+- よって判断は **「小変更で可」**。専用スクリプト `scripts/generate_pseudo_rel_augmented_dataset.py`
+  を新規作成した(§4)。safety gate 付きで、生成 npy は学習時にクラッシュしないことを保証する。
+- 動作確認の **canary (2000件→1990 valid, 0 error)** を `/tmp/sg_pseudo_rel_v2_canary.npy` に生成済み。
+  `ConstraintDataset.__getitem__` 経由 800件ロードで **エラー 0** = 学習可能。rare relation が
+  GT に豊富に入った(Mirror/Perp/Parallel/Equal/Tangent…)。本生成のスコープのみ要確認(§6)。
+
+---
+
+
+**1. 静的トレース: 冗長 GT が通る2つの経路**
+
+ConstraintDataset.`__getitem__`(`constraint_dataset.py:68`)は1つの sketch から**2つ**を作る:
+
+| 経路 | 中身 | 切り詰め | 冗長の扱い | 消費先 |
+|---|---|---|---|---|
+| **① GT sketch object** | `result["sketch"]`=full `datalib.Sketch` | **なし**(オブジェクトそのまま) | SVD で吸収 | **報酬**(`ResponseIntentReward` 等) |
+| ② tokenized `c_val` | `tokenizer.tokenize()` 出力 | **あり**(`pad_or_truncate(…,192)`) | 末尾を黙って切る | CE/SFT・`gt_tokens` |
+
+**1.1 報酬は経路①(full object)を使う — 冗長は SVD で吸収**
+
+- RLOO: `_compute_rloo_loss` → `build_context(sketch_original_list=expanded['sketch'], …)`
+  (`constraint_ar_module_rloo.py:185`)。報酬は `ctx.sketch_original_list[i]` を `gt_sketch` として使う。
+- `get_or_compute_gt_motion_relational_subspace` → `motion_relational_subspace(gt_sketch, …)`
+  は `gt_sketch.constraints.values()` の**全関係**を `stack_relation_jacobians_at` で J_R に積む
+  (`geometry.py:146–156`)。`N_C = null(J_R)`、`W_C = range(J_phi @ N_C)`、basis は
+  `orthonormal_range`(`geometry.py:36–40`)で **特異値 ≥ eps の本数だけ**を採る。
+  → **冗長行(H+H が含意する Parallel 等)は特異値≈0でランク非寄与 = 吸収**。`dim_gt` は count では
+  なく rank なので、冗長を何本足しても不変。ユーザの仮説どおり。
+- **重要**: GT subspace は経路①(full object)なので、tokenizer の 192 切り詰めの影響を**受けない**。
+  どれだけ長い closure でも全関係が J_R に入る。
+
+**1.2 切り詰め(経路②)が効く先と、現 config での無害性**
+
+- **CE/SFT**: `total_loss = rl_loss + ce_loss * sft_coeff`(`constraint_ar_module_rloo.py:357`)。
+  `sft_coeff` 既定 **0.0**(`configs/model/constraint_ar_rloo.yaml:62`、scaffold config で未上書き)
+  → CE は学習に**寄与せず**、切り詰めは無害。
+- **DimParsimonyReward**(`gt_tokens` 消費): GT の**寸法**トークン数を数える。pseudo-GT は
+  relational-only なので寸法=0 → 切り詰めと無関係。
+- **GTMatchReward**: scaffold config の rewards に**不在**(SolverReward + DimParsimony +
+  RelationalClassPrior + ResponseIntent のみ)。
+- 結論: **現 response-metric RLOO 設定では 192 切り詰めは報酬・学習に実害なし**。
+  （SFT/pretrain で v2 を教師に使う、または `gt_tokens` 系報酬を足す場合のみ要対応 → §5 caveat。）
+
+**1.3 cleanse は制約「間」の冗長を消さない(=意図通り保存)**
+
+`cleanse_sketch_constraints` の dedup は**単一制約内のref重複**のみ(`sketch_utils.py:721–744`、
+例 Coincident(A,A))。制約**間**の幾何冗長(H+H+Parallel)は消さない。よって冗長は GT に残り、
+報酬側 SVD で吸収される、という設計が成立。
+
+**1.4 正規化は相似変換 = 検出述語は不変**
+
+`normalize_sketch` = center + **等方** rescale(`sketch_utils.py:248–253`、単一 scale_factor)。
+Horizontal/Vertical/Parallel/Perp/Coincident/Concentric/Equal/Tangent/Mirror は相似変換不変 →
+**augment を正規化の前後どちらで行っても同じ集合**。geometry 不一致の懸念なし。
+
+---
+
+**2. 実データ検証(`/tmp/probe_augmenter_pipeline.py`、freecad env、60件)**
+
+`sg_filtered_unique_valid.npy` 先頭60件で、base(関係のみ)→ augment(scale0.25)→
+to/from_sequence 往復 → dataset 前処理 を実行:
+
+| 検証項目 | 結果 | 意味 |
+|---|---|---|
+| **往復後 dim == augment 後 dim** | **59/59 一致** | npy 詰め込み＋ロードで GT subspace が**厳密保存** |
+| **augment 後 dim ≤ base dim** | **常に True** | 冗長を平均61本(最大367本)足しても dim は blow up せず縮むだけ |
+| augment 後の dim 平均 | base 8.54 → aug 5.49 | 関係が増え motion が締まる(rank 有界) |
+| 往復で関係数が減る量 | 平均 −6.2(最大 −17) | cleanse が**冗長**関係を一部削除。**ただし dim は不変**=削られたのは inert な冗長 |
+| **エラー** | 1/60 | sketch54。augment 前の**元データ** c_41(3-ref Midpoint 厳密性)。augmenter 由来ではない |
+| augment 時間 | 平均 75ms / p95 282ms | 後述スコープ算定の根拠 |
+
+→ 「冗長 GT が pipeline を壊す」懸念は**経路①(報酬)について実証的に否定**された。
+
+---
+
+**3. 必要だった「小変更」: 専用生成スクリプト**
+
+`scripts/generate_pseudo_rel_augmented_dataset.py`(新規)。`generate_pseudo_rel_dataset.py` との差分:
+
+1. **モデル不使用**。各 sketch を `sketch_from_sequence → normalize → cleanse_primitives →
+   (既定)全制約strip → augment_sketch(scale0.25) → lenient cleanse/complete → sketch_to_sequence`。
+   - 既定は **pure relational closure**(bare primitives から復元)。v1 が「モデル予測の関係で
+     置換」だったのと整合。`--keep_original` で既存関係に上乗せも可。
+2. **solver 検証は既定 OFF**。`--solver_validate` 指定時のみ、**緩和版**(Redundant 許容、
+   Conflicting/Malformed/Distorting のみ却下)。§0 の Redundant 誤却下を回避。
+3. **safety gate(常時)**: 生成系列を **dataset と同一の STRICT 前処理**
+   (`cleanse_sketch_constraints` 厳密＋`complete_constraint_values` 厳密)で再ロードし、
+   `motion_relational_subspace` まで計算。**例外を出す標本/関係0の標本は捨てる**。
+   → 保存 npy は **学習時クラッシュしないことを構成的に保証**。
+4. `--no_mirror`(Mirror 除外=full_no_mirror ablation)、`--shard i/n`(並列)、`--limit`、`--types`。
+
+**3.1 canary 実行結果(先頭2000件)**
+```
+valid 1990 / no_rel 10 / load_reject 0 / augment_error 0 / solver_reject 0
+avg relations added/sketch 67.9   8.8 sketch/s
+```
+- `load_reject 0` = safety gate を全件通過。pure closure で**元データの不良制約が消える**ため、
+  §3 の sketch54 系エラーも再発しない。
+
+**3.2 ConstraintDataset 経由ロード(`/tmp/verify_v2_dataset.py`、rloo context, 800件)**
+```
+__getitem__ ok=800  errors=0          ← align=4 の >3-ref guard でもクラッシュ無し = 学習可能
+relations/sketch (strict cleanse後) mean 71.2 / max 464
+c_val が 192 cap 到達(切り詰め): 430/800 (54%)   ← 経路②のみ。報酬には無関係(§2.2)
+relation HEAD-type: Mirror 11617, Coincident 11358, Perpendicular 10461,
+  Parallel 8798, Equal 6004, Tangent 2936, Horizontal 2556, Vertical 2536, Midpoint 661
+```
+→ 本来「ほぼ無い」だった **Parallel/Perp/Equal/Tangent/Mirror が GT に豊富**に入った
+(動機 §obs.2 を直接充足)。
+
+---
+
+**4. 注意点・既知の caveat**
+
+- **C5-a 切り詰め(経路②)**: full closure は 54% の sketch で c_val が 192 を超える(最大 1188 tok)。
+  **現設定では無害**(§2.2)。ただし将来 v2 で **SFT/pretrain**(`sft_coeff>0`)や **GTMatch/gt_tokens
+  系報酬**を使うなら、`max_token_length` を上げるか型別に密度を間引く必要がある。
+- **C5-b Concentric → Coincident 正規化**: `cleanse_sketch_constraints` の
+  `_convert_concentric_to_coincident`(`sketch_utils.py:770`)が **Concentric を中心同士の
+  Coincident に変換**する。よって GT に "Concentric" **ラベルは出ない**(canary でも head-type 0)。
+  - これは**脱落ではなく相対ラベル変換**で、**幾何・motion subspace は等価**(中心一致=同心)。
+    report の検証で raw Concentric 候補は 3000件中850件 検出されており、cleanse 段で Coincident に
+    畳まれているだけ。**§14.4 が言う「Concentric の構造的欠落」の正体はこれ**で、v1 も含む既存挙動。
+  - 報酬(motion subspace)には無害。ただし **class prior の `Concentric` 係数や型別の質的集計**には
+    "Concentric" が現れない点に注意(必要なら cleanse の変換を gate するか、Coincident-of-centers を
+    Concentric として再分類する)。
+- **C5-c Mirror は survive**(canary 11617件)。§14.4 の Mirror 欠落は v1(モデルが出せない)由来で、
+  augmenter 経由なら GT に入りパイプラインを通る。ただし fiverr precision 0.006 なので
+  **full_no_mirror ablation を必ず併走**(§15.5)。
+- **C5-d 関係過多のリスク**: closure は dim を強く締める(8.5→5.5)。これは「人間 GT の sparse
+  annotation を closure に近づける」狙い(§15.2-4)に沿うが、over-closure(`Equal.length` 全ペア、
+  遠点 Mirror 等)が motion subspace を**過剰に**狭める可能性は残る。`full_all` / `full_no_mirror` /
+  `high_precision_only` を分けて relation Jacobian rank / null-space / d_H_angle(対 human)で診断する
+  (§15.4 方針)。本トレースは**安全性**を確認したもので、**有効性**(d_H_angle 改善)は別途要評価。
+
+---
+
+**5. 本生成: sharded parallel**
+
+- **スコープ確定**: 入力 `sg_filtered_unique_valid.npy`(**1,670,450件**)の **先頭 167k**
+  (v1 `sg_pseudo_rel_167k` と同スケール)。variant = **full_all** と **full_no_mirror** の2本。
+  scale=0.25。全 1.67M(~53h)は当面の実験に過剰なので採らない。
+- **オーケストレータ**: `scripts/run_pseudo_rel_v2_gen.sh`。各 variant を **NSHARD=12** に分割し、
+  両 variant を**同時**に走らせる(=24 python worker)。`--shard i/12` は **limit 先・shard 後**
+  なので 12 本の和集合がちょうど先頭 167k(各 ~13,917件)。完了後、各 variant の shard を
+  `--merge_inputs` で1ファイルにマージ(行順保存で sequence↔metadata の整合維持)。
+- **環境条件**(実測): 32 コア / 空き 107GB / 入力 npy は `mmap_mode='r'`(各 worker が 2GB を
+  RSS で抱えない)。worker は `torch.set_num_threads(1)` + `OMP/MKL/OPENBLAS=1` で 1 スレッド化し、
+  24 本を全コアにばらまく。実測 worker affinity=0–31(フル)、各 ~100% CPU。
+  → **ETA ~30 分**(単一プロセス 5.3h を短縮)。
+- **出力**: `data_processed/sg_pseudo_rel_v2_full_all.npy` / `data_processed/sg_pseudo_rel_v2_no_mirror.npy`。
+- **完全デタッチ起動(セッションを閉じても継続)**:
+  ```bash
+  setsid bash scripts/run_pseudo_rel_v2_gen.sh < /dev/null \
+      > /tmp/gen_v2_orchestrator.log 2>&1 & disown
+  ```
+  `setsid` で新セッションリーダ化 → 起動した CLI セッションのプロセスグループ signal の影響を
+  受けず、**会話セッション/ターミナルを閉じても走り続ける**。
+- **監視 / 完了確認**:
+  ```bash
+  tail -n 20 /tmp/gen_v2_orchestrator.status   # マイルストーン(launching / merged / ALL DONE)
+  ls /tmp/gen_v2_DONE                           # 存在すれば全完了
+  grep -h valid= /tmp/gen_v2_full_all.shard*.log | tail   # shard 進捗
+  ```
+- 完了後の検証(自動ではない、手動 or 再開時に実行): 両 npy を `ConstraintDataset` で全件ロードし
+  `__getitem__` エラー 0 と relation 分布(canary 同様 Mirror/Perp/Parallel/Equal/Tangent が豊富)
+  を確認する。
+
+**5.1 本生成完了・sanity check (2026-05-31)**
+
+本生成は完了。`/tmp/gen_v2_DONE` が存在し、orchestrator status は
+`2026-05-31 11:04:00 ALL DONE`。出力は `.gitignore` 配下のため commit 対象ではなく、
+ローカル実験データとして `data_processed/` に保存:
+
+| variant | npy | size | dataset size | 生成時棄却 |
+|---|---:|---:|---:|---:|
+| full_all | `data_processed/sg_pseudo_rel_v2_full_all.npy` | 214M | 166,254 | no_rel 746 / load_reject 0 / augment_error 0 |
+| full_no_mirror | `data_processed/sg_pseudo_rel_v2_no_mirror.npy` | 200M | 166,254 | no_rel 746 / load_reject 0 / augment_error 0 |
+
+`ConstraintDataset` の RLOO 実経路(`max_token_length=192`, align=4,
+`PrimitiveNoise(std=0.15)`)で **全件 `__getitem__` sanity check green**:
+
+| variant | `__getitem__` | rel/sketch mean | rel/sketch max | c_val 192 cap |
+|---|---:|---:|---:|---:|
+| full_all | 166,254 ok / **0 errors** | 69.4 | 2,936 | 87,558 / 166,254 |
+| full_no_mirror | 166,254 ok / **0 errors** | 55.2 | 1,232 | 74,234 / 166,254 |
+
+主要 relation head-type (全件):
+
+| type | full_all | full_no_mirror |
+|---|---:|---:|
+| Mirror | 2,366,079 | 0 |
+| Coincident | 2,283,136 | 2,283,136 |
+| Perpendicular | 2,088,540 | 2,088,540 |
+| Parallel | 1,751,349 | 1,751,349 |
+| Equal | 1,244,472 | 1,244,472 |
+| Tangent | 638,475 | 638,475 |
+| Horizontal / Vertical | 518,630 / 509,642 | 518,630 / 509,642 |
+| Midpoint | 137,427 | 137,427 |
+
+metadata 長も `sequences/sketch_ids/sequence_lengths = 166,254` で揃っている。
+したがって v2 GT は、RLOO 報酬経路の入力としては training-ready と判断する。
+
+
+### 15.6 次手
 
 1. ✅ 全件 fiverr スイープ完了（§15.4）。運用点 = scale 0.25。型別方針は precision cut ではなく、
    full relational closure を第一 ablation として試し、rank/null-space で over-closure を診断する。
@@ -1435,6 +1811,16 @@ scale sweep の読み:
 3. **pseudo-GT v2 生成**: augmenter を学習側 primitives（`sg_filtered` 等）に適用。
    ※ 現状 detect は候補ごとに handler.residual を呼ぶため 167k 件には遅い → numpy 高速 path
    へ最適化が要る（既知 TODO）。
+   - ✅ パイプライン安全性: 確認済み(冗長 GT は報酬経路で安全)。
+   - ✅ 小変更スクリプト + safety gate + merge: 実装・smoke 検証済み。
+   - ✅ 本生成(full_all + no_mirror @167k): 完了。全件 `ConstraintDataset.__getitem__` sanity
+      check 0 errors（§15.5.1）。
+   - scaffold-v2 + intent を **v2 GT** で回し、§14.6 ゲートで判定(Parallel がサンプルに乗るか /
+      leak・response_full_angle が v1 比改善か / 残差が報酬バランス #3 か)。**C5-d** の
+      rank/null-space/d_H_angle(対 human)over-closure 診断を併走。`full_all` 対 `full_no_mirror` で
+      Mirror over-completion の影響を切り分ける。
+   - (config) `train_sequence_file` を v2 npy に差し替え。SFT/gt_tokens を使う場合のみ §C5-a の
+      `max_token_length` 対応が要る(現 RLOO 設定では不要)。
 4. scaffold-v2 + intent を **v2 GT** で回し、§14.6 のゲートで判定（Parallel がサンプルに
    乗るか / v1 比で response_full_angle・leak 改善か / 残差が報酬バランス #3 か）。
 5. **必要時のみ** RoPE rel-only 列挙器（§15.1 の union 採取構成）。
