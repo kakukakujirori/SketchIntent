@@ -1360,6 +1360,255 @@ FC を犠牲にせず relational に拘束できるか**」だった。判定:
 優先実行: **1→2→3 を先に（全て学習不要、数時間で律速 #3 を一次証拠で確定）**、次に **4**（活かす報酬設定を
 確定して augmenter 生成を de-risk）。これらは規則付与器の生成・再学習パイプラインと完全に独立で、並行可能。
 
+### 14.7.5 「なぜ非代替の rare relation が出ないのか」を学習なしで切り分ける (2026-05-31)
+
+この節は §14.7.4 で挙げた「学習不要の独立検証」を実際に実装・実行した結果を**一本化**して記す
+（旧 `notebooks/diag_independent_checks_results.md` は本節へ統合し廃止。スクリプトは `scripts/diag_*.py`）。
+他節と同じく、初見でも追えるよう目的・方法・結果・読み方を省略せず書く。
+
+**背景と目的（何がしたいか）**: scaffold-v2（§14.7.1–3）でも rare relation の絶対量は伸びず
+（rare-rel 計 0.042→0.047）、とりわけ「他の制約で**代替できない**」Tangent / Perpendicular / Equal が
+人間 GT 比で大きく不足したままだった。「なぜ伸びないか」には処方の異なる複数の原因がありうる:
+
+- **H1 未サンプル**: そもそも方策がその関係を出さない（事前分布・探索の問題）。
+- **H2 報酬淘汰**: 出すが RLOO の報酬が選ばない（advantage が負）＝報酬バランスの問題。
+- **H3 指標の非分離**: 指標 d_H_angle がその関係を代替制約と区別できない＝指標の分解能の問題。
+- **H4 GT 欠落**: 報酬 GT にその関係が無い（Mirror/Concentric/全 dimensional）＝GT 組成の問題。
+- **H5 汎化失敗**: 学習分布では出るが人間データ(fiverr)に汎化しない＝OOD の問題。
+
+処方は H1=探索強化 / H2=報酬係数 / H3=指標再設計 / H4=規則付与器 / H5=汎化、と全く違う。規則付与器に
+よる pseudo-GT v2 の生成＋再学習は長時間（167k で ~5h、1.67M で ~53h）なので、**その完成を待たずに
+「どの原因が効いているか」を学習なしで切り分ける**のが本節の狙い。材料は既存の v2_int チェックポイント
+（run `0csbzpdm`）と fiverr 人間データと報酬コードだけ。効用は2つ — 律速を一次証拠で確定すること、そして
+v2 GT 投入時に使う報酬設定を**事前に**決めて長時間生成を de-risk すること。
+
+4本の診断と、それぞれが切り分ける仮説:
+
+| 診断 | 何を切り分けるか | スクリプト |
+|---|---|---|
+| #1 サンプル vs 採択 | H1（出さない）か H2（出すが消される）か ＋ H5（汎化） | `diag_sample_vs_select.py` |
+| #2 統制構成の因果測定 | H2/H3 を統制実験で因果的に（H+H vs Parallel、正解 vs 近似ミス Tangent） | `diag_reward_balance.py` |
+| #3 d_H_angle 分離能 | H3 の type 別版＝「どの関係なら指標が見えるか」＝引き上げ可能な type の順位 | `diag_dhangle_separability.py` |
+| #6 報酬 vs 評価 整合 | 報酬指標(motion_relational)と評価指標(response_full)の構造的ズレ | `diag_reward_target_gap.py` |
+
+#### #1 サンプル vs 採択の分解 — 「出さない」のか「出すが消される」のか
+
+**知りたいこと**: ある関係が生成に出ない時、原因が H1（方策がそもそもサンプルしない）か H2（サンプルは
+するが報酬で淘汰される）かで打ち手が真逆になる。これを type 別に分ける。
+
+**方法**: v2_int で各スケッチに K=8 サンプルし（学習時と同じ温度1.2・本物の training reward composer）、
+各サンプルの総報酬から RLOO の **within-group advantage**（同一スケッチの K サンプル間で、その type を
+**含む**サンプルの advantage − **含まない**サンプルの advantage、の平均）を出す。within-group にするのは
+「図の難しさ」を相殺して**その type を入れたことの純効果**を見るため。併せて、その type を含むサンプルの
+**ソルバ状態**（Conflicting/Malformed/Distorted = risky）と、**報酬項別の寄与差**（solver / intent /
+rel_prior の、type を含む − 含まない の平均差）も出す。さらに学習データ(sg_pseudo_rel_167k)と人間データ
+(fiverr)の両方で回し、H5（汎化）も見る。
+
+**結果① 学習データで prompt（3072 sample / 384 group, FC 74.5%, 全体 risky 2.4%）**:
+
+| type | samp%(出た割合) | within-grp advΔ | risky% | solver寄与差 | intent寄与差 |
+|---|---|---|---|---|---|
+| Coincident | 96.7 | +0.23 | 2.4 | −1.36 | +0.41 |
+| Horizontal | 95.3 | **−3.61** | 2.3 | +2.36 | +0.11 |
+| Vertical | 65.1 | **−2.32** | 2.9 | −1.77 | −0.22 |
+| Parallel | 54.0 | +0.53 | 0.9 | +2.36 | +0.27 |
+| Perpendicular | 56.1 | +1.25 | 0.9 | +2.48 | +0.28 |
+| Tangent | 12.8 | +0.99 | **4.6** | **−1.88** | **+1.10** |
+| Equal | 15.7 | +0.28 | 2.9 | +0.08 | +0.45 |
+| Midpoint | 30.1 | +3.13 | 1.0 | – | – |
+
+**結果② fiverr で prompt（1192 sample / 149 group, FC 60.9%, 全体 risky 2.4%）**:
+
+| type | samp% | within-grp advΔ | risky% | solver寄与差 | intent寄与差 |
+|---|---|---|---|---|---|
+| Coincident | 98.7 | −0.75 | 1.9 | +7.36 | +0.94 |
+| Horizontal | 91.7 | +0.05 | 2.6 | +1.83 | +0.87 |
+| Vertical | 87.0 | −0.50 | 2.7 | +0.84 | +0.65 |
+| Equal | 22.2 | **−1.04** | 3.8 | −1.23 | −0.19 |
+| Tangent | **8.6** | +1.04 | 0.0 | **−2.79** | **−0.37** |
+| Perpendicular | **7.7** | −0.30 | 0.0 | +0.78 | +0.49 |
+| Parallel | **0.4** | −1.70 | 0.0 | −2.11 | −0.10 |
+
+**どう読むか**:
+- **H1 か H2 か**: 学習データでは Parallel が **54%** のサンプルに出ており（H1 ＝未サンプルではない）、within-group
+  advΔ も **+0.53**（淘汰どころか正に選ばれている）。Tangent +0.99、Perp +1.25 も正。**負なのは
+  Horizontal(−3.61) / Vertical(−2.32)** ——intent 報酬は「安易な H/V」を不利にし rare relation を後押し
+  している。つまり**学習分布上では報酬は正しく働いており、H1 でも H2 でもない**。
+- **では val でなぜ出ないか＝ H5（汎化）**: fiverr で prompt すると **Parallel 54%→0.4%**、**Perp 56%→7.7%**
+  とサンプル率が崩壊する。人間 CAD 図は軸平行(H/V)が多く斜め平行が少ないため、方策がそもそも Parallel/Perp を
+  **提案しなくなる**。よって「val の Parallel≈0」は報酬の淘汰ではなく**学習分布→人間図への汎化ギャップ**。
+- **Tangent は例外的に汎化する**: 13%→8.6% としか落ちない。だから Tangent 過少は H1/H5 ではない。手掛かりは
+  ソルバ寄与: Tangent を含むサンプルは **solver 寄与が −1.9(train)/−2.8(fiverr)** と一貫して低く（risky 率も
+  train で 4.6%＝全体の約2倍）、intent は +1.1(train) で押し返すが **fiverr では intent が −0.4 と弱い**
+  （gate=converged で FC の低い fiverr では発火が減る）。→ Tangent は「solver が嫌がる(ドラッグ)のを intent が
+  押し返す綱引き」で、**人間図では intent が負けている** ＝ H2（報酬バランス）の一種。
+- 注意: advΔ・寄与差は**相関**指標（その type を含むサンプルは他の点でも違いうる）。因果は #2 で統制して確かめる。
+
+#### #2 統制構成での因果測定 — H+H vs Parallel と Tangent のリスク
+
+**知りたいこと**: #1 は相関なので、「Parallel を H+H に替えたら報酬がどう動くか」「正しい接と僅かにズレた接で
+報酬がどう違うか」を **同一 primitives・制約だけ差し替え**で因果的に測る。特に H3（指標が H+H と Parallel を
+区別できるか）を白黒つける。
+
+**方法**: 2本の軸平行線（H+H も Parallel も成立）や 線＋接円を手で構成し、制約セットだけ差し替えた candidate を
+v2_int の本物の reward composer に通す。同時に token 非依存の `_compute_h_theta_metrics` で raw な d_H_angle
+（motion_relational・leak 等）も直接計算する。
+
+**結果 P（GT=Parallel, 軸平行2線）**:
+
+| candidate | solver状態 | solver | intent | TOTAL | mrel | leak |
+|---|---|---|---|---|---|---|
+| empty（制約なし） | Under | 0.00 | 1.57 | 1.57 | 0.333 | 0.000 |
+| Parallel | Under | **1.67** | **3.00** | 4.72 | 0.000 | 0.000 |
+| H+H | Under | **3.33** | **3.00** | 6.42 | 0.000 | 0.000 |
+| H+H+Parallel | Redundant | −2.00 | 0.00 | −2.00 | 0.000 | 0.000 |
+
+**結果 T（GT=Tangent, 線＋接円）**:
+
+| candidate | solver状態 | solver | intent | mrel | leak |
+|---|---|---|---|---|---|
+| empty（接なし） | Under | 0.00 | 1.38 | 0.378 | 0.000 |
+| Tangent（正解） | Under | **2.00** | **3.00** | 0.000 | 0.000 |
+| 中心-線 Coincident（代替） | **Distorted** | −0.25 | 0.00 | 0.272 | 0.000 |
+| Tangent（近似ミス: 円を0.1ズラす） | **Distorted** | **−0.25** | – | – | – |
+
+**どう読むか**:
+- **H3 の決着＝「H+H と Parallel は指標上で同じ」（ユーザの主張が正しい）**: pred=H+H と pred=Parallel は、
+  ソルバ報酬こそ **H+H 3.33 = 2×Parallel 1.67**（DoF を2減らす vs 1減らす）だが、**intent は両方 3.00 で
+  完全一致**、raw でも `motion_relational=leak=0`。つまり **d_H_angle は H+H と Parallel を区別しない**。
+  理由: 本指標は「ペア間距離で観測できる動き」を測るが、図**全体の回転**は全ペア距離を保存する
+  **gauge（測れない基準自由度）**なので不可視。H+H が余分に全体回転を止めても指標は感知しない。
+  → §15.2 step-3「H+H は全体回転を余計に止めるので d_H_angle が差を出せる」は**誤り**。
+  - 帰結: intent は Parallel を H+H より高く評価する**手段がない**し、その**必要もない**（両者は"意図でない
+    全体回転"だけが違う＝同じ設計意図）。ソルバが H+H を 2:1 で選ぶのは正しく、**Parallel が出ないのは無害**。
+- **Tangent は対照的に「本物の意図」**: 正解 Tangent は solver +2.00 / intent +3.00 で最良。接を**省く**と
+  intent が 3.00→1.38（−1.62）に落ちる＝指標はちゃんと「接の欠落」を罰する（leak ではなく
+  motion_relational 0.378 経由）。代替の「中心を線上に Coincident」は **Distorted（solver −0.25）かつ
+  mrel 0.272≠0** ＝指標も「接とは別物」と判定。→ **Tangent は幾何的に非代替で、指標もそれを見えている**。
+- **ソルバ・リスクの実測**: 円を僅か(0.1)ずらして接を主張すると **Distorted → solver −0.25**。正解 +2.00 との
+  **振れ幅 2.25**。これが #1 の「Tangent の solver 寄与 −1.9〜−2.8」の正体＝**不完全な人手幾何で接を主張すると
+  ソルバ罰**。Coincident のような寛容な制約と違い、Tangent はハイリスク。
+
+#### #3 d_H_angle 分離能監査 — どの関係なら指標が「見える」か
+
+**知りたいこと**: #2 を全 type・実データへ一般化する。「ある type を入れる/外すで d_H_angle がどれだけ動くか」
+＝**指標がその type を見分けられる度合い** ＝ intent 報酬がその type を引き上げ"られる"上限。これで
+「追う価値のある type」を順位づける。
+
+**方法**: fiverr 人間 GT 149図で、各 type の制約を**全部外し（残りは保持）**、外した版と full GT の d_H_angle を
+測る（限界 removal-leak）。残りを保持するので「その図で他の制約が肩代わりしているか＝代替可能か」が自動的に
+効く: H/V で足りる Parallel は低く出て、何も肩代わりできない Tangent は高く出る。token 非依存。
+
+**結果（149図, rfull = response_full の平均, 高いほど load-bearing ＝ 非代替）**:
+
+| type | 重要度 rfull | frac>.05 | mrel | 注 |
+|---|---|---|---|---|
+| Coincident | 0.664 | 1.00 | 0.728 | 骨格（既に豊富に生成） |
+| Distance | 0.606 | 0.98 | **0.000** | dimensional（mrel=0 ＝報酬に不可視, →#6） |
+| **Tangent** | **0.516** | 1.00 | 0.606 | rare-rel 最重要・非代替 |
+| **Perpendicular** | **0.445** | 0.90 | 0.531 | 非代替（H+V で代替されていない） |
+| Radius | 0.420 | 1.00 | 0.000 | dimensional |
+| **Equal** | **0.388** | 0.94 | 0.450 | 非代替 |
+| Midpoint | 0.273 | 0.90 | 0.513 | 中 |
+| Parallel | 0.226 | 0.92 | 0.410 | **最下位＝代替可能＝無害** |
+| Mirror | 0.205 | 0.79 | 0.414 | 中（報酬GTに無い→augmenter） |
+| Vertical | 0.158 | 0.72 | 0.348 | 代替可能 |
+| Horizontal | 0.118 | 0.54 | 0.247 | 最も代替可能 |
+
+**どう読むか**:
+- rare relation の重要度（＝intent が引き上げるべき優先度）は **Tangent 0.52 > Perpendicular 0.45 >
+  Equal 0.39 ≫ Parallel 0.23（最下位）**。Tangent は人間 CAD で**最も load-bearing な rare relation**
+  （外すと必ず悪化: frac>.05=1.00）。**ユーザの「Tangent が本丸」を定量裏付け**。
+- **Parallel が最下位**＝人間の平行は多くが軸平行で H/V が肩代わり→外しても効かない＝**代替可能＝無害**
+  （#2 と整合）。H/V はさらに低い。
+- **Perpendicular は意外に高い(0.45)**＝人間図の直角ペアは両方が軸平行とは限らず H+V で代替されていない＝
+  load-bearing。生成 0.4% vs GT 5% は実損失。→ Tangent/Equal と並ぶ本丸。
+- **dimensional の伏線**: Distance 0.606 / Radius 0.420 と重要度は高いのに **mrel=0**＝これらは
+  motion_relational に全く映らない（報酬が見られない）。これは #6 へ。
+
+#### #6 報酬指標 vs 評価指標 — dimensional の盲点
+
+**知りたいこと**: 報酬が最適化するのは `motion_relational_angle`（relational のみ）、評価の本指標は
+`response_full_angle`（dimensional 込み）。この2つはどれだけズレているか＝「報酬を完璧にしても評価が
+どこまで残るか」。
+
+**方法**: fiverr 人間 GT から「dimensional を全部外した版（＝報酬が狙える最善）」と full GT の d_H_angle を
+測る。token 非依存。
+
+**結果（149図, 人間GTの dimensional 構成比 0.257）**:
+
+| ablation | response_full | motion_full | motion_rel | leak |
+|---|---|---|---|---|
+| rel_only（報酬が狙える最善） | 0.707 | **1.000** | **0.000** | **0.000** |
+| dim_only | 0.783 | 0.776 | 0.835 | 0.789 |
+
+**どう読むか**:
+- dimensional を全部外すと **motion_relational=0・leak=0** ＝ **報酬は「完璧」と判定**。ところが
+  **motion_full=1.0（飽和=最大）・response_full=0.71**。つまり **motion_relational 報酬は dimensional の
+  意図を一切見ていない**。全関係を完璧に再現する方策でも、評価指標 response_full は ≈0.71 が下限で、これ以上は
+  寸法制約を入れないと縮まらないが intent はそれを誘導しない（寸法は SolverReward の DoF/FC 任せ）。
+- 逆に関係を全部外す(dim_only)と motion_relational 0.835 ＝ 関係も load-bearing。両者は相補的。
+- 含意: **報酬指標と評価指標が構造的にズレている**。§14.7 で intent が response_full を改善したのは間接効果。
+  これは規則付与器（関係 GT の充足）では直らない設計論点で、寸法意図も狙うなら dimensional-aware な intent 項が
+  別途要る（ただし空系列 hack を避ける設計が前提＝§実験ノート 失敗例2）。
+
+#### 統合: 律速の再特定と §14.7/§15.2 の訂正
+
+**訂正**:
+- §14.7.2-6 と §15.2 step-3 は誤り。#2 の通り **d_H_angle は H+H と Parallel を区別しない**（gauge 不変）。
+  「Parallel が死ぬのは指標の非分離性ゆえソルバの DoF 選好が勝つから」という因果づけは不要で、正しくは
+  **Parallel 欠落は無害**（H+H と同じ意図）。
+- §14.7 の「Parallel は sampled-but-selected-away」も誤り。#1 の通り **val では未サンプル（汎化崩壊）**で、
+  学習分布では出て正に選ばれている。
+
+**律速の再特定（すべて規則付与器 非依存）**:
+1. **Parallel = 無害**（gauge 等価, #2/#3）。追わない。
+2. **Perpendicular = 汎化(H5)**（重要だが fiverr で未サンプル, #1/#3）→ 探索強化（probe B）。
+3. **Tangent / Equal = 報酬バランス(H2)**（ソルバ・ドラッグ > intent, 特に fiverr で intent が弱い,
+   #1/#2/#3）→ intent 振幅増＋Tangent de-risk（probe A）。
+4. **dimensional = 報酬の構造的盲点(#6)**。probe では直らない。将来 dimensional-aware な intent 項。
+5. **Mirror/Concentric = GT 組成(H4)**（報酬 GT に無い）。規則付与器の担当（重要度は中: Mirror 0.21）。
+
+**launch-ready な次実験（学習直前まで準備済・CPU smoke exit0・hydra 解決値確認済）**:
+- **probe A** `configs/experiment/rloo_response_scaffold3_rewardbalance_intent.yaml`（律速3を叩く）:
+  `coeff_h_angle 3→8`・`cap 0.70→0.85`、rel_prior **Tangent/Perpendicular/Equal を 0.30 へ**
+  （Parallel は据え置き＝無害）、SolverReward `penalty_deformed −0.25→0`（Tangent de-risk）。
+  狙い: 非代替 rare-rel を solver ドラッグを上回って引き上げられるか／FC を壊さないか。
+- **probe B** `configs/experiment/rloo_response_scaffold3_explore_intent.yaml`（律速2を叩く）:
+  `entropy_bonus 0.005→0.02`・`temp 1.2→1.5`（DoF 原因切り分けは `model.train_sample_temperature=1.0`
+  の CLI override）。狙い: 真に entropy を上げれば Perp/Tangent の fiverr サンプリングが回復するか／FC だけ崩れるか。
+- **probe A/B は v1 GT のまま据え置く**（現 pretrain・val composer は scaffold2 と同一＝eval 比較可能）。
+  これは意図的: 診断より A/B の標的（H2 報酬バランス・H5 汎化）は GT 組成と独立なので、GT を同時に変えると
+  「reward を変えた効果」と「GT を変えた効果」が交絡する（§11.6 の統制比較）。
+
+**v2 GT（規則付与器 pseudo-rel）を別軸として追加 (2026-05-31)**: 規則付与器の v2 GT が完成
+（`data_processed/sg_pseudo_rel_v2_no_mirror.npy` / `..._full_all.npy`、166k sketch、per-sketch 完全で
+constr/sketch 19→57/70、Perp 5→23%・Parallel 9→19%・Tangent 4→6.6%・Mirror 0/19%）。診断を踏まえた判断:
+- **採用する。ただし probe A/B を書き換えず、独立軸として足す**。v2 GT が直すのは A/B とは別の律速＝
+  **H4（Mirror/Concentric は augmenter でしか入らない）**と **per-sketch 完全性**（Tangent/Perp/Equal の
+  d_H_angle ターゲットを図ごとに正しくする＝probe A を補完）。redundant 多発（57 constr）はモーション部分空間が
+  rank で吸収（inert; pipeline-safety trace で motion dim 8.5→5.5＝より完全に拘束）。Parallel 9→19% は #2 の
+  gauge 等価より **inert**（害も益も無い）。→ Mirror は precision 0.006＝ほぼ FP なので **no_mirror を既定**、
+  full_all は Mirror ablation。
+- これで **{v1, v2 GT} × {base, reward-balance} の 2×2** が揃う（GT 効果・reward 効果・交互作用を分離可能）:
+
+| GT \ reward | base（scaffold2 stack） | reward-balance（probe A stack） |
+|---|---|---|
+| **v1** | `scaffold2_intent`（実行済 `0csbzpdm`） | **probe A** `scaffold3_rewardbalance_intent` |
+| **v2** | **probe C** `scaffold3_v2gt_intent` | **probe D** `scaffold3_rewardbalance_v2gt_intent` |
+
+  - **probe C**（GT 単独効果）: scaffold2 と同一 reward stack＋v2 GT。scaffold2_intent(v1) との差＝GT 効果。
+  - **probe D**（合わせ技 best-bet）: probe A stack＋v2 GT。2軸同時なので attribution 用でなく「到達可能な最良」を見る。
+  - 両 config とも **val composer は scaffold2 と同一**（eval 比較可能）・CPU smoke/hydra 解決値確認済。
+- 推奨実行順: まず **probe A（v1,rb）と probe C（v2,base）を並行**（reward 軸と GT 軸を各々単独で測る）→
+  両方効くなら **probe D（合わせ技）**。probe B（探索）は H5 用に随時。
+- 起動（各半日級・各自のタイミングで。`CUDA_VISIBLE_DEVICES` でGPU指定）:
+  - probe A: `conda run -n freecad python src/train.py experiment=rloo_response_scaffold3_rewardbalance_intent`
+  - probe B: `conda run -n freecad python src/train.py experiment=rloo_response_scaffold3_explore_intent`
+  - probe C: `conda run -n freecad python src/train.py experiment=rloo_response_scaffold3_v2gt_intent`
+  - probe D: `conda run -n freecad python src/train.py experiment=rloo_response_scaffold3_rewardbalance_v2gt_intent`
+  - Mirror ablation は各 config の `data.train_sequence_file=data_processed/sg_pseudo_rel_v2_full_all.npy` 上書きで。
+
 ## 15. 規則付与器の実装と「列挙器は後回し」の判断 (2026-05-30)
 
 この章は §14.6 の第二段階を実装に落とす過程で得た判断を、**この章だけで完結して読める**よう、

@@ -1,0 +1,173 @@
+# @package _global_
+
+# scaffold-v3 PROBE (D) — COMBINED best-bet: reward-balance stack (probe A) + v2 GT (probe C).
+#
+# This is the cell most likely to actually lift the non-substitutable rare relations,
+# because it attacks two independent bottlenecks at once (2026-05-31 diagnostics, §14.7.5):
+#   * reward balance / solver-drag on Tangent/Equal (H2)  -> probe A's reward knobs
+#     (coeff_h_angle 3->8, cap 0.70->0.85, rel_prior Tangent/Perp/Equal->0.30,
+#      SolverReward penalty_deformed -0.25->0 to de-risk a near-miss tangency);
+#   * per-sketch GT completeness for those same types (the d_H_angle target)       -> v2 GT.
+# Parallel is deliberately NOT boosted (gauge-equivalent to H+H, benign per #2).
+#
+# It is the (v2, reward-balance) corner of the 2x2 with scaffold2_intent (v1,base),
+# scaffold3_rewardbalance_intent (v1,rb), scaffold3_v2gt_intent (v2,base).  Because two
+# axes move at once it is NOT for clean attribution — run A/C too if you need to
+# decompose the effect; run THIS to see the best achievable.
+#
+# v2 GT = no_mirror by default (full_all Mirror is ~precision 0.006 = mostly FP); swap
+# train_sequence_file to sg_pseudo_rel_v2_full_all.npy for the Mirror ablation.
+#
+# Smoke test (CPU, 2 steps):
+#   conda run -n freecad python src/train.py experiment=rloo_response_scaffold3_rewardbalance_v2gt_intent \
+#     trainer.accelerator=cpu trainer.devices=1 trainer.strategy=auto trainer.precision=32 \
+#     data.batch_size=1 model.group_sample_size=2 \
+#     +trainer.max_steps=2 +trainer.limit_val_batches=0 +trainer.num_sanity_val_steps=0
+# Launch (GPU): conda run -n freecad python src/train.py experiment=rloo_response_scaffold3_rewardbalance_v2gt_intent
+
+defaults:
+  - override /data: constraint_rloo.yaml
+  - override /model: constraint_ar_rloo.yaml
+  - override /trainer: default
+
+tags: ["rloo", "response", "scaffold3", "rewardbalance", "v2gt", "intent", "probe"]
+
+callbacks:
+  model_checkpoint_epoch:
+    every_n_train_steps: 100
+    save_top_k: 3
+    filename: "epoch_{epoch}_step_{step}"
+    save_last: true
+
+  model_checkpoint_loss: null
+
+  model_checkpoint_reward:
+    _target_: lightning.pytorch.callbacks.ModelCheckpoint
+    dirpath: ${paths.output_dir}/checkpoints
+    monitor: "validation_gen/solver_valid_dof_mean"
+    filename: "step_{step}_dof_{validation_gen/solver_valid_dof_mean:.3f}"
+    save_top_k: 3
+    mode: "min"
+    auto_insert_metric_name: false
+    every_n_train_steps: 100
+
+data:
+  # v2 rule-augmenter GT (per-sketch complete). Swap to sg_pseudo_rel_v2_full_all.npy
+  # for the Mirror ablation.
+  train_sequence_file: data_processed/sg_pseudo_rel_v2_no_mirror.npy
+  batch_size: 32
+  num_workers: 1
+
+model:
+  entropy_bonus: 0.005
+  train_sample_temperature: 1.2
+  val_sample_temperature: 1.0
+
+  reward_composer:
+    _target_: src.models.rewards.composer.RewardComposer
+    rewards:
+      - _target_: src.models.rewards.solver_reward.SolverReward
+        context: ${data.context}
+        reward_dof_reduction: 10.0
+        reward_fully_constrained: 5.0
+        penalty_conflicting: -1.0
+        penalty_redundant: -1.0
+        penalty_malformed: -0.5
+        # de-risk a near-miss tangency (Distorted), per diagnostic #2.
+        penalty_deformed: -0.0
+        penalty_per_problematic_constraint: -1.0
+        penalty_rigid_dimensional: -0.0
+        fully_constrained_dof: 2
+        distortion_threshold: null
+        penalty_near_zero_distance: -1.5
+        near_zero_distance_threshold: 0.001
+        near_zero_distance_cap: 3
+        near_zero_distance_gate: converged
+        penalty_axis_angle: -1.5
+        axis_angle_tolerance_rad: 0.001
+        axis_angle_cap: 3
+        axis_angle_gate: converged
+        num_workers: null
+
+      - _target_: src.models.rewards.dim_parsimony.DimParsimonyReward
+        context: ${data.context}
+        coeff: 0.30
+        mode: excess_over_gt_per_primitive
+        excess_margin: 1
+        gate: converged
+
+      # Boost ONLY the non-substitutable, under-produced types (#3 ranking).
+      - _target_: src.models.rewards.relational_class_prior.RelationalClassPriorReward
+        context: ${data.context}
+        gate: converged
+        cap_total: 1.0
+        cap_per_type: 4
+        coeff_by_type:
+          Mirror: 0.15
+          Equal: 0.30
+          Concentric: 0.055
+          Parallel: 0.053
+          Perpendicular: 0.30
+          Tangent: 0.30
+          Coincident: 0.012
+          Horizontal: 0.042
+          Vertical: 0.05
+          Midpoint: 0.112
+
+      - _target_: src.models.rewards.response_metric_reward.ResponseIntentReward
+        context: ${data.context}
+        eps: 1.0e-9
+        coeff_h_angle: 8.0
+        cap_h_angle: 0.85
+        h_angle_reward_metric: motion_relational_angle
+        motion_relational_angle_mode: symmetric
+        motion_relational_reverse_weight: 0.5
+        gate: converged
+        num_workers: 4
+
+  # Val composer IDENTICAL to scaffold2 (eval comparable across all 4 cells).
+  reward_val_composer:
+    _target_: src.models.rewards.composer.RewardValComposer
+    context: ${data.context}
+    metrics:
+      - _target_: src.models.rewards.solver_reward.SolverReward
+        context: ${data.context}
+        fully_constrained_dof: 2
+        penalty_near_zero_distance: 0.0
+        near_zero_distance_threshold: 0.001
+        penalty_axis_angle: 0.0
+        axis_angle_tolerance_rad: 0.001
+        num_workers: null
+      - _target_: src.models.rewards.response_metric_reward.ResponseIntentReward
+        context: ${data.context}
+        eps: 1.0e-9
+        gate: always
+        h_angle_reward_metric: response_full_angle
+        num_workers: 0
+      - _target_: src.models.rewards.relational_class_prior.RelationalClassPriorReward
+        context: ${data.context}
+        gate: always
+        cap_total: 1.0
+        cap_per_type: 3
+        coeff_by_type:
+          Mirror: 0.15
+          Equal: 0.129
+          Concentric: 0.055
+          Parallel: 0.053
+          Perpendicular: 0.046
+          Tangent: 0.048
+          Coincident: 0.012
+          Horizontal: 0.042
+          Vertical: 0.05
+          Midpoint: 0.112
+
+  optimizer:
+    lr: 1e-5
+
+trainer:
+  check_val_every_n_epoch: null
+  val_check_interval: 100
+  devices: 1
+  max_epochs: 3
+
+pretrained_ckpt_path: logs/train/runs/2026-05-02_20-35-42/checkpoints/epoch_29.ckpt

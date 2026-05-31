@@ -1,0 +1,170 @@
+# @package _global_
+
+# scaffold-v3 PROBE (B) — EXPLORATION STRENGTH (plan §14.7.4 item 5).
+#
+# Motivation (2026-05-31 diagnostics): scaffold-v2's exploration knobs were a near
+# no-op — train/entropy moved only 0.371 -> 0.377 (+0.006), and on fiverr the policy
+# under-samples Perpendicular (56% train -> 7.7% fiverr) and Parallel (54% -> 0.4%):
+# a train->fiverr SAMPLING collapse, not reward suppression (#1).  This probe asks
+# whether genuinely stronger exploration (a) raises steady-state entropy at all and
+# (b) recovers the non-substitutable Perpendicular/Tangent sampling on human data —
+# or just degrades FC further (which would re-implicate reward balance, probe A).
+#
+# Diff vs scaffold2_intent: entropy_bonus 0.005 -> 0.02, train_sample_temperature
+# 1.2 -> 1.5.  Reward stack IDENTICAL to scaffold2_intent (so this is a clean
+# one-axis change: exploration only).
+#
+# DoF-cause control (isolates whether scaffold-v2's DoF 3.85 -> 4.69 came from temp
+# or from the -1.5 hygiene): re-run this with temperature back to 1.0 via CLI, no
+# extra file needed:
+#   ... experiment=rloo_response_scaffold3_explore_intent model.train_sample_temperature=1.0 model.entropy_bonus=0.005
+#
+# Smoke test (CPU, 2 steps):
+#   conda run -n freecad python src/train.py experiment=rloo_response_scaffold3_explore_intent \
+#     trainer.accelerator=cpu trainer.devices=1 trainer.strategy=auto trainer.precision=32 \
+#     data.batch_size=1 model.group_sample_size=2 \
+#     +trainer.max_steps=2 +trainer.limit_val_batches=0 +trainer.num_sanity_val_steps=0
+# Launch (GPU): conda run -n freecad python src/train.py experiment=rloo_response_scaffold3_explore_intent
+
+defaults:
+  - override /data: constraint_rloo.yaml
+  - override /model: constraint_ar_rloo.yaml
+  - override /trainer: default
+
+tags: ["rloo", "response", "scaffold3", "explore", "intent", "probe"]
+
+callbacks:
+  model_checkpoint_epoch:
+    every_n_train_steps: 100
+    save_top_k: 3
+    filename: "epoch_{epoch}_step_{step}"
+    save_last: true
+
+  model_checkpoint_loss: null
+
+  model_checkpoint_reward:
+    _target_: lightning.pytorch.callbacks.ModelCheckpoint
+    dirpath: ${paths.output_dir}/checkpoints
+    monitor: "validation_gen/solver_valid_dof_mean"
+    filename: "step_{step}_dof_{validation_gen/solver_valid_dof_mean:.3f}"
+    save_top_k: 3
+    mode: "min"
+    auto_insert_metric_name: false
+    every_n_train_steps: 100
+
+data:
+  train_sequence_file: data_processed/sg_pseudo_rel_167k_unique_valid.npy
+  batch_size: 32
+  num_workers: 1
+
+model:
+  # PROBE: genuinely stronger exploration (scaffold-v2 was 0.005 / 1.2).
+  entropy_bonus: 0.02
+  train_sample_temperature: 1.5
+  val_sample_temperature: 1.0
+
+  reward_composer:
+    _target_: src.models.rewards.composer.RewardComposer
+    rewards:
+      - _target_: src.models.rewards.solver_reward.SolverReward
+        context: ${data.context}
+        reward_dof_reduction: 10.0
+        reward_fully_constrained: 5.0
+        penalty_conflicting: -1.0
+        penalty_redundant: -1.0
+        penalty_malformed: -0.5
+        penalty_deformed: -0.25
+        penalty_per_problematic_constraint: -1.0
+        penalty_rigid_dimensional: -0.0
+        fully_constrained_dof: 2
+        distortion_threshold: null
+        penalty_near_zero_distance: -1.5
+        near_zero_distance_threshold: 0.001
+        near_zero_distance_cap: 3
+        near_zero_distance_gate: converged
+        penalty_axis_angle: -1.5
+        axis_angle_tolerance_rad: 0.001
+        axis_angle_cap: 3
+        axis_angle_gate: converged
+        num_workers: null
+
+      - _target_: src.models.rewards.dim_parsimony.DimParsimonyReward
+        context: ${data.context}
+        coeff: 0.30
+        mode: excess_over_gt_per_primitive
+        excess_margin: 1
+        gate: converged
+
+      - _target_: src.models.rewards.relational_class_prior.RelationalClassPriorReward
+        context: ${data.context}
+        gate: converged
+        cap_total: 1.0
+        cap_per_type: 3
+        coeff_by_type:
+          Mirror: 0.15
+          Equal: 0.129
+          Concentric: 0.055
+          Parallel: 0.053
+          Perpendicular: 0.046
+          Tangent: 0.048
+          Coincident: 0.012
+          Horizontal: 0.042
+          Vertical: 0.05
+          Midpoint: 0.112
+
+      - _target_: src.models.rewards.response_metric_reward.ResponseIntentReward
+        context: ${data.context}
+        eps: 1.0e-9
+        coeff_h_angle: 3.0
+        cap_h_angle: 0.70
+        h_angle_reward_metric: motion_relational_angle
+        motion_relational_angle_mode: symmetric
+        motion_relational_reverse_weight: 0.5
+        gate: converged
+        num_workers: 4
+
+  reward_val_composer:
+    _target_: src.models.rewards.composer.RewardValComposer
+    context: ${data.context}
+    metrics:
+      - _target_: src.models.rewards.solver_reward.SolverReward
+        context: ${data.context}
+        fully_constrained_dof: 2
+        penalty_near_zero_distance: 0.0
+        near_zero_distance_threshold: 0.001
+        penalty_axis_angle: 0.0
+        axis_angle_tolerance_rad: 0.001
+        num_workers: null
+      - _target_: src.models.rewards.response_metric_reward.ResponseIntentReward
+        context: ${data.context}
+        eps: 1.0e-9
+        gate: always
+        h_angle_reward_metric: response_full_angle
+        num_workers: 0
+      - _target_: src.models.rewards.relational_class_prior.RelationalClassPriorReward
+        context: ${data.context}
+        gate: always
+        cap_total: 1.0
+        cap_per_type: 3
+        coeff_by_type:
+          Mirror: 0.15
+          Equal: 0.129
+          Concentric: 0.055
+          Parallel: 0.053
+          Perpendicular: 0.046
+          Tangent: 0.048
+          Coincident: 0.012
+          Horizontal: 0.042
+          Vertical: 0.05
+          Midpoint: 0.112
+
+  optimizer:
+    lr: 1e-5
+
+trainer:
+  check_val_every_n_epoch: null
+  val_check_interval: 100
+  devices: 1
+  max_epochs: 3
+
+pretrained_ckpt_path: logs/train/runs/2026-05-02_20-35-42/checkpoints/epoch_29.ckpt
