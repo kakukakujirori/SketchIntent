@@ -2044,40 +2044,428 @@ relation HEAD-type: Mirror 11617, Coincident 11358, Perpendicular 10461,
 metadata 長も `sequences/sketch_ids/sequence_lengths = 166,254` で揃っている。
 したがって v2 GT は、RLOO 報酬経路の入力としては training-ready と判断する。
 
+## 16. v1/v2 reward-ranking 監査と次アクションの再整理 (2026-06-01)
 
-### 15.6 次手
+この章は、§15 までの計画・実装・実験を前提に、2026-06-01 時点で得られた追加監査を
+自己完結にまとめる。目的は、会話履歴や暗黙知なしで次の担当者が作業を再開できるようにすること。
 
-1. ✅ 全件 fiverr スイープ完了（§15.4）。運用点 = scale 0.25。型別方針は precision cut ではなく、
-   full relational closure を第一 ablation として試し、rank/null-space で over-closure を診断する。
-2. **検出器の穴埋め（任意・優先度順）**:
-   - ✅ **Tangent.point**（human support 434）: 実装済み。scale 0.25 で recall 1.0 / precision 0.420。
-   - **Tangent.edge**: signed distance bug は修正済みで recall 1.0。残る問題は recall でなく
-     precision 0.034 の密度選択。
-   - ✅ **Mirror(existing-axis)**: 実装済み。scale 0.25 で recall 1.0 / precision 0.006。
-     precision が極端に低いので `full_no_mirror` ablation も必ず切る。
-   - ✅ **Midpoint center / arc endpoint 3-ref**: 実装済み。scale 0.25 で recall 1.0 / precision 0.116。
-     任意2点+中点の3-refは FP 爆発に近い over-closure だったため default では採用しない。
-3. **pseudo-GT v2 生成**: augmenter を学習側 primitives（`sg_filtered` 等）に適用。
-   ※ 現状 detect は候補ごとに handler.residual を呼ぶため 167k 件には遅い → numpy 高速 path
-   へ最適化が要る（既知 TODO）。
-   - ✅ パイプライン安全性: 確認済み(冗長 GT は報酬経路で安全)。
-   - ✅ 小変更スクリプト + safety gate + merge: 実装・smoke 検証済み。
-   - ✅ 本生成(full_all + no_mirror @167k): 完了。全件 `ConstraintDataset.__getitem__` sanity
-      check 0 errors（§15.5.1）。
-   - ✅ v2 GT 実験 config 追加:
-      `rloo_response_scaffold2_intent_v2_full_all` /
-      `rloo_response_scaffold2_intent_v2_no_mirror`。どちらも
-      `rloo_response_scaffold2_intent` を継承し、`train_sequence_file` のみ v2 npy に差し替える。
-      Hydra `--cfg job` は両方 OK。`no_mirror` は CPU 2 step smoke で `max_steps=2` 到達。
-   - ⏳ scaffold-v2 + intent を **v2 GT** で回し、§14.6 ゲートで判定(Parallel がサンプルに乗るか /
-      leak・response_full_angle が v1 比改善か / 残差が報酬バランス #3 か)。**C5-d** の
-      rank/null-space/d_H_angle(対 human)over-closure 診断を併走。`full_all` 対 `full_no_mirror` で
-      Mirror over-completion の影響を切り分ける。
-      - 起動済み (2026-05-31 13:13, group `pseudo_rel_v2_scaffold2_intent`):
-        `full_all=qa5ph3me` (GPU0, `/tmp/rloo_v2_full_all.log`) /
-        `no_mirror=akrzzgn4` (GPU1, `/tmp/rloo_v2_no_mirror.log`)。
-   - (config) `train_sequence_file` を v2 npy に差し替え。SFT/gt_tokens を使う場合のみ §C5-a の
-      `max_token_length` 対応が要る(現 RLOO 設定では不要)。
-4. scaffold-v2 + intent を **v2 GT** で回し、§14.6 のゲートで判定（Parallel がサンプルに
-   乗るか / v1 比で response_full_angle・leak 改善か / 残差が報酬バランス #3 か）。
-5. **必要時のみ** RoPE rel-only 列挙器（§15.1 の union 採取構成）。
+### 16.1 この章で扱う問い
+
+このコードベースのタスクは、2D CAD sketch の primitives を入力し、その primitives 間に入る
+constraints を推論することである。CAD では同じ形状を保つ constraint set が複数あり得るため、
+単に GT と同じ constraint command を出すだけでは design intent を評価しにくい。
+
+本研究では、constraint command の表記ゆれや冗長性を吸収するため、parameter motion subspace を
+比較する `d_H_angle` / `ResponseIntentReward` を提案している。ここでの RL 補助実験の目標は、
+次の形に限定する。
+
+> relational constraints が作る関係性を、command type や冗長性に過度に依存せず
+> parameter motion subspace として捉えることで、SolverReward 単体より強いrelational constraints選択信号を
+> RLOO に与えられるか。
+
+重要な注意:
+
+- `ResponseIntentReward` は「人間がその constraint type を選ぶか」を直接誘導する報酬ではない。
+  例えば `Parallel` と `Horizontal+Horizontal` が同じ motion subspace を作る場合、motion-subspace
+  reward はそれらを区別しない。
+- `ResponseIntentReward` を強くすると FC rate が下がること自体は、直ちに失敗ではない。
+  簡単に DoF を削れる `Distance` 系 shortcut を使いにくくし、relational motion space を合わせるために
+  relational constraints を多めに推論させる設定なので、問題設定は SolverReward 単体より難しい。
+  また `leak_relational_angle` は雑な Distance を張る候補を罰するため、FC rate と intent 指標は
+  trade-off し得る。FC rate は主指標だがこれを最重要視しないように。
+- 一方で、RLOO の学習信号として使うには、同一 prompt 内の候補間で reward ranking が実際に
+  変わる必要がある。以下の監査はこの点を確認するために行った。
+
+### 16.2 参照するデータ、run、checkpoint、監査スクリプト
+
+**GT / pseudo-GT データ**
+
+| name | path | 内容 |
+|---|---|---|
+| pseudo-GT v1 | `data_processed/sg_pseudo_rel_167k_unique_valid.npy` | 旧 pseudo relational GT。モデル生成関係を元にしたもの。 |
+| pseudo-GT v2 full_all | `data_processed/sg_pseudo_rel_v2_full_all.npy` | rule augmenter による full relational closure。Mirror を含む。 |
+| pseudo-GT v2 no_mirror | `data_processed/sg_pseudo_rel_v2_no_mirror.npy` | full_all から Mirror を除いた variant。 |
+| validation human | `data_processed/data_fiverr_ryotaro_unique_valid.npy` | validation/test に使う human annotation 側データ。 |
+
+**主な W&B run**
+
+| shorthand | run id | 意味 |
+|---|---|---|
+| `sc2_noint` | `uywjlizh` | scaffold2 without ResponseIntentReward。SolverReward 単体ではなく hygiene / dim / rel_prior を含む。 |
+| `sc2_int` | `0csbzpdm` | scaffold2 + ResponseIntentReward。v1 pseudo-GT。 |
+| `sc2_v2_no_mirror` | `6bshl57m` | scaffold2 + ResponseIntentReward。train GT を v2 no_mirror に差し替え。 |
+| `sc2_v2_full_all` | `mkxnjtff` | scaffold2 + ResponseIntentReward。train GT を v2 full_all に差し替え。 |
+| `A_rewardbalance` | `vp9z9w32` | Section 14 experiment A。rewardbalance。`coeff_h_angle=8.0`, `cap_h_angle=0.85`。 |
+| `B_explore` | `ypk0yp9t` | Section 14 experiment B。exploration 寄り。 |
+| `C_v2gt` | `4k3nn1m4` | Section 14 experiment C。v2 GT 系。 |
+| `D_rb_v2gt` | `wckc2b2w` | Section 14 experiment D。rewardbalance + v2 GT 系。 |
+| `solver_only` | `s2ibmbil` | old SolverReward-only rerun。response / cmix を十分ログしていないため直接比較には注意。 |
+
+**ローカル checkpoint**
+
+| checkpoint | run | 用途 |
+|---|---|---|
+| `logs/train/runs/2026-05-30_15-17-10/checkpoints/last.ckpt` | `sc2_int` | 旧 scaffold2 intent の ranking 監査。 |
+| `logs/train/runs/2026-05-31_16-20-28/checkpoints/last.ckpt` | `A_rewardbalance` | 完了済み rewardbalance probe A の ranking / diversity / sample-vs-select 監査。 |
+
+**追加した監査スクリプト**
+
+- `scripts/diag_v1_v2_reward_ranking.py`
+
+このスクリプトは、同一 prompt から同一 K samples を生成した後、ResponseIntentReward の
+target sketch だけを v1 / v2 に差し替えて reward ranking を比較する。つまり、policy 出力の違いではなく
+「target を v2 にしたとき、同じ候補群に対する RLOO ranking が変わるか」だけを見る。
+
+主な出力:
+
+- intent-only reward ranking の v1 vs v2 差
+- full reward ranking の v1 vs v2 差
+- group winner flip rate
+- pairwise ranking disagreement
+- within-group type-conditioned advantage
+- K 内の exact sequence diversity / type-count diversity
+
+### 16.3 W&B summary による最終点の粗い比較
+
+2026-06-01 時点で取得した W&B summary。`resp` は
+`validation_gen/intent_response_full_angle_mean`、`mrel` は
+`validation_gen/intent_motion_relational_angle_mean`、`leak` は
+`validation_gen/intent_leak_relational_angle_mean`。いずれも低いほどよい。
+`distFam` は生成 constraint 中の distance family 比率、`keyrel` は key relational 比率。
+
+| run | step | resp | mrel | leak | FC | DoF | distFam | keyrel |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `v1_noint` | 14898 | 0.526 | 0.464 | 0.519 | 0.711 | 3.570 | 0.287 | 0.365 |
+| `v1_int` | 14898 | 0.495 | 0.446 | 0.487 | 0.658 | 3.852 | 0.284 | 0.390 |
+| `sc2_noint` | 14898 | 0.482 | 0.434 | 0.454 | 0.631 | 4.698 | 0.254 | 0.378 |
+| `sc2_int` | 14898 | 0.477 | 0.426 | 0.447 | 0.604 | 4.685 | 0.247 | 0.406 |
+| `sc2_v2_no_mirror` | 15588 | 0.464 | 0.421 | 0.427 | 0.638 | 4.779 | 0.246 | 0.401 |
+| `sc2_v2_full_all` | 15588 | 0.465 | 0.431 | 0.444 | 0.591 | 4.732 | 0.253 | 0.410 |
+| `A_rewardbalance` | 14898 | 0.469 | 0.428 | 0.435 | 0.523 | 5.584 | 0.230 | 0.448 |
+| `B_explore` | 14898 | 0.535 | 0.502 | 0.281 | 0.403 | 12.987 | 0.140 | 0.550 |
+| `C_v2gt` | 10499 | 0.466 | 0.422 | 0.442 | 0.570 | 4.617 | 0.253 | 0.411 |
+| `D_rb_v2gt` | 10749 | 0.462 | 0.429 | 0.400 | 0.331 | 6.470 | 0.193 | 0.462 |
+| `solver_only` | 16949 | n/a | n/a | n/a | 0.806 | 3.375 | n/a | n/a |
+
+読み:
+
+- `A_rewardbalance` は `sc2_int` と比べて distance family を減らし、key relational 比率を上げている。
+  FC / DoF は悪化しているが、これは §16.1 の通り、relational intent を優先する問題設定では
+  想定される trade-off として読む。
+- `B_explore` は keyrel を大きく増やすが DoF が大きく残り、現時点では本命ではない。
+- `sc2_v2_no_mirror` / `sc2_v2_full_all` は v1 scaffold2 intent より response 系がわずかに良いが、
+  差は定性的主張として十分強くない。
+- `solver_only` は FC / DoF は良いが、response / cmix を十分ログしていないため、
+  design intent 側の直接比較としては使いにくい。
+
+### 16.4 v1 vs v2 reward-ranking 監査
+
+**目的**: v2 pseudo-GT が ResponseIntentReward の ranking を実際に変えるかを確認する。
+ここで ranking が変わらなければ、v2 GT を使った学習で差分が出ないのは自然である。
+
+**probe A / v2 no_mirror**
+
+実行:
+
+```bash
+conda run -n freecad python scripts/diag_v1_v2_reward_ranking.py \
+  --ckpt logs/train/runs/2026-05-31_16-20-28/checkpoints/last.ckpt \
+  --v2-data data_processed/sg_pseudo_rel_v2_no_mirror.npy \
+  --limit 128 --K 8 --batch-size 32 --device cuda
+```
+
+結果:
+
+```text
+GLOBAL: 1024 samples, 128 groups, K=8
+solver status: FC 66.5%, Under 25.3%, Redundant 5.1%, Distorted 2.6%
+diversity: mean unique seq/group=8.00, all-identical groups=0.0%
+type-count diversity: mean unique type-count/group=3.66, all-identical groups=26.6%
+
+INTENT ONLY:
+  mean v1=2.9626, v2=3.5996, delta=+0.6370
+  centered corr=0.7491
+  pairwise ranking disagreement=22.47%
+  winner flip rate=19.53%
+  advantage std v1=0.6808, v2=0.7183
+
+TOTAL reward:
+  centered corr=0.9902
+  pairwise ranking disagreement=10.11%
+  winner flip rate=11.72%
+  advantage std v1=3.5150, v2=3.5557
+```
+
+**probe A / v2 full_all**
+
+実行:
+
+```bash
+conda run -n freecad python scripts/diag_v1_v2_reward_ranking.py \
+  --ckpt logs/train/runs/2026-05-31_16-20-28/checkpoints/last.ckpt \
+  --v2-data data_processed/sg_pseudo_rel_v2_full_all.npy \
+  --limit 128 --K 8 --batch-size 32 --device cuda
+```
+
+結果:
+
+```text
+GLOBAL: 1024 samples, 128 groups, K=8
+solver status: FC 66.5%, Under 25.4%, Redundant 5.1%, Distorted 2.5%
+diversity: mean unique seq/group=8.00, all-identical groups=0.0%
+type-count diversity: mean unique type-count/group=3.66, all-identical groups=26.6%
+
+INTENT ONLY:
+  mean v1=2.9661, v2=3.5416, delta=+0.5755
+  centered corr=0.7842
+  pairwise ranking disagreement=17.44%
+  winner flip rate=19.53%
+  advantage std v1=0.6734, v2=0.7195
+
+TOTAL reward:
+  centered corr=0.9916
+  pairwise ranking disagreement=7.93%
+  winner flip rate=10.94%
+  advantage std v1=3.5078, v2=3.5481
+```
+
+解釈:
+
+- v2 pseudo-GT は ResponseIntentReward 単体では効いている。intent-only winner flip が約 19.5% あり、
+  v1/v2 target の違いは ranking に現れている。
+- しかし full reward では winner flip が約 11% まで落ちる。SolverReward / dim / rel_prior を含む
+  総報酬の分散が大きく、ResponseIntentReward の差分が RLOO の実際の選択圧として薄まっている。
+- no_mirror と full_all の差はこの監査では大きくない。生成候補側に `Mirror` がほぼ出ていないため、
+  full_all の Mirror closure は immediate な ranking 差としては見えにくい。
+
+### 16.5 K 内 diversity 監査
+
+ユーザ懸念: RLOO 後は entropy が潰れており、K=8 や K=128 でサンプルしても差分が出ないのではないか。
+
+確認結果:
+
+```bash
+# train temperature 1.2
+conda run -n freecad python scripts/diag_v1_v2_reward_ranking.py \
+  --ckpt logs/train/runs/2026-05-31_16-20-28/checkpoints/last.ckpt \
+  --limit 64 --K 128 --batch-size 8 --device cuda --diversity-only
+```
+
+```text
+GLOBAL: 8192 samples, 64 groups, K=128
+mean unique seq/group=127.94
+all-identical groups=0.0%
+mean top-duplicate frac=0.008
+mean unique type-count/group=22.83
+type-count all-identical groups=12.5%
+```
+
+```bash
+# validation temperature 1.0
+conda run -n freecad python scripts/diag_v1_v2_reward_ranking.py \
+  --ckpt logs/train/runs/2026-05-31_16-20-28/checkpoints/last.ckpt \
+  --limit 32 --K 128 --batch-size 8 --device cuda --temperature 1.0 --diversity-only
+```
+
+```text
+GLOBAL: 4096 samples, 32 groups, K=128
+mean unique seq/group=127.44
+all-identical groups=0.0%
+mean top-duplicate frac=0.009
+mean unique type-count/group=12.22
+type-count all-identical groups=9.4%
+```
+
+解釈:
+
+- exact token sequence level では collapse は主要因ではない。
+- ただし type-count level の多様性は exact sequence より狭い。つまり token-level ノイズは残っているが、
+  semantic action diversity はそれほど広くない。
+- したがって「K を増やしても全く同じ出力しか出ないから ranking 監査が無意味」という状態ではない。
+  ただし、重要な relation type について同一 prompt 内の有無差が出るかは別問題で、§16.7 がそれを扱う。
+
+### 16.6 統制候補での報酬分解: Parallel vs H+H
+
+実行:
+
+```bash
+conda run -n freecad python scripts/diag_reward_balance.py \
+  --ckpt logs/train/runs/2026-05-31_16-20-28/checkpoints/last.ckpt \
+  --device cuda
+```
+
+`P:axis-parallel-pair (GT=Parallel)` の結果:
+
+| candidate | solver status | solver | intent | rel_prior | total | mrel | leak |
+|---|---|---:|---:|---:|---:|---:|---:|
+| empty | Under | 0.00 | 4.86 | 0.00 | 4.86 | 0.333 | 0.000 |
+| Parallel | Under | 1.67 | 8.00 | 0.05 | 9.72 | 0.000 | 0.000 |
+| H+H | Under | 3.33 | 8.00 | 0.08 | 11.42 | 0.000 | 0.000 |
+| H+H+Parallel | Redundant | -2.00 | 0.00 | 0.00 | -2.00 | 0.000 | 0.000 |
+
+解釈:
+
+- `Parallel` と `H+H` は ResponseIntentReward 上では同点である。これは `motion_relational_angle` が
+  command type ではなく motion subspace を見ているためで、設計上自然な挙動である。
+- SolverReward は DoF を多く削る `H+H` を `Parallel` より高く評価する。
+- 現行 `rel_prior` も `Horizontal` / `Vertical` を key relation として扱うため、少なくともこの統制例では
+  `H+H` をさらに少し有利にする。
+- よって「Parallel command を H+H より選ばせる」ことは、motion-subspace reward 単体からは出てこない。
+  これは `d_H_angle` の失敗ではなく、不変性を持つ metric と command-type preference を混同している。
+  command-type 誘導は別報酬または canonicalization として分離する必要がある。
+
+`T:line-circle-tangent (GT=Tangent)` の結果:
+
+| candidate | solver status | solver | intent | rel_prior | total | mrel | leak |
+|---|---|---:|---:|---:|---:|---:|---:|
+| empty | Under | 0.00 | 4.44 | 0.00 | 4.44 | 0.378 | 0.000 |
+| Tangent(correct) | Under | 2.00 | 8.00 | 0.30 | 10.30 | 0.000 | 0.000 |
+| Coincident.center-on-line substitute | Distorted | 0.00 | 0.00 | 0.00 | 0.00 | 0.272 | 0.000 |
+
+ここでは正しい Tangent は reward 上で明確に勝つ。つまり `ResponseIntentReward` が常に無力なのではない。
+問題は、実 rollout でその比較候補が同一 prompt 内に現れるかどうかである。
+
+### 16.7 actual rollout の sample-vs-select 監査
+
+実行:
+
+```bash
+conda run -n freecad python scripts/diag_sample_vs_select.py \
+  --ckpt logs/train/runs/2026-05-31_16-20-28/checkpoints/last.ckpt \
+  --data data_processed/sg_pseudo_rel_167k_unique_valid.npy \
+  --limit 128 --K 8 --batch_size 32 --device cuda
+```
+
+結果の要点:
+
+```text
+GLOBAL: 1024 samples, 128 groups, K=8
+solver status: FC 66.5%, Under 25.4%, Redundant 5.1%, Distorted 2.5%
+
+type            samp%   grp%   advΔ_wg  ngrp
+Tangent         13.28   13.3       nan     0
+Parallel        53.91   53.9       nan     0
+Perpendicular   69.73   71.1      1.22     3
+Equal           25.59   28.1      1.07     8
+Coincident      95.41   96.1     -9.78     2
+Horizontal      95.21   96.9      1.00     6
+Vertical        59.67   61.7     -0.21     4
+```
+
+`ngrp` は「同一 RLOO group 内で、その type を含む候補と含まない候補の両方が存在した group 数」。
+
+解釈:
+
+- Tangent と Parallel はサンプル自体には出ている。しかし今回の 128 prompts では、同一 group 内で
+  `あり` と `なし` が比較できる prompt が 0 件だった。
+- つまり RLOO は Tangent/Parallel の有無を選ぶ advantage をほぼ受け取っていない。
+  出る prompt では全候補に出る、出ない prompt では全候補に出ない、という構造に近い。
+- `Perpendicular` / `Equal` は少数ながら within-group contrast があり、advantage も正。
+  ここは reward が比較可能な形で効き得る。
+- `Coincident` はほぼ全サンプルに出るため、少数の contrast group では強く負に見える。
+  これは Coincident 自体が悪いというより、ほぼ常時出る token の group 内比較が局所的であることに注意。
+
+この監査から見える主な律速は、reward 値の良し悪しだけでなく、**on-policy RLOO の候補集合に
+意味のある counterfactual が入っていないこと**である。
+
+### 16.8 更新された次手
+
+この小節が §15.6 の更新版である。次の担当者はこの順番で進める。
+
+1. **FC rate だけで打ち切り判断しない**
+   - `ResponseIntentReward` を強めると、SolverReward 単体が使いやすい `Distance` shortcut を避けるため
+     FC / DoF は悪くなり得る。
+   - 判断の主指標は、`intent_response_full_angle_mean`, `intent_motion_relational_angle_mean`,
+     `intent_leak_relational_angle_mean`, `eval_distance_family_ratio_mean`,
+     `eval_key_rel_ratio_mean`, qualitative samples とする。
+   - FC / DoF は「どれだけ難しい制約集合を作れているか」の副指標として併記する。
+
+2. **v2 pseudo-GT 仮説は破棄しない**
+   - §16.4 により、v2 target は intent-only reward ranking を約 18-20% の winner flip で変えている。
+   - 学習ログで差が薄い理由は、v2 target が完全に無効だからではなく、full reward 内で選択圧が薄まることと、
+     actual rollout 内で key relation の counterfactual が不足すること。
+   - 今後の報酬変更後も、`scripts/diag_v1_v2_reward_ranking.py` を acceptance test として使う。
+     目標は total reward 側の winner flip / pairwise disagreement を増やし、intent 差分が
+     RLOO advantage に乗る状態を作ること。
+
+3. **dense / block-level reward を別タスクとして実装する**
+   - 担当: 別エージェント。
+   - 主な参照先: `src/models/rewards/response_metric_reward.py`,
+     `src/models/rewards/utils/geometry.py`, `src/models/constraint_ar_module_rloo.py`,
+     `scripts/diag_sample_vs_select.py`。
+   - 背景: sequence-level STOP reward だけでは、Tangent/Parallel のような relation type が
+     group 内 counterfactual を作らず、RLOO が「どの成分が足りないか」を学びにくい。
+   - 要求: constraint block 追加ごと、または prefix ごとに、motion subspace / relation rowspace の
+     不足成分が改善したかを返す dense reward を検討する。
+   - 実装後の監査: §16.7 と同じ sample-vs-select を走らせ、Tangent/Parallel/Perpendicular/Equal の
+     `ngrp` と `advΔ_wg` が増えるかを見る。
+
+4. **motion-subspace reward と command-type 誘導を分離する**
+   - 担当: 別エージェント。
+   - 主な参照先: `src/models/rewards/response_metric_reward.py`,
+     `src/models/rewards/relational_class_prior.py`, `scripts/diag_reward_balance.py`。
+   - 背景: §16.6 の通り、`motion_relational_angle` は `Parallel` と `H+H` が同じ motion subspace を
+     作る場合に同点にする。これは metric の狙い通りだが、`Parallel` command を明示的に好む
+     preference ではない。
+   - 要求: command-type preference が必要なら、motion-subspace reward ではなく別の canonicalization /
+     type prior / H/V downweight / relation-specific preference reward として扱う。
+   - 注意: この追加報酬は `d_H_angle` の主張と混ぜない。`d_H_angle` は冗長性を吸収する evaluator /
+     subspace reward、command-type 誘導は human-readable command prior として別名で評価する。
+
+5. **`RelationalClassPriorReward` を見直す**
+   - 担当: 別エージェント。
+   - 主な参照先: `src/models/rewards/relational_class_prior.py`,
+     `src/metrics/constraint_subtypes.py`, `scripts/derive_relational_class_prior_coeffs.py`,
+     `scripts/diag_reward_balance.py`。
+   - 背景: §16.6 の統制例では、現行 rel_prior が `Parallel` より `H+H` を少し有利にしている。
+     `Horizontal` / `Vertical` は relation token ではあるが、`Parallel` / `Perpendicular` の
+     command-level 代替として働き得る。
+   - 要求: H/V と key binary relation を同じ向きに boost する現設計を見直す。少なくとも
+     `Horizontal/Vertical` の係数、cap、subtype/key-rel 集計上の扱いを再検討する。
+   - 実装後の監査: `diag_reward_balance.py` の `P:axis-parallel-pair` で `H+H` が rel_prior により
+     さらに有利にならないことを確認する。
+
+6. **短期的には blind hyperparameter sweep を増やさない**
+   - 現在の結果は「coeff を少し変えれば解ける」というより、reward placement と candidate contrast の問題を示している。
+   - 係数調整をする場合も、まず §16.4 / §16.7 の監査で total reward ranking と within-group contrast が
+     どう変わるかを確認してから full training に回す。
+
+7. **ResponseIntent-only run は低優先度の診断に留める**
+   - 目的: SolverReward なしで `intent_response_full_angle` / `motion_relational_angle` がどこまで改善するかを見る。
+   - 期待: FC rate はかなり低くなる可能性が高い。これは本命実験ではなく、Distance shortcut を抑えたときの
+     intent reward の単独挙動を見る診断である。
+   - 実行するなら短い canary に留め、定性的主張の中心に置かない。
+
+8. **次に比較する run の最小セット**
+   - dense / block-level reward と rel_prior 見直しが入るまでは、大規模な新規 run を増やさない。
+   - 変更後に走らせる最小セット:
+     1. `scaffold revised` without ResponseIntentReward
+     2. `scaffold revised + ResponseIntentReward`
+     3. 必要なら `scaffold revised + shuffled ResponseIntentReward`
+   - すべて同一 train data / checkpoint / temperature / entropy / KL / SFT で揃える。
+   - step が揃っていない途中 run の比較では、必ず `trainer/global_step` で同一 step または近傍 step を取る。
+
+9. **この章の監査を再実行するための最小コマンド**
+
+```bash
+# v1 vs v2 reward ranking
+conda run -n freecad python scripts/diag_v1_v2_reward_ranking.py \
+  --ckpt <checkpoint> \
+  --v2-data data_processed/sg_pseudo_rel_v2_no_mirror.npy \
+  --limit 128 --K 8 --batch-size 32 --device cuda
+
+# K diversity only
+conda run -n freecad python scripts/diag_v1_v2_reward_ranking.py \
+  --ckpt <checkpoint> \
+  --limit 64 --K 128 --batch-size 8 --device cuda --diversity-only
+
+# controlled reward balance
+conda run -n freecad python scripts/diag_reward_balance.py \
+  --ckpt <checkpoint> --device cuda
+
+# sample-vs-select
+conda run -n freecad python scripts/diag_sample_vs_select.py \
+  --ckpt <checkpoint> \
+  --data data_processed/sg_pseudo_rel_167k_unique_valid.npy \
+  --limit 128 --K 8 --batch_size 32 --device cuda
+```

@@ -209,6 +209,33 @@ def _endpoint_refs(sketch: datalib.Sketch) -> list[str]:
     return refs
 
 
+def _hv_point_refs(sketch: datalib.Sketch) -> list[str]:
+    """Point-like refs eligible for two-point Horizontal/Vertical.
+
+    Includes Line/Arc endpoints, bare Point entities, **and** Circle/Arc
+    centres — centre alignment (e.g. Horizontal(circle.center, line.start))
+    is a common design-intent constraint.  Arc ``.start``/``.end``/``.center``
+    are all included so that *same-arc* alignments (the chord
+    ``Horizontal(arc.start, arc.end)`` or a centre-to-endpoint radius
+    ``Vertical(arc.center, arc.start)``) are reachable — an Arc, unlike a Line,
+    has no single-entity H/V form, so these are real candidates rather than
+    duplicates (see the same-entity guard in ``detect_candidates``).
+    """
+    refs: list[str] = []
+    for eid, ent in sketch.entities.items():
+        if isinstance(ent, datalib.Point):
+            refs.append(eid)
+        elif isinstance(ent, datalib.Line):
+            refs.append(f"{eid}.start")
+            refs.append(f"{eid}.end")
+        elif isinstance(ent, (datalib.Circle, datalib.Arc)):
+            refs.append(f"{eid}.center")
+            if isinstance(ent, datalib.Arc):
+                refs.append(f"{eid}.start")
+                refs.append(f"{eid}.end")
+    return refs
+
+
 def _mirror_point_refs(sketch: datalib.Sketch) -> list[str]:
     """Point-like refs eligible for Mirror, including curve centres."""
     refs = _point_refs(sketch)
@@ -383,6 +410,40 @@ def detect_candidates(
             raw = _raw(type_name, (eid,))
             if raw is not None:
                 _emit(type_name, (eid,), "orientation", raw, line_len[eid])
+
+    # -- orientation: Horizontal / Vertical (two-point form) ----------------- #
+    # Two points that share the same Y-coordinate (Horizontal) or X-coordinate
+    # (Vertical).  This covers alignments the single-line form above cannot
+    # express, e.g. Horizontal(circle.center, line.start) across entities, or
+    # the chord Horizontal(arc.start, arc.end) / radius Vertical(arc.center,
+    # arc.start) within one Arc.  Point pool includes all point-like refs
+    # (endpoints, bare Points, and curve centres).
+    hv_point_refs = _hv_point_refs(sketch)
+    for type_name in ("Horizontal", "Vertical"):
+        if type_name not in wanted:
+            continue
+        for i in range(len(hv_point_refs)):
+            for j in range(i + 1, len(hv_point_refs)):
+                ra, rb = hv_point_refs[i], hv_point_refs[j]
+                if _ref_base(ra) == _ref_base(rb) and isinstance(
+                    sketch.entities.get(_ref_base(ra)), datalib.Line
+                ):
+                    # Same Line: (start, end) is exactly the single-line form
+                    # already emitted above → skip to avoid a duplicate.  An Arc
+                    # has no single-entity H/V form, so its same-entity pairs
+                    # (chord start↔end, centre↔endpoint) are kept below.
+                    continue
+                raw = _raw(type_name, (ra, rb))
+                if raw is None:
+                    continue
+                # Normalize by inter-point distance (→ |sin θ|, same unit as
+                # the single-line margin).
+                pa = _np_point(state, ra)
+                pb = _np_point(state, rb)
+                dist = float(np.linalg.norm(pb - pa))
+                if dist < _EPS:
+                    continue  # coincident points → H/V is trivially true but meaningless
+                _emit(type_name, (ra, rb), "orientation", raw, dist)
 
     # -- orientation: Parallel / Perpendicular (line pairs) ------------------ #
     for type_name in ("Parallel", "Perpendicular"):

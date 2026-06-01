@@ -87,8 +87,8 @@ def test_square_detects_exactly_the_true_relations():
     by = _by_type(accepted)
 
     assert by["Coincident"] == 4          # the 4 corners (point-point only)
-    assert by["Horizontal"] == 2          # bottom, top
-    assert by["Vertical"] == 2            # left, right
+    assert by["Horizontal"] == 8          # 2 line-based (bottom, top) + 6 two-point pairs at same Y
+    assert by["Vertical"] == 8            # 2 line-based (left, right) + 6 two-point pairs at same X
     assert by["Parallel"] == 2            # (b,t), (l,r)
     assert by["Perpendicular"] == 4       # the 4 right-angle pairs
     assert by["Equal"] == 6               # all C(4,2) equal-length pairs
@@ -113,7 +113,8 @@ def test_square_margins_are_near_zero_for_true_relations():
 
 
 def test_rotated_line_pair_is_parallel_not_axis_aligned():
-    # Two parallel oblique lines at 30°: Parallel holds, Horizontal/Vertical don't.
+    # Two parallel oblique lines at 30°: Parallel holds, line-form Horizontal/Vertical don't.
+    # But two-point Vertical(0.start, 1.start) fires because both start at x=0.
     ang = np.radians(30.0)
     d = (float(np.cos(ang)), float(np.sin(ang)))
     s = _sketch([
@@ -123,8 +124,8 @@ def test_rotated_line_pair_is_parallel_not_axis_aligned():
     by = _by_type(filter_candidates(detect_candidates(s, CTX)))
     assert by["Parallel"] == 1
     assert by["Equal"] == 1               # same length
-    assert by["Horizontal"] == 0
-    assert by["Vertical"] == 0
+    assert by["Horizontal"] == 0          # no line-based or two-point H
+    assert by["Vertical"] == 2            # Vertical(0.start, 1.start) + Vertical(0.end, 1.end)
     assert by["Perpendicular"] == 0
 
 
@@ -260,12 +261,112 @@ def test_point_at_segment_endpoint_is_vertex_coincidence_not_point_on_object():
 def test_augment_sketch_adds_and_dedups():
     sketch = _unit_square()
     n_detected = len(filter_candidates(detect_candidates(sketch, CTX)))
-    assert n_detected == 20
+    assert n_detected == 32  # 20 original + 12 two-point H/V (6H + 6V)
 
     augmented = augment_sketch(sketch, CTX)
-    assert len(augmented.constraints) == 20
+    assert len(augmented.constraints) == 32
     # idempotent: augmenting again adds nothing (all duplicates).
     again = augment_sketch(augmented, CTX)
-    assert len(again.constraints) == 20
+    assert len(again.constraints) == 32
     # original sketch is untouched.
     assert len(sketch.constraints) == 0
+
+
+# --------------------------------------------------------------------------- #
+#  Two-point Horizontal / Vertical (cross-entity alignment)
+# --------------------------------------------------------------------------- #
+
+def test_two_point_horizontal_circle_center_and_line_endpoint():
+    """Horizontal alignment: circle centre at (3, 0) and line endpoint at (0, 0)."""
+    s = _sketch([
+        ("L", _line("L", (0.0, 0.0), (1.0, 1.0))),
+        ("C", _circle("C", 3.0, 0.0, 0.5)),
+    ])
+    cands = filter_candidates(detect_candidates(s, CTX))
+    h_cands = [c for c in cands if c.type_name == "Horizontal" and len(c.refs) == 2]
+    # L.start (0,0) and C.center (3,0) share the same Y → Horizontal
+    assert any(set(c.refs) == {"L.start", "C.center"} for c in h_cands), \
+        f"Expected Horizontal(L.start, C.center), got refs: {[c.refs for c in h_cands]}"
+
+
+def test_two_point_vertical_circle_center_and_line_endpoint():
+    """Vertical alignment: circle centre at (0, 3) and line endpoint at (0, 0)."""
+    s = _sketch([
+        ("L", _line("L", (0.0, 0.0), (1.0, 1.0))),
+        ("C", _circle("C", 0.0, 3.0, 0.5)),
+    ])
+    cands = filter_candidates(detect_candidates(s, CTX))
+    v_cands = [c for c in cands if c.type_name == "Vertical" and len(c.refs) == 2]
+    # L.start (0,0) and C.center (0,3) share the same X → Vertical
+    assert any(set(c.refs) == {"L.start", "C.center"} for c in v_cands), \
+        f"Expected Vertical(L.start, C.center), got refs: {[c.refs for c in v_cands]}"
+
+
+def test_two_point_hv_does_not_fire_for_oblique_points():
+    """No two-point H/V for points that are neither horizontally nor vertically aligned."""
+    s = _sketch([
+        ("p0", _point("p0", 0.0, 0.0)),
+        ("p1", _point("p1", 1.0, 1.0)),
+    ])
+    cands = filter_candidates(detect_candidates(s, CTX))
+    hv = [c for c in cands if c.type_name in ("Horizontal", "Vertical")]
+    assert len(hv) == 0
+
+
+def test_two_point_hv_same_entity_endpoints_not_duplicated():
+    """Two-point H/V within the same Line is already covered by line-based H/V.
+    Verify the same-entity guard prevents duplicate detection."""
+    s = _sketch([
+        ("L", _line("L", (0.0, 0.0), (1.0, 0.0))),
+    ])
+    cands = filter_candidates(detect_candidates(s, CTX))
+    h_cands = [c for c in cands if c.type_name == "Horizontal"]
+    # Only the line-based form Horizontal("L",) — no two-point Horizontal("L.start", "L.end")
+    assert len(h_cands) == 1
+    assert h_cands[0].refs == ("L",)
+
+
+# --------------------------------------------------------------------------- #
+#  Same-arc Horizontal / Vertical (an Arc has no single-entity H/V form, so its
+#  own endpoint chord and centre-to-endpoint radius are real candidates)
+# --------------------------------------------------------------------------- #
+
+def test_same_arc_horizontal_chord():
+    """The two endpoints of one arc share a Y → Horizontal(arc.start, arc.end).
+
+    Bulge is shallow so the centre is off the chord line, isolating the chord
+    from the centre-to-endpoint pairs."""
+    s = _sketch([("A", _arc("A", (-1.0, 2.0), (0.0, 2.3), (1.0, 2.0)))])
+    cands = filter_candidates(detect_candidates(s, CTX))
+    h = [c for c in cands if c.type_name == "Horizontal"]
+    assert any(set(c.refs) == {"A.start", "A.end"} for c in h), \
+        f"Expected same-arc Horizontal(A.start, A.end), got: {[c.refs for c in h]}"
+    # The chord is horizontal but neither centre-to-endpoint pair is, and there
+    # is no single-entity arc form.
+    assert not any(c.type_name == "Vertical" for c in cands)
+    assert all(len(c.refs) == 2 for c in h)  # no spurious single-ref arc form
+
+
+def test_same_arc_vertical_chord():
+    """The two endpoints of one arc share an X → Vertical(arc.start, arc.end)."""
+    s = _sketch([("A", _arc("A", (2.0, -1.0), (2.3, 0.0), (2.0, 1.0)))])
+    cands = filter_candidates(detect_candidates(s, CTX))
+    v = [c for c in cands if c.type_name == "Vertical"]
+    assert any(set(c.refs) == {"A.start", "A.end"} for c in v), \
+        f"Expected same-arc Vertical(A.start, A.end), got: {[c.refs for c in v]}"
+    assert not any(c.type_name == "Horizontal" for c in cands)
+
+
+def test_same_arc_center_to_endpoint_alignment():
+    """Quarter arc centred at origin from (1,0) to (0,1): the centre is
+    horizontally aligned with the start and vertically aligned with the end."""
+    s = _sketch([("A", _arc("A", (1.0, 0.0), (float(np.cos(np.pi / 4)), float(np.sin(np.pi / 4))), (0.0, 1.0)))])
+    cands = filter_candidates(detect_candidates(s, CTX))
+    h = [c for c in cands if c.type_name == "Horizontal"]
+    v = [c for c in cands if c.type_name == "Vertical"]
+    assert any(set(c.refs) == {"A.center", "A.start"} for c in h), \
+        f"Expected Horizontal(A.center, A.start), got: {[c.refs for c in h]}"
+    assert any(set(c.refs) == {"A.center", "A.end"} for c in v), \
+        f"Expected Vertical(A.center, A.end), got: {[c.refs for c in v]}"
+    # The chord (1,0)-(0,1) is diagonal → no chord H/V.
+    assert not any(set(c.refs) == {"A.start", "A.end"} for c in (h + v))
