@@ -2095,10 +2095,10 @@ constraints を推論することである。CAD では同じ形状を保つ con
 | `sc2_int` | `0csbzpdm` | scaffold2 + ResponseIntentReward。v1 pseudo-GT。 |
 | `sc2_v2_no_mirror` | `6bshl57m` | scaffold2 + ResponseIntentReward。train GT を v2 no_mirror に差し替え。 |
 | `sc2_v2_full_all` | `mkxnjtff` | scaffold2 + ResponseIntentReward。train GT を v2 full_all に差し替え。 |
-| `A_rewardbalance` | `vp9z9w32` | Section 14 experiment A。rewardbalance。`coeff_h_angle=8.0`, `cap_h_angle=0.85`。 |
-| `B_explore` | `ypk0yp9t` | Section 14 experiment B。exploration 寄り。 |
-| `C_v2gt` | `4k3nn1m4` | Section 14 experiment C。v2 GT 系。 |
-| `D_rb_v2gt` | `wckc2b2w` | Section 14 experiment D。rewardbalance + v2 GT 系。 |
+| `A_rewardbalance` | `vp9z9w32` | Section 14 probe A。rewardbalance。`coeff_h_angle=8.0`, `cap_h_angle=0.85`。 |
+| `B_explore` | `ypk0yp9t` | Section 14 probe B。exploration 寄り。 |
+| `C_v2gt` | `4k3nn1m4` | Section 14 probe C。v2 GT 系。 |
+| `D_rb_v2gt` | `wckc2b2w` | Section 14 probe D。rewardbalance + v2 GT 系。 |
 | `solver_only` | `s2ibmbil` | old SolverReward-only rerun。response / cmix を十分ログしていないため直接比較には注意。 |
 
 **ローカル checkpoint**
@@ -2143,9 +2143,15 @@ target sketch だけを v1 / v2 に差し替えて reward ranking を比較す�
 | `sc2_v2_full_all` | 15588 | 0.465 | 0.431 | 0.444 | 0.591 | 4.732 | 0.253 | 0.410 |
 | `A_rewardbalance` | 14898 | 0.469 | 0.428 | 0.435 | 0.523 | 5.584 | 0.230 | 0.448 |
 | `B_explore` | 14898 | 0.535 | 0.502 | 0.281 | 0.403 | 12.987 | 0.140 | 0.550 |
-| `C_v2gt` | 10499 | 0.466 | 0.422 | 0.442 | 0.570 | 4.617 | 0.253 | 0.411 |
-| `D_rb_v2gt` | 10749 | 0.462 | 0.429 | 0.400 | 0.331 | 6.470 | 0.193 | 0.462 |
+| `C_v2gt` †crashed | 10799 | 0.464 | 0.427 | 0.428 | 0.497 | 5.013 | 0.242 | 0.410 |
+| `D_rb_v2gt` †crashed | 11049 | 0.455 | 0.424 | 0.400 | 0.389 | 6.034 | 0.201 | 0.459 |
 | `solver_only` | 16949 | n/a | n/a | n/a | 0.806 | 3.375 | n/a | n/a |
+
+> **2026-06-01 更新**: W&B summary を再取得した。他 9 run は前回値と完全一致（変化なし）。
+> `C_v2gt`(`4k3nn1m4`) と `D_rb_v2gt`(`wckc2b2w`) は †`crashed` 状態で、step 10799 / 11049 で停止。
+> 他 run の 14898 に未到達のため、**この2行だけは step 非整合の暫定値**として読む。両者とも前回
+> （10499 / 10749）から +300 step ほど進んだだけで crash しており、傾向（C ≈ sc2_int 系・FC 微減、
+> D = reward-balance + v2 GT で FC が最低水準）は前回と不変。同一 step での確定比較が要るなら再開・完走が必要。
 
 読み:
 
@@ -2378,7 +2384,7 @@ Vertical        59.67   61.7     -0.21     4
    - 判断の主指標は、`intent_response_full_angle_mean`, `intent_motion_relational_angle_mean`,
      `intent_leak_relational_angle_mean`, `eval_distance_family_ratio_mean`,
      `eval_key_rel_ratio_mean`, qualitative samples とする。
-   - FC / DoF は「どれだけ難しい制約集合を作れているか」の副指標として併記する。
+   - FC / DoF は「どれだけ難しい制約集合を作れているか」の指標として併記する。これを主指標にするとSolverReward単体が自明に勝つため、副指標とまで言うのは避けたいが重要度は若干落とす。
 
 2. **v2 pseudo-GT 仮説は破棄しない**
    - §16.4 により、v2 target は intent-only reward ranking を約 18-20% の winner flip で変えている。
@@ -2411,6 +2417,7 @@ Vertical        59.67   61.7     -0.21     4
      type prior / H/V downweight / relation-specific preference reward として扱う。
    - 注意: この追加報酬は `d_H_angle` の主張と混ぜない。`d_H_angle` は冗長性を吸収する evaluator /
      subspace reward、command-type 誘導は human-readable command prior として別名で評価する。
+   - （追記コメント：これはRelationalClassPriorRewardですでに分離できているのでは？）
 
 5. **`RelationalClassPriorReward` を見直す**
    - 担当: 別エージェント。
@@ -2435,6 +2442,7 @@ Vertical        59.67   61.7     -0.21     4
    - 期待: FC rate はかなり低くなる可能性が高い。これは本命実験ではなく、Distance shortcut を抑えたときの
      intent reward の単独挙動を見る診断である。
    - 実行するなら短い canary に留め、定性的主張の中心に置かない。
+   - 追記：これをwarm-upとして、RLOOの途中からSolverRewardを加える運用にするのはあり？
 
 8. **次に比較する run の最小セット**
    - dense / block-level reward と rel_prior 見直しが入るまでは、大規模な新規 run を増やさない。
@@ -2469,3 +2477,164 @@ conda run -n freecad python scripts/diag_sample_vs_select.py \
   --data data_processed/sg_pseudo_rel_167k_unique_valid.npy \
   --limit 128 --K 8 --batch_size 32 --device cuda
 ```
+
+### 16.9 律速の確定: counterfactual 生成（flip）と報酬バランスは相補的 (2026-06-01)
+
+§16.4–§16.7 は「intent 報酬の within-group advantage 分散が小さい」「同一 group 内に
+key relation の counterfactual（あり/なし両方）が無い」を別々に観察していた。本節は両者が
+**同一現象**であることを実証し、それを解く2レバー（入力 flip による counterfactual 生成と、
+SolverReward 圧縮による報酬バランス）が**相補的**で、どちらも単独では不足することを、いずれも
+**学習なし**の監査で確定する。checkpoint は `A_rewardbalance`(`vp9z9w32`,
+`logs/train/runs/2026-05-31_16-20-28/checkpoints/last.ckpt`, coeff_h_angle=8)。
+
+**新規実装**（反射の責務は2層に分離。`sketch_utils` = object 空間、`flip_augment` = token 空間）:
+- `src.sketch_handlers.sketch_utils.reflect_sketch(sketch, axis)`: `datalib.Sketch` の軸平行反射
+  （x/y 座標符号反転）。等長変換（pairwise 距離保存。arc 含む 600 sketch で誤差 2.7e-15・involution
+  を検証、`scripts/verify_reflect_sketch.py`）。relational/H/V は反射不変、constraint トークンは座標
+  フリー（entity index 参照）かつ entity 順序は反射で不変なので、**反射入力で条件付け生成した制約
+  系列はそのまま元スケッチで有効・採点可能**。
+- `src.sketch_handlers.flip_augment`: token 空間の flip 拡張（**訓練ループと診断の単一の真実**）。
+  `reflect_primitive_value_tokens`（量子化グリッドが対称なので bin q→num_bins-1-q が厳密。座標
+  VALUE トークンのみ・軸別に反転。noise 保存。arc は点エンコードなので frame/clockwise 不要。
+  object 版と非arc で ≤1bin＝sub量子化一致を検証）、`flip_view_schedule`（K を view に均等分割）、
+  `reflected_expanded_pval`（K 展開済み `[B*K]` に per-sample 反射。単体テスト `tests/test_flip_augment.py`）。
+- `scripts/diag_sample_vs_select.py --flip-axes x,y`: 各 prompt を orig + 反射 view から K ずつ
+  サンプルし（反射は上記 token 版＝訓練と同一機構、反射 view も**元 primitives/GT で採点**）、
+  1 つの RLOO group に pool。orig-only slice と pooled slice の ngrp/advΔ を比較。
+  （注: §16.9.1 の数値は当初 object 版反射で取得したが、token 版へ統一後も差は sub量子化（≤1bin の
+  条件付け差）で ngrp の定性は不変。）
+- `scripts/diag_reward_rescale.py`: 固定 ckpt の K rollout を再採点し、SolverReward 寄与を係数
+  α で縮小（`total_α = total − (1−α)·solver`、再 solve 不要）。winner-flip・intent/solver advantage
+  比・**winner サンプルの key-rel / distance-family 比**・type 別 within-group advantage を α 掃引。
+
+**16.9.1 flip-augment counterfactual 診断（Phase 0）**
+
+同一予算（24 sample/group）での **ngrp**（同一 group 内に「型あり」と「型なし」が共存した group 数
+＝ RLOO が選好を学べる counterfactual の数）:
+
+| type | fiverr orig K=8 | fiverr plain K=24 | **fiverr flip(orig+x+y) 24** | v1 orig K=8 | v1 plain K=24 | **v1 flip 24** |
+|---|---:|---:|---:|---:|---:|---:|
+| Tangent | 11 | 11 | **21** | 1 | 1 | **5** |
+| Perpendicular | 15 | 17 | **56** | 3 | 7 | **18** |
+| Equal | 16 | 21 | 25 | 5 | 12 | 19 |
+| Parallel | 5 | 13 | 14 | 2 | 3 | 2 |
+
+読み:
+- **plain に K を増やしても Tangent/Perp の counterfactual はほぼ増えない**（fiverr Tangent 11→11,
+  Perp 15→17; v1 Tangent 1→1, Perp 3→7）。これらの型は prompt の向きに対し方策がほぼ決定論的
+  （all-or-none per prompt）なので、同じ向きで何度サンプルしても一致する。§16.7 の `ngrp=0` 構造の正体。
+- **flip は同予算で counterfactual を 2〜6× に増やす**（fiverr Perp 15→56, Tangent 11→21; v1 Perp 3→18,
+  Tangent 1→5）。反射が方策の向き依存バイアスを破り、view ごとに rare relation の有無が割れるため。
+  §14.7.5 #3 の最重要・非代替型（Tangent 0.52 / Perp 0.45）こそ、flip でしか届かない。
+- flip は **FC を壊さない**（v1 FC 68%, fiverr 51%, risky ~3%。B_explore の温度↑が DoF を 13 まで
+  壊したのと対照的）。各 sample は正常温度・有効入力に対する通常生成なので品質が落ちない。
+- counterfactual が出来た上での within-group advΔ: **Tangent は flip 上で正**（fiverr +1.26, v1 +4.06;
+  orig-only は contrast 群僅少でノイズ）。**Perp は v1 flip で +1.00 に転じるが fiverr flip では −0.31**、
+  **Equal は両者で ~0/負**。→ Tangent は現報酬で既に選好されるが、Perp/Equal は counterfactual だけでは
+  選好に届かず**報酬バランスが要る**。
+
+**16.9.2 報酬バランス（SolverReward 圧縮）診断（Phase 1a）**
+
+mean seq reward は solver 支配（v1: total 15.7 / solver 12.1 / intent 3.0; fiverr: 15.3 / 10.9 / 3.8）。
+α 掃引（intent advΔ std は固定、solver advΔ std が α 倍）:
+
+| α | v1 winflip | v1 int/sol | v1 win_keyrel | fiverr winflip | fiverr int/sol | fiverr win_keyrel |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1.0 | 0.000 | 0.23 | 0.503 | 0.000 | 0.29 | 0.435 |
+| 0.5 | 0.023 | 0.46 | 0.504 | 0.047 | 0.58 | 0.438 |
+| 0.3 | 0.023 | 0.77 | 0.506 | 0.060 | 0.97 | 0.437 |
+| 0.2 | 0.023 | 1.16 | 0.506 | 0.060 | 1.46 | 0.437 |
+| 0.1 | 0.102 | 2.32 | 0.510 | 0.128 | 2.92 | 0.439 |
+
+type 別 within-group advΔ（α=1 → 0.1）: fiverr **Perpendicular 0.001 → +0.49**, Tangent 0.56→0.58(既正),
+Equal 0.50→0.47(既正); v1 **Equal 0.064 → +0.73**, Tangent/Perp は contrast 群僅少(ngrp 2-3)でノイズ。
+
+読み:
+- solver 圧縮で intent/solver advantage 比は上がる（0.23→2.32 / 0.29→2.92）が、**winner-flip は α=0.1 で
+  やっと 10–13%、winner サンプルの key-rel 比はほぼ不動**（v1 0.503→0.510, fiverr 0.435→0.439）。
+  ＝ **群内に「より関係的な代替候補」が無ければ、報酬を再重み付けしても選ぶものが無い**。especially v1 は
+  ngrp が小さく（Tangent 2 / Perp 3 / Equal 6）、rebalance 単独では動かしようがない。
+- ただし **type 別 within-group advΔ は Perp(fiverr) +0.49 / Equal(v1) +0.73 と改善**。RLOO 勾配は winner
+  だけでなく全 K 標本の advantage を使うので、これは「counterfactual が在る型」に対しては訓練に効く信号。
+- ＝ **rebalance は counterfactual がある所でだけ効く**。fiverr で Perp が効いて v1 で効かないのは、
+  fiverr の Perp counterfactual が多い（ngrp 15）から。
+
+**16.9.3 統一結論と次実験**
+
+- §16.4 の「希釈」と §16.7 の「counterfactual 欠如」は同一現象。intent が advantage を作れるのは group 内で
+  relational 構造が割れる時だけで、rare relation はほぼ all-or-none なので intent 寄与は係数に依らず near-zero。
+  → **coeff_h_angle 増（probe A の 8）も dense/block 報酬も、この near-zero 信号を scale/再配分するだけで
+  根本（group 内 counterfactual の不在）を直さない**。
+- **2レバーは相補的で、どちらも単独では不足**:
+  - **flip-augment**（入力対称変換）＝ counterfactual を作る唯一の安価な手段（plain bigK も rebalance も作れない）。
+    FC 非破壊。Tangent は flip だけで選好に届く。
+  - **SolverReward 圧縮**＝ counterfactual の上で Perp/Equal を選好に変える。flip が無いと作用対象が無い。
+- **提案する次の学習実験（Phase 1b/2、要 GPU・半日）**: flip-augment rollout（orig+x+y を 1 RLOO group に
+  pool）＋ **中程度の solver 圧縮**（`reward_dof_reduction 10→3–5`, `reward_fully_constrained 5→1.5–2.5`
+  ＝ α≈0.3–0.5。α=0.1 は FC 崩壊リスク）。intent は据え置き。GT/pretrain/temperature は scaffold2 と同一に固定
+  （flip と solver スケール以外を動かさない統制）。判定: §16.3 指標 ＋ §16.9.1 の ngrp 再測（Tangent/Perp/Equal
+  が収束時 >0 を維持するか）＋ FC を guardrail。RLOO の flip pool は対称性により baseline 不偏（reward も反射不変）。
+- block 報酬は保留（§16.8 #3）。coeff 増（Q3）は単独レバーとしては非推奨（上記理由）。
+
+**16.9.4 実行スクリプトと追跡（launch & track）**
+
+§16.9.3 の次実験を回すための具体コマンド。config は実装済（`scaffold4`=rebalance単独 / `scaffold5`=flip+rebalance）。
+flip は `model.flip_augment_axes`、view 分割は `group_sample_size`（scaffold5 は 9＝3view×3）で制御。GT/pretrain/temperature/
+val composer は scaffold2 と同一固定（flip と solver スケール以外を動かさない統制）。
+
+attribution の 2×2（flip 軸 × solver 圧縮軸。**neither = scaffold2_intent `0csbzpdm` が既存ベースライン**）:
+
+| | solver 10/5（無圧縮） | solver 4/2（圧縮） |
+|---|---|---|
+| **flip 無し** | `scaffold2_intent`（実行済 `0csbzpdm`） | **`scaffold4`**（rebalance単独, Phase 1b） |
+| **flip [x,y]** | **flip単独**（下記 CLI override） | **`scaffold5`**（flip+rebalance, Phase 2 本命） |
+
+```bash
+# --- CPU smoke（起動前の健全性確認。各 config）---
+conda run -n freecad python src/train.py experiment=rloo_response_scaffold5_flip_rebalance_intent \
+  trainer.accelerator=cpu trainer.devices=1 trainer.strategy=auto trainer.precision=32 \
+  data.batch_size=1 model.group_sample_size=3 \
+  +trainer.max_steps=2 +trainer.limit_val_batches=0 +trainer.num_sanity_val_steps=0
+
+# --- 本番起動（各半日級。GPU は CUDA_VISIBLE_DEVICES で指定）---
+# Phase 1b: rebalance 単独（別マシン可・コード非依存）
+CUDA_VISIBLE_DEVICES=0 conda run -n freecad python src/train.py \
+  experiment=rloo_response_scaffold4_solvercompress_intent
+
+# Phase 2: flip + rebalance（本命）
+CUDA_VISIBLE_DEVICES=1 conda run -n freecad python src/train.py \
+  experiment=rloo_response_scaffold5_flip_rebalance_intent
+
+# flip 単独（attribution 用。scaffold5 の solver を無圧縮 10/5 に戻す）
+CUDA_VISIBLE_DEVICES=1 conda run -n freecad python src/train.py \
+  experiment=rloo_response_scaffold5_flip_rebalance_intent \
+  model.reward_composer.rewards.0.reward_dof_reduction=10.0 \
+  model.reward_composer.rewards.0.reward_fully_constrained=5.0
+
+# セッションを閉じても継続したい場合（§15.5 と同じ detached 起動）
+setsid bash -c 'CUDA_VISIBLE_DEVICES=1 conda run -n freecad python src/train.py \
+  experiment=rloo_response_scaffold5_flip_rebalance_intent' < /dev/null \
+  > /tmp/scaffold5.log 2>&1 & disown
+```
+
+完走後の判定・追跡（§16.9.3 の判定基準を実コマンド化）:
+
+```bash
+# 直近 run の last.ckpt を取得（必要なら手動でパス指定）
+CKPT=$(ls -td logs/train/runs/*/checkpoints/last.ckpt | head -1); echo "$CKPT"
+
+# (1) flip が収束時も counterfactual を維持しているか（ngrp 再測。§16.9.1 と同形式）
+CUDA_VISIBLE_DEVICES=1 conda run -n freecad python scripts/diag_sample_vs_select.py \
+  --ckpt "$CKPT" --data data_processed/data_fiverr_ryotaro_unique_valid.npy \
+  --limit 0 --K 8 --batch_size 16 --flip-axes x,y --device cuda \
+  --focus Tangent,Perpendicular,Equal,Parallel
+
+# (2) solver 圧縮が intent の選択圧シェアを上げたか（§16.9.2 の α 掃引を ckpt 上で再確認）
+CUDA_VISIBLE_DEVICES=1 conda run -n freecad python scripts/diag_reward_rescale.py \
+  --ckpt "$CKPT" --data data_processed/sg_pseudo_rel_167k_unique_valid.npy --limit 128
+```
+
+W&B 主指標（**`scaffold2_intent`=`0csbzpdm` と同一 step で比較**。§16.3 と同じ列）:
+`intent_response_full_angle_mean`/`mrel`/`leak` ↓、`eval_key_rel_ratio_mean` ↑、`eval_distance_family_ratio_mean` ↓。
+**FC を guardrail に**: `solver_fc_rate` が ~0.4 を割る／`solver_valid_dof_mean` が暴れる場合は solver 係数を 6/3 へ戻す。
+判定の優先は §16.8 #1（FC を主指標にしない）に従う。collapse 兆候（`[START][STOP]` 多発・FC 0 付近張り付き）が出たら中止。

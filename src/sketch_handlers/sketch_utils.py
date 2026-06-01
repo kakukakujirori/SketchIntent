@@ -189,6 +189,53 @@ def rotate_sketch(sketch: datalib.Sketch, angle_rad: float):
             ent.y = x * sin_a + y * cos_a
 
 
+def reflect_sketch(sketch: datalib.Sketch, axis: str = "x") -> None:
+    """Reflect the sketch in place about a coordinate axis through the origin.
+
+    ``axis="x"`` negates every x-coordinate (a left/right flip, i.e. mirror
+    about the vertical axis); ``axis="y"`` negates every y-coordinate.
+
+    Reflection is an *improper* isometry: it preserves all pairwise distances
+    (so the solver/d_H_angle geometry is unchanged) but reverses chirality.
+    Every relational constraint (Coincident/Parallel/Perpendicular/Tangent/
+    Equal/Concentric/Midpoint/Mirror) and axis-aligned Horizontal/Vertical is
+    invariant under an axis-aligned reflection, and the constraint tokens carry
+    only entity references (no coordinates), so a constraint set generated on a
+    reflected view stays valid — and equally scorable — on the original sketch.
+    That is what makes reflection usable both as a rollout-diversifier and as a
+    candidate-augmenter (research plan §16, flip-augmentation).
+
+    Curve orientation (``clockwise``) and the local x-direction (``xDir``) are
+    flipped together so the reflected arc/circle sweeps the mirrored geometry;
+    ``startParam``/``endParam`` are angular offsets in that frame and are left
+    untouched.  Correctness is asserted by the pairwise-distance-preservation
+    check in ``scripts/diag_sample_vs_select.py`` / the flip unit test.
+    """
+    if axis not in ("x", "y"):
+        raise ValueError(f"axis must be 'x' or 'y', got {axis!r}")
+
+    for ent in sketch.entities.values():
+        if ent.type == EntityType.Line:
+            if axis == "x":
+                ent.pntX = -ent.pntX
+                ent.dirX = -ent.dirX
+            else:
+                ent.pntY = -ent.pntY
+                ent.dirY = -ent.dirY
+        elif ent.type in (EntityType.Circle, EntityType.Arc):
+            if axis == "x":
+                ent.xCenter = -ent.xCenter
+                ent.xDir = -ent.xDir
+            else:
+                ent.yCenter = -ent.yCenter
+                ent.yDir = -ent.yDir
+            ent.clockwise = not ent.clockwise
+        elif ent.type == EntityType.Point:
+            if axis == "x":
+                ent.x = -ent.x
+            else:
+                ent.y = -ent.y
+
 
 def normalize_sketch_circumradius(sketch: datalib.Sketch) -> float:
     """Center and rescale the sketch based on its circumradius (max distance from center).

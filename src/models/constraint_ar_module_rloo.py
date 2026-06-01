@@ -17,6 +17,7 @@ from src.models.rewards.composer import (
 )
 from src.sketch_handlers.constants import ConstraintToken, DIMENSIONAL_CONSTRAINT_TOKEN_IDS
 from src.sketch_handlers.context import SketchContext
+from src.sketch_handlers.flip_augment import reflected_expanded_pval
 from src.sketch_handlers.sketch_tokenizer import SketchTokenizer
 
 
@@ -39,6 +40,7 @@ class ConstraintARModuleRLOO(L.LightningModule):
         relational_only: bool = False,
         train_sample_temperature: float = 1.0,
         val_sample_temperature: float = 1.0,
+        flip_augment_axes: list[str] | None = None,
     ):
         super().__init__()
         self.save_hyperparameters(
@@ -81,6 +83,20 @@ class ConstraintARModuleRLOO(L.LightningModule):
         # rel-only warm start collapses the dimensional-token logits.
         self.train_sample_temperature = float(train_sample_temperature)
         self.val_sample_temperature = float(val_sample_temperature)
+        # Flip-augmented RLOO rollouts (research plan §16.9): each prompt's K
+        # rollouts are split across input views (identity + axis reflections),
+        # pooled into one RLOO group.  Reflection is a distance-preserving
+        # symmetry of the task and of the (reflection-invariant) reward, so a
+        # sequence sampled under a reflected view is scored on the ORIGINAL
+        # sketch — manufacturing the within-group relational counterfactuals
+        # that on-policy sampling cannot (§16.7).  Empty = standard single-view.
+        self.flip_augment_axes = list(flip_augment_axes or [])
+        for _axis in self.flip_augment_axes:
+            if _axis not in ("x", "y"):
+                raise ValueError(
+                    f"flip_augment_axes entries must be 'x' or 'y', got {_axis!r}"
+                )
+        self._num_quant_bins = int(context.num_quantization_bins)
 
         # losses and metrics
         self.criterion = torch.nn.CrossEntropyLoss(ignore_index=ConstraintToken.Pad)
@@ -158,16 +174,38 @@ class ConstraintARModuleRLOO(L.LightningModule):
         loss = self.criterion(logits.reshape(-1, V), target.reshape(-1))
         return loss, logits, target
 
+    def _rollout_memory(self, model, batch, expanded, expanded_cond, K):
+        """Primitive memory for generation / policy / ref forward.
+
+        With flip augmentation each sample has its own (reflected) primitive
+        conditioning, so memory is computed per-sample on ``expanded_cond``;
+        otherwise the prompt-shared ``_compute_group_memory`` fast path is kept.
+        """
+        if self.flip_augment_axes:
+            return model.compute_memory(expanded_cond)
+        return self._compute_group_memory(model, batch, expanded, K)
+
     def _compute_rloo_loss(self, batch: dict[str, Any]) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         B, K = batch['p_val'].shape[0], self.group_sample_size
         _, max_len = batch['c_val'].shape
 
         expanded = {k: v.repeat_interleave(K, dim=0) if isinstance(v, torch.Tensor) else [x for x in v for _ in range(K)] for k, v in batch.items()}
+        # Flip-augment: per-sample reflected primitives for CONDITIONING only;
+        # the reward (Step 2) keeps the original `expanded` (scores on the
+        # un-reflected sketch).  expanded_cond == expanded when flip is off.
+        expanded_cond = expanded
+        if self.flip_augment_axes:
+            cond_pval = reflected_expanded_pval(
+                cast(torch.Tensor, expanded['p_val']),
+                cast(torch.Tensor, expanded['p_attr']),
+                K, self.flip_augment_axes, self._num_quant_bins,
+            )
+            expanded_cond = {**expanded, 'p_val': cond_pval}
 
         # Step 1: Sample trajectories (GPU)
         with torch.no_grad():
-            sample_memory = self._compute_group_memory(
-                self.model, batch, expanded, K
+            sample_memory = self._rollout_memory(
+                self.model, batch, expanded, expanded_cond, K
             )
             generated, gen_logprobs = self.generate_sample(
                 expanded,
@@ -194,9 +232,11 @@ class ConstraintARModuleRLOO(L.LightningModule):
         mask = (generated[:, 1:] != ConstraintToken.Pad).float()   # [B*K, L-1]
         n_valid = mask.sum().clamp(min=1)
 
-        # Policy model forward pass (needs gradient for PG loss)
+        # Policy model forward pass (needs gradient for PG loss).  Uses the same
+        # per-sample (possibly reflected) conditioning as generation, so the
+        # log-probs are evaluated under each sample's own view.
         gen_batch = {**expanded, 'c_val': generated}
-        policy_memory = self._compute_group_memory(self.model, batch, expanded, K)
+        policy_memory = self._rollout_memory(self.model, batch, expanded, expanded_cond, K)
         output = self.model(gen_batch, memory=policy_memory)        # [B*K, L, V]
         logits = output[:, :-1, :]                                 # [B*K, L-1, V]
 
@@ -213,8 +253,8 @@ class ConstraintARModuleRLOO(L.LightningModule):
         kl_penalty: torch.Tensor | None = None
         if self.kl_coeff > 0.0:
             with torch.no_grad():
-                ref_memory = self._compute_group_memory(
-                    self.ref_model, batch, expanded, K
+                ref_memory = self._rollout_memory(
+                    self.ref_model, batch, expanded, expanded_cond, K
                 )
                 ref_output = self.ref_model(
                     {**expanded, 'c_val': generated},
