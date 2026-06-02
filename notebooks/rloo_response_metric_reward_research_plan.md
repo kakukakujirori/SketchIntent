@@ -2970,3 +2970,13 @@ Under 25% / FC 68% で、人間図 fiverr ほどは不足しない＝§14.7.5 #1
   vs 方策平均）は既存 `scripts/diag_sample_vs_select.py` がほぼ充足＝新規不要。
 - **caveat**: 診断1/2 は flip pool 無し生成での測定。flip 込みでは `ngrp` が増え v2 効果は本測定より大きくなり得る（上限未測）
   ＝学習実験前の足切りとしては十分だが、最終判定は `scaffold6` 実走で。
+
+#### 16.11.4 実行コマンド
+
+```bash
+# scaffold6 with intent
+conda run -n freecad python src/train.py experiment=rloo_response_scaffold6_v2gt_flip_rebalance_intent
+
+# scaffold6 without intent
+conda run -n freecad python src/train.py experiment=rloo_response_scaffold6_v2gt_flip_rebalance_no_intent
+```

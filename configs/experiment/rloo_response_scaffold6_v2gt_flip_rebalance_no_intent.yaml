@@ -1,0 +1,187 @@
+# @package _global_
+
+# scaffold-v6 NO-INTENT CONTROL — the decisive S arm for "is ResponseIntentReward
+# effective?" (research plan §3 S-vs-S+R, applied to the v2/flip/rebalance regime).
+#
+# This is rloo_response_scaffold6_v2gt_flip_rebalance_intent.yaml with EXACTLY ONE
+# change: the ResponseIntentReward is REMOVED from model.reward_composer.rewards
+# (the train signal). Everything else is byte-for-byte identical to scaffold6:
+#   - train GT = data_processed/sg_pseudo_rel_v2_no_mirror.npy (v2 closure)
+#   - flip_augment_axes [x, y], group_sample_size 9
+#   - SolverReward 4/2 + hygiene (-1.5 near-zero / axis-angle, converged gate)
+#   - DimParsimonyReward coeff 0.30, RelationalClassPriorReward (scaffold6 coeffs)
+#   - entropy 0.005, train/val temperature 1.2/1.0, lr 1e-5, pretrain ckpt
+#   - reward_val_composer is IDENTICAL (incl. ResponseIntentReward at gate=always),
+#     so this arm is evaluated on the SAME design-intent axes as scaffold6.
+#
+# WHY this is the right control, not "SolverReward only":
+#   scaffold5-vs-scaffold6 is a GT-quality ablation (v1 vs v2), and BOTH arms have
+#   intent ON, so it can never isolate the intent reward. The v1->v2 difference is
+#   added *relational* GT, whose only RL channel is the ResponseIntentReward motion
+#   target (DimParsimony reads GT *dimensional* count, ~unchanged v1->v2; Solver and
+#   rel_prior are GT-free). Therefore the intent effect is isolated by toggling the
+#   intent reward on/off with GT held at v2 + flip + rebalance + scaffolding fixed.
+#   Using bare SolverReward as the control would leave rel_prior / flip / hygiene as
+#   alternative explanations; this arm holds ALL of the scaffold fixed and removes
+#   only the treatment.
+#
+# Note on GT here: with intent OFF the v2 GT acts only through DimParsimony's
+# n_dims_gt (≈ v1), so this single no-intent run is simultaneously the control for
+# BOTH scaffold5 and scaffold6 — no separate v1-no-intent run is needed.
+#
+# Judge (vs scaffold6 at MATCHED trainer/global_step): if scaffold6 (S+R) shows
+# lower intent_response_full_angle_mean / mrel / leak and lower
+# eval_distance_family_ratio_mean / higher eval_key_rel_ratio_mean than THIS arm,
+# the gain is attributable to the intent reward. If the two arms are
+# indistinguishable on those axes, the intent reward adds nothing on top of the
+# scaffold (research plan §8.3) — that is the result this control exists to catch.
+# FC / DoF are guardrails, not the decision metric (§16.8 #1).
+#
+# Smoke (CPU, 2 steps):
+#   conda run -n freecad python src/train.py experiment=rloo_response_scaffold6_v2gt_flip_rebalance_no_intent \
+#     trainer.accelerator=cpu trainer.devices=1 trainer.strategy=auto trainer.precision=32 \
+#     data.batch_size=1 model.group_sample_size=3 \
+#     +trainer.max_steps=2 +trainer.limit_val_batches=0 +trainer.num_sanity_val_steps=0
+# Launch (GPU): conda run -n freecad python src/train.py experiment=rloo_response_scaffold6_v2gt_flip_rebalance_no_intent
+
+defaults:
+  - override /data: constraint_rloo.yaml
+  - override /model: constraint_ar_rloo.yaml
+  - override /trainer: default
+
+tags: ["rloo", "response", "scaffold6", "v2gt", "flip", "rebalance", "no_intent"]
+
+callbacks:
+  model_checkpoint_epoch:
+    every_n_train_steps: 100
+    save_top_k: 3
+    filename: "epoch_{epoch}_step_{step}"
+    save_last: true
+
+  model_checkpoint_loss: null
+
+  model_checkpoint_reward:
+    _target_: lightning.pytorch.callbacks.ModelCheckpoint
+    dirpath: ${paths.output_dir}/checkpoints
+    monitor: "validation_gen/solver_valid_dof_mean"
+    filename: "step_{step}_dof_{validation_gen/solver_valid_dof_mean:.3f}"
+    save_top_k: 3
+    mode: "min"
+    auto_insert_metric_name: false
+    every_n_train_steps: 100
+
+data:
+  # IDENTICAL to scaffold6: v2 rule-augmenter GT (per-sketch complete closure).
+  train_sequence_file: data_processed/sg_pseudo_rel_v2_no_mirror.npy
+  batch_size: 32
+  num_workers: 1
+
+model:
+  # IDENTICAL to scaffold6: flip-augmented rollouts + even 3-way split.
+  flip_augment_axes: [x, y]
+  group_sample_size: 9
+
+  entropy_bonus: 0.005
+  train_sample_temperature: 1.2
+  val_sample_temperature: 1.0
+
+  reward_composer:
+    _target_: src.models.rewards.composer.RewardComposer
+    rewards:
+      # IDENTICAL to scaffold6.
+      - _target_: src.models.rewards.solver_reward.SolverReward
+        context: ${data.context}
+        reward_dof_reduction: 4.0
+        reward_fully_constrained: 2.0
+        penalty_conflicting: -1.0
+        penalty_redundant: -1.0
+        penalty_malformed: -0.5
+        penalty_deformed: -0.25
+        penalty_per_problematic_constraint: -1.0
+        penalty_rigid_dimensional: -0.0
+        fully_constrained_dof: 2
+        distortion_threshold: null
+        penalty_near_zero_distance: -1.5
+        near_zero_distance_threshold: 0.001
+        near_zero_distance_cap: 3
+        near_zero_distance_gate: converged
+        penalty_axis_angle: -1.5
+        axis_angle_tolerance_rad: 0.001
+        axis_angle_cap: 3
+        axis_angle_gate: converged
+        num_workers: null
+
+      - _target_: src.models.rewards.dim_parsimony.DimParsimonyReward
+        context: ${data.context}
+        coeff: 0.30
+        mode: excess_over_gt_per_primitive
+        excess_margin: 1
+        gate: converged
+
+      - _target_: src.models.rewards.relational_class_prior.RelationalClassPriorReward
+        context: ${data.context}
+        gate: converged
+        cap_total: 1.0
+        cap_per_type: 3
+        coeff_by_type:
+          Mirror: 0.15
+          Equal: 0.129
+          Concentric: 0.055
+          Parallel: 0.053
+          Perpendicular: 0.046
+          Tangent: 0.048
+          Coincident: 0.012
+          Horizontal: 0.042
+          Vertical: 0.05
+          Midpoint: 0.112
+
+      # ResponseIntentReward DELIBERATELY OMITTED — this is the no-intent control.
+      # It remains in reward_val_composer below (gate=always) so this arm is
+      # evaluated on the same design-intent axes as scaffold6.
+
+  # Val composer LEFT IDENTICAL to scaffold6 (eval must not move with the treatment).
+  reward_val_composer:
+    _target_: src.models.rewards.composer.RewardValComposer
+    context: ${data.context}
+    metrics:
+      - _target_: src.models.rewards.solver_reward.SolverReward
+        context: ${data.context}
+        fully_constrained_dof: 2
+        penalty_near_zero_distance: 0.0
+        near_zero_distance_threshold: 0.001
+        penalty_axis_angle: 0.0
+        axis_angle_tolerance_rad: 0.001
+        num_workers: null
+      - _target_: src.models.rewards.response_metric_reward.ResponseIntentReward
+        context: ${data.context}
+        eps: 1.0e-9
+        gate: always
+        h_angle_reward_metric: response_full_angle
+        num_workers: 0
+      - _target_: src.models.rewards.relational_class_prior.RelationalClassPriorReward
+        context: ${data.context}
+        gate: always
+        cap_total: 1.0
+        cap_per_type: 3
+        coeff_by_type:
+          Mirror: 0.15
+          Equal: 0.129
+          Concentric: 0.055
+          Parallel: 0.053
+          Perpendicular: 0.046
+          Tangent: 0.048
+          Coincident: 0.012
+          Horizontal: 0.042
+          Vertical: 0.05
+          Midpoint: 0.112
+
+  optimizer:
+    lr: 1e-5
+
+trainer:
+  check_val_every_n_epoch: null
+  val_check_interval: 100
+  devices: 1
+  max_epochs: 3
+
+pretrained_ckpt_path: logs/train/runs/2026-05-02_20-35-42/checkpoints/epoch_29.ckpt
