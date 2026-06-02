@@ -2574,7 +2574,7 @@ Equal 0.50→0.47(既正); v1 **Equal 0.064 → +0.73**, Tangent/Perp は contra
   ＝ α≈0.3–0.5。α=0.1 は FC 崩壊リスク）。intent は据え置き。GT/pretrain/temperature は scaffold2 と同一に固定
   （flip と solver スケール以外を動かさない統制）。判定: §16.3 指標 ＋ §16.9.1 の ngrp 再測（Tangent/Perp/Equal
   が収束時 >0 を維持するか）＋ FC を guardrail。RLOO の flip pool は対称性により baseline 不偏（reward も反射不変）。
-- block 報酬は保留（§16.8 #3）。coeff 増（Q3）は単独レバーとしては非推奨（上記理由）。
+- block 報酬は保留（§16.8 #3）。`coeff_h_angle` 増は単独レバーとしては非推奨（上記理由）。
 
 **16.9.4 実行スクリプトと追跡（launch & track）**
 
@@ -2638,3 +2638,335 @@ W&B 主指標（**`scaffold2_intent`=`0csbzpdm` と同一 step で比較**。§1
 `intent_response_full_angle_mean`/`mrel`/`leak` ↓、`eval_key_rel_ratio_mean` ↑、`eval_distance_family_ratio_mean` ↓。
 **FC を guardrail に**: `solver_fc_rate` が ~0.4 を割る／`solver_valid_dof_mean` が暴れる場合は solver 係数を 6/3 へ戻す。
 判定の優先は §16.8 #1（FC を主指標にしない）に従う。collapse 兆候（`[START][STOP]` 多発・FC 0 付近張り付き）が出たら中止。
+
+### 16.10 scaffold4/5 完走後の再整理: Distance-family 削減を主目的に戻す (2026-06-02)
+
+**16.10.1 現状観察**
+
+本節では目的を明確化する。最重要目標は「relational diversity 一般」ではなく、
+**もっと relational を出し、相対的に Distance-family（Distance/DistanceX/DistanceY）を減らすこと**。
+この改善が `motion_relational_angle` 系の motion-subspace 報酬に由来すると示せることが、研究上の主張として重要。
+
+完走済み run:
+
+- `scaffold4` = `rloo_response_scaffold4_solvercompress_intent`
+  (`logs/train/runs/2026-06-01_19-07-33/checkpoints/last.ckpt`)
+- `scaffold5` = `rloo_response_scaffold5_flip_rebalance_intent`
+  (`logs/train/runs/2026-06-01_19-04-12/checkpoints/last.ckpt`)
+
+W&B summary 上の同一 step 比較では、`scaffold5` は `scaffold2_intent` より
+`intent_response_full_angle_mean` / `motion_full` / `motion_relational` /
+`leak` が低く、`eval_distance_family_ratio_mean` も低い
+（例: `scaffold2_intent` distFam 0.247 → `scaffold5` 0.222）。
+一方、`probeD` は distFam 0.197 / keyrel 0.460 と最も強く関係寄りだが、
+FC が低く DoF が高い partial/crashed run なので、本命というより「関係寄りに振ると距離は減る」
+ことを示す参考点として扱う。
+
+定性的には、`scaffold5` checkpoint は従来より Distance 過剰が抑えられている。
+ただし、まだ Distance-family は多く、残る Distance の張られ方が非直感的な場合がある。
+また `Radius` は Distance-family には含めないが、circle/arc の寸法固定として残りやすく、
+「relational で表したい構造を dimensional で閉じている」印象を強めることがある。
+
+`diag_sample_vs_select.py` の full fiverr + flip pooling 診断では、`scaffold5` の
+within-group advantage は次の傾向:
+
+| type | `scaffold5` advΔ_wg | 読み |
+|---|---:|---|
+| Distance | -0.18 | 現報酬は Distance 本体を局所的に選びにくくしている |
+| DistanceX | +0.03 | ほぼ中立 |
+| DistanceY | -0.02 | ほぼ中立 |
+| Radius | -0.06 | 弱い負、ただし distFam ではない |
+| Equal | +0.22 | やや正 |
+| Tangent | +1.33 | 強く正 |
+| Perpendicular | +0.00 | 中立 |
+| Parallel | -0.41 | 負、かつ稀 |
+
+対照的に `scaffold4` は Distance が +0.14、DistanceX/Y が負、Radius が +0.17。
+つまり `scaffold5` では **Distance 本体を減らす選択圧は見えるが、DistanceX/Y まで一貫して
+減らす報酬にはなっていない**。この差の完全な原因は未確定だが、現時点では
+policy prior、solver 上の軸方向距離の安定性、relationals 後に残る DoF の種類が混ざっている可能性が高い。
+この原因追跡は有用だが、次手を止めるほどの最優先ではない。
+
+`diag_reward_rescale.py` の α 掃引では、`scaffold5` に対して solver contribution を
+post-hoc に強く縮めても winner の distFam は 0.248 → 0.236 程度、keyrel は
+0.498 → 0.507 程度しか動かない。したがって **solver 係数をさらに縮めるだけでは低 ROI**。
+counterfactual 候補に relationals が出ていない／出ても motion 報酬が十分に採択していない箇所へ
+作用する必要がある。
+
+**16.10.2 解釈**
+
+`motion_relational_angle` は Pred/GT の relational-only motion subspace を比較する。
+dimensionals の placement/value は直接見ないため、Distance-family を減らす作用は
+「relational を増やすことで、solver が dimensionals に頼る必要を下げる」という間接経路になる。
+
+現在の観察はこの経路と整合する:
+
+- `probeD` と `scaffold5` は、関係寄りに振るほど distFam が下がる。
+- `scaffold5` は qualitative に Distance 過剰を抑える。
+- ただし DistanceX/Y にはほぼ中立で、Distance-family 全体を十分には押し切れていない。
+- scalar の response/motion/leak 指標は改善しても、非直感的な Distance placement までは十分に反映しない。
+
+したがって、次に検証すべき主張は
+**「motion-subspace 報酬をより relation不足に敏感な形にすると、Distance-family 全体がさらに下がり、
+key relational が増える」**である。
+
+**16.10.3 次に試す施策**
+
+> **注（2026-06-02 追記・重要）**: 本節の `mixed_subset` 中心の提案は、後続の §16.11 Phase 0 診断（学習なし）で
+> **改訂された**。**最終決定は §16.11.4**（本線＝v2 GT × flip × rebalance × `symmetric`。`mixed_subset` 単独強化は
+> 予備に降格）。本節は提案の記録として残す。`mixed_subset` と `dimensional row-space overlap` の定義（§16.11 でも参照）は
+> ここに置く。
+
+第一候補は `scaffold5` を土台にした `motion_relational_angle` の強化版。
+
+- `coeff_h_angle: 3.0 → 8.0`
+- `cap_h_angle: 0.70 → 0.85`
+- `motion_relational_angle_mode: symmetric → mixed_subset`
+- `motion_relational_reverse_weight: 0.1` または `0.2`
+
+`mixed_subset` は実装済みで、
+
+```text
+angle^2 = pred_subset_gt^2 + reverse_weight * gt_subset_pred^2
+```
+
+を使う。ここで `pred_subset_gt` は「Pred の relational-only motion が GT に含まれない方向へ
+はみ出すこと」を罰する項。目的は、GT の rule-based relation set と完全対称に一致させることではなく、
+**Pred が relation 不足により余計な運動を許すことを主に罰する**こと。
+`symmetric` よりこの目的に合う可能性が高い。
+
+`response_relational_angle` への単純置換は本命にしない。
+これは `motion_relational_angle` と `leak_relational_angle` の RMS だが、
+`leak` は Pred の dimensional response map `R_pred` が GT relational row-space へ漏れるかを見る。
+no-dimensional/強い dimensional closure で小さくなり得るため、relational を増やす圧としては
+`motion_relational_angle` より危うい。試すなら短い canary か、小係数の補助項に限る。
+
+補助候補として `relation-only Pred leak` は残す。
+現行の `leak_relational_angle` は
+
+```text
+leak^2 = || orth(row(J_R_GT))^T orth(range(R_pred)) ||_F^2 / dim(range(R_pred))
+```
+
+で、`R_pred` は Pred の dimensional parameter を微小編集したときの primitive 応答。
+これに対して `relation-only Pred leak` は、`R_pred` の代わりに Pred relationals だけが許す motion
+
+```text
+N_R_pred = null(J_R_pred)
+```
+
+を使う:
+
+```text
+rel_only_leak^2 =
+  || orth(row(J_R_GT))^T orth(N_R_pred) ||_F^2 / dim(N_R_pred)
+```
+
+直感的には「Pred が入れた relationals だけでは、GT relation を壊す運動をまだ許していないか」を測る。
+dimensionals を増やしても改善しないため、現行 leak より relational 増加圧として安全。
+ただしこれは `motion_relational_angle` の `pred_subset_gt` / `mixed_subset` と近い一方向の
+relation-deficiency 信号なので、まずは実装済みの `mixed_subset` を試す。
+`mixed_subset` でも relation不足が十分に拾えない場合、または leak 型の補助項が必要になった場合に
+`relation-only Pred leak` を実装候補に戻す。
+
+最低限追加で見る診断:
+
+- per-type head ratio:
+  `Distance`, `DistanceX`, `DistanceY`, `Radius`, `Equal`, `Tangent`,
+  `Parallel`, `Perpendicular` を baseline / probeD / scaffold4 / scaffold5 / 次 run で比較する。
+- `diag_sample_vs_select.py`:
+  focus を `Distance,DistanceX,DistanceY,Radius,Equal,Tangent,Perpendicular,Parallel`
+  にして、type ごとの局所選択圧を確認する。
+- qualitative:
+  Distance 数だけでなく、遠距離 primitive 間の非直感的 Distance が減っているかを固定 validation subset で見る。
+
+`dimensional row-space overlap` は保留だが、定義は次の通り。
+GT relational のヤコビアンを `J_R_GT`、Pred の特定 dimensional family
+（例: Distance/DistanceX/DistanceY、または Radius を含めた family）のヤコビアンを `J_D_pred` とする。
+同じ geometry 上で
+
+```text
+U_R = orth(row(J_R_GT))
+U_D = orth(row(J_D_pred))
+```
+
+を作り、例えば
+
+```text
+overlap_recall    = || U_R^T U_D ||_F^2 / rank(U_R)
+overlap_precision = || U_R^T U_D ||_F^2 / rank(U_D)
+```
+
+を見る。`overlap_recall` は「GT relational の禁止方向を Pred dimensionals がどれだけ張っているか」、
+`overlap_precision` は「Pred dimensionals がどれだけ relation-like な方向を張っているか」を表す。
+
+これは `Distance=0` や `Angle=0/90` の検出が目的ではない。それらは既に
+`solver_near_zero_distance_rate` / `penalty_near_zero_distance` / `penalty_axis_angle` が担当している。
+この diagnostic の目的は、nonzero Distance/DistanceX/Y/Radius の row-space が relationals の
+row-space を代替しているかを見ること。single constraint row の overlap は Tangent/Equal のような
+複合 relation で解釈が弱いので、sketch-level / family-level overlap として実装する。
+ただし、これは現時点の主実験を進めるための必須項目ではない。
+
+**16.10.4 望ましい結論と分岐**
+
+望ましい結果:
+
+- `eval_distance_family_ratio_mean` が `scaffold5` よりさらに低下する。
+- `eval_key_rel_ratio_mean` / `eval_rel_ratio_mean` が上昇する。
+- `Distance`, `DistanceX`, `DistanceY` の per-type ratio が一貫して下がる。
+- `solver_fc_rate` と `solver_valid_dof_mean` は guardrail 内に留まる。
+- qualitative に非直感的な遠距離 Distance が減る。
+
+この場合に言えること:
+
+> relation-only motion subspace の不足を罰する報酬を強めると、モデルは dimensionals ではなく
+> relational constraints で design intent を表す方向に動き、Distance-family 過剰が下がる。
+
+これは単なる class prior や dimensional penalty ではなく、motion-subspace reward の設計に由来する改善として
+主張できる。特に `scaffold4`/`scaffold5`/次 run の比較で、flip と solver 圧縮だけでは不十分で、
+`motion_relational_angle` の選択圧強化によって distFam が追加で下がることを示せると嬉しい。
+
+悪い結果と読み:
+
+- distFam は下がるが FC/DoF が崩れる:
+  solver 係数を 6/3 へ戻す、または `coeff_h_angle` を下げる。
+- keyrel は増えず DistanceX/Y だけ残る:
+  現在の motion 報酬は DistanceX/Y に中立であり、relation class prior か別の family-level regularizer が必要。
+- response/motion/leak は改善するが qualitative が悪い:
+  現 scalar 指標は placement 品質を十分に反映していない。per-type ratio と qualitative subset を主評価に追加する。
+- `response_relational_angle` canary で dimensionals が増える:
+  leak 系は主報酬にしない判断を確定する。
+
+**16.10.5 TODO**
+
+> **注（2026-06-02）**: この TODO は §16.11.4 の確定版に置き換わった。`mixed_subset` 単独強化はせず、第一 run の config は
+> **scaffold6（v2 GT × flip × rebalance × `symmetric`）**。下記 3–5（per-type ratio 表・qualitative・診断再実行）は確定版でも有効。
+
+1. ~~`scaffold5` 派生 config を作る: `coeff_h_angle=8.0`, `cap_h_angle=0.85`, `motion_relational_angle_mode=mixed_subset`, `motion_relational_reverse_weight=0.1`~~（→ §16.11.4 で **scaffold6** に変更）。
+2. 短い canary で FC/DoF collapse が無いことを確認し、問題なければ full run。
+3. 完走後、W&B scalar に加えて `diag_sample_vs_select.py` を dimensional + keyrel focus で再実行。
+4. baseline / probeD / scaffold4 / scaffold5 / 次 run の per-type ratio 表を作る。
+5. 固定 validation subset で qualitative comparison を行い、Distance-family 数と非直感的 placement を分けて記録する。
+
+### 16.11 Phase 0 無料診断と次手の確定: substitution 軸 と deficiency 軸 (2026-06-02)
+
+§16.10 の次手（`mixed_subset` 強化）に GPU 半日を賭ける前に、**学習なし**の診断で「『Distance 過剰／relational
+不足』の律速は何か」を切り分けた。**結論を先に**: 「Distance 過剰」には混同しやすい **2 つの別軸**があり、打ち手が違う。
+
+- **substitution 軸** = Pred が出す Distance が、**関係で代替できる方向**を pin しているか（関係の代用 Distance）。
+- **deficiency 軸** = Pred が**そもそも関係を出し切れず DoF を残す**（関係そのものの不足＝未拘束）。
+
+診断の結果、**substitution 軸の余地は中程度**にとどまり、**ユーザが定性的に見ている「relational 不足」の本体は
+deficiency 軸（余地が大きい）**だった。よって本線は deficiency 軸を叩く実験（§16.11.4）になる。
+
+使用 checkpoint は `scaffold5`（`logs/train/runs/2026-06-01_19-04-12/checkpoints/last.ckpt`）。新スクリプト
+`scripts/diag_dim_relation_overlap.py`（診断1＋診断2 の mixed 部）と既存 `scripts/diag_v1_v2_reward_ranking.py`
+（診断2 の v2 部）。生成はすべて素（flip pool なし＝val と同条件）の K=8。
+
+**この節で使う測定量（用語）**
+- `row(J)`（row space）: 制約集合のヤコビアン `J` の行が張る方向＝その制約が **pin する（動きを止める）方向**。
+  `orth(·)` はその正規直交基底、`rank` はその次元、`n_dof` はスケッチ全体の自由度数。
+- `overlap_precision = ‖U_Aᵀ U_B‖_F² / rank(U_B)`: 部分空間 `B` のうち `A` の中に入っている割合（principal cos² の
+  和を rank で正規化、[0,1]）。`overlap_recall` は分母が `rank(U_A)`。
+- **chance**: `A` と `B` が無相関（ランダム部分空間）なときの期待値。precision の chance ≈ `rank(U_A)/n_dof`、
+  recall の chance ≈ `rank(U_B)/n_dof`。absolute 値でなく chance / control からの**超過**を読む。
+- **control**: 解釈の基準に置く **人間 GT 自身の dimensional**（＝人間が意図的に置いた**正当な driver**）の同じ overlap。
+- **winflip**: 報酬を変えたとき RLOO group 内で argmax（採択される候補）が変わった group の割合。
+- `ngrp` / within-group advΔ / **counterfactual**: §16.7 と同義（群内に当該 type の「あり」「なし」が両方在る group 数／
+  その advantage の差）。
+
+#### 16.11.1 診断1（substitution 軸の大きさ）— dimensional↔relational row-space overlap
+
+Pred の Distance-family が GT relations と**同じ方向**を pin しているか（関係の代用か、真の driver か）を、同一 state 上で
+`U_R=orth(row(J_R_GT))`・`U_D=orth(row(J_D_pred))` の overlap で測る。`leak`（§7.2）は under-constraint（Pred が
+許す運動）を見るが、ここは **substitution（Distance で関係の仕事を肩代わり）**を見る——Distance が方向を正しく pin
+している限り `leak` はこれを見逃す。基準は control（人間 driver）と chance。
+
+人間 GT は疎な annotation なので、**幾何的に成り立つ関係を全部入れた closure**（rule-augmenter `augment_sketch`）に
+対しても測った（fiverr, N=700, `--augment-gt`）:
+
+| subspace pair | recall | precision |
+|---|---:|---:|
+| Pred distfam vs **human GT** relations | 0.144 | 0.734 |
+| GT dims (control) vs human GT rel | 0.124 | 0.620 |
+| Pred distfam vs **CLOSURE** relations | 0.146 | **0.796** |
+| GT dims (control) vs CLOSURE rel | 0.135 | **0.703** |
+
+`rank(human GT rel)=29.0`、`rank(closure rel)=30.7`（**ほぼ同じ**）、`rank(Pred distfam)=4.9`、`n_dof=49.8`、
+chance precision ≈ `29/50 ≈ 0.58`。別途 N=900 の human-only run も同値（Pred 0.728 / control 0.622）。
+v1（train 分布, N=600）は Pred distfam precision **0.776**（v1 は rel-only GT で control 無し）。
+
+読み:
+- **絶対 precision（0.7〜0.8）は substitution の度合いとして読めない**。関係空間が rank 29/50 ＝全方向の ~58% を占める
+  ため、ランダムな driver でも chance ≈0.58、人間の**正当な** driver でも 0.703（chance+0.12＝幾何由来の下駄）出る。
+- 意味があるのは **control からの超過**: Pred 0.796 − 人間 driver 0.703 = **+0.09**（closure 基準）。＝scaffold5 の
+  Distance は人間自身の driver より **~9pt だけ関係寄り**＝substitution は実在するが**中程度**。closure rank≈human rank
+  なので「人間は既にほぼ closure まで関係を付けている」＝この軸の余地が小さいのは確か。
+- Radius を含めると precision は下がる（dist+rad 0.677）＝**代替的なのは Distance/DistanceX/DistanceY、Radius は真の driver**。
+- ＝ **substitution 軸の余地は中程度（+0.09）**。なお「**非直感的な Distance の置き場所**」はこの軸でも見えない: どの
+  primitive 対で pin しても row space は同じ（motion-subspace 不変）なので、overlap も motion_relational 報酬も原理的に
+  不可視（§14.7.5 #6）。これは token-level / human-prior 系でしか触れない別問題。
+
+#### 16.11.2 診断2（報酬を再形成しても選択は変わらない — 候補集合が律速）
+
+**mixed_subset 再採点（fiverr, 149 group）.** 学習済 symmetric と同一 coeff/cap/gate で
+モードだけ `mixed_subset` に替えて同一 rollout を再採点:
+
+| mode | winflip | win_distfam | win_keyrel |
+|---|---:|---:|---:|
+| symmetric (base) | – | 0.236 | 0.418 |
+| mixed rw=0.2 | 0.000 | 0.236 | 0.418 |
+| mixed rw=0.1 | 0.007 | 0.236 | 0.419 |
+
+- **winner はほぼ動かない**（winflip ~0、winner の distfam/keyrel 不変）。§16.9.2 の solver 圧縮・§16.4 の
+  v2 target と**同じ**＝ per-sample 報酬の再形成は選択を変えない。**律速は候補集合**。
+- ただし type 別 within-group advΔ は mixed が **Equal +0.117 / Perp +0.017** と微増（Tangent −0.157、既正）。
+  RLOO は winner でなく全 K の advantage を使うので、`mixed_subset` は**勾配としては Equal/Perp を僅かに後押し**する
+  （害は無いが distFam を動かす主レバーにはならない）。
+
+**v2 target 再採点（scaffold5, v1 prompts, 128 group）.** §16.4 を scaffold5（solver 圧縮 4/2）で再実行:
+intent-only winflip **14.8%**、total winflip **7.8%**（§16.4 の A_rewardbalance: 19.5% / 11.7%）。
+圧縮下でも total 選択は ~8% しか動かない＝**希釈は残る**。type 別 d_total: **Coincident +0.71**（v2 の
+per-sketch 完全 Coincident が効く）、Perpendicular +0.12、Equal −0.25（v1 の Equal 過剰補正）、Tangent は
+**ngrp=0（flip 無しで counterfactual 皆無、§16.7 再現）**。
+
+**診断2 の読み**: `mixed_subset`・solver 圧縮（§16.9.2）・v2 target のいずれも **flip 無しでは winner を動かさない**
+（候補集合が律速）。ただし within-group advΔ レベルでは効く所がある（mixed で Equal/Perp、v2 で Coincident/Perp）。
+＝報酬の再形成は「**counterfactual がある所**でだけ効く」。v2 の価値は distFam でなく **per-sketch 完全性
+（特に Coincident/Perp の per-sketch『推論漏れ』補完）**にある。
+
+#### 16.11.3 診断3（deficiency 軸の大きさ）— under-constraint の実測
+
+overlap（診断1）は substitution 軸しか測らない。deficiency 軸（関係を出し切れず DoF を残す）は solver 状態で測る:
+`scaffold5` は **fiverr で Under 48.2% / FC 45.2%、`solver_valid_dof_mean` ≈ 5.0**（FC は DoF≤2）＝**約半数の
+スケッチで関係が大量に不足し未拘束**。これがユーザの「relational 不足」の正体で、**余地は大きい**（v1 train prompt 上では
+Under 25% / FC 68% で、人間図 fiverr ほどは不足しない＝§14.7.5 #1 の汎化ギャップと整合）。
+
+#### 16.11.4 統合結論と次手の確定
+
+- **2 軸の切り分け**: substitution 軸（診断1）は control 比 **+0.09 ＝中程度**。deficiency 軸（診断3）は
+  **Under 48% / DoF~5 ＝大きい**。**ユーザの定性観測（relational 不足）は deficiency 軸として正しい。**
+- **報酬の再形成は単独では効かない（診断2）**が、それは「無効」ではない: `mixed_subset` の `pred_subset_gt` 項は
+  **deficiency 軸そのものを罰する**（U_pred が U_gt に無い方向＝Pred の関係不足）ので**標的は正しい**。winner が動かないのは
+  **flip 無しで群内 counterfactual が無い**ため（§16.7/§16.9 と同根）。v2 target も deficiency 軸を締める（training 標的の
+  motion dim 8.5→5.5, §15.5）。**v2 も mixed も「無効」ではなく「flip 待ち」。**
+- **distFam が下がる経路は2つ**: (i) substitution 除去（中程度・overlap-penalty の担当）、(ii) **deficiency を関係で閉じる
+  → solver が Distance に頼らなくなる間接経路（大きい・v2/flip の担当）**。**(ii) が本線。**
+
+**確定した次手（ユーザ確認済）**:
+- **本線 = v2 GT × flip × rebalance × `symmetric`**（deficiency 軸を、flip が作る counterfactual の上で関係方向に閉じる）。
+  config 実装済・CPU smoke 通過: `configs/experiment/rloo_response_scaffold6_v2gt_flip_rebalance_intent.yaml`
+  （`scaffold5` の GT だけ v2 no_mirror に差し替え、他は完全同一＝GT 効果のクリーンな attribution）。判定は `scaffold5` と
+  同一 step で「`solver_under_rate`↓ / `solver_valid_dof_mean`↓（deficiency 解消）＋ rare-rel↑ &
+  `eval_distance_family_ratio_mean`↓、FC を guardrail、収束時 `ngrp`>0」。
+- **`mixed_subset` は第一 run では使わない**: mixed は v1 GT の per-sketch **不完全さ**の回避策（不完全な GT より完全な
+  Pred を罰さない）。**v2 はその不完全さを元から直すので `symmetric` が筋**であり、GT(v1→v2) と mode(sym→mixed) の同時変更は
+  attribution を交絡させる。mixed(rev_weight 0.1–0.2) は v2×symmetric が伸び悩んだ時の**予備**。
+- **overlap（substitution 軸）は診断/val ログ止まり**: 余地 +0.09 と小さく、報酬化は per-sketch baseline 相対の較正が難しく
+  flip 依存で低 ROI。`scripts/diag_dim_relation_overlap.py` は診断として保持。
+- **best-of-N rerank は standalone タスクとして取り下げ**: 独立 yardstick が無く循環（d_H_angle を最終比較に使えない）、
+  human-eval は弱く K 候補の差分も微小、評価器としての主張は `summary_histcad_response_metric_v4_results.md` で既出。
+  唯一の有用部分（サンプル vs 選択の客観上限＝既存 K 候補で d_H_angle 選択時の distFam/keyrel/DoF 到達上限 vs solver 選択
+  vs 方策平均）は既存 `scripts/diag_sample_vs_select.py` がほぼ充足＝新規不要。
+- **caveat**: 診断1/2 は flip pool 無し生成での測定。flip 込みでは `ngrp` が増え v2 効果は本測定より大きくなり得る（上限未測）
+  ＝学習実験前の足切りとしては十分だが、最終判定は `scaffold6` 実走で。
