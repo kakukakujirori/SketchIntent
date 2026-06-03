@@ -9,7 +9,7 @@
 #   - train GT = data_processed/sg_pseudo_rel_v2_no_mirror.npy (v2 closure)
 #   - flip_augment_axes [x, y], group_sample_size 9
 #   - SolverReward 4/2 + hygiene (-1.5 near-zero / axis-angle, converged gate)
-#   - DimParsimonyReward coeff 0.30, RelationalClassPriorReward (scaffold6 coeffs)
+#   - DimParsimonyReward coeff 0.30, RelationalClassPriorReward + DimensionalClassPriorReward
 #   - entropy 0.005, train/val temperature 1.2/1.0, lr 1e-5, pretrain ckpt
 #   - reward_val_composer is IDENTICAL (incl. ResponseIntentReward at gate=always),
 #     so this arm is evaluated on the SAME design-intent axes as scaffold6.
@@ -135,6 +135,19 @@ model:
           Vertical: 0.05
           Midpoint: 0.112
 
+      - _target_: src.models.rewards.dimensional_class_prior.DimensionalClassPriorReward
+        context: ${data.context}
+        gate: converged
+        cap_positive_total: 0.12
+        cap_negative_total: -0.15
+        cap_per_type: 3
+        coeff_by_type:
+          # Light CAD-prior nudge: prefer axis dimensions over arbitrary
+          # Distance, without turning this into a dimension-placement metric.
+          Distance: -0.03
+          DistanceX: 0.02
+          DistanceY: 0.02
+
       # ResponseIntentReward DELIBERATELY OMITTED — this is the no-intent control.
       # It remains in reward_val_composer below (gate=always) so this arm is
       # evaluated on the same design-intent axes as scaffold6.
@@ -174,6 +187,17 @@ model:
           Horizontal: 0.042
           Vertical: 0.05
           Midpoint: 0.112
+
+      - _target_: src.models.rewards.dimensional_class_prior.DimensionalClassPriorReward
+        context: ${data.context}
+        gate: always
+        cap_positive_total: 0.12
+        cap_negative_total: -0.15
+        cap_per_type: 3
+        coeff_by_type:
+          Distance: -0.03
+          DistanceX: 0.02
+          DistanceY: 0.02
 
   optimizer:
     lr: 1e-5

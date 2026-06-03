@@ -440,15 +440,17 @@ class ConstraintARModuleRLOO(L.LightningModule):
                     if metric_name == CONSTRAINT_MIX_KEY:
                         self._accumulate_constraint_mix(metric_value)
                     continue
-                # The polymorphic sub-type counts (rel_prior_subtype_*) are a
-                # per-type *distribution*, not a headline diagnostic.  Route them
-                # to their own collapsible section so the ~7 of them do not crowd
+                # The prior per-type distributions are not headline diagnostics.
+                # Route them to their own collapsible section so they do not crowd
                 # validation_gen/*, while still being tracked as time-series (a
                 # snapshot bar chart cannot show their evolution over training —
                 # see _log_constraint_mix_chart).
                 section = (
                     "validation_submix"
-                    if metric_name.startswith("rel_prior_subtype_")
+                    if (
+                        metric_name.startswith("rel_prior_subtype_")
+                        or metric_name.startswith("dim_prior_subtype_")
+                    )
                     else "validation_gen"
                 )
                 self.log(

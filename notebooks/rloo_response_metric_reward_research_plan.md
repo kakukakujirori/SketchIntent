@@ -2980,3 +2980,101 @@ conda run -n freecad python src/train.py experiment=rloo_response_scaffold6_v2gt
 # scaffold6 without intent
 conda run -n freecad python src/train.py experiment=rloo_response_scaffold6_v2gt_flip_rebalance_no_intent
 ```
+
+## 17. motion_angle のfailure modeと dimensioning 軸（deform_gain）の検討 (2026-06-03)
+
+「design intent = **robustness to future modification**」と定義したとき、motion_angle が dimensioning の良し悪しを測れるかを問うた検討の確定事項。結論: **motion_angle は relational correctness（正しい manifold への到達）を測る指標で、dimensioning placement にだけ構造的に盲目。** dimensioning 軸は eval 専用の新指標 deform_gain を提案。
+
+### 17.1 なぜ response_angle (= d_H_angle) はdimensionalの入れ方を見ないのか
+
+motion_angle は R_C = -pinv(J_x)J_p。FC で張られた線形部分空間を比較するが、スケッチに dimensional を加えていく操作は線形部分空間のランクを上げて真の接空間に近づける操作。一方で relational を加える操作はランクを保持して線形空間の傾きだけを変えている。
+
+例：長方形ABCDのABとBCにDistance制約が入っていて、残りはHorizontal/Vertical/Coincidentによりfully constrained (DoF=2でglobal translationは除く)ケースを考える。
+
+- もしすべてのrelational constraintsを削除した場合、dx/dp_CはABとBCの長さを微小変動させた場合のスケッチ全体の変形を見るから、依然として接空間はdim=2、ただしABとBC以外は一切不動であり、つまりこれは接空間が傾いて軸に平行に配置されたと解釈できる。
+
+- もしBCのDistance constraintを削除した場合、dx/dp_CはABの長さを微小摂動させた場合のスケッチ全体の変形を見るから、これはdim=1、つまりもとの接空間のうち１次元分に移動が制限されたことを意味する。
+
+つまり relationalを可能な限りフルに入れた状態ではすでにゴールの接空間は定まっており、dimensionを加えてfully constrainedに近づける操作は、この接空間上で何次元分までを動けるかの自由度を増やしているだけ。なのでfully constrainedになった時点でどんなdimensionalを入れたとしても最終的に行き着く先は真の接空間全体となる。ゆえにmotion_angleはdimensionalの入れ方に関しては無力。
+
+
+### 17.2 dimensioning eval の採用案: deform_gain（eval 専用）
+
+これではresponse_angleがdesign intentを図りますという主張ができないため、dimensionalの入れ方を測る指標 deform_gain を提案する：
+
+GT の dimensional 制約たち {c_1, ..., c_m} のうち１つを edit probe q とする。ここでは q = c_1 としても一般性を失わない。このとき「c_2, ..., c_m の寸法を保ちつつ q = c_1 を微小変動させた編集後のスケッチを考える。この編集をPred側でも実現するのに必要な Pred の driving param の総変化量の L1 norm 合計 `‖δp‖_1` 」を deform_gainとして定める。小さいほど修正手間低＝良。
+
+### 17.3 deform_gain の確定定義と「最小化 vs 1-からの乖離」(質問1の確定) (2026-06-03)
+
+実装: [notebooks/v4_exp/deform_gain.py](v4_exp/deform_gain.py)（`dfeas_*` 下書きの participation 構成を流用・整理。旧名 `dfeas_gain` は §5 の `d_feas` と紛らわしいので **deform_gain** に改名し別ファイルへ分離）。
+
+**構成（cross-sketch で安定な形）**: edit を GT geometry の motion でなく GT 制約の residual target で定義する。
+
+```text
+native_P = compute_native_response(pred)         # R_P : (n_x, n_pP)
+J_Q      = stack_i constraint_jacobian(q_i, native_P.state)   # GT probe を Pred 幾何で評価
+A        = J_Q @ R_P                               # (n_gt, n_pP)
+dp_i     = pinv(A) @ e_i                            # 「GT dim i を1動かし他を保つ」を Pred knob で実現
+deform_gain(raw, §17.2) = ‖dp_i‖_1
+```
+
+`e_i` の off-diagonal 0 が「c_2..c_m を保つ」を表現する。`q_i` の参照エンティティが Pred に無い（model がエンティティ欠落）場合その probe は skip。
+
+**reference は 0 でなく 1**: GT-on-GT なら `A=I`, `dp_i=e_i`, `‖dp_i‖_1=1`。実測でも `source_self` で `l1=1.0000, resid=0.0`（§17.4 表）。ゆえに「小さいほど良い」は誤りで、**1 からの乖離を見るべき**（質問1の答え＝Yes）。
+
+- `l1 > 1`: Pred は複数 knob を動員（over-coupling / leak）→ 編集が他寸法に波及。
+- `l1 < 1`: 小さな knob 変化で大きく動く＝**過敏な driving param**（質問1で挙げた「sensitive な小部品」）。L1 最小化はこれを最良と誤判定する。
+
+**読み出し（per-edit, GT probe 平均）**:
+
+| 読み出し | 定義 | ideal | 役割 |
+|---|---|---|---|
+| `l1` | `‖dp‖_1` | 1 | §17.2 raw（**単独では誤導**） |
+| `deviation` | `|1 - ‖dp‖_1|` | 0 | GT 同等労力からの距離（**頑健な主指標**） |
+| `logdev` | `|log ‖dp‖_1|` | 0 | 比対称版（過敏 `<1` と鈍重 `>1` を等価に罰する。質問1の趣旨に最も忠実だが `l1→0` で発散） |
+| `participation` | `‖dp‖_1²/‖dp‖_2²` | 1 | 実効 knob 数（scale 不変、magnitude を見ない補助） |
+| `resid` | `‖A dp - e_i‖` | 0 | 再現可能性（dim 数が足りるか） |
+| `frac_clean` | `#{resid<1e-6}/n` | 1 | 同上の離散版 |
+
+**質問1の確定回答**: raw `l1` 最小化は不可（§17.4 の dim_drop で `l1` は劣化に対し**減少**＝逆向き）。主指標は `deviation=|1-l1|`（有界・頑健）。比対称が欲しければ `logdev`、ただし再現不能域（`l1→0`）で発散するので常に `resid` を併記する。`deform_gain` は **(a) 再現可能性 (resid)** と **(b) 再現できた前提での労力一致 (deviation/logdev)** の2軸であり、単一スカラーに潰さず両軸 report する。
+
+### 17.4 deform_gain の ablation（v4_results §3–§4 と同形式）(2026-06-03)
+
+driver: [notebooks/v4_exp/deform_gain_ablation.py](v4_exp/deform_gain_ablation.py)（v4 と同一 setting: 6 batch × 5 human, ref_size=2, n=396 rotation, base=308 / solver_rl=368）。純線形代数のため FreeCAD finite solve 不要。artifact: [artifacts/v4_exp/deform_gain_details.csv](../artifacts/v4_exp/deform_gain_details.csv)。
+
+**variant 別 median（rotation-level, refs 平均）**:
+
+| variant | n | l1 | deviation | logdev | participation | resid | frac_clean | med n_pP |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| source_self | 396 | 1.0000 | 0.0000 | 0.0000 | 1.0000 | 0.0000 | 1.0000 | 5 |
+| heldout | 396 | 1.2667 | 0.3907 | 0.3315 | 1.3367 | 0.0000 | 1.0000 | 5 |
+| dim_drop25 | 396 | 1.0711 | 0.4798 | 0.7573 | 1.4276 | 0.3340 | 0.4500 | 4 |
+| dim_drop50 | 396 | 0.7504 | 0.5574 | 5.3650 | 1.3496 | 0.6041 | 0.1548 | 3 |
+| dim_drop75 | 396 | 0.3516 | 0.7257 | 12.278 | 1.0000 | 0.8066 | 0.0000 | 1 |
+| dim_drop100 | 396 | 0.0000 | 1.0000 | NA | 0.0000 | 1.0000 | 0.0000 | 0 |
+| rel_drop50 | 396 | 3.7894 | 2.9960 | 1.9194 | 1.3896 | 0.1436 | 0.7500 | 5 |
+| rel_drop100 | 396 | 1.3318 | 1.0000 | 4.6794 | 0.9167 | 0.3790 | 0.5460 | 5 |
+| **base** | 308 | 1.0833 | 0.6772 | 0.7188 | 1.2693 | 0.2652 | 0.6036 | 4 |
+| **solver_rl** | 368 | 1.2207 | 0.3333 | 0.2883 | 1.4730 | 0.0000 | 1.0000 | 9 |
+
+**construct validity（dim_drop sweep）**:
+- `deviation` 単調増加 `0.391→0.480→0.557→0.726→1.000` ✓、`resid` 単調増加 `0.0→0.334→0.604→0.807→1.000` ✓。
+- 一方 raw `l1` は `1.267→1.071→0.750→0.352→0.000` と**減少**＝劣化を低値と誤判定。質問1（raw 最小化不可）の直接証拠。
+- `rel_drop` は off-axis で非単調・暴れる（`deviation` が rel_drop50 で 2.996）。relational 除去は `R_P` を直接壊すため deform_gain は relational presence と直交しない。motion_angle の**補完**であって直交分解ではない、と位置づける。
+
+**paired Wilcoxon（model vs heldout, lower-is-better, z>0 ⇒ human 優位）**:
+
+| readout | base z | solver_rl z |
+|---|---:|---:|
+| deviation | **+5.68** (p=1.3e-8) | −2.24 (p=2.5e-2) |
+| logdev | **+7.86** (p=3.9e-15) | −3.79 (p=1.5e-4) |
+| resid | **+8.77** (p=1.8e-18) | −11.49 (p=1.4e-30) |
+
+- **base（under-dimensioning）には全軸で human 優位**＝deform_gain は「人間の dimensioning > base」を正しく検出。
+- **solver_rl は model 優位（符号反転）**。原因は **over-dimensioning**: solver_rl の `med n_pP=9`（GT `n_gt=5`）、detail 行の **77% が n_pP>n_gt**（base 32%, heldout 26%）。dim が過剰だと `resid=0/frac_clean=1` で全 edit を自明に再現でき、`l1≈1` 近傍に乗る。これは §9 の Case K/M sign-inversion・§14.7 M1 の「FC cost が育つ」と**同型の over-constraint exploit**。
+- **count-matched（square-only, n_gt==n_pP）に絞ると solver_rl の優位は消失**: `deviation z=−0.92 (n.s.)`, `logdev z=−1.13 (n.s.)`。すなわち solver_rl の見かけの勝ちは placement の良さでなく dim 数水増しの artifact。base は square-only でも `resid z=+2.19`, `logdev z=+2.65` で human 優位を保つ。
+
+**結論（§17 の主張への含意）**:
+1. deform_gain は motion_angle が盲目な dimensioning 軸を実際に測れる（dim_drop 単調・base で human 優位）。§17.1 の「motion_angle は placement に盲目」を補完する eval として成立。
+2. ただし raw 形は over-dimensioning で gaming 可能。**eval では count を統制**（square-only、または n_pP>n_gt の冗長 dim にペナルティ）しないと「intent を測る」主張に使えない。これは reward 化する場合の必須前提でもある（solver の over-constraint 癖を再び餌にする）。
+3. 単一スカラー化は避け `deviation`（labor 一致）＋ `resid`（再現可能性）の2軸 report を主診断とする。`logdev` は比対称が要る箇所の補助。
