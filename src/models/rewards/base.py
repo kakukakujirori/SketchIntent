@@ -76,6 +76,12 @@ class RewardContext:
     # pred), so J_R(gt_rels) is state-independent in practice.
     gt_subspace_cache: dict[tuple[int, torch.dtype, str], object] = field(default_factory=dict)
     sketch_tokenizer: "SketchTokenizer | None" = None
+    # RLOO group size K: the batch is laid out as B contiguous blocks of K
+    # rollouts (sample index = b*K + k), matching the (B, K) regrouping used for
+    # the advantage baseline in ``constraint_ar_module_rloo``.  Rewards that need
+    # the group structure (e.g. the shuffled-intent negative control) read it
+    # here.  ``None`` outside RLOO (e.g. the validation composer).
+    group_sample_size: int | None = None
 
 
 class BaseReward(torch.nn.Module, abc.ABC):

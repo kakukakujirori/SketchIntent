@@ -2981,100 +2981,125 @@ conda run -n freecad python src/train.py experiment=rloo_response_scaffold6_v2gt
 conda run -n freecad python src/train.py experiment=rloo_response_scaffold6_v2gt_flip_rebalance_no_intent
 ```
 
-## 17. motion_angle のfailure modeと dimensioning 軸（deform_gain）の検討 (2026-06-03)
+## 17. motion_angle の placement 盲目性と dimensioning-placement 指標 participation (2026-06-03)
 
-「design intent = **robustness to future modification**」と定義したとき、motion_angle が dimensioning の良し悪しを測れるかを問うた検討の確定事項。結論: **motion_angle は relational correctness（正しい manifold への到達）を測る指標で、dimensioning placement にだけ構造的に盲目。** dimensioning 軸は eval 専用の新指標 deform_gain を提案。
+**結論（先出し）**: motion_angle (= d_H_angle) は relational correctness（正しい接空間への到達）を測る指標で、**dimensioning placement にだけ構造的に盲目**。これを叩くため、GT と Pred が relational set・幾何・最終 DoF を共有する**統制設定**を設計し、その下で placement だけを測る指標 **participation** を確立した。実データ（`dim_uglify` 合成統制）で「汚い dimensioning ほど participation が悪化する」を決定的に実証（paired Wilcoxon p=3.8e-59）。
 
-### 17.1 なぜ response_angle (= d_H_angle) はdimensionalの入れ方を見ないのか
+**本章の唯一の新規軸は placement = participation**（§17.3）。motion_angle とも leak_angle とも独立した dimensioning 専門軸。coverage（under/over-dimensioning）と relational correctness は既存の motion_angle（d_sub_angle の `max(dim_P,dim_G)` rank 正規化）+ leak_angle がすでに捉えており、別途 coverage 指標（resid 系）は不要だった — むしろ motion_angle は solver_rl の over-dim を正しく human 優位に並べ（z≈+11.9, exploit 無し）、resid 系が解こうとした問題は既存指標には存在しなかった。途中で検討した棄却案（resid_sym を含む / raw l1 最小化 / deviation / rank-redundancy / square-only）は §17.7 に集約。
 
-motion_angle は R_C = -pinv(J_x)J_p。FC で張られた線形部分空間を比較するが、スケッチに dimensional を加えていく操作は線形部分空間のランクを上げて真の接空間に近づける操作。一方で relational を加える操作はランクを保持して線形空間の傾きだけを変えている。
+**重要な限界（先出し）**: participation は「**GT の慣習との一致**」を測る指標で、絶対的な dimensioning の良し悪しではない。chain vs baseline(datum) のような**正当な別慣習どうしでも participation は高く出る**（§17.6, toy 実測 1.7–3.5＝ランダム uglify と同程度）。thesis 実証には無害だが、model 評価には multi-reference（複数 human GT に min）+ human-human floor が必須。
 
-例：長方形ABCDのABとBCにDistance制約が入っていて、残りはHorizontal/Vertical/Coincidentによりfully constrained (DoF=2でglobal translationは除く)ケースを考える。
+### 17.1 motion_angle はなぜ placement に盲目か（動機）
 
-- もしすべてのrelational constraintsを削除した場合、dx/dp_CはABとBCの長さを微小変動させた場合のスケッチ全体の変形を見るから、依然として接空間はdim=2、ただしABとBC以外は一切不動であり、つまりこれは接空間が傾いて軸に平行に配置されたと解釈できる。
+motion_angle は `R_C = -pinv(J_x)J_p` が張る線形部分空間を比較する。dimensional を加える操作は部分空間のランクを上げて真の接空間に近づける操作、relational を加える操作はランクを保ったまま空間の傾きを変える操作。
 
-- もしBCのDistance constraintを削除した場合、dx/dp_CはABの長さを微小摂動させた場合のスケッチ全体の変形を見るから、これはdim=1、つまりもとの接空間のうち１次元分に移動が制限されたことを意味する。
+例: 長方形 ABCD の AB と BC に Distance、残りを Horizontal/Vertical/Coincident で fully constrained（DoF=2、global translation を除く）。
 
-つまり relationalを可能な限りフルに入れた状態ではすでにゴールの接空間は定まっており、dimensionを加えてfully constrainedに近づける操作は、この接空間上で何次元分までを動けるかの自由度を増やしているだけ。なのでfully constrainedになった時点でどんなdimensionalを入れたとしても最終的に行き着く先は真の接空間全体となる。ゆえにmotion_angleはdimensionalの入れ方に関しては無力。
+- relational を全削除すると dx/dp_C は AB/BC の長さ変動で見るので接空間は依然 dim=2、ただし AB/BC 以外は不動＝接空間が軸平行に傾いた配置。
+- BC の Distance を削除すると dim=1、接空間の1次元分に移動が制限される。
 
+つまり relational をフルに入れた時点でゴールの接空間は定まり、dimensional を加える操作は「その接空間上で何次元動けるか」の自由度を増やすだけ。**fully constrained になればどんな dimensioning でも行き着く先は真の接空間全体**となり、motion_angle は dimensioning の入れ方を区別できない。
 
-### 17.2 dimensioning eval の採用案: deform_gain（eval 専用）
+### 17.2 統制設定: placement だけを残す
 
-これではresponse_angleがdesign intentを図りますという主張ができないため、dimensionalの入れ方を測る指標 deform_gain を提案する：
+GT と Pred が **relational set 同一・幾何同一・ともに fully constrained**（DoF=2）とする。この設定の構造的帰結:
 
-GT の dimensional 制約たち {c_1, ..., c_m} のうち１つを edit probe q とする。ここでは q = c_1 としても一般性を失わない。このとき「c_2, ..., c_m の寸法を保ちつつ q = c_1 を微小変動させた編集後のスケッチを考える。この編集をPred側でも実現するのに必要な Pred の driving param の総変化量の L1 norm 合計 `‖δp‖_1` 」を deform_gainとして定める。小さいほど修正手間低＝良。
+- 同 rel set + 両 fully constrained ⟹ **dim 本数 m が一致**、かつ `range(R_GT)=range(R_Pred)= relational manifold の接空間`。
+- ⟹ `motion_angle` は同一部分空間を比較 → **principal angle 全て 0**（盲目の最もクリーンな言明）。
+- ⟹ `A := J_{Q_GT} R_Pred`（GT probe を Pred 幾何で評価した行 × Pred native response）は **正方・可逆** → 再現は常に可能で coverage 差はゼロ。
 
-### 17.3 deform_gain の確定定義と「最小化 vs 1-からの乖離」(質問1の確定) (2026-06-03)
+placement 情報は**部分空間（同一）でなく、その中の基底**に宿る: `A` はちょうど「Pred dims → GT dims」の基底変換。clean な dimensioning なら `A` は置換行列様（各 GT 編集が単一 Pred ツマミ）、ugly なら密。
 
-実装: [notebooks/v4_exp/deform_gain.py](v4_exp/deform_gain.py)（`dfeas_*` 下書きの participation 構成を流用・整理。旧名 `dfeas_gain` は §5 の `d_feas` と紛らわしいので **deform_gain** に改名し別ファイルへ分離）。
+### 17.3 採用指標 participation: 定義・お気持ち・gaming 不能性
 
-**構成（cross-sketch で安定な形）**: edit を GT geometry の motion でなく GT 制約の residual target で定義する。
-
+各 GT 編集 i（「GT dim i を1動かし他を保つ」）を Pred のツマミで実現する変化:
 ```text
-native_P = compute_native_response(pred)         # R_P : (n_x, n_pP)
-J_Q      = stack_i constraint_jacobian(q_i, native_P.state)   # GT probe を Pred 幾何で評価
-A        = J_Q @ R_P                               # (n_gt, n_pP)
-dp_i     = pinv(A) @ e_i                            # 「GT dim i を1動かし他を保つ」を Pred knob で実現
-deform_gain(raw, §17.2) = ‖dp_i‖_1
+dp_i = A^{-1} e_i                              # 正方可逆なので一意
+participation_i = ‖dp_i‖_1^2 / ‖dp_i‖_2^2      # GT 編集ごとに平均
 ```
 
-`e_i` の off-diagonal 0 が「c_2..c_m を保つ」を表現する。`q_i` の参照エンティティが Pred に無い（model がエンティティ欠落）場合その probe は skip。
+**お気持ち（なぜ (L1/L2)^2 か、なぜ L2 で割るか）**: これは inverse participation ratio ＝「実効的に動くツマミの本数」。等しい k 本が動くとき `‖dp‖_1^2/‖dp‖_2^2 = (kc)^2/(kc^2) = k` と本数に一致、不均等なら soft count（例 `(1,0.01)`→≈1.02＝実質1本）。**L2 で割る意味は scale 不変化**: `participation(c·dp)=participation(dp)`。`‖dp‖_1` 単独は「本数 × 大きさ」を混ぜるが、その「大きさ」こそ gain/感度の軸で、§17.7 で deviation を汚した張本人。L2（＝最大成分が支配する大きさのスケール）で割ると magnitude が消え、**純粋に「いくつのツマミが必要か」だけ**が残る。`‖dp‖_1` = 総移動量、`‖dp‖_2` = 大きさスケール、その比（の二乗）が spread/count。
 
-**reference は 0 でなく 1**: GT-on-GT なら `A=I`, `dp_i=e_i`, `‖dp_i‖_1=1`。実測でも `source_self` で `l1=1.0000, resid=0.0`（§17.4 表）。ゆえに「小さいほど良い」は誤りで、**1 からの乖離を見るべき**（質問1の答え＝Yes）。
+**基準と gaming 不能性**: GT-on-GT で `A=I` → participation=1。統制下で **participation=1 ⟺ A^{-1} が monomial（各列に非ゼロ1つ）⟺ 各 GT 編集が単一 Pred ツマミで実現 ⟺ Pred が GT と edit-equivalent**。「ugly かつ participation=1」は定義上ありえない（edit-equivalent-to-GT と not-ugly-relative-to-GT は同義）ので、**統制下では gaming failure mode が存在しない**。本数 m 固定なので over-dimensioning exploit も構造的に不可能。（datum/基準寸法は participation≈1 で正しく「良い実務」と判定、chain 寸法は GT の datum 編集を再現するのにツマミが連鎖して >1。）
 
-- `l1 > 1`: Pred は複数 knob を動員（over-coupling / leak）→ 編集が他寸法に波及。
-- `l1 < 1`: 小さな knob 変化で大きく動く＝**過敏な driving param**（質問1で挙げた「sensitive な小部品」）。L1 最小化はこれを最良と誤判定する。
+**数値実証（toy: 共有2D接空間を R^6 に埋め込み、Pred 基底を GT から角度 mix で回転＝ugliness）**:
 
-**読み出し（per-edit, GT probe 平均）**:
+| ugliness | motion_angle(deg) | resid | participation | ‖dp‖_1 |
+|---:|---:|---:|---:|---:|
+| 0.00 | 0.0000 | 0.0 | 1.000 | 1.000 |
+| 0.50 | 0.0000 | 0.0 | 1.707 | 1.307 |
+| 1.00 | 0.0000 | 0.0 | 2.000 | 1.414 |
 
-| 読み出し | 定義 | ideal | 役割 |
-|---|---|---|---|
-| `l1` | `‖dp‖_1` | 1 | §17.2 raw（**単独では誤導**） |
-| `deviation` | `|1 - ‖dp‖_1|` | 0 | GT 同等労力からの距離（**頑健な主指標**） |
-| `logdev` | `|log ‖dp‖_1|` | 0 | 比対称版（過敏 `<1` と鈍重 `>1` を等価に罰する。質問1の趣旨に最も忠実だが `l1→0` で発散） |
-| `participation` | `‖dp‖_1²/‖dp‖_2²` | 1 | 実効 knob 数（scale 不変、magnitude を見ない補助） |
-| `resid` | `‖A dp - e_i‖` | 0 | 再現可能性（dim 数が足りるか） |
-| `frac_clean` | `#{resid<1e-6}/n` | 1 | 同上の離散版 |
+motion_angle・resid は 0 のまま、participation だけが 1→2 へ単調増加。
 
-**質問1の確定回答**: raw `l1` 最小化は不可（§17.4 の dim_drop で `l1` は劣化に対し**減少**＝逆向き）。主指標は `deviation=|1-l1|`（有界・頑健）。比対称が欲しければ `logdev`、ただし再現不能域（`l1→0`）で発散するので常に `resid` を併記する。`deform_gain` は **(a) 再現可能性 (resid)** と **(b) 再現できた前提での労力一致 (deviation/logdev)** の2軸であり、単一スカラーに潰さず両軸 report する。
+**補助・代替案**:
+- `‖dp_i‖_0`（閾値超え本数）= 仮説の文字通りの離散版。participation はその滑らかな代理。
+- 割当外エネルギー比（`|A^{-1}|` 上の Hungarian 最適割当、置換で0・密で→1）は **可逆な統制下では participation とほぼ一致**（A 可逆 → 列独立 → 1:1 割当が必ず存在）。標準的で解釈容易な participation を採用し、これは非可逆ケース用の頑健化候補として記録のみ（実装不要）。
 
-### 17.4 deform_gain の ablation（v4_results §3–§4 と同形式）(2026-06-03)
+### 17.4 dim_uglify 生成器の実装
 
-driver: [notebooks/v4_exp/deform_gain_ablation.py](v4_exp/deform_gain_ablation.py)（v4 と同一 setting: 6 batch × 5 human, ref_size=2, n=396 rotation, base=308 / solver_rl=368）。純線形代数のため FreeCAD finite solve 不要。artifact: [artifacts/v4_exp/deform_gain_details.csv](../artifacts/v4_exp/deform_gain_details.csv)。
+[notebooks/v4_exp/dim_uglify.py](v4_exp/dim_uglify.py) `uglify_sketch(gt, alpha, ...)`:
 
-**variant 別 median（rotation-level, refs 平均）**:
+1. relational + size dim（Radius/Diameter）を保持し、**uglifiable**（Distance/DistanceX/DistanceY/Angle）の α 割合を除去。
+2. 貪欲に「GT 自身の dim **型**（point-point / point-line Distance, Angle…）を random ref に張り替えた候補」を追加し、`rank(J_x)` が上がるものだけ採択（冗長は棄却）。**型を再利用するのが要点**: point-point Distance だけでは line 長・point-to-line・向き DoF を張れない。
+3. full-rank 復帰後 `complete_constraint_values`（[sketch_utils.py](../src/sketch_handlers/sketch_utils.py)）で各 dim 値を GT 幾何から確定（`VALUE_ASSIGNED:` watermark 付与）。SketchGraphs 原データの値は壊れていることが多く、これが正準経路。
+4. FreeCAD native solver で最終検証（`converged` のみ採択）。
 
-| variant | n | l1 | deviation | logdev | participation | resid | frac_clean | med n_pP |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| source_self | 396 | 1.0000 | 0.0000 | 0.0000 | 1.0000 | 0.0000 | 1.0000 | 5 |
-| heldout | 396 | 1.2667 | 0.3907 | 0.3315 | 1.3367 | 0.0000 | 1.0000 | 5 |
-| dim_drop25 | 396 | 1.0711 | 0.4798 | 0.7573 | 1.4276 | 0.3340 | 0.4500 | 4 |
-| dim_drop50 | 396 | 0.7504 | 0.5574 | 5.3650 | 1.3496 | 0.6041 | 0.1548 | 3 |
-| dim_drop75 | 396 | 0.3516 | 0.7257 | 12.278 | 1.0000 | 0.8066 | 0.0000 | 1 |
-| dim_drop100 | 396 | 0.0000 | 1.0000 | NA | 0.0000 | 1.0000 | 0.0000 | 0 |
-| rel_drop50 | 396 | 3.7894 | 2.9960 | 1.9194 | 1.3896 | 0.1436 | 0.7500 | 5 |
-| rel_drop100 | 396 | 1.3318 | 1.0000 | 4.6794 | 0.9167 | 0.3790 | 0.5460 | 5 |
-| **base** | 308 | 1.0833 | 0.6772 | 0.7188 | 1.2693 | 0.2652 | 0.6036 | 4 |
-| **solver_rl** | 368 | 1.2207 | 0.3333 | 0.2883 | 1.4730 | 0.0000 | 1.0000 | 9 |
+**速度・並列**: 内側ループは Jacobian-rank 判定のみ（rank は target 値に非依存なので候補は dummy 値、FreeCAD 不使用）、FreeCAD solve は build 毎に1回だけ。driver [gen_dim_uglify.py](v4_exp/gen_dim_uglify.py) は 1 file=1 task の ProcessPoolExecutor（spawn, FreeCAD は process-safe, 各 worker 自前 context, Vitruvion model はロードしない）。16 workers で 139 files が ~7 分。
 
-**construct validity（dim_drop sweep）**:
-- `deviation` 単調増加 `0.391→0.480→0.557→0.726→1.000` ✓、`resid` 単調増加 `0.0→0.334→0.604→0.807→1.000` ✓。
-- 一方 raw `l1` は `1.267→1.071→0.750→0.352→0.000` と**減少**＝劣化を低値と誤判定。質問1（raw 最小化不可）の直接証拠。
-- `rel_drop` は off-axis で非単調・暴れる（`deviation` が rel_drop50 で 2.996）。relational 除去は `R_P` を直接壊すため deform_gain は relational presence と直交しない。motion_angle の**補完**であって直交分解ではない、と位置づける。
+**実装上の落とし穴（記録）**: 候補 dim の `QuantityParameter` は `value`=float かつ `expression` が `VALUE_ASSIGNED:` で始まる必要があり（[constraints/base.py](../src/sketch_handlers/constraints/base.py) `get_constraint_props`）、欠けると handler residual が raise → `compute_native_response` が黙ってその制約を落とし rank が上がらない。`complete_constraint_values` を使えば自動付与。
 
-**paired Wilcoxon（model vs heldout, lower-is-better, z>0 ⇒ human 優位）**:
+### 17.5 dim_uglify 実データ結果（決定的）
 
-| readout | base z | solver_rl z |
-|---|---:|---:|
-| deviation | **+5.68** (p=1.3e-8) | −2.24 (p=2.5e-2) |
-| logdev | **+7.86** (p=3.9e-15) | −3.79 (p=1.5e-4) |
-| resid | **+8.77** (p=1.8e-18) | −11.49 (p=1.4e-30) |
+α∈{0,.25,.5,.75,1}, seed×3, GT=各 human が自分の dimensioning を uglify する self-comparison。artifact: `artifacts/v4_exp/dim_uglify_details.csv`、uglified sketch は `artifacts/v4_exp/dim_uglify_cache/` に pickle。集計は `uglifiable_dof>0` に限定。
 
-- **base（under-dimensioning）には全軸で human 優位**＝deform_gain は「人間の dimensioning > base」を正しく検出。
-- **solver_rl は model 優位（符号反転）**。原因は **over-dimensioning**: solver_rl の `med n_pP=9`（GT `n_gt=5`）、detail 行の **77% が n_pP>n_gt**（base 32%, heldout 26%）。dim が過剰だと `resid=0/frac_clean=1` で全 edit を自明に再現でき、`l1≈1` 近傍に乗る。これは §9 の Case K/M sign-inversion・§14.7 M1 の「FC cost が育つ」と**同型の over-constraint exploit**。
-- **count-matched（square-only, n_gt==n_pP）に絞ると solver_rl の優位は消失**: `deviation z=−0.92 (n.s.)`, `logdev z=−1.13 (n.s.)`。すなわち solver_rl の見かけの勝ちは placement の良さでなく dim 数水増しの artifact。base は square-only でも `resid z=+2.19`, `logdev z=+2.65` で human 優位を保つ。
+**フル結果（6 batch, 139 files, 5330 builds, build 成功率 ~84%@α>0）**:
 
-**結論（§17 の主張への含意）**:
-1. deform_gain は motion_angle が盲目な dimensioning 軸を実際に測れる（dim_drop 単調・base で human 優位）。§17.1 の「motion_angle は placement に盲目」を補完する eval として成立。
-2. ただし raw 形は over-dimensioning で gaming 可能。**eval では count を統制**（square-only、または n_pP>n_gt の冗長 dim にペナルティ）しないと「intent を測る」主張に使えない。これは reward 化する場合の必須前提でもある（solver の over-constraint 癖を再び餌にする）。
-3. 単一スカラー化は避け `deviation`（labor 一致）＋ `resid`（再現可能性）の2軸 report を主診断とする。`logdev` は比対称が要る箇所の補助。
+| alpha | participation (median) | resid | deviation | n |
+|---:|---:|---:|---:|---:|
+| 0.00 | 1.000 | 0.0000 | 0.000 | 371 |
+| 0.25 | 1.160 | 0.0000 | 0.167 | 1044 |
+| 0.50 | 1.333 | 0.0000 | 0.414 | 1035 |
+| 0.75 | 1.500 | 0.0000 | 0.578 | 1039 |
+| 1.00 | 1.600 | 0.0000 | 0.667 | 1031 |
+
+- **participation は α（汚さ）とともに単調増加、resid は終始 0.0000**＝統制成立（同接空間なので motion_angle も 0）。
+- per-sketch 単調性 96%（343/357）、end-to-end 厳密増加 91%（324/357）。
+- paired Wilcoxon（α=1 vs α=0, n=355 sketches）: median 1.000→1.613、mean Δ=+0.725、**p=3.8e-59**。tie 31 は uglifiable 自由度が実質ゼロの sketch。
+
+**結論**: §17.1 の主張（motion_angle は placement に盲目／participation がその軸を捉える）を実データで決定的に実証。GT は同一 rel set・幾何・最終 DoF を持つ「汚い」再 dimensioning より participation が低い＝**GT の dimensioning が「各編集を最小ツマミで達成できる自然な配置」であることを定量化できた**。
+
+備考: `uglifiable_dof=0`（全 dim が Radius 等で placement 自由度ゼロ）や `=1`（単一 line 長等の強制 DoF）の sketch では participation は α によらず 1 のまま（正しい挙動＝置換する placement 自由が無い）。Angle 候補が Circle 同士を引く無効ケースは reject されるだけ（warning のみ、結果に影響なし）。
+
+### 17.6 participation の射程と限界（GT 慣習依存・chain vs datum）
+
+**(1) 統制域でのみ有効**: participation が placement 指標として信頼できるのは **count-matched な統制域のみ**。任意の model 出力（over-dimensioning しうる）に直接当てると `A` が非正方になり pinv の min-norm が余剰ツマミに分散して値が信用できない。よって participation は **thesis 実証用の instrument**（および count-matched subset での診断）であり、任意 model 評価の drop-in metric ではない。
+
+**(2) GT 慣習依存 — chain vs datum 問題（重要）**: participation は「Pred が **GT の慣習** とどれだけ一致するか」を測るのであって、絶対的な良し悪しではない。基準は 1（GT-on-GT）で、GT と違う placement は全て >1。問題は、**正当な別慣習どうしでも大きく出る**こと。toy（直線上 n 点, datum=基準点から各点を寸法 / chain=隣接間を寸法）:
+
+| | participation (n=3 / 4 / 6) |
+|---|---:|
+| GT=datum, Pred=chain | 1.67 / 1.75 / 1.83 |
+| GT=chain, Pred=datum | 2.00 / 2.50 / 3.50 |
+| GT=datum, Pred=**random ugly** | 1.67 / 1.75 / 1.83 |
+
+すなわち **chain↔datum はランダム uglify と同程度のスコア**。participation だけでは「劣った dimensioning」と「正当な別慣習」を magnitude で区別できない。これは participation が placement 軸を測れている証拠の裏返し（chain と datum は tolerance stack-up vs 独立配置という**別の design intent** で、motion_angle は両者を 0=同一と見るが participation は区別する）でもあるが、**model を「正しい/間違い」で採点する用途では交絡**。
+
+→ 対処: model 評価では **multi-reference**（複数の human GT に対して participation を計算し min を取る＝どれか1人の慣習に合致すれば低スコア）＋ **human-human participation を floor** として併置（人間どうしも慣習差で >1 になり、その分布が「正常範囲」）。v4 の source-conditioned multi-reference 枠組みがそのまま使える。絶対値 vs 単一 GT を品質判定に使ってはならない。
+
+**(3) coverage は既存指標で足りる**: 「適切な DoF を被覆しているか（under/over-dimensioning）」という軸は、本章で一度 `resid_sym` として作ったが、**motion_angle（d_sub_angle の rank 正規化）+ leak_angle が既に捉えている**ため新規には不要（§17.7 参照）。よって最終的に追加すべき新軸は participation の1つのみ。
+
+### 17.7 検討の経緯と棄却・派生案まとめ
+
+placement 指標 participation に至るまでに検討し、棄却ないし別軸へ振り分けた案を一括記録（教訓つき）:
+
+| 案 | 何を測ろうとしたか | 判定と理由 |
+|---|---|---|
+| **raw deform_gain `‖dp‖_1` 最小化** | 編集に要する Pred driving param 総変化（小さいほど良い、の初案） | **棄却**。dim_drop で劣化に対し `l1` が**減少**（1.27→0.0）＝逆向き。基準は 0 でなく **1**（GT-on-GT で `A=I`→1）。 |
+| **deviation `\|1−l1\|` / logdev** | 1 からの乖離＝GT 同等労力か（過敏 `<1`・過結合 `>1` の両側を罰） | **headline から降格**。再現が綺麗な領域に限定しても human/model を分けず、むしろ over-dim model を僅か優遇（min-norm が多ツマミに分散し `l1≈1` に寄る）。effort 軸は intent と相関しない。operability 診断としてのみ残置。 |
+| **redundancy `n_pP − rank(R_P)`** | over-dimensioning（冗長 dim）を rank 欠損で検出 | **棄却**。solver_rl の余剰 dim は独立（rank=n_pP）で、over-determined でなく「人間が空けた DoF まで拘束」型。rank 欠損が無く検出不能。 |
+| **square-only 統制** | n_gt==n_pP に絞り placement を count から分離 | **棄却**。coverage 多様性（human diversity）を潰し、残るのは gamed な deviation のみ。統制は dim_uglify（rel 同一・幾何同一）で行うべき。 |
+| **forward-only resid** | GT 編集を Pred が再現できるか（coverage） | **棄却**。単独では over-dim exploit（solver_rl 符号反転 z=−11.3）。backward を足した symmetric `resid_sym` で z=+12.1 に修正できたが（下記）、結局 coverage 自体が既存指標で足りるので不要。 |
+| **resid_sym = max(resid_fwd, resid_bwd)** | coverage（under/over-dimensioning）を双方向で頑健に | **棄却（冗長）**。coverage は motion_angle（d_sub_angle の `max(dim_P,dim_G)` rank 項）+ leak_angle が既に捉え、しかも motion_angle は solver_rl の over-dim を exploit 無しで human 優位に並べる（z≈+11.9）。resid_sym が解いた exploit は forward-only resid 固有の自作問題で、既存指標には存在しなかった。新軸としては participation のみ残す。 |
+
+**全体の教訓**: 当初は design-intent を「coverage + placement の2軸」と捉えたが、coverage は既存の motion_angle + leak_angle で足り、**本章が追加すべき真に新規な軸は placement = participation の1つだけ**だった。participation は motion_angle / leak_angle が構造的に盲目な「どの辺に dim を置くか」を、`A^{-1}` 列の実効ツマミ数で測る。L2 正規化により magnitude=gain を落として本数のみを抽出するのが核心（effort 軸 `l1`/deviation はこの汚染で intent を測れなかった）。ただし「GT 慣習との一致」を測る性質上、chain↔datum 等の別慣味交絡があり、評価には multi-reference + human floor が必須（§17.6）。

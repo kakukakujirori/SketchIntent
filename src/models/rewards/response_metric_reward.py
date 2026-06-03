@@ -82,6 +82,7 @@ from src.models.rewards.utils.sketch_builder import (
     get_or_compute_gt_relation_nullspace,
     get_or_compute_j_phi,
 )
+from src.sketch_handlers.constants import ConstraintToken
 from src.sketch_handlers.context import SketchContext
 from src.sketch_handlers.sketch_tokenizer import SketchTokenizer
 
@@ -714,6 +715,7 @@ class ResponseIntentReward(BaseReward):
         motion_relational_reverse_weight: float = 0.5,
         gate: str = "fc",
         num_workers: int = 0,
+        shuffle_within_group: bool = False,
         weight: float = 1.0,
         enabled: bool = True,
     ):
@@ -735,6 +737,15 @@ class ResponseIntentReward(BaseReward):
                 and ``always`` scores every reconstructable sample.
             num_workers: Number of process workers for per-sketch group
                 scoring.  ``0`` keeps the serial in-process path.
+            shuffle_within_group: Negative control.  When ``True``, the per-sample
+                intent reward scalars are permuted within each RLOO group of
+                ``ctx.group_sample_size`` rollouts before being placed back at
+                each sample's own STOP token.  This preserves the reward
+                distribution and the group mean (so the RLOO baseline is
+                unchanged) while destroying the sample↔reward correspondence, so
+                any remaining S+R̃ effect is attributable to reward *scale* rather
+                than to matching the GT.  The logged ``intent_*`` metrics still
+                describe the true (unshuffled) angles.
             weight: Composer-level multiplier from ``BaseReward``.
             enabled: Composer-level on/off switch from ``BaseReward``.
         """
@@ -763,6 +774,7 @@ class ResponseIntentReward(BaseReward):
         self.motion_relational_reverse_weight = motion_relational_reverse_weight
         self.gate = gate
         self.num_workers = max(0, int(num_workers))
+        self.shuffle_within_group = bool(shuffle_within_group)
         self.tokenizer = SketchTokenizer(context)
         self._executor: ProcessPoolExecutor | None = None
 
@@ -1045,6 +1057,44 @@ class ResponseIntentReward(BaseReward):
 
         return scores, stats
 
+    def _shuffle_scores_within_group(
+        self, scores: torch.Tensor, ctx: RewardContext
+    ) -> torch.Tensor:
+        """Permute per-sample intent scalars within each RLOO group.
+
+        The sequence-level reward placed by ``_score_*_from_arrays`` is a single
+        scalar at each sample's first STOP, so ``scores.sum(dim=1)`` recovers the
+        per-sample intent reward (0 for gated-out samples).  We permute those
+        scalars within each contiguous block of ``K = ctx.group_sample_size`` and
+        place the permuted value back at the *receiving* sample's own first STOP.
+        Because a permutation preserves the per-group multiset, the group sum (and
+        thus the RLOO leave-one-out baseline mean) is unchanged; only the
+        sample↔reward correspondence is broken.
+        """
+        K = ctx.group_sample_size
+        B, L = scores.shape
+        if not K or K < 2 or B % K != 0:
+            return scores
+
+        scalar = scores.sum(dim=1)                                  # (B,)
+        cons = ctx.cons_tokens.detach().to("cpu")
+        eq_stop = (cons == int(ConstraintToken.Stop)).int()
+        any_stop = eq_stop.any(dim=-1)
+        first_stop = torch.where(
+            any_stop,
+            eq_stop.argmax(dim=-1),
+            torch.full((B,), L - 1, dtype=torch.long),
+        )
+
+        perm = torch.arange(B)
+        for g in range(B // K):
+            base = g * K
+            perm[base : base + K] = base + torch.randperm(K)
+
+        new_scores = torch.zeros_like(scores)
+        new_scores[torch.arange(B), first_stop] = scalar[perm]
+        return new_scores
+
     @torch.no_grad()
     def compute(self, ctx: RewardContext) -> RewardOutput:
         """Compute sequence-level scores and scalar logging metrics for a batch."""
@@ -1066,6 +1116,11 @@ class ResponseIntentReward(BaseReward):
             scores, stats = self._score_serial_from_arrays(
                 ctx, prim_np, cons_np, statuses, L
             )
+
+        # Negative control: scramble the sample↔reward correspondence within each
+        # RLOO group (scale-matched, baseline-preserving).  Metrics stay true.
+        if self.shuffle_within_group:
+            scores = self._shuffle_scores_within_group(scores, ctx)
 
         return RewardOutput(scores=scores, metrics=stats.to_metrics_dict())
 

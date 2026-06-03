@@ -225,6 +225,7 @@ class ConstraintARModuleRLOO(L.LightningModule):
             cons_tokens=generated,
             sketch_original_list=expanded['sketch'],
             gt_tokens=gt_expanded,
+            group_sample_size=K,
         )
         reward_handles = self.reward_composer.submit_async(ctx)
 

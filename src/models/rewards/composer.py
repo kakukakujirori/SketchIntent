@@ -77,12 +77,14 @@ class RewardComposer(torch.nn.Module):
         cons_tokens: torch.Tensor,
         sketch_original_list: list[datalib.Sketch],
         gt_tokens: torch.Tensor | None = None,
+        group_sample_size: int | None = None,
     ) -> RewardContext:
         return RewardContext(
             prim_tokens=prim_tokens,
             cons_tokens=cons_tokens,
             sketch_original_list=sketch_original_list,
             gt_tokens=gt_tokens,
+            group_sample_size=group_sample_size,
         )
 
     # ------------------------------------------------------------------ #
