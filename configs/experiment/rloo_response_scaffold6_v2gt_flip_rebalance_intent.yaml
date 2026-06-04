@@ -140,19 +140,6 @@ model:
           Vertical: 0.05
           Midpoint: 0.112
 
-      - _target_: src.models.rewards.dimensional_class_prior.DimensionalClassPriorReward
-        context: ${data.context}
-        gate: converged
-        cap_positive_total: 0.12
-        cap_negative_total: -0.15
-        cap_per_type: 3
-        coeff_by_type:
-          # Light CAD-prior nudge: prefer axis dimensions over arbitrary
-          # Distance, without turning this into a dimension-placement metric.
-          Distance: -0.03
-          DistanceX: 0.02
-          DistanceY: 0.02
-
       - _target_: src.models.rewards.response_metric_reward.ResponseIntentReward
         context: ${data.context}
         eps: 1.0e-9
@@ -199,17 +186,6 @@ model:
           Horizontal: 0.042
           Vertical: 0.05
           Midpoint: 0.112
-
-      - _target_: src.models.rewards.dimensional_class_prior.DimensionalClassPriorReward
-        context: ${data.context}
-        gate: always
-        cap_positive_total: 0.12
-        cap_negative_total: -0.15
-        cap_per_type: 3
-        coeff_by_type:
-          Distance: -0.03
-          DistanceX: 0.02
-          DistanceY: 0.02
 
   optimizer:
     lr: 1e-5

@@ -2981,13 +2981,68 @@ conda run -n freecad python src/train.py experiment=rloo_response_scaffold6_v2gt
 conda run -n freecad python src/train.py experiment=rloo_response_scaffold6_v2gt_flip_rebalance_no_intent
 ```
 
+### 16.12 intent on/off/shuffled の3者比較 — shuffle 負例対照で「強い成功」を確定 (2026-06-04)
+
+§16.11.4 の本線 run（scaffold6 = v2 GT × flip × rebalance × symmetric）が完走し、ResponseIntentReward の
+有効性を切り分けるための**決定的 ablation 軸**が揃った。判定軸は scaffold5-vs-6（= GT v1/v2 の質 ablation）ではなく、
+**GT=v2・flip・rebalance・足場を全固定して intent {ON / OFF / shuffled} だけを動かす**ことである（§16.1 / §16.8 #1）。
+shuffle 負例対照は、§3 / §8.1 next-action / §16.8 #6 で「S vs S+R に gap が出てから回す」と保留していたもので、
+gap が出た（下表）ため実行した。
+
+**実装（負例対照）**: `ResponseIntentReward(shuffle_within_group=True)`。`RewardContext.group_sample_size`（=K、
+`constraint_ar_module_rloo.build_context` で付与）を見て、`compute()` で per-sample の intent 報酬スカラを
+**同一 RLOO group（K=9、flip view 込み）内で permutation** してから各サンプル自身の STOP に再配置する。
+permutation は group の multiset を保存する＝**RLOO leave-one-out baseline の group 平均は不変**で、
+**sample↔報酬（=sample↔GT）の対応だけを破壊**する。よって S+R̃ に残る効果があれば、それは GT 対応ではなく
+**報酬の scale / 分散**に由来する。ログの `intent_*` は真値（shuffle 前の角度）を出すので eval 軸は3者で同一。
+config は `rloo_response_scaffold6_v2gt_flip_rebalance_shuffled_intent.yaml`（= o0xgo75k の config と完全同一＝
+commit d82a42b の pre-`DimensionalClassPrior` 版＋train 側 `shuffle_within_group: true` の1行のみ）。
+ユニット検証で group 和不変・gated-out サンプルが他サンプルの値を受領・metrics 真値を確認済み。
+
+**3者の同一 step（~15.6k）比較**（`validation_gen/*`。`resp`/`mrel`/`leak`/`distFam`/`DoF`/`under` は低いほど良い、
+`keyrel`/`rel`/`FC` は高いほど良い、ただし FC は guardrail 扱い §16.8 #1）:
+
+| run | step | resp | mrel | leak | FC | under | DoF | distFam | keyrel | rel |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| **S+R** intent `o0xgo75k` | 15654 | **0.428** | **0.405** | **0.391** | 0.503 | 0.423 | 5.36 | **0.217** | **0.428** | **0.712** |
+| S no-intent `13f89l4i` | 15588 | 0.475 | 0.442 | 0.447 | 0.570 | 0.389 | 5.46 | 0.246 | 0.413 | 0.682 |
+| **S+R̃** shuffled `buxh9c4w` | 15588 | 0.477 | 0.439 | 0.434 | 0.597 | 0.362 | 5.59 | 0.241 | 0.417 | 0.695 |
+
+**読み（決定的）**:
+- **S+R̃ は全 design-intent 軸で no-intent ベースライン S に潰れる**: resp 0.477≈0.475（intent 0.428 から遠い）、
+  mrel 0.439≈0.442、distFam 0.241≈0.246、keyrel 0.417≈0.413、rel 0.695≈0.682。intent の改善（S 比 resp −0.047 /
+  distFam −0.029 / keyrel +0.015）は **scale を揃えて対応だけ壊すと消える**。
+- ＝ **改善は GT 対応（各サンプルを自分自身の motion-subspace 標的に向ける信号）に由来し、報酬の大きさ/分散ではない**。
+  これは §8.1「強い成功」の署名で、補助 RL 実験として狙っていた切り分けがクリーンに取れた。
+- むしろ S+R̃ は FC 0.597 / under 0.362 / DoF 5.59 と **S よりやや拘束過多側へ**動く（ランダムに注入された報酬ノイズの
+  作用）。真の intent が relational/under 側（FC 0.503・distFam 最小）へ動かすのと**逆向き**で、対応信号の方向性を裏書きする。
+- 唯一の小さな残差は **leak**: S+R̃ 0.434 は S 0.447 をわずかに下回る（intent は 0.391）。intent 効果（S 比 −0.056）の
+  約 1/4 で、3者の FC/DoF 動作点が微妙に違う（S+R̃ が最も拘束過多）ことの副作用と読める範囲。leak も「ほぼ no-intent 側」で、
+  対応由来でない残差は小さい。
+
+**caveat / 限界**:
+- 各条件 1 seed・同一 step（~15.6k）・点推定の平均（paired 検定ではない）。ただし3者の分離は全軸で一貫し符号も安定。
+  有意性を足すなら最も安いのは wandb history で直近 step 群の gap 符号安定性を見ること（新規計算不要）。
+- 動作点（FC/DoF）が3者で完全一致していない。ただし shuffle 対照が「同じ intent 報酬 scale で対応のみ除去」を担保し、
+  それが intent 指標を再現しない（むしろ逆向き）ので、relational シフトは対応駆動と帰属できる。
+- eval の headline `response_full_angle`（gate=always、canonical d_H_angle）は**訓練報酬（`motion_relational_angle`）とは
+  別 metric の sibling** なので完全な自己評価ではない。加えて報酬が直接最適化しない非報酬指標（distFam/keyrel/FC）が
+  同方向に動いている点が、循環でない裏付けになる（§16.8 #1 / トートロジー懸念への回答）。
+
+**結論**: ResponseIntentReward は、同一足場（v2 GT × flip × rebalance）の上で **GT 対応に由来する design-intent 信号として
+機能している**（§8.1 強い成功）。FC は intent ありで下がる（trade-off、§16.1 で想定済み）が、これは主指標ではない。
+**補助 RL 実験の主張はここで確定**とし、以降は (1) 設定凍結 → (2) 全件 pseudo-GT（`sg_pseudo_rel_v2_no_mirror_full.npy` /
+`sg_pseudo_rel_v2_full_all_full.npy`、生成済/生成中）で本命 intent と −intent をフル長で step-matched に回し最終定性 figure、
+の production 流れに移る。全件長期学習は rare-rel を伸ばす施策ではなく（収束で頭打ち）、fiverr の under（分布ギャップ）も
+埋めないので、新しい主張を出すためではなく凍結設定の最終 checkpoint・figure 取りとして位置づける。
+
 ## 17. motion_angle の placement 盲目性と dimensioning-placement 指標 participation (2026-06-03)
 
 **結論（先出し）**: motion_angle (= d_H_angle) は relational correctness（正しい接空間への到達）を測る指標で、**dimensioning placement にだけ構造的に盲目**。これを叩くため、GT と Pred が relational set・幾何・最終 DoF を共有する**統制設定**を設計し、その下で placement だけを測る指標 **participation** を確立した。実データ（`dim_uglify` 合成統制）で「汚い dimensioning ほど participation が悪化する」を決定的に実証（paired Wilcoxon p=3.8e-59）。
 
 **本章の唯一の新規軸は placement = participation**（§17.3）。motion_angle とも leak_angle とも独立した dimensioning 専門軸。coverage（under/over-dimensioning）と relational correctness は既存の motion_angle（d_sub_angle の `max(dim_P,dim_G)` rank 正規化）+ leak_angle がすでに捉えており、別途 coverage 指標（resid 系）は不要だった — むしろ motion_angle は solver_rl の over-dim を正しく human 優位に並べ（z≈+11.9, exploit 無し）、resid 系が解こうとした問題は既存指標には存在しなかった。途中で検討した棄却案（resid_sym を含む / raw l1 最小化 / deviation / rank-redundancy / square-only）は §17.7 に集約。
 
-**重要な限界（先出し）**: participation は「**GT の慣習との一致**」を測る指標で、絶対的な dimensioning の良し悪しではない。chain vs baseline(datum) のような**正当な別慣習どうしでも participation は高く出る**（§17.6, toy 実測 1.7–3.5＝ランダム uglify と同程度）。thesis 実証には無害だが、model 評価には multi-reference（複数 human GT に min）+ human-human floor が必須。
+**重要な限界（先出し）**: participation は「**GT の慣習との一致**」を測る指標で、絶対的な dimensioning の良し悪しではない。chain vs baseline(datum) のような**正当な別慣習どうしでも participation は高く出る**（§17.6, toy 実測 1.7–3.5＝ランダム uglify と同程度）。thesis 実証には無害だが、model 評価には multi-reference（複数 human GT に min）+ human-human floor が必須。**この交絡が実 Fiverr データで稀な病理ではなく「典型」（human-human median 1.34、frac≤1.05=25%）であること、および任意 model への適用が count-mismatch で壊れることを §17.8 で実データ検証した**（human-human/model 比較・drop test 込み）。
 
 ### 17.1 motion_angle はなぜ placement に盲目か（動機）
 
@@ -3103,3 +3158,218 @@ placement 指標 participation に至るまでに検討し、棄却ないし別�
 | **resid_sym = max(resid_fwd, resid_bwd)** | coverage（under/over-dimensioning）を双方向で頑健に | **棄却（冗長）**。coverage は motion_angle（d_sub_angle の `max(dim_P,dim_G)` rank 項）+ leak_angle が既に捉え、しかも motion_angle は solver_rl の over-dim を exploit 無しで human 優位に並べる（z≈+11.9）。resid_sym が解いた exploit は forward-only resid 固有の自作問題で、既存指標には存在しなかった。新軸としては participation のみ残す。 |
 
 **全体の教訓**: 当初は design-intent を「coverage + placement の2軸」と捉えたが、coverage は既存の motion_angle + leak_angle で足り、**本章が追加すべき真に新規な軸は placement = participation の1つだけ**だった。participation は motion_angle / leak_angle が構造的に盲目な「どの辺に dim を置くか」を、`A^{-1}` 列の実効ツマミ数で測る。L2 正規化により magnitude=gain を落として本数のみを抽出するのが核心（effort 軸 `l1`/deviation はこの汚染で intent を測れなかった）。ただし「GT 慣習との一致」を測る性質上、chain↔datum 等の別慣味交絡があり、評価には multi-reference + human floor が必須（§17.6）。
+
+### 17.8 participation を model 評価に当てた実データ検証: human-human floor・drop test・chain/datum 頻度 (2026-06-04)
+
+**結論（先出し）**: §17.5 の dim_uglify は **count-matched 統制域** での placement signal を実証したが、(a) human-human vs human-Vitruvion 比較、(b) relational/dimensional drop test、(c) §17.6 で警告した chain↔datum 交絡が実データで**どれくらい頻発するか**、の3点は未検証だった。これらを既存 artifact `artifacts/v4_exp/deform_gain_details.csv`（[deform_gain_ablation.py](v4_exp/deform_gain_ablation.py) 出力、6 batch・396 rotations・base/solver_rl 込み）から検証した。結果は **§17.6 の限界記述を実データで決定的に確証**: chain/datum 交絡は稀な病理ではなく**典型**（human-human participation 中央値 1.34、frac≤1.05 はわずか 25%）であり、participation を任意 model の drop-in 評価指標にしてはならないという §17.6 の position が裏付けられた。dim_uglify thesis（§17.5）は count-matched 統制内の主張なので無傷。
+
+分析: [notebooks/v4_exp/analyze_participation_eval.py](v4_exp/analyze_participation_eval.py)（既存 details CSV を読むだけ、再生成不要）。各 detail 行は (rotation, variant, GT-ref)。1 rotation に GT-ref が2人いるので ref 上で **mean**（単一慣習一致）と **min**（multi-reference, §17.6: どれか1人の慣習に合えば低スコア）の両方で集約。participation は `A` が正方（`n_gt==n_p_pred`）のときのみ信頼でき（§17.6(1)）、SQUARE-ONLY view は count-matched 行のみに制限する。
+
+#### 17.8.1 count 一致の実態（なぜ任意 model で participation が壊れるか）
+
+| variant | n | square% | under% | over% | med_resid |
+|---|---:|---:|---:|---:|---:|
+| source_self | 792 | 100% | 0% | 0% | 0.0000 |
+| heldout (human) | 792 | 48% | 26% | 26% | 0.0000 |
+| dim_drop25 | 792 | 19% | 74% | 6% | 0.3476 |
+| dim_drop50 | 792 | 6% | 93% | 1% | 0.6200 |
+| dim_drop75 | 792 | 1% | 99% | 0% | 0.8089 |
+| dim_drop100 | 792 | 0% | 100% | 0% | 1.0000 |
+| rel_drop50 | 792 | 48% | 26% | 26% | 0.1256 |
+| rel_drop100 | 792 | 48% | 26% | 26% | 0.3763 |
+| base | 612 | 21% | 46% | 32% | 0.2500 |
+| solver_rl | 732 | 21% | 2% | 77% | 0.0000 |
+
+**human-human ですら dim 本数が一致するのは 48% のみ**（26% under / 26% over）。base は under-constrained（46% under）、solver_rl は **77% over-dim**（resid=0＝全 GT 編集を over-span で再現）。任意 model は count-matched 域をほぼ外れるため、participation の前提（`A` 正方可逆）が成立しない。
+
+#### 17.8.2 drop test: participation は coverage でも relational でもない（直交性の確認）
+
+| variant | med participation (mean / min agg, ALL) |
+|---|---:|
+| source_self | 1.000 / 1.000 |
+| **heldout** | **1.337 / 1.167** |
+| dim_drop25 | 1.425 / 1.324 |
+| dim_drop50 | 1.348 / 1.219 |
+| dim_drop75 | 1.000 / 1.000 |
+| dim_drop100 | **0.000 / 0.000** |
+| rel_drop50 | 1.390 / 1.231 |
+| rel_drop100 | **0.917 / 0.779** |
+| base | 1.269 / 1.142 |
+| solver_rl | 1.473 / 1.250 |
+
+- **dimensional drop は participation の妥当な負例にならない**: 1.425→1.348→1.000→**0.000** と非単調で、劣化が進むほど participation が**下がる**（dim_drop100 が「最良」に見える）。これは dim を抜くと `A` が non-square・under-dim になり resid が 0.35→1.0 と増大、pinv min-norm が `dp` を縮め participation が 1→0 に潰れるため。coverage（under-dimensioning）は participation の管轄外で、§17.6(3) の通り motion_angle/leak_angle が見る軸。
+- **relational drop も off-axis**: rel_drop100 で participation=**0.917<1**（relation を全部壊しても placement スコアは「良い」）。participation は relational correctness と直交（motion_angle の管轄）。
+- これらは「participation が placement 専用軸」という §17 主張の裏返しの確認（coverage/relational では動かない）であると同時に、**participation を単独で under/over-dimensioning の検出に使えない**ことの実証。
+
+#### 17.8.3 human-human floor vs human-model 分布（§17.6(2) の頻度実測 + model 比較）
+
+human-human（heldout）floor と human-model（base / solver_rl）の participation 分布を**同一形式で並置**。交絡は値が 1 を超えるたびに発火する。model 行が human floor と比較できるのは count-matched な SQUARE view のみ（§17.6(1)）:
+
+| view | variant | agg | n | median | Q75 | Q90 | Q95 | max | frac≤1.05 |
+|---|---|---|---:|---:|---:|---:|---:|---:|---:|
+| ALL | heldout (human) | mean | 396 | 1.337 | 1.596 | 2.000 | 2.298 | 3.905 | **0.25** |
+| ALL | heldout (human) | min | 396 | 1.167 | 1.415 | 1.753 | 2.019 | 3.690 | **0.43** |
+| ALL | base | mean | 308 | 1.269 | 1.650 | 2.195 | 2.685 | 3.666 | 0.35 |
+| ALL | base | min | 308 | 1.142 | 1.498 | 2.029 | 2.345 | 3.393 | 0.47 |
+| ALL | solver_rl | mean | 368 | 1.473 | 1.966 | 2.724 | 3.451 | 5.347 | 0.19 |
+| ALL | solver_rl | min | 368 | 1.250 | 1.500 | 2.277 | 2.734 | 4.944 | 0.38 |
+| SQUARE | heldout (human) | mean | 257 | 1.217 | 1.500 | 1.780 | 2.192 | 3.690 | 0.38 |
+| SQUARE | heldout (human) | min | 257 | 1.171 | 1.475 | 1.780 | 2.192 | 3.690 | 0.41 |
+| SQUARE | base | mean | 85 | 1.222 | 1.447 | 1.733 | 1.867 | 2.460 | 0.40 |
+| SQUARE | base | min | 85 | 1.200 | 1.447 | 1.693 | 1.867 | 2.460 | 0.45 |
+| SQUARE | solver_rl | mean | 104 | 1.300 | 1.500 | 1.714 | 2.208 | 4.944 | 0.25 |
+| SQUARE | solver_rl | min | 104 | 1.268 | 1.500 | 1.714 | 2.208 | 4.944 | 0.33 |
+
+**(a) chain/datum 交絡は稀な病理ではなく常態**: human-human の participation 中央値は単一参照で 1.34、count-matched に絞っても 1.22 で、**1 近傍（≤1.05）に収まるのは 25–38% に過ぎない**。§17.6 の toy 実測（chain↔datum=1.7–3.5）が実 Fiverr データでそのまま再現し、人間どうしでも placement 慣習が日常的に食い違う。multi-reference min（ここでは ref 2人）は floor を 1.34→1.17 へ下げ frac≤1.05 を 0.25→0.43 に改善するが、**2参照では依然 1 に乗らない**（過半が >1.05）。参照数を増やすほど floor が 1 に近づくことを示唆する（より多くの慣習をカバー）。
+
+**(b) 有効域では model が human floor 帯に埋もれる**: count-matched な SQUARE view では base=1.22/1.20（mean/min）が human=1.22/1.17 と**ほぼ同値**、solver_rl=1.30/1.27 も human floor の中央〜Q75 内（human Q75=1.50）に収まる。すなわち participation の有効域で model と human の placement 差はほぼ無く、§17.8.4 の paired test（SQUARE で marginal）と一致。**ALL view で solver_rl の分布が右に伸びて見える（median 1.47, Q95 3.45）のは over-dim 77% の count-mismatch inflation**（§17.8.4）であって placement 品質の劣化ではない。base は逆に under-dim で participation が 1 側に潰れ（ALL median 1.27 < human 1.34）、「under-constrained なのに participation 上は human より良く見える」という、participation を単独 model 指標にできないもう一つの証左になっている。
+
+#### 17.8.4 human vs model: 単一/少数参照では分離しない、見かけの分離は count-mismatch artifact
+
+paired Wilcoxon（model vs heldout, z>0 ⇒ human 優位＝participation 低い）:
+
+| view | agg | model | n | z | p |
+|---|---|---|---:|---:|---:|
+| ALL | mean | base | 308 | −0.86 | 0.39 (n.s.) |
+| ALL | mean | solver_rl | 368 | **+8.45** | 2.8e-17 |
+| ALL | min | base | 308 | −0.10 | 0.92 (n.s.) |
+| ALL | min | solver_rl | 368 | +6.11 | 9.8e-10 |
+| SQUARE | mean | base | 67 | +1.15 | 0.25 (n.s.) |
+| SQUARE | mean | solver_rl | 82 | **+2.54** | 0.011 |
+| SQUARE | min | base | 67 | +0.98 | 0.33 (n.s.) |
+| SQUARE | min | solver_rl | 82 | +2.23 | 0.026 |
+
+- **base（under-constrained）は participation で human と分離しない**（全 view で n.s.）。under-dimensioning は participation の管轄外（§17.8.2）なので当然。
+- **solver_rl の ALL-pairs での強い分離（z=+8.45）は placement 品質差ではなく over-dimensioning の count-mismatch artifact**。count カテゴリ別 participation を見ると solver_rl は square=1.27 / over=1.50（over-dim 77%）で、過剰ツマミに pinv min-norm が分散して participation が膨張している（heldout square=1.17）。**count-matched（SQUARE-ONLY）に絞ると z は +8.45→+2.54（min で +2.23, p≈0.03）と marginal に崩れる** = participation が有効な統制域では human/model の placement 差はほぼ無い。これは §17.6(1)（任意 model は `A` 非正方で値が信用できない）が予測した通りの挙動。
+
+#### 17.8.5 統合結論
+
+1. **§17.6 の限界記述を実データで確証**: participation は count-matched 統制（dim_uglify, §17.5）でのみ信頼できる thesis instrument であり、任意 model の drop-in 評価指標にしてはならない。
+2. **chain/datum 交絡は頻発する**（human-human median 1.34, frac≤1.05=25%）。「正当な別慣習」が日常的に participation を 1 から押し上げるため、絶対値・単一 GT での品質判定は不可。multi-reference min + human-human floor の併置が必須で、参照数を増やすほど floor が締まる。
+3. **drop test は participation の直交性を確認**: dimensional drop で非単調（count-mismatch で潰れる）・relational drop で <1。coverage と relational correctness は既存の motion_angle/leak_angle が管轄（§17.6(3) 再確認）。
+4. **したがって §17 の最終形は維持**: 新規軸は placement=participation の1本、ただし用途は (i) dim_uglify 型の count-matched 統制実証、(ii) count-matched subset での診断、に限定。model ranking は motion_angle（coverage+relational）+ leak_angle が担い、participation はそれと独立な placement 軸の存在証明として paper に置く。
+
+実行コマンド:
+```bash
+# details CSV 再生成（既存なら不要、~数分・FreeCAD solve 無し）
+python notebooks/v4_exp/deform_gain_ablation.py \
+  --vitruvion-spec base=<base_root> --vitruvion-spec solver_rl=<solver_rl_root>
+# 本節の分析（CSV を読むだけ）
+python notebooks/v4_exp/analyze_participation_eval.py
+```
+
+## 18. set_sim（motion-basis 一致）: encoding 不変な placement/diversity 軸とその射程 (2026-06-04)
+
+**結論（先出し）**: participation（§17）は **native-knob 空間**の指標で、placement の符号的多様性（chain/datum 交絡）により model 評価に使えなかった（§17.8）。本章は同じ placement 軸を**幾何 motion 空間**で測る指標 `set_sim`（motion-basis 一致）を確立する。set_sim は (i) encoding 不変（「同じ隙間を point-point か point-line で寸法」が同一視される）、(ii) human-human 一致が高い（0.84, signature Jaccard 0.11 と対照的）、(iii) 実 model を正しい向きに強く分離する（z≈+11〜12, count 交絡なし）、(iv) toy で motion_angle が構造的に盲目な placement 差を捉える（正方形 side-vs-diagonal=1.000 / 長方形 right+top-vs-right+diagonal=0.86–0.95, いずれも motion_angle=0）。**ただし重大な留保**: 統制域（relation・幾何・DoF 同一 ⇒ motion_angle≡0）で隔離すると set_sim の純粋 placement 識別力は弱く（AUROC 0.62, chain/datum 交絡あり）、ablation の強い分離（z≈+11）の大半は relational+coverage チャネル＝**既存の motion_angle/leak_angle と冗長**な可能性が高い。set_sim が motion_angle に対し *増分* の識別力を持つかは §18.7 で未検証。また intrinsic な placement-**quality**（reference 不要で good/bad を測る）候補は全滅した（§18.6）。
+
+### 18.1 定義
+
+native response $R_C=-J_x^{+}J_p\in\mathbb{R}^{n_x\times m}$（列 $j$ = dim $j$ を駆動し他制約を保つ最小ノルム幾何 motion, [edit_response_distance.py:294](../src/metrics/edit_response_distance.py#L294)）、observable Jacobian $J_\phi$（pairwise 距離＋半径, [:599](../src/metrics/edit_response_distance.py#L599)）から:
+$$M=J_\phi R_C\in\mathbb{R}^{m_\phi\times m},\qquad u_j=\frac{M_{:,j}}{\lVert M_{:,j}\rVert_2}\quad(\text{単位 motion 方向})$$
+共有 `base_eids` 上で $J_\phi$ を組むため observable フレームは annotator 間で共通。2 つの単位列集合 $A=\{a_i\}, B=\{b_j\}$ の対称 mean max-cos:
+$$\mathrm{set\_sim}(A,B)=\tfrac12\Big(\underset{j}{\mathrm{mean}}\,\underset{i}{\max}|\langle a_i,b_j\rangle| + \underset{i}{\mathrm{mean}}\,\underset{j}{\max}|\langle a_i,b_j\rangle|\Big)\in[0,1]$$
+1=同一 motion 基底、低いほど基底が回転（placement が違う）。motion_angle は range$(R_C)$ の部分空間距離で、統制域では 0（盲目）。set_sim は**同一部分空間内の基底**を見る点が新規。実装: [diag_motion_basis_consistency.py](v4_exp/diag_motion_basis_consistency.py)。
+
+### 18.2 annotator agreement: placement は多様、motion は一致
+
+3 名の Fiverr annotator で寸法配置の合意を実測（[diag_annotator_agreement.py](v4_exp/diag_annotator_agreement.py)）:
+
+| 指標 | 値 |
+|---|---|
+| 寸法 signature を 1 人だけが使用 | **79%** |
+| 全 3 人が共有 | 3%（一致中央値 0.00）|
+| pairwise Jaccard（placement 重なり）| **0.11** |
+| **motion-basis 一致**（set_sim, human-human）| **0.83** |
+
+→ **人間は「どこに寸法を置くか」では 8 割食い違うが、「どんな motion を駆動するか」では 8 割一致**。encoding 不変性が偽の多様性を潰し、kinematic な合意が現れる。motion 空間が diversity を測る正しい空間。
+
+### 18.3 ablation（human-human / human-model / drop, n=396）
+
+[diag_motion_consistency_ablation.py](v4_exp/diag_motion_consistency_ablation.py), ref 上で mean / max 集約:
+
+| variant | n | med(mean) | med(max) |
+|---|---:|---:|---:|
+| source_self | 396 | 1.000 | 1.000 |
+| **heldout (human)** | 396 | **0.843** | **0.904** |
+| dim_drop25/50/75 | | 0.779 / 0.691 / 0.609 | 0.819 / 0.732 / 0.643 |
+| rel_drop50/100 | | 0.649 / 0.520 | 0.678 / 0.536 |
+| **base** | 276 | **0.739** | 0.770 |
+| **solver_rl** | 369 | **0.749** | 0.790 |
+
+paired Wilcoxon（human 優位 z>0）: **base z=+11.99, solver_rl z=+11.18**（both p<1e-28, mean/max 同様）。dim_drop / rel_drop とも単調減少（construct-valid）。**participation（AUROC 0.5, §17.8）と違い両 model を強く正しく分離し、count 交絡も無い**（[0,1] の similarity）。
+
+### 18.4 強さの出どころ: relational+coverage チャネル vs 純粋 placement
+
+ablation の z≈+11 が placement 純粋成分か検証。統制域（同一 relation・幾何・両 fully constrained ⇒ motion_angle≡0, 純粋 placement）で隔離:
+- **dim_uglify 統制**: human-human 0.829 vs human-ugly 0.769、**AUROC 0.62**（[diag_motion_basis_consistency.py](v4_exp/diag_motion_basis_consistency.py)）。
+- **chain/datum toy**（[diag_chain_datum_motion.py](v4_exp/diag_chain_datum_motion.py), n 個共線点）:
+
+| n | datum vs chain | datum vs ugly(×20) |
+|---|---:|---:|
+| 4 | 0.678 | 0.763 |
+| 8 | 0.561 | 0.723 |
+
+→ set_sim は正当な別慣習 chain-vs-datum（0.56–0.68）を**ランダム ugly（0.72–0.76）より悪く採点**（cascade 系 motion の幾何差が大きいため）。participation と同じ convention 交絡を持つ。
+
+**解釈**: ablation の z≈+11 と統制域 0.62 の差が **relational+coverage チャネルの寄与**。すなわち set_sim の強い model 分離は大部分が motion_angle/leak_angle が既に捉える軸で、真に新規な純粋 placement 成分は弱い。multi-reference（ref union への coverage）でも改善せず（AUROC 0.641 vs single 0.639, [diag_motion_multiref.py](v4_exp/diag_motion_multiref.py)）— ugly の motion は同一 $V$ 内にあり humans が $V$ を張るため union で覆えてしまう。
+
+### 18.5 toy: set_sim は motion_angle が盲目な placement 軸を捉える
+
+[diag_set_sim_toy.py](v4_exp/diag_set_sim_toy.py)、パイプライン数式 $M=J_\phi R_C$ で解析計算。両 toy とも relational 形状固定 ⇒ range$(R_C)=V$ 同一 ⇒ motion_angle≡0:
+
+| toy | dimensioning 比較 | set_sim | motion_angle |
+|---|---|---:|---:|
+| (1) 正方形（1 DoF=scale）| 右辺 vs 対角 | **1.000** | 0.000 |
+| (2) 長方形 w:h=2:1（2 DoF）| (右辺+上辺) vs (右辺+対角) | **0.908** | 0.000 |
+| (2) 長方形 3:1 | 同上 | 0.952 | 0.000 |
+| (2) 長方形 1.5:1 | 同上 | 0.864 | 0.000 |
+
+- **(1)**: 正方形では side も diagonal も唯一の scale DoF を駆動 ⇒ motion 同一 ⇒ set_sim=1。**motion-equivalent な dimensioning を正しく同一視**（placement が違っても変形が同じなら差を出さない＝正しい挙動）。
+- **(2)**: 対角を駆動すると（右辺保持で）w↔h が結合し、軸平行基底 {V,H} と異なる基底 {V−H, H} になる ⇒ set_sim<1。**motion_angle が盲目（同一 $V$）な placement 差を set_sim が捉える**。aspect ratio で値が動く（正方形に近いほど結合が強く低下）。
+
+→ set_sim が motion_angle と**別軸**を見ること、かつ motion-equivalent なら 1 を返す健全性を toy で確認。実データでこの新規軸が motion_angle に**増分**の model 識別力を与えるかは §18.7（未検証）。
+
+### 18.6 棄却した intrinsic placement-quality 候補（一括）
+
+reference 不要で good/bad を測る intrinsic placement-quality 指標を多数試し、**全滅**した。dim_uglify の「ugly」が valid・full-rank ＝幾何的に alternative convention と区別不能（§17.6/17.8）なのが根本。一括記録:
+
+| 候補 | 何を測るか | 結果（AUROC natural vs ugly / model 分離）|
+|---|---|---|
+| Euclidean 近接性 | dim が結ぶ entity の幾何距離 | **0.495**（無信号, natural 中央値 0.65 vs ugly 0.66）[diag_placement_locality.py](v4_exp/diag_placement_locality.py) |
+| relational graph 距離 | 結ぶ entity のトポロジ距離 | 0.587（弱）|
+| pooled per-dim 特徴密度 | learned P(placement\|geometry), 5-fold CV | **0.519**（無信号）[diag_placement_density.py](v4_exp/diag_placement_density.py) |
+| 構造特徴（max-degree 等）| dimensioning graph 形状 | 0.62（弱）|
+| per-primitive 局在 (IPR) | dim 駆動で何個 primitive が動くか | **0.531**（fully constrained では relational 結合で全体が動く）[diag_motion_localization.py](v4_exp/diag_motion_localization.py) |
+| 条件数 κ(M) | motion 基底の decoupling | **失敗**: count 交絡（dim 減 ⇒ κ 低 ⇒ 劣化が「良く」見える, base AUROC 0.36 逆向き）[diag_motion_kappa_ablation.py](v4_exp/diag_motion_kappa_ablation.py) |
+| frame 局在 eff_norm/aniso | 基底の実効方向数/異方性（Gram スペクトル）| dim_uglify 統制では **0.63**（natural が decoupled）だが ablation で **count 交絡**（drop/under-dim が「良く」見える）、count-matched human-model では**分離せず**（base タイ, solver_rl 逆向き）[diag_motion_localization_ablation.py](v4_exp/diag_motion_localization_ablation.py) |
+| multi-reference coverage | Pred motion が human union に被覆されるか | 0.641（single 0.639 と同等, 改善なし）[diag_motion_multiref.py](v4_exp/diag_motion_multiref.py) |
+
+**frame 局在の定義**（最有力だった intrinsic 候補）: $S=\sum_j u_ju_j^\top$ のスペクトル $\{\lambda\}$（= Gram $U^\top U$ の固有値, $\sum\lambda=m$）から $\mathrm{eff}=(\sum\lambda)^2/\sum\lambda^2=m^2/\sum_{ij}\cos^2\theta_{ij}\in[1,m]$, $\mathrm{eff\_norm}=\mathrm{eff}/m$, $\mathrm{aniso}=\lambda_{\max}/m$。直交基底で eff=m（decoupled）、平行で eff=1（冗長）。dim_uglify では natural がより decoupled（eff_norm 0.73 vs 0.64）だが、**count 統制が外れると交絡で逆転し実 model に転移しない**＝dim_uglify 固有のアーティファクト（random rewiring が冗長軸を作る）であって naturalness ではなかった。
+
+**GL(m) 不能性論法の撤回**: 一時「統制域では任意の可逆 $A\in GL(m)$ が valid dimensioning ＝ good/bad の部分領域が存在しない」と論じたが、これは「群不変な関数が分離しない」ことしか言わず quality 関数の非存在の証明ではない（誤り、撤回）。frame 局在が弱いながら統制域で信号を出すこと自体がこの過剰主張への反証。正しい現状認識は経験的: 試した全 intrinsic 候補が 0.5–0.63 / count 交絡 / 合成 oracle 限定で、実 model 上の placement-quality 信号は見つからない。真の quality 評価には semantic/functional 入力か good/bad ラベルが要る。
+
+### 18.7 暫定結論と未検証の問い
+
+1. **diversity / convention-distance 軸としては set_sim が確立**: encoding 不変、human-human 一致 0.84、実 model を正しく強く分離（z≈+11〜12）、count 交絡なし、SVD のみ。試した全候補で最良。
+2. **ただし純粋 placement-quality 軸としては不十分**: 統制域で 0.62、chain/datum 交絡、強い分離は relational+coverage（motion_angle 冗長）の疑い。
+3. **intrinsic placement-quality は全滅**（§18.6）。
+4. **増分検証（§18.7a, 実施済み）**: set_sim が motion_angle に対し *増分* の model 識別力を持つか。
+
+### 18.7a set_sim の motion_angle に対する増分（[diag_set_sim_increment.py](v4_exp/diag_set_sim_increment.py)）
+
+同一 bundle で per (rotation, variant, gt) に set_dist=1−set_sim と motion_angle(=d_sub_angle, range の部分空間距離) を計算し、model−heldout の paired 差で増分を測定（n: base 276, solver_rl 369 rotation）:
+
+- **相関(set_dist, motion_angle) = 0.775**（全 pred-gt 集約）。**set_sim は motion_angle と 78% 冗長**。
+- **motion_angle が分離しない subset**（|d_motion_angle| 最小 1/3）で set_sim がなお human を優位にするか:
+
+| model | tie subset n | set_dist が human 優位 / model 優位 | z | p |
+|---|---:|---:|---:|---:|
+| base | 92 | **49 / 24** | +2.59 | **0.0096** |
+| solver_rl | 123 | 52 / 39 | +1.36 | 0.17 (n.s.) |
+
+→ **増分は実在するが弱く不安定**: base では motion_angle が盲目な所で set_sim がなお human 優位（p<0.01, placement 残差信号）だが、solver_rl では有意でない。
+
+**§18 最終判定**: set_sim は実質「motion_angle を basis 敏感に測った版」（r=0.78）＋弱い placement 残差（base のみ有意）。toy（§18.5）が示す通り別軸を*見てはいる*が、実 model 上での*増分*識別力は小さく一貫しない。したがって:
+- **placement を独立の model-eval 軸として強く正当化はできない** → model ランキングは既存の motion_angle + leak_angle に任せる（従来推奨を維持）。
+- **set_sim の確立された価値**: (i) §17 placement 軸の motion 空間での*存在の可測化*（encoding 不変、human 一致 0.84、toy で motion_angle 盲目性を可視化）、(ii) **diversity / convention-distance 記述子**としての利用（human-human floor 0.84 を正常範囲とする）。品質採点ではなく多様性記述に用いる。
+- intrinsic placement-quality は全滅（§18.6）。真の quality 評価には semantic/functional 入力か good/bad ラベルが必要、というのが §17–§18 を貫く確定結論。
