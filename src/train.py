@@ -1,3 +1,4 @@
+import json
 import re
 import sys
 from pathlib import Path
@@ -77,8 +78,58 @@ def _pop_resume_from(argv: list[str]) -> tuple[list[str], str | None]:
     return cleaned, resume_from
 
 
+def _same_path(path_value: object, path: Path) -> bool:
+    if path_value is None:
+        return False
+    try:
+        return Path(str(path_value)).expanduser().resolve() == path
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
+def _is_self_resume_config(cfg: DictConfig, run_dir: Path) -> bool:
+    """Detect a run config overwritten by a previous ``--resume_from`` attempt."""
+    return _same_path(cfg.get("resume_from"), run_dir)
+
+
+def _wandb_metadata_args(run_dir: Path) -> list[str]:
+    wandb_dir = run_dir / "wandb"
+    if not wandb_dir.exists():
+        return []
+
+    metadata_paths = sorted(
+        {
+            path.resolve()
+            for path in wandb_dir.glob("run-*/files/wandb-metadata.json")
+            if path.is_file()
+        },
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    for metadata_path in metadata_paths:
+        try:
+            metadata = json.loads(metadata_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        args = metadata.get("args")
+        if isinstance(args, list):
+            return [str(arg) for arg in args]
+    return []
+
+
+def _resume_config_was_overwritten(run_dir: Path) -> bool:
+    config_path = run_dir / ".hydra" / "config.yaml"
+    if not config_path.exists():
+        return False
+    try:
+        cfg = OmegaConf.load(config_path)
+    except Exception:
+        return False
+    return isinstance(cfg, DictConfig) and _is_self_resume_config(cfg, run_dir)
+
+
 def _prepare_resume_argv(argv: list[str]) -> list[str]:
-    """Replay saved run overrides and force Hydra to reuse the run directory."""
+    """Normalize the friendly ``--resume_from DIR`` flag before Hydra parses argv."""
     cleaned, resume_from = _pop_resume_from(argv)
     if resume_from is None:
         return argv
@@ -99,27 +150,31 @@ def _prepare_resume_argv(argv: list[str]) -> list[str]:
         if (key := _override_key(arg)) is not None
     }
 
-    saved_overrides: list[str] = []
-    overrides_path = run_dir / ".hydra" / "overrides.yaml"
-    if overrides_path.exists():
-        loaded = OmegaConf.load(overrides_path)
-        saved_overrides = [str(x) for x in loaded]
-
-    resume_internal_keys = {"resume_from", "hydra.run.dir", "resume_ckpt_path"}
-    replayed = [
-        item for item in saved_overrides
-        if (
-            (key := _override_key(item)) not in current_keys
-            and key not in resume_internal_keys
+    resume_config_was_overwritten = _resume_config_was_overwritten(run_dir)
+    if "experiment" in current_keys and not resume_config_was_overwritten:
+        raise SystemExit(
+            "Error: Cannot specify both 'experiment=xxx' and '--resume_from'. "
+            "When resuming, the experiment configuration is loaded from the original run."
         )
-    ]
+
+    recovered_args: list[str] = []
+    if resume_config_was_overwritten and "experiment" not in current_keys:
+        recovered_args = [
+            arg for arg in _wandb_metadata_args(run_dir)
+            if not arg.startswith("--")
+            and (key := _override_key(arg)) is not None
+            and key not in {"resume_from", "hydra.run.dir"}
+        ]
+    recovered_with_current_cfg = resume_config_was_overwritten and (
+        bool(recovered_args) or "experiment" in current_keys
+    )
 
     return [
         cleaned[0],
-        *replayed,
+        *recovered_args,
         *override_args,
         f"resume_from={run_dir}",
-        f"hydra.run.dir={run_dir}",
+        *([] if not recovered_with_current_cfg else ["+_resume_from_recovered=true"]),
         *hydra_args,
     ]
 
@@ -168,6 +223,8 @@ def _configure_resume_from(cfg: DictConfig) -> None:
             cfg.resume_ckpt_path = str(ckpt_path)
         if cfg.get("resume_ckpt_path") is not None:
             cfg.pretrained_ckpt_path = None
+        if cfg.get("paths") is not None:
+            cfg.paths.output_dir = str(run_dir)
         if cfg.get("trainer") is not None:
             cfg.trainer.default_root_dir = str(run_dir)
         if cfg.get("logger") is not None and cfg.logger.get("wandb") is not None:
@@ -237,7 +294,9 @@ def train(cfg: DictConfig) -> tuple[dict[str, Any], dict[str, Any]]:
         "trainer": trainer,
     }
 
-    if logger:
+    if logger and cfg.get("resume_from"):
+        log.info("Skipping hyperparameter logging on resume to preserve the original logger config.")
+    elif logger:
         log.info("Logging hyperparameters!")
         log_hyperparameters(object_dict)
 
@@ -271,6 +330,49 @@ def main(cfg: DictConfig) -> float | None:
     :param cfg: DictConfig configuration composed by Hydra.
     :return: Optional[float] with optimized metric value.
     """
+    if cfg.get("resume_from"):
+        run_dir = Path(cfg.resume_from).expanduser().resolve()
+        saved_config_path = run_dir / ".hydra" / "config.yaml"
+        if not saved_config_path.exists():
+            raise SystemExit(f"Original config.yaml not found in {run_dir}/.hydra/")
+
+        log.info(f"Loading original config from {saved_config_path}")
+        saved_cfg = OmegaConf.load(saved_config_path)
+        recovered_from_current_cfg = bool(cfg.get("_resume_from_recovered"))
+        if _is_self_resume_config(saved_cfg, run_dir):
+            if not recovered_from_current_cfg:
+                raise SystemExit(
+                    f"Saved config in {saved_config_path} points resume_from back to itself. "
+                    "It was likely overwritten by an earlier resume attempt, and no W&B "
+                    "metadata args were found to recover the original experiment config."
+            )
+            log.warning(
+                "Saved config was overwritten by an earlier resume attempt; "
+                "using the current Hydra-composed config to recover the original experiment config."
+            )
+            original_cfg = cfg
+            with open_dict(original_cfg):
+                original_cfg.pop("_resume_from_recovered", None)
+        else:
+            original_cfg = saved_cfg
+
+        # Extract current overrides from sys.argv to apply them
+        overrides = []
+        for arg in sys.argv[1:]:
+            if arg.startswith("--"):
+                break
+            key = _override_key(arg)
+            if key and key not in {"resume_from", "hydra.run.dir", "_resume_from_recovered"}:
+                overrides.append(arg)
+
+        if recovered_from_current_cfg:
+            cfg = original_cfg
+        else:
+            overrides_cfg = OmegaConf.from_dotlist(overrides)
+            cfg = OmegaConf.merge(original_cfg, overrides_cfg)
+        with open_dict(cfg):
+            cfg.resume_from = str(run_dir)
+
     # apply extra utilities
     # (e.g. ask for tags if none are provided in cfg, print cfg tree, etc.)
     extras(cfg)
