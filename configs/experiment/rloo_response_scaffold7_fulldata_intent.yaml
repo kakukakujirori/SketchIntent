@@ -86,7 +86,7 @@ callbacks:
     every_n_train_steps: 100
 
 data:
-  train_sequence_file: data_processed/sg_pseudo_rel_v2_keeporig_noEq_noMir_full.npy
+  train_sequence_file: data_processed/sg_pseudo_rel_v2_full_all_full.npy
   batch_size: 32
   num_workers: 1
 

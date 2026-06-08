@@ -1,0 +1,269 @@
+# @package _global_
+#
+# ===== scaffold-v8 (2026-06-09): FC-BONUS=0 + INTENT x2 (coeff 6.0) =====
+# 4th arm: scaffold8_fc0_intent with coeff_h_angle 3.0 -> 6.0 (cap 0.70 and mode
+# symmetric UNCHANGED = a clean intent-weight amplification, no other moving part).
+# Rationale: FC=0 alone is NOT differentially pro-relational (relations also earn
+# solver DoF-reduction reward, per-reward contrast Perp/Parallel solver +0.95/+0.90
+# vs Distance +0.50), so the lever that tilts selection toward relations is the
+# intent signal itself.  The ngrp check (positive within-group advΔ + ngrp>0 for
+# Parallel/Perp/Equal) shows this amplification now has SIGNED traction under flip,
+# unlike the pre-flip winflip~0 regime where coeff-increase was rejected.  With M2
+# (intent off) and M1 (coeff 3.0) this gives an intent dose-response (0/3/6) on one
+# fixed FC=0 scaffold.  GUARDRAIL: coeff 6.0 can over-rotate to under-constraint
+# (intent max bonus 6.0 now >= solver max 4.0); watch solver_fc_rate / collapse and
+# back off toward 4.5 if FC craters.
+# Launch: conda run -n freecad python src/train.py experiment=rloo_response_scaffold8_fc0_intent_hicoeff trainer.devices=[N]
+# ---- scaffold8_fc0_intent header retained below ----
+#
+# ===== scaffold-v8 (2026-06-09): FC-BONUS=0 PROBE (intent ON) =====
+# Goal: isolate whether the discrete fully-constrained bonus (+2.0 at DoF<=2) is
+# the OVER-DIMENSIONING engine.  Diagnostic (artifacts/substitution_diag) showed
+# per-reward Distance solver-contrib = +0.50 (Distance closes DoF -> earns the FC
+# bonus); the +2.0 jump is ~10x the continuous last-DoF marginal, so it is the
+# prime "pile a dim to cross the FC line" incentive.  Here reward_fully_constrained
+# 2.0 -> 0.0; reward_dof_reduction stays 4.0 so DoF reduction is still rewarded
+# continuously (rate->1 at DoF=2), i.e. the policy still constrains, it just loses
+# the all-or-nothing closure prize.  ONLY change vs scaffold7: FC bonus.
+# DimParsimony (0.30) and DimPrior (off) deliberately UNCHANGED to attribute the
+# effect to SolverReward alone.  If over-dim persists -> next lower
+# reward_dof_reduction; if it resolves -> binary-search FC bonus in (0, 2.0].
+# ngrp check (scaffold7 ckpt) PASSED: Parallel/Perp/Equal ngrp 9/30/11 with
+# positive within-group advΔ, so intent-coeff amplification has signed traction if
+# FC=0 alone underdelivers.  Tangent is suppressed by solver-risk (separate issue).
+# Launch: conda run -n freecad python src/train.py experiment=rloo_response_scaffold8_fc0_intent trainer.devices=[N]
+# ---- original scaffold7 header retained below for provenance ----
+#
+# ===== scaffold-v7 (2026-06-04): FULL-DATASET production config =====
+# Identical to scaffold6 EXCEPT (a) train GT swapped to the full-dataset v2
+# closure (1.67M sketches) and (b) DimensionalClassPriorReward LIVES HERE NOW.
+# dim_prior (Distance -0.03 / DistanceX,Y +0.02, a light axis-over-Distance CAD
+# prior) was added to scaffold6 but never actually run there (o0xgo75k/13f89l4i
+# are pre-dim_prior); per the refactor it is removed from scaffold6 and carried
+# into scaffold7 so this is the first config that actually exercises it.
+# Launch:  conda run -n freecad python src/train.py experiment=rloo_response_scaffold7_fulldata_intent
+# Override train_sequence_file for the GT ablations (full_all / high-precision).
+# ---- original scaffold6 header retained below for provenance ----
+
+# scaffold-v6 — v2 GT × FLIP × SOLVER COMPRESSION (research plan §16.11.1 / Q2).
+#
+# The missing cell of the GT × flip 2x2: scaffold5 ran flip+rebalance on v1 GT;
+# the v2 rule-augmenter runs (sc2_v2_*, probe C/D) ran v2 GT WITHOUT flip — i.e.
+# v2 was only ever tested in the regime (no within-group counterfactual) where the
+# RLOO baseline cancels a constant target shift, so it could not surface (§16.4/16.7).
+# This config is the decisive test of the user's hypothesis: a per-sketch-complete
+# (closure) target SHRINKS the relation-only motion subspace the reward chases, so
+# the model should work to emit the missing relations — PROVIDED flip manufactures
+# the counterfactuals and solver-compression lets the intent signal select them.
+#
+# The bottleneck this attacks is the DEFICIENCY axis (Pred under-constrains:
+# scaffold5 fiverr Under 48% / DoF~5), NOT the substitution axis (Pred Distance on
+# relation directions = only +0.09 over the human-driver baseline, §16.11.1 0a).
+# distFam is expected to drop INDIRECTLY: closing the DoF deficit with relations
+# means the solver leans less on Distance.
+#
+# Diff vs scaffold5 (run 2026-06-01_19-04-12): ONLY the training reward GT, v1
+# (sg_pseudo_rel_167k, per-sketch INCOMPLETE) -> v2 (sg_pseudo_rel_v2_no_mirror,
+# per-sketch COMPLETE closure, GT motion dim ~8.5->5.5, §15.5). flip [x,y],
+# group_sample_size 9, solver 4/2, hygiene, rel_prior, intent coeff/cap, pretrain,
+# temperature, entropy, val composer are ALL IDENTICAL to scaffold5, so the only
+# moving part vs scaffold5 is the GT (clean attribution of the GT effect inside the
+# flip+rebalance regime).
+#
+# motion_relational_angle_mode stays SYMMETRIC (NOT mixed_subset): mixed_subset was
+# a workaround for v1's per-sketch INCOMPLETENESS (stop penalizing Pred for being more
+# complete than an incomplete GT); v2 fixes incompleteness at the source, so symmetric
+# is principled and avoids confounding the GT change with a mode change. Keep
+# mixed_subset (rev_weight 0.1-0.2) only as a FALLBACK if v2×symmetric underdelivers.
+#
+# no_mirror is the default (full_all's Mirror is precision ~0.006 = mostly FP, §15.4);
+# swap train_sequence_file to sg_pseudo_rel_v2_full_all_full.npy for the Mirror ablation.
+#
+# Judge (vs scaffold5 at matched step): DEFICIENCY closing = solver_under_rate down /
+# solver_valid_dof_mean down; rare-rel up + eval_distance_family_ratio_mean down;
+# response_full/mrel/leak down. FC is the GUARDRAIL (flip+compression under-constrain;
+# if solver_fc_rate < ~0.4 raise solver coeffs toward 6/3). Re-run
+# scripts/diag_sample_vs_select.py --flip-axes x,y on the ckpt to confirm
+# Tangent/Perp/Equal ngrp stays >0 at convergence (sampling-vs-selection check).
+#
+# Smoke (CPU, 2 steps):
+#   conda run -n freecad python src/train.py experiment=rloo_response_scaffold7_fulldata_intent \
+#     trainer.accelerator=cpu trainer.devices=1 trainer.strategy=auto trainer.precision=32 \
+#     data.batch_size=1 model.group_sample_size=3 \
+#     +trainer.max_steps=2 +trainer.limit_val_batches=0 +trainer.num_sanity_val_steps=0
+# Launch (GPU): conda run -n freecad python src/train.py experiment=rloo_response_scaffold7_fulldata_intent
+
+defaults:
+  - override /data: constraint_rloo.yaml
+  - override /model: constraint_ar_rloo.yaml
+  - override /trainer: default
+
+tags: ["rloo", "response", "scaffold6", "v2gt", "flip", "rebalance", "intent"]
+
+callbacks:
+  model_checkpoint_epoch:
+    every_n_train_steps: 100
+    save_top_k: 3
+    filename: "epoch_{epoch}_step_{step}"
+    save_last: true
+
+  model_checkpoint_loss: null
+
+  model_checkpoint_reward:
+    _target_: lightning.pytorch.callbacks.ModelCheckpoint
+    dirpath: ${paths.output_dir}/checkpoints
+    monitor: "validation_gen/solver_valid_dof_mean"
+    filename: "step_{step}_dof_{validation_gen/solver_valid_dof_mean:.3f}"
+    save_top_k: 3
+    mode: "min"
+    auto_insert_metric_name: false
+    every_n_train_steps: 100
+
+data:
+  train_sequence_file: data_processed/sg_pseudo_rel_v2_full_all_full.npy
+  batch_size: 32
+  num_workers: 1
+
+model:
+  # PHASE 2: flip-augmented rollouts (the counterfactual generator) + even 3-way split.
+  flip_augment_axes: [x, y]
+  group_sample_size: 9
+
+  entropy_bonus: 0.005
+  train_sample_temperature: 1.2
+  val_sample_temperature: 1.0
+
+  reward_composer:
+    _target_: src.models.rewards.composer.RewardComposer
+    rewards:
+      - _target_: src.models.rewards.solver_reward.SolverReward
+        context: ${data.context}
+        # PHASE 2: compress the solver dynamic range (alpha ~= 0.4), as in scaffold4.
+        reward_dof_reduction: 4.0
+        # scaffold8 PROBE: FC bonus zeroed (was 2.0). DoF-reduction rate (4.0) still
+        # rewards constraining; only the all-or-nothing closure prize is removed.
+        reward_fully_constrained: 0.0
+        penalty_conflicting: -1.0
+        penalty_redundant: -1.0
+        penalty_malformed: -0.5
+        penalty_deformed: -0.25
+        penalty_per_problematic_constraint: -1.0
+        penalty_rigid_dimensional: -0.0
+        fully_constrained_dof: 2
+        distortion_threshold: null
+        penalty_near_zero_distance: -1.5
+        near_zero_distance_threshold: 0.001
+        near_zero_distance_cap: 3
+        near_zero_distance_gate: converged
+        penalty_axis_angle: -1.5
+        axis_angle_tolerance_rad: 0.001
+        axis_angle_cap: 3
+        axis_angle_gate: converged
+        num_workers: null
+
+      - _target_: src.models.rewards.dim_parsimony.DimParsimonyReward
+        context: ${data.context}
+        coeff: 0.30
+        mode: excess_over_gt_per_primitive
+        excess_margin: 1
+        gate: converged
+
+      - _target_: src.models.rewards.relational_class_prior.RelationalClassPriorReward
+        context: ${data.context}
+        gate: converged
+        cap_total: 1.0
+        cap_per_type: 3
+        coeff_by_type:
+          Mirror: 0.15
+          Equal: 0.129
+          Concentric: 0.055
+          Parallel: 0.053
+          Perpendicular: 0.046
+          Tangent: 0.048
+          Coincident: 0.012
+          Horizontal: 0.042
+          Vertical: 0.05
+          Midpoint: 0.112
+
+      # - _target_: src.models.rewards.dimensional_class_prior.DimensionalClassPriorReward
+      #   context: ${data.context}
+      #   gate: converged
+      #   cap_positive_total: 0.12
+      #   cap_negative_total: -0.15
+      #   cap_per_type: 3
+      #   coeff_by_type:
+      #     # Light CAD-prior nudge: prefer axis dimensions over arbitrary
+      #     # Distance, without turning this into a dimension-placement metric.
+      #     Distance: -0.03
+      #     DistanceX: 0.02
+      #     DistanceY: 0.02
+
+      - _target_: src.models.rewards.response_metric_reward.ResponseIntentReward
+        context: ${data.context}
+        eps: 1.0e-9
+        # scaffold8 intent x2: amplify the relational selection pressure (was 3.0).
+        coeff_h_angle: 6.0
+        cap_h_angle: 0.70
+        h_angle_reward_metric: motion_relational_angle
+        motion_relational_angle_mode: symmetric
+        motion_relational_reverse_weight: 0.5
+        gate: converged
+        num_workers: 4
+
+  # Val composer LEFT IDENTICAL to scaffold2 (eval must not move with the treatment).
+  reward_val_composer:
+    _target_: src.models.rewards.composer.RewardValComposer
+    context: ${data.context}
+    metrics:
+      - _target_: src.models.rewards.solver_reward.SolverReward
+        context: ${data.context}
+        fully_constrained_dof: 2
+        penalty_near_zero_distance: 0.0
+        near_zero_distance_threshold: 0.001
+        penalty_axis_angle: 0.0
+        axis_angle_tolerance_rad: 0.001
+        num_workers: null
+      - _target_: src.models.rewards.response_metric_reward.ResponseIntentReward
+        context: ${data.context}
+        eps: 1.0e-9
+        gate: always
+        h_angle_reward_metric: response_full_angle
+        num_workers: 0
+      - _target_: src.models.rewards.relational_class_prior.RelationalClassPriorReward
+        context: ${data.context}
+        gate: always
+        cap_total: 1.0
+        cap_per_type: 3
+        coeff_by_type:
+          Mirror: 0.15
+          Equal: 0.129
+          Concentric: 0.055
+          Parallel: 0.053
+          Perpendicular: 0.046
+          Tangent: 0.048
+          Coincident: 0.012
+          Horizontal: 0.042
+          Vertical: 0.05
+          Midpoint: 0.112
+
+      # - _target_: src.models.rewards.dimensional_class_prior.DimensionalClassPriorReward
+      #   context: ${data.context}
+      #   gate: always
+      #   cap_positive_total: 0.12
+      #   cap_negative_total: -0.15
+      #   cap_per_type: 3
+      #   coeff_by_type:
+      #     Distance: -0.03
+      #     DistanceX: 0.02
+      #     DistanceY: 0.02
+
+  optimizer:
+    lr: 1e-5
+
+trainer:
+  check_val_every_n_epoch: null
+  val_check_interval: 100
+  devices: 1
+  max_epochs: 3
+
+pretrained_ckpt_path: logs/train/runs/2026-05-02_20-35-42/checkpoints/epoch_29.ckpt
