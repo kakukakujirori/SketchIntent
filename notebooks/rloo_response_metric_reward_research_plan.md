@@ -3373,3 +3373,306 @@ reference 不要で good/bad を測る intrinsic placement-quality 指標を多�
 - **placement を独立の model-eval 軸として強く正当化はできない** → model ランキングは既存の motion_angle + leak_angle に任せる（従来推奨を維持）。
 - **set_sim の確立された価値**: (i) §17 placement 軸の motion 空間での*存在の可測化*（encoding 不変、human 一致 0.84、toy で motion_angle 盲目性を可視化）、(ii) **diversity / convention-distance 記述子**としての利用（human-human floor 0.84 を正常範囲とする）。品質採点ではなく多様性記述に用いる。
 - intrinsic placement-quality は全滅（§18.6）。真の quality 評価には semantic/functional 入力か good/bad ラベルが必要、というのが §17–§18 を貫く確定結論。
+
+### 18.8 未試行の構造統計の一括テスト: amp（レバー増幅）・coherence・割当(assignment)系 (2026-06-10)
+
+**結論（先出し）**: §18.6/18.7 の「識別力が悪い」を叩くため、未試行の per-dim 構造統計を一括設計し、(a) human/model/random/datum-chain 識別、(b) constraint drop、の両テストにかけた。結果4点:
+
+1. **新 intrinsic 軸 amp（レバー増幅）= 統制域最強の placement 信号、ただし model-eval 不可**: `amp_j = ‖M_{:,j}‖₂/√m_φ`（dim j を単位駆動したときの観測空間応答の大きさ。既存候補は全て magnitude を正規化で捨てていた）。dim_uglify 統制で **amp_med AUROC 0.705 / amp_q90 0.714**（paired z≈+11.7, p~1e-31, α単調 ρ=0.70）と §18.6 の全候補（0.50–0.63）を明確に上回る。**しかし T3 で双方向に崩壊**: dim/rel drop で amp が縮み「改善」（rel_drop z=−16）、model も base（under, 緩和で応答縮小）/ solver_rl（over, 矛盾行が pinv 応答を圧縮）**双方が human より良く見える**（z=−6.6/−7.9）。さらに human-human floor ×1.14 ≈ ugly 効果 ×1.17（median, |log amp_med 比| AUROC 0.528）で絶対値の単独使用も不可（tail のみ分離: q75 ×1.35 vs ×1.70）。→ **participation と同じ「count/coverage-matched 統制域専用の thesis instrument」**（より強く α単調な版）。
+2. **GT 参照系の実改善: set_sim の max-matching → Hungarian 1:1 割当（asgn）**: 多対一マッチで ugly の重複方向が隠れる穴を塞ぐ。`asgn_min`（割当 |cos| 和 / min(k_P,k_G)＝count 不問・placement 純）は hh-vs-hu **0.619→0.666**（count-matched subset では set_sim 自体 0.708 / asgn_min 0.711 ⇒ 全体差の主因は**人間の52% count 不一致へのロバスト化**）。multi-reference 実用フレーム（3人中2人を ref、床込み）で **set_sim_best 0.679 → asgn_min_best 0.703**、**combo（asgn_min + cov_dist + amp_ratio の rank fusion）= 0.736**（file-clustered bootstrap: Δ=+0.024 CI[+.012,+.038] / +0.057 CI[+.038,+.079]、500回とも >0）。チャネルは相補（cov_dist=正規化応答共分散 ‖MMᵀ/tr‖ の距離 0.696、amp_ratio=ref に対する log amp 比 0.658）。
+3. **`asgn_sim`（max(k_P,k_G) 正規化＝coverage 混合版）が model 分離最強 + over-dim を正しく罰す**: T3（n=396 rotation）で dim/rel drop 全段単調劣化（z=+13〜+16）、model は **base z=+12.1 / solver_rl z=+12.0**（set_sim +11.9/+11.2 を上回る）。重要: `motion_full` は val GT=人間フル拘束ゆえ **over-dim を報酬する**（§20.2）が、asgn_sim は余剰 Pred 列が max 正規化で必ず罰される（solver_rl median 0.560 vs heldout 0.722）。**§20 系の「FC を保った over-dim 抑制」実験の成否判定・checkpoint 選択の eval 候補**（leak/distFam の補強）。
+4. **chain/datum 識別の構造的不可能性（単一参照）を確定**: toy の全 full-rank gap dimensioning は **spanning tree**（n−1 本の独立 gap = 全域木 ⇔ totally unimodular ⇒ 応答は常に cut-block 並進）。chain=path 木は datum=star 木から**最も遠い木**で、random 木は両者の**中間** ⇒ 「chain-datum が random より遠い」のは set_sim の欠陥でなく**幾何的必然**であり、いかなる単一参照指標でも逆転不能。同時に intrinsic 側も縮退（toy では random も block-coherent な正当慣習 — coherence/coh2 が全員 1.0 を返すのは正しい挙動）。**慣習許容は multi-reference min でしか得られない**（§17.6 の処方の理論的確定。T1c=その実装で、床込みでも 0.703/0.736 が出る）。
+
+**棄却した新 intrinsic 候補（amp 以外）**: 運動場の区分 similarity/affine 一貫性 coherence（pairwise/隣接限定/k=2,3 大域区分 fit）= 統制域 0.54–0.62 止まり（CAD の relational 網では min-norm 応答が滑らかに混合し block 構造が立たない）かつ rel_drop で改善方向（gameable）。φ空間スパース性 obs_ipr = 0.54、solver_rl を逆方向に採点（z=−10.5）。いずれも T3 失格。
+
+| テスト | 最良の新顔 | 既存比 |
+|---|---|---|
+| T1 統制識別（n=355, paired） | amp_q90 **0.714**（z+11.8, α単調0.70） | eff_norm 0.63 / set_sim 0.62 |
+| T1b 単一参照 hh-vs-hu（401/1015） | asgn_min **0.666** | set_sim 0.619 |
+| T1c multi-ref 床込み（395/333） | combo **0.736**（asgn_min 単独 0.703） | set_sim_best 0.679 |
+| T2 toy 慣習順序 | （全 GT 参照系で chain<random は不変＝木の幾何） | multi-ref で吸収 |
+| T3 drop 安全性 | GT 参照系すべて z>0（asgn_min は dim_drop75 で平坦 +0.3 n.s.、ただし負にはならない） | intrinsic 系は全滅 |
+| T3 model 分離 | asgn_sim **+12.1/+12.0**（over-dim を罰す） | set_sim +11.9/+11.2 |
+
+**最終判定**:
+- 「どちらのテストもパスする」単一指標として立つのは **割当系（asgn_sim / asgn_min）+ 補助チャネル（cov_dist, amp_ratio）の GT 参照ファミリ**。識別力は set_sim 比で全プロトコル一貫改善（+0.02〜+0.06 AUROC、model z 同等以上）、drop 完全安全。ranking 推奨は従来の motion_full+leak に **asgn_sim を「over-dim を正しく罰す coverage+placement 統合軸」として併置**（特に §20 の操作点選択）。placement 純粋軸の議論には asgn_min（count 不問）。
+- intrinsic 路線は amp で頭打ち（統制域 0.71 ≈ count-matched 天井。残り ~0.3 は「正当な代替 dimensioning」で原理的に識別不能 — §18.6 の GL(m) 経験則の再確認）。
+- 実装・再現: [metrics_motion_struct.py](v4_exp/metrics_motion_struct.py)（amp/coherence/obs_ipr）、[diag_motion_struct_uglify.py](v4_exp/diag_motion_struct_uglify.py)（T1）、[diag_motion_struct_pairwise.py](v4_exp/diag_motion_struct_pairwise.py)（T1b, pair_metrics に asgn/wset/cov 実装）、[diag_struct_multiref_cls.py](v4_exp/diag_struct_multiref_cls.py)（T1c）、[diag_chain_datum_struct.py](v4_exp/diag_chain_datum_struct.py)（T2）、[diag_motion_struct_ablation.py](v4_exp/diag_motion_struct_ablation.py)（T3）。artifact: `artifacts/v4_exp/motion_struct_uglify.csv`, `motion_struct_ablation.csv`。
+
+```bash
+# T1 統制識別 + α単調（dim_uglify cache、~12分）
+python notebooks/v4_exp/diag_motion_struct_uglify.py            # --analyze でCSV再分析のみ
+# T1b/T1c 参照系（cache、各 ~2分）
+python notebooks/v4_exp/diag_motion_struct_pairwise.py
+python notebooks/v4_exp/diag_struct_multiref_cls.py
+# T2 toy
+python notebooks/v4_exp/diag_chain_datum_struct.py
+# T3 drop+model（bundle 一式、~30分; --analyze で再分析のみ）
+python notebooks/v4_exp/diag_motion_struct_ablation.py
+```
+
+### 18.8b 第2弾未試行候補の一括テスト: OT・CKA/Bures・deflation(omp)・tail(q25)・参照相対化 (2026-06-11)
+
+**結論（先出し）**: §18.8 の asgn 系をさらに改善すべく、棄却リストと重複しない未試行8候補を実装し T1b/T1c/T2/T3 の全プロトコルにかけた。新顔は全て asgn 系と **r=0.91–0.95** の高相関（=同じ軸の磨き込み）で、識別と drop 安全性の Pareto front はわずかに前進したが、「両テストを単独で大きく勝つ」新指標は出なかった。確定4点:
+
+1. **asgn_q25（Hungarian マッチ済み |cos| の下位四分位）= 識別最強、ただし drop 失格**: T1b **0.673**（asgn_min 0.666）、T1c 単独 **0.710**（0.703）、combo **q25+cov+amp_ratio 0.742**（既存 0.736）。ただし file-clustered bootstrap（500回）では単独 Δ=+0.008 CI[−0.005,+0.021] P(Δ>0)=0.89 / combo Δ=+0.006 CI[−0.001,+0.013] P=0.96 と**境界級**。そして **T3 で dim_drop75 z=−5.3（逆向き）・dim_drop50 +2.4 n.s.** — 重度 under-dim でマッチ集合が良い列だけに痩せ、tail 統計が「改善」して見える count 交絡（asgn_worst は −11.4 とさらに悪い）。→ participation/amp と同列の「**count-matched 統制域専用の診断 instrument**」。drop-in model 評価には使用禁止。
+
+2. **omp_sim（貪欲マッチ＋両側 deflation、未説明残差エネルギーで正規化）= T3 最強、asgn_sim の上位互換候補**: 定義は単位列集合を貪欲に 1:1 マッチ → マッチ方向成分を両側の残列から除去（再正規化なし）→ `Σ|⟨ra,rb⟩| / √(Ea·Eb)`（E = マッチ残差＋未マッチ残存エネルギー。Cauchy-Schwarz で self=1 厳密）。drop 全段で**全指標中最大の z**（dim +14.5/+16.4/+16.3, rel +17.1/+17.2）、model 分離 **base z=+12.36 / solver_rl z=+12.21**（asgn_sim +12.12/+11.96・set_sim +11.9/+11.2 を上回る、median: solver_rl 0.736 vs heldout 0.892）。意味論（サニティで確認）: **正確な重複列は許す（新エネルギーゼロ）が、新規方向の junk（人間が空けた DoF の拘束）は未説明エネルギーとして罰する** — over-dim の罰し方が asgn_sim の「本数」より物理的。弱点: hh-vs-hu 識別は弱い（T1b 0.547 / T1c 0.635）。r(omp_sim, asgn_sim)=0.935。
+
+3. **omp_min は asgn_min の dim_drop75 平坦の修正**: asgn_min z=+0.3 n.s. → omp_min **+10.2–10.6\***（有意に drop-safe）。count 不問のまま duplicate-proof。ただし識別は T1c 0.659 vs asgn_min 0.703 と下がる — 「drop 安全な placement 純粋軸」が要る場面の代替。
+
+4. **その他は利得なし（棄却）**: **ot/wot（Sinkhorn OT, 一様/amp 質量）**は asgn と r=0.954・全プロトコル同等以下（soft マッチの利点なし、self も entropic blur で 0.994 と非厳密）。**cka/bures** は共分散系で**基底回転に構造的盲目**（MQQᵀMᵀ=MMᵀ、サニティで確認＝placement を見ない）。bures_dist は model z +12.0/+9.3 と cov_dist（+10.6/+5.7）より強いが combo では cov を超えず（0.727 vs 0.736）— cov_dist の代替候補として記録のみ。**eff_ratio**（参照相対化 eff_norm）は solver_rl +2.4–2.6 n.s. で失格。**amp_w1** は amp_dist 系と同等止まり。T2 は全 GT 参照系で chain<ugly 不変（§18.8-4 の全域木幾何の通り。omp は toy では span 飽和で全比較≈1＝無感応）。
+
+| テスト | §18.8 ベスト | §18.8b 新顔 | 判定 |
+|---|---|---|---|
+| T1b 単一参照 hh-vs-hu | asgn_min 0.666 | **asgn_q25 0.673** | 小幅更新 |
+| T1c multi-ref 床込み | asgn_min 0.703 / combo 0.736 | **asgn_q25 0.710 / q25+cov+amp_ratio 0.742** | 更新（bootstrap 境界級） |
+| T2 toy 慣習順序 | chain<ugly（木の幾何） | 不変 | multi-ref で吸収（変わらず） |
+| T3 drop 安全性 | asgn_sim 全段+ / asgn_min dim75 平坦 | **omp_sim 全段最大 / omp_min +10.6\*** | 改善（q25 は −5.3 失格） |
+| T3 model 分離 | asgn_sim +12.1/+12.0 | **omp_sim +12.36/+12.21** | 小幅更新 |
+
+**最終判定（§18.8 の更新）**:
+- model ranking / ckpt 選択の eval 軸: **asgn_sim に omp_sim を併置（または置換）**。T3 で一貫して上回り、over-dim を「未説明エネルギー」で罰する分だけ物理的。ただし r=0.935 なので §20 系の操作点判定はどちらでも結論は変わらない見込み。
+- count-matched 統制域の識別 instrument: **asgn_q25 を追加**（T1b/T1c 最良）。drop-in 評価には使用禁止。
+- placement 純粋軸: asgn_min（識別 0.703）⇔ omp_min（drop 安全）のトレードオフとして使い分け。
+- 棄却: ot_sim / wot_sim / cka / eff_ratio / amp_w1（bures_dist は記録のみ）。
+- 大局: 新顔が全て r>0.9 で asgn 系に張り付く事実は、**motion-basis 一致系の識別力が天井に達しつつある**ことを示唆（§18.8-2 の「残り ~0.3 は正当な代替 dimensioning で原理的に識別不能」の再確認）。次の改善は指標の磨き込みではなく、参照数の増加（multi-ref floor の引き締め）か semantic/functional 入力に求めるべき。
+
+実装・再現: [diag_motion_struct_pairwise.py](v4_exp/diag_motion_struct_pairwise.py)（pair_metrics に 10 指標追加: asgn_q25/asgn_worst/cka/bures_dist/ot_sim/wot_sim/omp_sim/omp_min/eff_ratio/amp_w1）、[diag_struct_multiref_boot.py](v4_exp/diag_struct_multiref_boot.py)（T1c file-clustered bootstrap、新規）、T1c combo・T2・T3 は既存スクリプトに配線済み。artifact: `motion_struct_ablation.csv` 更新（7692行）。
+
+```bash
+# T1b / T1c / bootstrap（dim_uglify cache、各 ~2分）
+conda run -n freecad python notebooks/v4_exp/diag_motion_struct_pairwise.py
+conda run -n freecad python notebooks/v4_exp/diag_struct_multiref_cls.py
+conda run -n freecad python notebooks/v4_exp/diag_struct_multiref_boot.py
+# T2 toy / T3 drop+model（T3 ~35分; --analyze で CSV 再分析のみ）
+conda run -n freecad python notebooks/v4_exp/diag_chain_datum_struct.py
+conda run -n freecad python notebooks/v4_exp/diag_motion_struct_ablation.py
+```
+
+### 18.8c 最終候補 3 指標（asgn_sim / asgn_q25 / omp_sim）の定義と使い分けまとめ
+
+§18.8/18.8b の結果を踏まえた採用候補 3 つの正式な定義と長所短所。実装は
+[diag_motion_struct_pairwise.py](v4_exp/diag_motion_struct_pairwise.py) `pair_metrics()` / `_omp_match()`。
+
+**共通の入力**（set_sim と同一）: 制約集合 $C$ の各 dimensional parameter $j$ について
+観測空間応答列 $M_{:,j} = (J_\phi R_C)_{:,j}$ をとり、その正規化方向
+$u_j = M_{:,j}/\lVert M_{:,j}\rVert$ を集める。Pred 側 $U_P=\{u_i\}_{i=1}^{k_P}$、
+GT 側 $U_G=\{u_j\}_{j=1}^{k_G}$、類似度行列 $C_{ij} = |\langle u_i, u_j\rangle|$（絶対 cos）。
+
+#### 定義
+
+**asgn_sim（Hungarian 1:1 割当 + max 正規化）**:
+$$\mathrm{asgn\_sim} = \frac{1}{\max(k_P, k_G)} \max_{\pi \in \text{1:1 matchings}} \sum_{(i,j)\in\pi} C_{ij}$$
+最適割当は Hungarian 法（`scipy.optimize.linear_sum_assignment`）で厳密に解く。
+set_sim の mean-max（多対一を許す）との違いは 2 点: (i) 1:1 強制により、重複した寸法方向が
+1 本の GT 方向に複数マッチして高得点になる穴（§18.8-2）を塞ぐ。(ii) $\max(k_P,k_G)$ 正規化により
+本数不一致が両方向で必ず減点される — Pred が余計に寸法を足せば（over-dim）マッチ相手のない列が
+分母だけ増やし、足りなければ（under-dim）GT 側の未マッチ列が同様に効く。
+派生: `asgn_min` = 同じ割当和を $\min(k_P,k_G)$ で割る（本数不問・placement 純粋軸）。
+
+**asgn_q25（割当済み |cos| プロファイルの下位四分位）**:
+上の最適割当で得た $\min(k_P,k_G)$ 個のマッチ済み $|\cos|$ 値を昇順に並べ、その 25% 分位点
+（実装は `sorted[floor(0.25·(n−1))]`）。直観: 慣習の違いによる不一致は少数のマッチだけを壊す
+（tail は浅い）が、デタラメな寸法付けは多数のマッチを広く壊す（tail が深く沈む）。
+平均ベースの asgn_min より tail に敏感で、その分識別が鋭くなる。
+
+**omp_sim（貪欲マッチ + 両側 deflation、未説明エネルギー正規化）**:
+正規化前の列集合から開始し（初期は単位列なのでエネルギー 1/列）、以下を反復:
+1. 現在の残差列同士で $|\langle r_a, r_b \rangle|$ 最大のペア $(a,b)$ を貪欲に選びマッチ。
+   $\mathrm{num} \mathrel{+}= |\langle r_a, r_b\rangle|$、$E_a \mathrel{+}= \lVert r_a\rVert^2$、$E_b \mathrel{+}= \lVert r_b\rVert^2$ を累積。
+2. **両側の残り列から、マッチした方向成分を射影で除去**（再正規化しない）。
+   → 重複列は除去後ほぼゼロエネルギーになり二重計上できない。
+3. 全マッチ終了後、マッチされなかった列の残存エネルギー $E^{\mathrm{left}}$ を「未説明エネルギー」として分母に加算:
+$$\mathrm{omp\_sim} = \frac{\mathrm{num}}{\sqrt{(E_a + E_a^{\mathrm{left}})(E_b + E_b^{\mathrm{left}})}}$$
+Cauchy-Schwarz により self-comparison で厳密に 1。意味論: **既存方向の重複は許す**（deflation 後の
+新エネルギーがゼロ）が、**GT が空けておいた DoF を拘束する新規方向の junk は未説明エネルギーとして
+分母に残り罰される**。over-dim の罰し方が asgn_sim の「本数」より物理的（エネルギー基準）。
+派生: `omp_min` = num/√(E_a·E_b)（マッチ分のみ、本数不問版）。
+
+#### 長所・短所（プロトコル名を使わない言い換え）
+
+評価軸は 3 つ:
+- **識別力**: 人間の自然な寸法付けと、それを機械的に崩した寸法付け（dim_uglify）を、人間どうしの
+  ばらつきを床としてどれだけ見分けられるか（AUROC）。
+- **ハック耐性**: 制約を一部間引いた（drop した）出力に対してスコアが必ず単調に下がるか。
+  下がらない／逆に上がる指標は「制約を消せば得をする」ため model 評価・報酬に使うと危険。
+- **モデル分離**: 実際のモデル出力（base / solver_rl）を、held-out の人間 GT から正しく分離するか。
+
+| | asgn_sim | asgn_q25 | omp_sim |
+|---|---|---|---|
+| 識別力（multi-ref 床込み AUROC） | 中（asgn_min 0.703 が placement 純粋版） | **最良 0.710**（combo 0.742） | 弱 0.635 |
+| ハック耐性 | ○ 全 drop 段で単調劣化（z=+13〜16） | **× 失格**: 重度 under-dim でスコア改善（z=−5.3 逆向き） | **◎ 全指標中最強**（z=+14.5〜17.2） |
+| モデル分離 | +12.1 / +12.0 | （対象外） | **+12.4 / +12.2** |
+| over-dim の扱い | 本数で罰（max 正規化） | 罰せない（マッチ集合が痩せるだけ） | 未説明エネルギーで罰（最も物理的） |
+| 定義の簡潔さ | **◎ 1 式**（割当＝標準の最適化問題） | ○ 割当＋分位点 | △ 手続き的（貪欲＋射影除去＋エネルギー簿記） |
+| self=1 の厳密性 | ◎ | ◎ | ◎（Cauchy-Schwarz） |
+
+**使い分け（§18.8b 最終判定の言い換え）**:
+- **モデル評価・checkpoint 選択**: asgn_sim または omp_sim。omp_sim がわずかに強いが r=0.935 で
+  実質同軸 — どちらを使っても操作点判定の結論は変わらない見込み。
+- **asgn_q25 は診断計器専用**: 本数・coverage を揃えた統制比較でのみ最強の識別を出す。drop で
+  逆向きに動くため、モデル出力にそのまま当てる評価には**使用禁止**。
+- **placement 純粋軸**（本数の影響を切りたい議論）: asgn_min（識別優先）⇔ omp_min（ハック耐性優先）。
+
+## 19. 全データ scale での over-dimensioning 再燃と FC-bonus 調整 (2026-06-09)
+
+§16.12 で「強い成功」（intent on/off/shuffled、scaffold6=v2 GT×flip×rebalance）を確定し、production として
+全データ scale（v2 closure 1.67M、`scaffold7`）に進めた。そこで **full data だと intent の distFam 効果が
+希釈し、定性的にも dimensioning 過多**が出た。本章はその切り分けと、FC-bonus を主レバーとした是正実験の記録。
+
+参照 run（W&B `kakuda40611-.../vitruvion`）:
+- small intent `o0xgo75k` / small no-intent `13f89l4i`（= §16.12 の S+R / S）
+- full intent `itboolr0`（=`scaffold7`, ckpt `logs/train/runs/2026-06-07_16-03-39`）/ full no-intent `xpmgeemw`
+
+### 19.1 substitution 切り分け（[scripts/diag_substitution_timeseries.py](../scripts/diag_substitution_timeseries.py)）
+
+GT v2 closure の構成（per-sketch 平均, n=2000）: **key_rel_ratio 0.461 / distfam_ratio 0.000**（寸法ゼロ・
+key_rel 47 本で全閉）。一方モデル収束時（full）は key_rel 0.39–0.41 / **distFam 0.24–0.25**。
+**GT が 0 dim で閉じている所をモデルは関係で取り切らず寸法で代用＝substitution headroom が実在し回収可能**。
+
+matched-step gap（intent − no-intent。負の distFam / 正の keyRel = intent 有利）:
+
+| | keyRel Δ | distFam Δ | mrel Δ | respF Δ |
+|---|---:|---:|---:|---:|
+| small 終盤 | +0.017 | −0.026 | **−0.041** | **−0.041** |
+| full 終盤 | +0.005 | −0.006 | **−0.039** | **−0.046** |
+
+**決定的な読み**: intent が直接最適化する**角度軸（mrel/respF）の gap は full でも減衰しない（−0.04）**。希釈したのは
+**構成比軸（distFam/keyRel）だけ**で、small でも終盤に向け縮む＝**データ量でなく FC 収束の関数**（full は長く回り FC
+0.66–0.75 と高く、両アームが寸法を積む）。また distFam の「後半再燃」は中盤最適点の反転ではなく、**初期 relational →
+FC 上昇と同期した単調 drift で寸法平衡へ収束**する過程（min は初期 val 点）。**intent は full でも"関係構造"を効かせ
+続けており**、「without intent と大差なし」は distFam 一指標の希釈。
+
+### 19.2 ngrp check（[scripts/diag_sample_vs_select.py](../scripts/diag_sample_vs_select.py) on `itboolr0`）
+
+flip 込み K=27・128 群・FC 69% の POOLED slice。**ngrp>0 が全 substitution relation で成立**（Perp 30 / Equal 11 /
+Parallel 9 / Tangent 5、DistanceX/Y 56/60）＝counterfactual は揃っており**レバーは作用可能（PASS）**。
+
+- **Parallel/Perp/Equal の within-group advΔ は既に正**（+0.26/+0.42/+0.36）＝報酬は正しく関係を選ぶ。律速は
+  **ミスランクでなくサンプリング頻度**（Distance 71% vs Equal 25% / Tangent 12%）。→ flip 下では intent-coeff 増が
+  符号の合った増幅として効く（pre-flip winflip≈0 で棄却した状況とは違う）。
+- per-reward contrast: **Distance solver 寄与 +0.50**（DoF を閉じて報酬）＝substitution engine の定量化。
+- **Tangent は solver-risk で死亡**（solver −1.32、risky 3.8%）＝reward balance でなく placement 由来。別問題。
+
+### 19.3 FC=0 probe（`scaffold8`, 5 run）→ over-dim でなく under-constraint へ振れた
+
+§19.2 の Distance solver +0.50 と「FC 閾値跨ぎの離散 +2.0 は最後の closure 限界報酬の約10倍」という観察から、
+FC-bonus が over-dim engine と見て **`reward_fully_constrained` 2.0→0.0** を probe（他は scaffold7 と同一、最小 diff）。
+5 軸: M1 `fc0_intent`(`gdkuxdvf`) / M2 `fc0_no_intent`(`wvazyig4`) / M3 `fc0_dimprior_intent`(`k7hhk3yi`) /
+M4 `fc0_intent_hicoeff`(coeff6, `kv2dq7fl`) / M5 `fc0_dofred2_intent`(dof_red2.0, `qbnkz1gy`)。
+
+結果（早期 step、baseline=scaffold7 収束値と比較）:
+
+| run | DoF | FC率 | under率 | distFam | keyRel | mrel | **respF** |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| BASE sc7 (FC=2.0) | 3.92 | **0.67** | 0.28 | 0.248 | 0.408 | 0.395 | 0.446 |
+| M1 fc0_int | 8.0 | **0.05** | 0.87 | 0.136 | 0.479 | 0.429 | 0.497 |
+| M2 fc0_noint | 8.6 | 0.05 | 0.91 | 0.173 | 0.471 | 0.477 | 0.529 |
+| M4 hicoeff(coeff6) | **10.1** | **0.00** | 0.95 | **0.019** | 0.562 | 0.417 | **0.660** |
+| M5 dofred2 | 9.9 | 0.01 | 0.90 | 0.039 | 0.550 | 0.423 | 0.648 |
+
+- **全 FC=0 run が under-constraint へ崩落**: FC率 0–5%（baseline 0.67）/ under ~0.9 / DoF 8–10。FC=0 で**閉じる誘因が
+  消え、anti-dim 力（DimParsimony＋intent の寸法盲目）に対抗するものが無く Distance が丸ごと抑圧**された。distFam は
+  下がるが「きれいに関係で代替」ではなく**寸法を出さず DoF を開けたまま放置**。FC は flat で回復せず＝FC=0 は本当に弱すぎ。
+- **respF が under-constraint を正しく罰す**: M4(coeff6) は distFam~0.02・keyrel 最高（関係は完璧）なのに **respF 最悪 0.660**。
+  mrel(関係のみ)は 0.417 で良いまま＝**dim 盲目の指標を最適化すると喜んで under へ落ちる**ことの実データ証拠（§17/§4
+  desiderata「θ_motion^full は under/over 感応、θ_motion^rel は寸法盲目」の裏取り）。
+- **陽性シグナル**: 同一動作点（FC~0.05）で **M1(intent) < M2(no-intent)**（distFam 0.136<0.173, mrel 0.429<0.477,
+  respF 0.497<0.529）＝intent は依然関係側へシフト。問題は intent の失効でなく FC=0 が動作点ごと under 領域へ押した点。
+
+### 19.4 確定した理解と次手: FC-bonus sweep ×「関係優先 bend レバー」
+
+- **over↔under は FC-bonus 一軸の trade-off**（2.0=over-dim / 0=under）。intent も dof_reduction も閉じ手段に無関心
+  なので、この軸を差別的には動かせない。**両極とも不可、中間点を探す**。
+- **固定 FC で distFam を下げる**には、閉じ手段を関係へ寄せる**関係優先レバー**（intent 増幅 or DimParsimony）が要る。
+  ただし FC=0 でそれを効かせると under へ落ちる（§19.3）。**FC-bonus を戻すと「閉じよ＋でも関係で」が拮抗**し関係閉じへ寄る、
+  という領域を狙う。
+
+実装した 5 config（全 intent-on / DimPrior off / dof_red 4.0、`scaffold8`、run 投入中）:
+
+| # | config | FC | DimP | coeff_h | 役割 |
+|---|---|---:|---:|---:|---|
+| 1 | `rloo_response_scaffold8_fc05_intent` | 0.5 | 0.30 | 3 | 完成度 sweep 下 |
+| 2 | `rloo_response_scaffold8_fc10_intent` | 1.0 | 0.30 | 3 | 完成度 sweep 中（hinge） |
+| 3 | `rloo_response_scaffold8_fc15_intent` | 1.5 | 0.30 | 3 | 完成度 sweep 上 |
+| 4 | `rloo_response_scaffold8_fc10_hicoeff_intent` | 1.0 | 0.30 | **6** | FC=1.0 で intent-bend |
+| 5 | `rloo_response_scaffold8_fc10_dimp09_intent` | 1.0 | **0.90** | 3 | FC=1.0 で parsimony-bend |
+
+判定: (1,2,3) で `solver_fc_rate` の operating curve を描き健全 FC（>~0.4–0.5）に戻る点を特定。(2 vs 4 vs 5) で同一
+FC=1.0 で `eval_distance_family_ratio_mean` を最も下げるレバー（intent 増幅 vs parsimony）を分離。**FC 率を保ったまま
+distFam↓**なら成功。**`intent_response_full_angle_mean`(respF) が baseline 以下を維持**しているかを必ず併読（M4 の轍＝
+distFam↓だが under で respF 悪化、を踏まないため）。当たりが出た動作点で改めて intent on/off 対比（claim）に進む。
+
+> 注（attribution）: §19.4 は「効くもの探し」段階で ablation は後回し。FC/DimParsimony は足場であり、対比 claim を取る際は
+> 確定した動作点で intent on/off（＋shuffled）を**同一足場上**で回す。DimParsimony を両アームで強めると distFam の intent
+> gap を食う恐れがあるため、claim の headline は relational 軸（mrel/leak/keyrel）に置き distFam は二次軸とする（§16.12 の整理を維持）。
+
+## 20. scaffold8 sweep 結果・response_full の pro-dim バイアス発見・scaffold9 (leak) (2026-06-09)
+
+### 20.1 scaffold8 sweep の結果と operating curve
+
+§19.3 の FC=0 5 run（全 under-constraint へ崩落）を受け、§19.4 で FC-bonus を {0.5,1.0,1.5}＋bend レバーへ振った。
+run（W&B id）: fc05 `aaqv926u`(running) / fc10 `b9wfkusx`(running) / fc15 `m07f8fgq`(crashed) / hicoeff `kmcne55j`(crashed) /
+dimp09 `5a357mrd`(crashed)。いずれも早期（step ~1000、baseline sc7 は ~2892 で収束）だが傾向は明瞭:
+
+| run | step | FC | DoF | distFam | keyR | mrel | leak | mfull | respf | **dimP** |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| sc7 base (FC2.0) | 2892 | 0.67 | 3.92 | 0.248 | 0.408 | 0.395 | 0.415 | 0.461 | 0.446 | **7.21** |
+| fc15 | 1009 | 0.44 | 5.57 | 0.207 | 0.444 | 0.395 | 0.368 | 0.465 | 0.430 | 5.83 |
+| fc10 | 995 | 0.31 | 6.70 | 0.177 | 0.465 | 0.406 | 0.332 | 0.491 | 0.436 | 4.87 |
+| fc05 | 1240 | 0.25 | 6.53 | 0.161 | 0.473 | 0.395 | 0.331 | 0.500 | 0.440 | 4.64 |
+| hicoeff(c6) | 960 | 0.17 | 6.92 | 0.144 | 0.487 | 0.393 | **0.295** | 0.527 | 0.448 | 4.16 |
+| dimp09 | 351 | 0.13 | 9.13 | 0.088 | 0.521 | 0.420 | 0.241 | 0.686 | 0.544 | 2.50 |
+| (GT dimG) | | | | | | | | | | **5.72** |
+
+- **operating curve（distFam vs FC）は単調**: FC↑ で distFam↑（fc05 0.161 → fc15 0.207 → sc7 0.248）。FC-bonus が over↔under
+  の主軸という §19.4 を実測で確認。健全 FC へ戻るほど寸法は増える。
+- **hicoeff(intent coeff6) は curve のやや下＋ leak 最小(0.295)**＝intent 増幅は関係寄せに効くが、まだ早期・FC 低め。
+- dimp09(DimParsimony0.9) は最も関係的(distFam0.088)だが DoF9.1/FC0.13＝under へ突入（FC=0 と同様、parsimony 単独強化は
+  closure 誘因不足で under に落ちる）。
+
+### 20.2 【重要発見】 response_full / motion_full は over-dimensioning を *報酬* する（val GT が人間=寸法フル拘束のため）
+
+ユーザの観察「dimension まみれの方が `intent_motion_full_angle_mean` が小さい」を追跡し、**val GT =
+`data_fiverr_ryotaro`＝人間 fiverr 原図＝寸法フル拘束**であることを確認（`configs/data/constraint_rloo.yaml`）。
+motion_full は人間 GT の駆動(寸法)部分空間（`dimG=5.72`）をどれだけ覆うかを `max(dimP,dimG)` 正規化で測るので、
+**`mfull` は `dimP≈dimG` で最小**になる（上表: dimP 7.21→5.83→4.87→4.64→4.16→2.50 に対し mfull 0.461→0.465→0.491→
+0.500→0.527→0.686）。＝**motion_full / response_full は「人間の寸法付けの再現」＝over-dimensioning を報酬する**。
+これは paper §6 が θ_motion^full を**学習報酬に使わなかった理由そのもの**（§4 desiderata と整合）。
+
+含意（§19.3 / §2.5 の訂正）:
+- **response_full は over-dim 実験の成否判定にも checkpoint 選択にも使えない**（過剰寸法ほど良く見える）。§19.3 で「respF が
+  under を正しく罰す」と書いたのは半分正しいが**不完全**: respF は under を罰すが、それは**寸法完全性を報酬する**ことの裏返しで、
+  **over-dim も同時に報酬**してしまう（「完全」と「過剰」を区別できない）。
+- **判定は distFam + mrel + leak + FC で行う**。特に **leak は寸法が増えるほど悪化**（sc7 0.415 → hicoeff 0.295）＝
+  over-dim を**正しく罰す**唯一の angle 軸（motion_full と逆向き）。`respF = RMS(motion_full[pro-dim], leak[anti-dim])` は
+  両者が打ち消し合う**濁った指標**（収束 run で 0.43–0.45 とほぼ平坦）→ 分解して leak を使う。
+- **学習報酬 `motion_relational_angle` は寸法盲目なので無傷・正しい**。問題は eval 指標の選択であって学習報酬の設計ではない。
+
+### 20.3 scaffold9: leak を substitution-direction 報酬に（DimParsimony は落とす）
+
+§20.2 の leak の性質（`leak² = ‖range(R_pred) を GT 関係 row 空間へ射影‖²_F / dim(range(R_pred))`）から、**leak は Pred の
+寸法ドライバのうち GT が関係で閉じる方向を駆動している割合＝substitution-Distance を特異的に罰す**（設計 DoF を開ける正当寸法は
+GT 関係空間と直交し leak≈0）。これを報酬化すれば over-dim（substitution）に効き、かつ FC-bonus を原状へ戻して収束を速められる。
+
+**DimParsimony は不要（落とす）と判断**（ユーザ提起、検討の結果妥当）:
+- leak を希釈する経路（正当寸法を足して分母 `dim(range(R_pred))` を増やす）は、**冗長寸法では rank が増えず希釈不能**かつ
+  **SolverReward の RedundantConstraints penalty(−1.0) が直撃**。rank を増やすのは**正当寸法だけ＝望ましい closure**で gaming でない。
+  → **有害な希釈経路は存在しない**＝DimParsimony を「希釈の番人」とする論拠は無い。
+- 役割整理: substitution=leak、冗長=SolverReward redundant、no-dims への under-game=**FC-bonus**（DimParsimony は無関係、むしろ
+  寸法を GT≈0 本へ寄せる under-pull で軽く有害）。**leak+FC が揃えば DimParsimony は冗長〜微有害**。
+
+実装した scaffold9 3 config（`response_relational_angle` = RMS(motion_relational, leak) に変更。anchor=sc7 `itboolr0`）:
+
+| config | FC | metric | DimParsimony | 役割 |
+|---|---:|---|---|---|
+| `rloo_response_scaffold9_leak_fc20_dimP_intent` | 2.0 | response_relational | あり0.30 | sc7+leak のみ＝leak 純効果 |
+| `rloo_response_scaffold9_leak_fc20_intent` | 2.0 | response_relational | **なし** | ↑から DimParsimony drop（主筋・最速） |
+| `rloo_response_scaffold9_leak_fc15_intent` | 1.5 | response_relational | なし | FC をやや落とした版 |
+
+attribution chain: **sc7(over-dim) → +leak(fc20_dimP) → −DimP(fc20) → FC↓(fc15)**、各段1変更。
+canary: `leak`↓ かつ `distFam` が sc7 0.248 より下がるか（FC 維持）／`solver_under_rate`・`solver_valid_dof_mean` 暴騰なし
+（leak=0 を空で達成していない＝FC が番人）／`solver_redundant_rate` が drop 側で上がらない（=redundant penalty が番人の実証）。
+判定は distFam/mrel/leak/FC（respF は §20.2 より不可）。caveat: response_relational は mrel:leak=50:50 固定。over-rotate
+（under 過多）なら leak 小係数化のコード改修（`ResponseIntentReward.__init__` に重み/別名第2項）へ。
