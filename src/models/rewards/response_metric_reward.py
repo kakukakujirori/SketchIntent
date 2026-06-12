@@ -30,6 +30,8 @@ The metric names are:
 ``response_full_angle``       -> canonical Htheta response angle
 ``response_relational_angle`` -> reward surrogate that combines relation-only
                                  motion structure and relation leak
+``response_relational_weighted_angle`` -> linear blend of the previous two with a
+                                 config-set mixing ratio (``leak_weight``)
 ``motion_full_angle``         -> full motion-subspace angle (uses R_C)
 ``motion_relational_angle``   -> mode-normalized relation-only motion angle
 ``leak_relational_angle``     -> relation-leak angle
@@ -96,6 +98,14 @@ H_THETA_REWARD_METRICS = {
     "motion_full_angle",
     "motion_relational_angle",
     "leak_relational_angle",
+    # Weighted variant of response_relational_angle: the linear blend
+    #   (1 - leak_weight) * motion_relational_angle
+    #   + leak_weight * leak_relational_angle.
+    # Unlike the fixed-RMS response_relational_angle, the mixing ratio is a
+    # config knob (ResponseIntentReward.leak_weight): lowering leak_weight
+    # shrinks the payoff of the "emit no dims -> leak=0" under-game that the
+    # 1:1 RMS over-rewards under amplified coefficients (scaffold10 collapse).
+    "response_relational_weighted_angle",
 }
 
 
@@ -711,6 +721,7 @@ class ResponseIntentReward(BaseReward):
         coeff_h_angle: float = 2.0,
         cap_h_angle: float = 1.0,
         h_angle_reward_metric: str = "response_relational_angle",
+        leak_weight: float = 0.5,
         motion_relational_angle_mode: str = "symmetric",
         motion_relational_reverse_weight: float = 0.5,
         gate: str = "fc",
@@ -728,6 +739,12 @@ class ResponseIntentReward(BaseReward):
             cap_h_angle: Angle/metric value at which the bonus reaches 0.
             h_angle_reward_metric: Metric name.  Defaults to
                 ``response_relational_angle``.
+            leak_weight: Mixing ratio for ``response_relational_weighted_angle`` only:
+                ``(1 - leak_weight) * motion_relational_angle +
+                leak_weight * leak_relational_angle``.  ``0.5`` weighs both
+                equally (linear analogue of the RMS default); smaller values
+                damp the leak channel and with it the incentive to zero leak
+                by emitting no dimensions.  Ignored by every other metric.
             motion_relational_angle_mode: How relation-only motion subspaces
                 are compared.
             motion_relational_reverse_weight: Reverse-direction weight for the
@@ -757,6 +774,11 @@ class ResponseIntentReward(BaseReward):
         self.h_angle_reward_metric = _validate_h_theta_metric_name(
             h_angle_reward_metric
         )
+        if not 0.0 <= leak_weight <= 1.0:
+            raise ValueError(
+                f"leak_weight must be in [0, 1], got {leak_weight}"
+            )
+        self.leak_weight = float(leak_weight)
         if motion_relational_angle_mode not in MOTION_RELATIONAL_ANGLE_MODES:
             raise ValueError(
                 "motion_relational_angle_mode must be one of "
@@ -796,6 +818,7 @@ class ResponseIntentReward(BaseReward):
                     self.coeff_h_angle,
                     self.cap_h_angle,
                     self.h_angle_reward_metric,
+                    self.leak_weight,
                     self.motion_relational_angle_mode,
                     self.motion_relational_reverse_weight,
                     self.gate,
@@ -859,7 +882,15 @@ class ResponseIntentReward(BaseReward):
             gt_motion_relational=gt_motion_relational,
             gt_relation_nullspace=gt_relation_nullspace,
         )
-        selected_angle = h_metrics.value(self.h_angle_reward_metric)
+        if self.h_angle_reward_metric == "response_relational_weighted_angle":
+            # Linear blend; computed here (not in HThetaMetrics) because the
+            # mixing ratio is reward config, not a property of the sketch pair.
+            selected_angle = (
+                (1.0 - self.leak_weight) * h_metrics.motion_relational_angle
+                + self.leak_weight * h_metrics.leak_relational_angle
+            )
+        else:
+            selected_angle = h_metrics.value(self.h_angle_reward_metric)
         stats.add_h_theta(h_metrics)
         return self._bonus(
             selected_angle,
@@ -1134,6 +1165,7 @@ def _init_response_intent_worker(
     coeff_h_angle: float,
     cap_h_angle: float,
     h_angle_reward_metric: str,
+    leak_weight: float,
     motion_relational_angle_mode: str,
     motion_relational_reverse_weight: float,
     gate: str,
@@ -1150,6 +1182,7 @@ def _init_response_intent_worker(
         coeff_h_angle=coeff_h_angle,
         cap_h_angle=cap_h_angle,
         h_angle_reward_metric=h_angle_reward_metric,
+        leak_weight=leak_weight,
         motion_relational_angle_mode=motion_relational_angle_mode,
         motion_relational_reverse_weight=motion_relational_reverse_weight,
         gate=gate,
