@@ -1,4 +1,4 @@
-"""ResponseIntentReward — reward-oriented Htheta / relation-intent signal.
+"""Response metric rewards — Htheta / relation-intent signals.
 
 This file intentionally keeps the experimental reward in one place, but it is
 organized around three boundaries:
@@ -57,6 +57,8 @@ import logging
 import math
 import multiprocessing as mp
 import statistics
+import warnings
+from typing import Any
 
 import numpy as np
 import torch
@@ -117,6 +119,12 @@ MOTION_RELATIONAL_ANGLE_MODES = {
 
 
 _GATE_MODES = ("always", "converged", "fc")
+# Consumer rewards additionally support the continuous ``dof`` mode: instead of a
+# 0/1 status gate, the bonus is scaled by the per-sample solver dof_reduction_rate
+# (0 at no/invalid closure -> 1 at fully constrained).  This smoothly ramps a
+# component (e.g. leak) in as a sketch closes, removing the hard FC cliff
+# (over-dim rush) and the no-dims degenerate minimum (under-collapse) at once.
+_CONSUMER_GATE_MODES = _GATE_MODES + ("dof",)
 
 
 # response_*_angle combines two unit-angle components (motion + leak), so the
@@ -152,6 +160,43 @@ def _linear_bonus(value: float, cap: float, coeff: float) -> float:
         return 0.0
     clipped = min(max(value, 0.0), cap)
     return coeff * (1.0 - clipped / cap)
+
+
+def _status_passes_gate(status: str | None, gate: str) -> bool:
+    if gate == "always" or status is None:
+        return True
+    if gate == "converged":
+        return status in ("FC", "Under")
+    if gate == "fc":
+        return status == "FC"
+    return False
+
+
+def _shuffle_scores_within_group(scores: torch.Tensor, ctx: RewardContext) -> torch.Tensor:
+    """Permute per-sample STOP rewards within each contiguous RLOO group."""
+    K = ctx.group_sample_size
+    B, L = scores.shape
+    if not K or K < 2 or B % K != 0:
+        return scores
+
+    scalar = scores.sum(dim=1)
+    cons = ctx.cons_tokens.detach().to("cpu")
+    eq_stop = (cons == int(ConstraintToken.Stop)).int()
+    any_stop = eq_stop.any(dim=-1)
+    first_stop = torch.where(
+        any_stop,
+        eq_stop.argmax(dim=-1),
+        torch.full((B,), L - 1, dtype=torch.long),
+    )
+
+    perm = torch.arange(B)
+    for g in range(B // K):
+        base = g * K
+        perm[base : base + K] = base + torch.randperm(K)
+
+    new_scores = torch.zeros_like(scores)
+    new_scores[torch.arange(B), first_stop] = scalar[perm]
+    return new_scores
 
 
 def _motion_relational_angle_scale(
@@ -697,12 +742,469 @@ def _compute_h_theta_metrics(
     )
 
 
+@dataclass(frozen=True)
+class ResponseMetricAsyncHandle:
+    """Deferred Htheta-evaluator work that needs solver status at collect time."""
+
+    ctx: RewardContext
+    prim_np: np.ndarray
+    cons_np: np.ndarray
+    length: int
+
+
+class ResponseMetricEvaluator(BaseReward):
+    """Producer for cached Htheta metrics and ``intent_*`` diagnostics.
+
+    This module performs the expensive sketch/native-response/Htheta pipeline
+    once, writes per-sample ``HThetaMetrics`` into ``ctx.h_theta_metrics``, and
+    returns zero reward scores.  ``MotionAngleReward`` and ``LeakAngleReward``
+    are the reward-bearing consumers.
+    """
+
+    name = "response_eval"
+    is_async = True
+
+    def __init__(
+        self,
+        context: SketchContext,
+        eps: float = 1e-9,
+        motion_relational_angle_mode: str = "symmetric",
+        motion_relational_reverse_weight: float = 0.5,
+        gate: str = "converged",
+        num_workers: int = 0,
+        weight: float = 1.0,
+        enabled: bool = True,
+        **unused_legacy_kwargs: Any,
+    ):
+        super().__init__(weight=weight, enabled=enabled)
+        if motion_relational_angle_mode not in MOTION_RELATIONAL_ANGLE_MODES:
+            raise ValueError(
+                "motion_relational_angle_mode must be one of "
+                f"{sorted(MOTION_RELATIONAL_ANGLE_MODES)}, got "
+                f"{motion_relational_angle_mode!r}"
+            )
+        if motion_relational_reverse_weight < 0.0:
+            raise ValueError(
+                "motion_relational_reverse_weight must be non-negative, got "
+                f"{motion_relational_reverse_weight}"
+            )
+        if gate not in _GATE_MODES:
+            raise ValueError(f"gate must be one of {_GATE_MODES}, got {gate!r}")
+        if unused_legacy_kwargs:
+            logger.debug(
+                "ResponseMetricEvaluator ignoring legacy reward-only kwargs: %s",
+                sorted(unused_legacy_kwargs),
+            )
+
+        self.context = context
+        self.eps = eps
+        self.motion_relational_angle_mode = motion_relational_angle_mode
+        self.motion_relational_reverse_weight = motion_relational_reverse_weight
+        self.gate = gate
+        self.num_workers = max(0, int(num_workers))
+        self.tokenizer = SketchTokenizer(context)
+        self._executor: ProcessPoolExecutor | None = None
+
+    def __del__(self):
+        executor = getattr(self, "_executor", None)
+        if executor is not None:
+            executor.shutdown(wait=False, cancel_futures=True)
+            self._executor = None
+
+    def _get_executor(self) -> ProcessPoolExecutor:
+        if self._executor is None:
+            self._executor = ProcessPoolExecutor(
+                max_workers=self.num_workers,
+                mp_context=mp.get_context("spawn"),
+                initializer=_init_response_metric_worker,
+                initargs=(
+                    self.context,
+                    self.eps,
+                    self.motion_relational_angle_mode,
+                    self.motion_relational_reverse_weight,
+                    self.gate,
+                ),
+            )
+        return self._executor
+
+    def _reset_executor(self) -> None:
+        executor = self._executor
+        self._executor = None
+        if executor is None:
+            return
+        processes = getattr(executor, "_processes", None) or {}
+        for proc in list(processes.values()):
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+        executor.shutdown(wait=False, cancel_futures=True)
+
+    def _gate_pass(self, status: str | None) -> bool:
+        return _status_passes_gate(status, self.gate)
+
+    def _compute_sample_metrics(
+        self,
+        ctx: RewardContext,
+        i: int,
+        length: int,
+        prim_i: np.ndarray,
+        cons_i_raw: np.ndarray,
+        gt_sketch: datalib.Sketch,
+        solver_status: str | None,
+        stats: ResponseIntentBatchStats,
+    ) -> HThetaMetrics | None:
+        """Compute Htheta metrics for one sample, or ``None`` when gated/invalid."""
+        if not self._gate_pass(solver_status):
+            return None
+
+        cons_i, _first_stop_idx = first_stop_and_pad(cons_i_raw, length)
+        try:
+            pred_sketch, pred_native = get_or_build_pred_native(
+                ctx,
+                i,
+                self.tokenizer,
+                cons_i,
+                prim_i,
+                gt_sketch,
+                self.context,
+                self.eps,
+            )
+        except Exception as exc:
+            logger.debug(
+                "response metric evaluator: skipped sample %d "
+                "(build failure: %s)",
+                i,
+                exc,
+            )
+            return None
+
+        try:
+            gt_native = get_or_compute_gt_native(
+                ctx, gt_sketch, self.context, self.eps
+            )
+            J_phi_pred = get_or_compute_j_phi(
+                ctx, pred_sketch, pred_native.R.dtype
+            )
+            J_phi_gt = get_or_compute_j_phi(
+                ctx, gt_sketch, gt_native.R.dtype
+            )
+            gt_motion_full = get_or_compute_gt_motion_full_subspace(
+                ctx, gt_sketch, gt_native, self.eps, J_phi_gt
+            )
+            gt_motion_relational = get_or_compute_gt_motion_relational_subspace(
+                ctx, gt_sketch, gt_native, self.context, self.eps, J_phi_gt
+            )
+            gt_relation_nullspace = get_or_compute_gt_relation_nullspace(
+                ctx, gt_sketch, gt_native, self.context, self.eps
+            )
+            h_metrics = _compute_h_theta_metrics(
+                pred_sketch,
+                pred_native,
+                gt_sketch,
+                gt_native,
+                self.context,
+                self.eps,
+                self.motion_relational_angle_mode,
+                self.motion_relational_reverse_weight,
+                J_phi_pred=J_phi_pred,
+                J_phi_gt=J_phi_gt,
+                gt_motion_full=gt_motion_full,
+                gt_motion_relational=gt_motion_relational,
+                gt_relation_nullspace=gt_relation_nullspace,
+            )
+        except Exception as exc:
+            logger.debug(
+                "response metric evaluator: skipped sample %d "
+                "(angle computation failure: %s)",
+                i,
+                exc,
+            )
+            return None
+
+        stats.add_h_theta(h_metrics)
+        return h_metrics
+
+    def _score_serial_from_arrays(
+        self,
+        ctx: RewardContext,
+        prim_np: np.ndarray,
+        cons_np: np.ndarray,
+        statuses: list[str | None],
+        length: int,
+    ) -> tuple[dict[int, HThetaMetrics], ResponseIntentBatchStats]:
+        metric_map: dict[int, HThetaMetrics] = {}
+        stats = ResponseIntentBatchStats()
+
+        for i in range(cons_np.shape[0]):
+            metrics = self._compute_sample_metrics(
+                ctx,
+                i,
+                length,
+                prim_np[i],
+                cons_np[i],
+                ctx.sketch_original_list[i],
+                statuses[i],
+                stats,
+            )
+            if metrics is not None:
+                metric_map[i] = metrics
+
+        return metric_map, stats
+
+    def _score_parallel_from_arrays(
+        self,
+        ctx: RewardContext,
+        prim_np: np.ndarray,
+        cons_np: np.ndarray,
+        statuses: list[str | None],
+        length: int,
+    ) -> tuple[dict[int, HThetaMetrics], ResponseIntentBatchStats]:
+        metric_map: dict[int, HThetaMetrics] = {}
+        stats = ResponseIntentBatchStats()
+
+        grouped: dict[int, tuple[datalib.Sketch, list[int]]] = {}
+        for i, sketch in enumerate(ctx.sketch_original_list):
+            key = id(sketch)
+            if key not in grouped:
+                grouped[key] = (sketch, [])
+            grouped[key][1].append(i)
+
+        if len(grouped) <= 1:
+            return self._score_serial_from_arrays(
+                ctx, prim_np, cons_np, statuses, length
+            )
+
+        payloads = []
+        for sketch, indices in grouped.values():
+            payloads.append(
+                (
+                    indices,
+                    prim_np[indices].copy(),
+                    cons_np[indices].copy(),
+                    sketch,
+                    [statuses[i] for i in indices],
+                    length,
+                )
+            )
+
+        try:
+            executor = self._get_executor()
+            futures = [
+                executor.submit(_score_response_metric_group, payload)
+                for payload in payloads
+            ]
+            for future in as_completed(futures):
+                part_metrics, part_stats = future.result()
+                stats.extend(part_stats)
+                for i, metrics in part_metrics:
+                    metric_map[i] = metrics
+        except Exception as exc:
+            logger.warning(
+                "parallel response metric evaluator failed; "
+                "falling back to serial: %s",
+                exc,
+            )
+            self._reset_executor()
+            return self._score_serial_from_arrays(
+                ctx, prim_np, cons_np, statuses, length
+            )
+
+        return metric_map, stats
+
+    def _compute_from_arrays(
+        self,
+        ctx: RewardContext,
+        prim_np: np.ndarray,
+        cons_np: np.ndarray,
+        statuses: list[str | None],
+        length: int,
+    ) -> RewardOutput:
+        B = cons_np.shape[0]
+        if self.num_workers > 0:
+            metric_map, stats = self._score_parallel_from_arrays(
+                ctx, prim_np, cons_np, statuses, length
+            )
+        else:
+            metric_map, stats = self._score_serial_from_arrays(
+                ctx, prim_np, cons_np, statuses, length
+            )
+
+        ctx.h_theta_metrics.clear()
+        for i in range(B):
+            ctx.h_theta_metrics[i] = metric_map.get(i)
+
+        scores = torch.zeros((B, length), dtype=torch.float32)
+        return RewardOutput(scores=scores, metrics=stats.to_metrics_dict())
+
+    def submit_async(self, ctx: RewardContext) -> ResponseMetricAsyncHandle:
+        """Capture CPU arrays now; actual gated work waits for solver status."""
+        return ResponseMetricAsyncHandle(
+            ctx=ctx,
+            prim_np=ctx.prim_tokens.detach().cpu().numpy(),
+            cons_np=ctx.cons_tokens.detach().cpu().numpy(),
+            length=int(ctx.cons_tokens.shape[1]),
+        )
+
+    def collect_results(self, handle: ResponseMetricAsyncHandle) -> RewardOutput:
+        ctx = handle.ctx
+        statuses = ctx.per_sample_solver_status
+        if statuses is None:
+            statuses = ["FC"] * handle.cons_np.shape[0]
+        return self._compute_from_arrays(
+            ctx,
+            handle.prim_np,
+            handle.cons_np,
+            list(statuses),
+            handle.length,
+        )
+
+    @torch.no_grad()
+    def compute(self, ctx: RewardContext) -> RewardOutput:
+        """Synchronous path used by validation and direct unit tests."""
+        B, L = ctx.cons_tokens.shape
+        assert len(ctx.sketch_original_list) == B
+
+        statuses = ctx.per_sample_solver_status
+        if statuses is None:
+            statuses = ["FC"] * B
+        return self._compute_from_arrays(
+            ctx,
+            ctx.prim_tokens.detach().cpu().numpy(),
+            ctx.cons_tokens.detach().cpu().numpy(),
+            list(statuses),
+            L,
+        )
+
+
+class _CachedAngleReward(BaseReward):
+    """Shared implementation for Htheta cache consumers."""
+
+    metric_attr = ""
+
+    def __init__(
+        self,
+        coeff: float,
+        cap: float = 1.0,
+        gate: str = "converged",
+        shuffle_within_group: bool = False,
+        weight: float = 1.0,
+        enabled: bool = True,
+        context: SketchContext | None = None,
+        cap_h_angle: float | None = None,
+        **unused_kwargs: Any,
+    ):
+        del context
+        if unused_kwargs:
+            logger.debug(
+                "%s ignoring producer-only kwargs: %s",
+                type(self).__name__,
+                sorted(unused_kwargs),
+            )
+        if cap_h_angle is not None:
+            cap = cap_h_angle
+        if gate not in _CONSUMER_GATE_MODES:
+            raise ValueError(
+                f"gate must be one of {_CONSUMER_GATE_MODES}, got {gate!r}"
+            )
+        super().__init__(weight=weight, enabled=enabled)
+        self.coeff = float(coeff)
+        self.cap = float(cap)
+        self.gate = gate
+        self.shuffle_within_group = bool(shuffle_within_group)
+
+    def _gate_pass(self, status: str | None) -> bool:
+        return _status_passes_gate(status, self.gate)
+
+    def _gate_weight(self, status: str | None, rate: float | None) -> float:
+        """Map solver state to a [0, 1] reward multiplier.
+
+        ``always``/``converged``/``fc`` are 0/1 step gates; ``dof`` is the
+        continuous ``dof_reduction_rate`` (0 = no/invalid closure, 1 = FC).
+        """
+        if self.gate == "dof":
+            return 0.0 if rate is None else float(min(max(rate, 0.0), 1.0))
+        return 1.0 if _status_passes_gate(status, self.gate) else 0.0
+
+    @torch.no_grad()
+    def compute(self, ctx: RewardContext) -> RewardOutput:
+        B, L = ctx.cons_tokens.shape
+        scores = torch.zeros((B, L), dtype=torch.float32)
+        statuses = ctx.per_sample_solver_status
+        if statuses is None:
+            statuses = ["FC"] * B
+        rates = ctx.per_sample_dof_reduction_rate
+        if self.gate == "dof" and rates is None:
+            logger.debug(
+                "%s gate='dof' but ctx.per_sample_dof_reduction_rate is unset "
+                "(SolverReward must run first); contributing zero reward.",
+                type(self).__name__,
+            )
+
+        cons_np = ctx.cons_tokens.detach().cpu().numpy()
+        reward_vals: list[float] = []
+        angle_vals: list[float] = []
+        cache = ctx.h_theta_metrics
+        for i in range(B):
+            rate_i = rates[i] if rates is not None else None
+            weight = self._gate_weight(statuses[i], rate_i)
+            if weight <= 0.0:
+                continue
+            h_metrics = cache.get(i)
+            if h_metrics is None:
+                continue
+            angle = getattr(h_metrics, self.metric_attr, None)
+            if angle is None:
+                continue
+            angle_f = float(angle)
+            sample_reward = weight * _linear_bonus(angle_f, self.cap, self.coeff)
+            _cons_i, first_stop_idx = first_stop_and_pad(cons_np[i], L)
+            scores[i, first_stop_idx] += sample_reward
+            reward_vals.append(sample_reward)
+            angle_vals.append(angle_f)
+
+        if self.shuffle_within_group:
+            scores = _shuffle_scores_within_group(scores, ctx)
+
+        metrics = {
+            f"{self.name}_reward_mean": _mean(reward_vals),
+            f"{self.name}_reward_median": _median(reward_vals),
+            f"{self.name}_{self.metric_attr}_mean": _mean(angle_vals),
+        }
+        return RewardOutput(scores=scores, metrics=metrics)
+
+
+class MotionAngleReward(_CachedAngleReward):
+    """Reward consumer for ``motion_relational_angle``."""
+
+    name = "motion_intent"
+    metric_attr = "motion_relational_angle"
+
+    def __init__(self, coeff: float, gate: str = "converged", **kwargs: Any):
+        super().__init__(coeff=coeff, gate=gate, **kwargs)
+
+
+class LeakAngleReward(_CachedAngleReward):
+    """Reward consumer for ``leak_relational_angle``."""
+
+    name = "leak_intent"
+    metric_attr = "leak_relational_angle"
+
+    def __init__(self, coeff: float, gate: str = "fc", **kwargs: Any):
+        super().__init__(coeff=coeff, gate=gate, **kwargs)
+
+
 class ResponseIntentReward(BaseReward):
-    """Sequence-level reward from Htheta / relation-intent angles.
+    """Deprecated sequence-level reward from Htheta / relation-intent angles.
 
     The reward is a clipped linear bonus on one selected Htheta/relation-intent
     angle.  The score is written at the first STOP token of each generated
     constraint sequence.
+
+    Deprecated:
+        Prefer ``ResponseMetricEvaluator`` + ``MotionAngleReward`` /
+        ``LeakAngleReward`` so motion and leak coefficients/gates are explicit
+        and the expensive Htheta computation is shared.
 
     This module assumes solver status has already been computed by
     ``SolverReward`` and can gate itself on solver status.  The default
@@ -725,6 +1227,7 @@ class ResponseIntentReward(BaseReward):
         motion_relational_angle_mode: str = "symmetric",
         motion_relational_reverse_weight: float = 0.5,
         gate: str = "fc",
+        leak_gate: str | None = None,
         num_workers: int = 0,
         shuffle_within_group: bool = False,
         weight: float = 1.0,
@@ -752,6 +1255,13 @@ class ResponseIntentReward(BaseReward):
             gate: Solver-status gate.  ``fc`` scores only fully constrained
                 samples, ``converged`` scores FC and under-constrained samples,
                 and ``always`` scores every reconstructable sample.
+            leak_gate: Separate gate for the leak component of
+                ``response_relational_weighted_angle`` (defaults to ``gate``).
+                Lets the always-wanted ``motion_relational`` term score under
+                ``gate`` while the leak term — whose ``leak=0`` minimum is reached
+                trivially by emitting no dimensions — is restricted to e.g. ``fc``,
+                preventing amplified intent from collapsing to the no-dims corner.
+                Has no effect on the single-scalar (non-blend) metrics.
             num_workers: Number of process workers for per-sketch group
                 scoring.  ``0`` keeps the serial in-process path.
             shuffle_within_group: Negative control.  When ``True``, the per-sample
@@ -767,6 +1277,12 @@ class ResponseIntentReward(BaseReward):
             enabled: Composer-level on/off switch from ``BaseReward``.
         """
         super().__init__(weight=weight, enabled=enabled)
+        warnings.warn(
+            "ResponseIntentReward is deprecated; use ResponseMetricEvaluator "
+            "with MotionAngleReward and/or LeakAngleReward instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         self.context = context
         self.eps = eps
         self.coeff_h_angle = coeff_h_angle
@@ -792,9 +1308,24 @@ class ResponseIntentReward(BaseReward):
             )
         if gate not in _GATE_MODES:
             raise ValueError(f"gate must be one of {_GATE_MODES}, got {gate!r}")
+        # leak_gate (defaults to gate) gates ONLY the leak component of the linear
+        # response_relational_weighted_angle blend; the motion_relational component
+        # always uses ``gate``.  This lets the always-wanted relational-structure
+        # signal score on Under samples (gate=converged) while the leak term — whose
+        # leak=0 minimizer is trivially reached by emitting NO dimensions, i.e. the
+        # under-constrained corner — is restricted to FC samples (leak_gate=fc), so
+        # amplifying intent cannot collapse into the no-dims corner.  Ignored by the
+        # non-blend metrics (they expose a single coupled scalar).
+        if leak_gate is None:
+            leak_gate = gate
+        if leak_gate not in _GATE_MODES:
+            raise ValueError(
+                f"leak_gate must be one of {_GATE_MODES}, got {leak_gate!r}"
+            )
         self.motion_relational_angle_mode = motion_relational_angle_mode
         self.motion_relational_reverse_weight = motion_relational_reverse_weight
         self.gate = gate
+        self.leak_gate = leak_gate
         self.num_workers = max(0, int(num_workers))
         self.shuffle_within_group = bool(shuffle_within_group)
         self.tokenizer = SketchTokenizer(context)
@@ -822,6 +1353,7 @@ class ResponseIntentReward(BaseReward):
                     self.motion_relational_angle_mode,
                     self.motion_relational_reverse_weight,
                     self.gate,
+                    self.leak_gate,
                 ),
             )
         return self._executor
@@ -843,14 +1375,21 @@ class ResponseIntentReward(BaseReward):
         """Instance wrapper for the common clipped angle-to-bonus transform."""
         return _linear_bonus(value, cap, coeff)
 
-    def _gate_pass(self, status: str | None) -> bool:
-        if self.gate == "always" or status is None:
+    @staticmethod
+    def _status_passes(status: str | None, gate: str) -> bool:
+        if gate == "always" or status is None:
             return True
-        if self.gate == "converged":
+        if gate == "converged":
             return status in ("FC", "Under")
-        if self.gate == "fc":
+        if gate == "fc":
             return status == "FC"
         return False
+
+    def _gate_pass(self, status: str | None) -> bool:
+        return self._status_passes(status, self.gate)
+
+    def _leak_gate_pass(self, status: str | None) -> bool:
+        return self._status_passes(status, self.leak_gate)
 
     def _score_h_theta(
         self,
@@ -860,13 +1399,21 @@ class ResponseIntentReward(BaseReward):
         gt_native: NativeResponse,
         stats: ResponseIntentBatchStats,
         *,
+        include_leak: bool = True,
         J_phi_pred: torch.Tensor | None = None,
         J_phi_gt: torch.Tensor | None = None,
         gt_motion_full: tuple[torch.Tensor, int] | None = None,
         gt_motion_relational: tuple[torch.Tensor, int] | None = None,
         gt_relation_nullspace: tuple[torch.Tensor, int] | None = None,
     ) -> float:
-        """Compute the selected Htheta-family angle and convert it to reward."""
+        """Compute the selected Htheta-family angle and convert it to reward.
+
+        ``include_leak`` is honoured only by ``response_relational_weighted_angle``:
+        when ``False`` (the sample passed ``gate`` but not ``leak_gate``), the leak
+        term is dropped and the reward is the pure ``motion_relational_angle`` bonus
+        at full weight, so the always-wanted relational signal is preserved while the
+        leak term is restricted to ``leak_gate`` samples.
+        """
         h_metrics = _compute_h_theta_metrics(
             pred_sketch,
             pred_native,
@@ -885,10 +1432,15 @@ class ResponseIntentReward(BaseReward):
         if self.h_angle_reward_metric == "response_relational_weighted_angle":
             # Linear blend; computed here (not in HThetaMetrics) because the
             # mixing ratio is reward config, not a property of the sketch pair.
-            selected_angle = (
-                (1.0 - self.leak_weight) * h_metrics.motion_relational_angle
-                + self.leak_weight * h_metrics.leak_relational_angle
-            )
+            # When the leak term is gated out for this sample (include_leak=False),
+            # fall back to pure motion_relational at full weight.
+            if include_leak:
+                selected_angle = (
+                    (1.0 - self.leak_weight) * h_metrics.motion_relational_angle
+                    + self.leak_weight * h_metrics.leak_relational_angle
+                )
+            else:
+                selected_angle = h_metrics.motion_relational_angle
         else:
             selected_angle = h_metrics.value(self.h_angle_reward_metric)
         stats.add_h_theta(h_metrics)
@@ -978,6 +1530,7 @@ class ResponseIntentReward(BaseReward):
                 gt_sketch,
                 gt_native,
                 stats,
+                include_leak=self._leak_gate_pass(solver_status),
                 J_phi_pred=J_phi_pred,
                 J_phi_gt=J_phi_gt,
                 gt_motion_full=gt_motion_full,
@@ -1156,6 +1709,73 @@ class ResponseIntentReward(BaseReward):
         return RewardOutput(scores=scores, metrics=stats.to_metrics_dict())
 
 
+_RESPONSE_METRIC_WORKER: ResponseMetricEvaluator | None = None
+
+
+def _init_response_metric_worker(
+    context: SketchContext,
+    eps: float,
+    motion_relational_angle_mode: str,
+    motion_relational_reverse_weight: float,
+    gate: str,
+) -> None:
+    """Initialise one process-pool worker for response metric evaluation."""
+    global _RESPONSE_METRIC_WORKER
+    try:
+        torch.set_num_threads(1)
+    except Exception:
+        pass
+    _RESPONSE_METRIC_WORKER = ResponseMetricEvaluator(
+        context=context,
+        eps=eps,
+        motion_relational_angle_mode=motion_relational_angle_mode,
+        motion_relational_reverse_weight=motion_relational_reverse_weight,
+        gate=gate,
+        num_workers=0,
+    )
+
+
+def _score_response_metric_group(
+    payload: tuple[
+        list[int],
+        np.ndarray,
+        np.ndarray,
+        datalib.Sketch,
+        list[str | None],
+        int,
+    ],
+) -> tuple[list[tuple[int, HThetaMetrics]], ResponseIntentBatchStats]:
+    """Evaluate one GT-sketch group in a worker process."""
+    if _RESPONSE_METRIC_WORKER is None:
+        raise RuntimeError("response metric worker was not initialised")
+
+    indices, prim_np, cons_np, gt_sketch, statuses, length = payload
+    local_b = len(indices)
+    ctx = RewardContext(
+        prim_tokens=torch.from_numpy(prim_np),
+        cons_tokens=torch.from_numpy(cons_np),
+        sketch_original_list=[gt_sketch] * local_b,
+    )
+    stats = ResponseIntentBatchStats()
+    metric_items: list[tuple[int, HThetaMetrics]] = []
+
+    for local_i, global_i in enumerate(indices):
+        metrics = _RESPONSE_METRIC_WORKER._compute_sample_metrics(
+            ctx,
+            local_i,
+            length,
+            prim_np[local_i],
+            cons_np[local_i],
+            gt_sketch,
+            statuses[local_i],
+            stats,
+        )
+        if metrics is not None:
+            metric_items.append((global_i, metrics))
+
+    return metric_items, stats
+
+
 _RESPONSE_INTENT_WORKER: ResponseIntentReward | None = None
 
 
@@ -1169,6 +1789,7 @@ def _init_response_intent_worker(
     motion_relational_angle_mode: str,
     motion_relational_reverse_weight: float,
     gate: str,
+    leak_gate: str,
 ) -> None:
     """Initialise one process-pool worker for response-intent scoring."""
     global _RESPONSE_INTENT_WORKER
@@ -1186,6 +1807,7 @@ def _init_response_intent_worker(
         motion_relational_angle_mode=motion_relational_angle_mode,
         motion_relational_reverse_weight=motion_relational_reverse_weight,
         gate=gate,
+        leak_gate=leak_gate,
         num_workers=0,
     )
 

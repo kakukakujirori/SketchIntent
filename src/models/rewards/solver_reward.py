@@ -594,6 +594,9 @@ class SolverReward(BaseReward):
         solver_dof_counter: Counter[int] = Counter()
         solver_status_counter: Counter[str] = Counter()
         per_sample_solver_status: list[str] = ["Timeout"] * handle.B
+        # Continuous closure progress for gate="dof" consumers (0 = no/invalid
+        # closure, 1 = fully constrained).  Only set on valid converged samples.
+        per_sample_dof_reduction_rate: list[float] = [0.0] * handle.B
 
         # Dimensional shortcut hygiene tallies (rates over the reconstructed set,
         # independent of the per-penalty gate so the diagnostic reflects the full
@@ -731,6 +734,7 @@ class SolverReward(BaseReward):
                 orig_dof = self._get_dof_without_constraints(sketch)
                 dof_reduction_rate = (orig_dof - solver_status.DoF) / max(1, orig_dof - self.fully_constrained_dof)
                 seq_reward = self.reward_dof_reduction * dof_reduction_rate
+                per_sample_dof_reduction_rate[i] = float(min(max(dof_reduction_rate, 0.0), 1.0))
 
                 if solver_status.DoF <= self.fully_constrained_dof:
                     seq_reward += self.reward_fully_constrained
@@ -753,6 +757,7 @@ class SolverReward(BaseReward):
             scores=scores,
             metrics=metrics,
             per_sample_solver_status=per_sample_solver_status,
+            per_sample_dof_reduction_rate=per_sample_dof_reduction_rate,
         )
 
     # ---------------------------------------------------------------------- #

@@ -39,13 +39,38 @@ from src.sketch_handlers.context import SketchContext
 CONSTRAINT_MIX_KEY = "_constraint_mix"
 
 
+def _propagate_context_outputs(
+    out: RewardOutput,
+    ctx: RewardContext,
+    producer_name: str,
+) -> None:
+    """Copy explicit producer outputs into the shared reward context."""
+    # Propagate solver status for downstream gating.
+    if out.per_sample_solver_status is not None:
+        if producer_name != "solver":
+            raise ValueError(
+                f"reward {producer_name!r} populated per_sample_solver_status; "
+                "only SolverReward may do so"
+            )
+        ctx.per_sample_solver_status = out.per_sample_solver_status
+    # Propagate continuous closure progress for gate="dof" consumers.
+    if out.per_sample_dof_reduction_rate is not None:
+        if producer_name != "solver":
+            raise ValueError(
+                f"reward {producer_name!r} populated per_sample_dof_reduction_rate; "
+                "only SolverReward may do so"
+            )
+        ctx.per_sample_dof_reduction_rate = out.per_sample_dof_reduction_rate
+
+
 class RewardComposer(torch.nn.Module):
     """Orchestrates a list of ``BaseReward`` modules.
 
     Args:
         rewards: ordered list of rewards. Async rewards are collected before
-            sync rewards; only ``SolverReward`` may populate
-            ``per_sample_solver_status`` for subsequent rewards.
+            sync rewards; ``SolverReward`` may populate
+            ``per_sample_solver_status`` for subsequent rewards, and async
+            producer rewards may populate their own explicit caches.
         clip_total: optional ``(lo, hi)`` clamp applied after aggregation.
         clip_per_reward: optional ``{name: (lo, hi)}`` per-reward clamp on
             ``RewardOutput.scores`` before the weighted sum.
@@ -124,14 +149,7 @@ class RewardComposer(torch.nn.Module):
                 out = r.compute(ctx)
             outputs[r.name] = out
 
-            # Propagate solver status for downstream gating.
-            if out.per_sample_solver_status is not None:
-                if r.name != "solver":
-                    raise ValueError(
-                        f"reward {r.name!r} populated per_sample_solver_status; "
-                        "only SolverReward may do so"
-                    )
-                ctx.per_sample_solver_status = out.per_sample_solver_status
+            _propagate_context_outputs(out, ctx, r.name)
 
             s = out.scores
             if r.name in self.clip_per_reward:
@@ -187,8 +205,8 @@ class RewardValComposer(torch.nn.Module):
 
     Holds a configurable list of ``BaseReward`` modules run purely for their
     metrics — typically the SAME reward classes the trainer uses (``SolverReward``
-    for ``solver_*`` rates, ``ResponseIntentReward`` for ``intent_*_angle`` incl.
-    the canonical ``response_full_angle``), so eval never reimplements a reward.
+    for ``solver_*`` rates, ``ResponseMetricEvaluator`` for ``intent_*_angle``
+    incl. the canonical ``response_full_angle``), so eval never reimplements a reward.
     Each module's ``compute(ctx)`` runs over a shared context and its scalar
     ``metrics`` are merged; there is no weighting, no aggregated score, and no
     ``reward_contrib`` (those are training concerns owned by RewardComposer).
@@ -199,8 +217,9 @@ class RewardValComposer(torch.nn.Module):
     (``eval_rel_ratio_mean``) itself — it is a trivial token-level quantity that
     no reward produces, so it does not warrant its own module.
 
-    ``per_sample_solver_status`` produced by a solver module is propagated into
-    the context so later modules may gate on it if they choose.
+    ``per_sample_solver_status`` and ``per_sample_dof_reduction_rate`` produced
+    by a solver module are propagated into the context so later modules may gate
+    on them if they choose.
     """
 
     def __init__(self, metrics: list[BaseReward], context: Any):
@@ -273,8 +292,7 @@ class RewardValComposer(torch.nn.Module):
             if not m.enabled:
                 continue
             out = m.compute(ctx)
-            if out.per_sample_solver_status is not None:
-                ctx.per_sample_solver_status = out.per_sample_solver_status
+            _propagate_context_outputs(out, ctx, m.name)
             for k, v in out.metrics.items():
                 if isinstance(v, (int, float)):
                     merged[k] = float(v)

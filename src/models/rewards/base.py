@@ -36,10 +36,15 @@ class RewardOutput:
             ``name`` by the ``RewardComposer``.
         per_sample_solver_status: only ``SolverReward`` populates this;
             downstream rewards read it from the ``RewardContext`` for gating.
+        per_sample_dof_reduction_rate: only ``SolverReward`` populates this;
+            ``(orig_dof - DoF) / (orig_dof - fully_constrained_dof)`` clamped to
+            ``[0, 1]`` (0 for invalid/unsolved samples).  Consumed via the
+            ``RewardContext`` by the continuous ``gate="dof"`` weighting.
     """
     scores: torch.Tensor
     metrics: dict[str, Any] = field(default_factory=dict)
     per_sample_solver_status: list[str] | None = None
+    per_sample_dof_reduction_rate: list[float] | None = None
 
 
 @dataclass
@@ -58,6 +63,7 @@ class RewardContext:
     sketch_original_list: list[datalib.Sketch]
     gt_tokens: torch.Tensor | None = None                       # (B, L_cons) — GT, for GT-match
     per_sample_solver_status: list[str] | None = None           # written by SolverReward
+    per_sample_dof_reduction_rate: list[float] | None = None     # written by SolverReward (gate="dof")
     pred_sketches: list[datalib.Sketch | None] | None = None    # built on demand
     native_cache: dict[tuple[str, int], "NativeResponse"] = field(default_factory=dict)
     # Cache for pairwise-distance Jacobian J_phi.  Keyed by ``(id(sketch),
@@ -75,6 +81,10 @@ class RewardContext:
     # ``overwrite_primitives_with_original`` deepcopying gt entities into
     # pred), so J_R(gt_rels) is state-independent in practice.
     gt_subspace_cache: dict[tuple[int, torch.dtype, str], object] = field(default_factory=dict)
+    # Producer/consumer cache for response Htheta metrics.  The concrete values
+    # are ``HThetaMetrics | None`` from ``response_metric_reward.py``; keep the
+    # type loose here to avoid a reward-module import cycle.
+    h_theta_metrics: dict[int, Any] = field(default_factory=dict)
     sketch_tokenizer: "SketchTokenizer | None" = None
     # RLOO group size K: the batch is laid out as B contiguous blocks of K
     # rollouts (sample index = b*K + k), matching the (B, K) regrouping used for
