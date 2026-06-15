@@ -111,6 +111,21 @@ callbacks:
     auto_insert_metric_name: false
     every_n_train_steps: 100
 
+  # Fixed-interval, NON-overwriting checkpoints for matched-step ablation eval.
+  # save_top_k=-1 keeps EVERY saved step (no pruning), unlike the top-3 callbacks
+  # above, so an arbitrary matched step (e.g. 25k/50k; 1 epoch = 52188 steps) is
+  # always recoverable for the Table A comparison.  NOTE: only affects FUTURE
+  # launches of this config; the in-flight 28xstb2f run does not save these
+  # retroactively (its reliable matched point is the end-of-epoch `last` ckpt).
+  model_checkpoint_step:
+    _target_: lightning.pytorch.callbacks.ModelCheckpoint
+    dirpath: ${paths.output_dir}/checkpoints
+    filename: "stepsave_{step}"
+    every_n_train_steps: 5000
+    save_top_k: -1
+    save_last: false
+    auto_insert_metric_name: false
+
 data:
   train_sequence_file: data_processed/sg_pseudo_rel_v2_full_all_full.npy
   batch_size: 32

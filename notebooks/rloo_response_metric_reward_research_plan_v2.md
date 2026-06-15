@@ -441,6 +441,81 @@ producer/consumer refactor で motion/leak を別報酬へ分離し、`LeakAngle
 Under の期待差分 / composer cache propagation を固定。`tests/test_pairwise_distance_observable.py` と合わせて通過。
 4 つの scaffold12 config は Hydra compose + reward/val composer instantiate 済み。
 
+### 4.7 結果: motion+leak+dimprior が暫定ゴール、各成分の役割が分離できた (2026-06-15)
+
+**暫定の最終 config = `rloo_response_scaffold12_m4.5_l1.5_leakdof_dimprior_intent`（`28xstb2f`）**
+＝ scaffold（v2GT × flip × FC1.0 × DimParsimony0.30 × RelClassPrior）の上に
+**MotionAngle(coeff4.5, gate=converged) + LeakAngle(coeff1.5, gate=dof) + DimPrior(Distance−/DistanceX,Y+/Angle−)**。
+
+**(1) refactor は挙動保存（§4.6 の健全性確認）**。`m6.0_dimprior` から DimPrior だけ抜いた対照
+`rloo_response_scaffold12_m6.0_nodimprior_intent`（`srips9h5`）が、旧 `ResponseIntentReward` 版の
+`scaffold8_fc10_hicoeff`（`kmcne55j`）を matched-step で再現（DoF/FC/distFam/Dist が seed 差内で一致）。
+→ `ResponseIntentReward → ResponseMetricEvaluator+MotionAngleReward` の分解は等価。以降の差は報酬成分に帰属できる。
+
+**(2) DimPrior の効果＝Distance→軸寸法の型切替（同 coeff で DimPrior だけ違う 2 本の matched 比較）**。
+`28xstb2f`(DimPrior有) vs `oyvonqrm`(=`m4.5_l1.5_leakdof`, DimPrior無)、step≈25k:
+
+| run | DoF | FC | distFam | leak | **Dist** | DistX | DistY |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `28xstb2f` (M+L+D) | 7.25 | 0.43 | 0.131 | 0.167 | **0.000** | 0.095 | 0.081 |
+| `oyvonqrm` (M+L) | 7.92 | 0.39 | 0.108 | 0.119 | **0.098** | 0.021 | 0.025 |
+
+同じ FC/DoF 帯で、DimPrior の有無だけが raw Distance を 0.098→**0.000**、軸寸法を 0.046→0.176 に置換。
+
+**(3) 型切替は「高 coeff × ~15k step 遅延」の現象**。`m6.0_dimprior`(`a1e6s9en`) の cmix 推移:
+Distance は step3k で即 0.003 に圧殺されるが、置換先（DistanceX/Y）を獲得するのは step15k 以降で、それと同期して
+DoF が再降下（10→6.9）。**DimPrior が収束を遅くする正体＝「Distance を捨てるのは一瞬・軸寸法を再学習するのに ~15k step」**。
+低 coeff（`s9rxgu3v`=`m2.25_l0.75_leakdof_dimprior`）は step4k で Distance がまだ 0.13＝**低 coeff では切替が鈍い可能性**（要観察）。
+
+**(4) leak は FC 補償に必須（観察④）**。DimPrior 単独＝leak 無し（`m6.0_dimprior`）は最終 DoF6.9 だが **FC0.12**（同 DoF の
+s8 は 0.38）＝「途中まで寸法を入れて閉じ切らない」。leak（gate=dof, closure に応じ ramp）を足すと FC0.43 に回復。
+→ **leak と DimPrior は分業**: leak=raw/斜め Distance 抑制＋closure 補償、DimPrior=型の付け替え。両方要る。
+
+**(5) 残る根本トレードオフ**: FC↑ につれ distFam↑ / relRat↓ は全 run 共通で未解決（`s9_leak_fc15`=`iw2i8e0d` は
+FC0.63 だが distFam0.198・Dist0.108・leak0.280＝over-dim 端）。`28xstb2f` はこの緊張は破れていないが、**matched-DoF で
+raw Distance≈0・leak・distFam が baseline を Pareto 優位**＝intent 品質では現状最良。
+
+**留保**: `Distance=0` は極端で、DimPrior coeff のハイパラ探索余地あり（優先度は下げる）。over-dim 監視 KPI は distFam 単体でなく
+**Distance vs DistanceX/Y 比 ＋ leak** に置く（distFam は FC を押せば必ず上がる）。eval は収束完了を待たず、現 ckpt の
+`28xstb2f` vs `oyvonqrm` を held-out(fiverr) で確定させれば因果主張は取れる段階。
+
+### 4.8 paper 用 ablation 設計（表A）と評価方針 (2026-06-15)
+
+**最終 config = `rloo_response_scaffold12_m4.5_l1.5_leakdof_dimprior_intent`（`28xstb2f`）**。これを成分分解した build-up
+＋ DimParsimony 置換を **表A（main）** とする。共通 scaffold S = Solver(FC1.5) + RelPrior + DimPrior + flip + v2GT
+（distortion `null`→1/64 で全 run 統一、pseudoGT-v2）。**M/L/DimParsimony だけ**を動かす:
+
+| arm | M | L | DimParsim | config / run | 役割 |
+|---|:-:|:-:|:-:|---|---|
+| no-intent | ✗ | ✗ | ✗ | `scaffold12_ablA_noML_dimprior`（新規） | over-dim floor |
+| +M | 4.5 | ✗ | ✗ | `scaffold12_ablA_m4.5_dimprior_intent`（新規） | motion の寄与（兼 L-off 腕） |
+| +M+DimParsim | 4.5 | ✗ | ✓ | `scaffold12_ablA_m4.5_dimprior_dimpars_intent`（新規） | **Leak↔DimParsimony 置換** |
+| +M+L（最終） | 4.5 | 1.5 | ✗ | `..._m4.5_l1.5_leakdof_dimprior_intent`（`28xstb2f`） | full |
+
+読み: no-intent→+M→+M+L で M・L 各寄与。**+M+DimParsim vs +M+L** で「Leak(方向) が count-parsimony を性能で包含」
+→ DimParsimony 不採用を**内部で**正当化。3 新規 config は Hydra compose + 2-step CPU smoke 通過済み（成分一致を確認）。
+表の列 = resp↓ / θ_motion^rel↓ / distFam＋(Distance vs DistanceX/Y 内訳) / key-rel↑ / leak↓ / FC。
+
+**設計判断（確定）**:
+- **DimPrior は ablation しない**（RelPrior と同系の固定 prior、全 arm に常時 ON）。
+- **faithful-Casey は DROP**（実装非公開・Fusion360・ハイパラ未公開＝忠実再現不可）。その役割は上記 DimParsimony↔Leak の
+  内部置換 ablation が代替。
+- **distortion_threshold は全 run 1/64 で統一済み**（原典 Casey ≈ 0.25 より厳格）＝内部整合 OK、再走不要。論文に一文明記。
+- **pseudoGT の RL ablation（旧 表B）は廃止**（素データ `sg_filtered_unique_valid` は under-constrained で、symmetric reward だと
+  「Pred も under」になるのが自明＝canonicalization の効果でない。subset mode 説明も重い）。pseudoGT の価値は Sec.5 既出の
+  command-F1 の不備で代替（指標レベルで充足）。
+- **shuffle 負例・FlipAug on/off は APPENDIX**（shuffle は旧 `buxh9c4w` で既出、flip は自明）。
+
+**APPENDIX**: DimParsimony 冗長性（+M+L+DimParsim 任意1本）、dose-response（`tjxf91fo` 等）、leak_gate＋dof分布 二峰→単峰
+figure、低coeff切替（`s9rxgu3v`）、FC崩壊（`a1e6s9en`）、flip on/off、shuffle。
+
+**評価 checkpoint 方針**:
+- **matched step で揃える**（各 run の best ckpt は使わない）。全 arm が val plateau する最早共通 step（28xstb2f の型切替完了
+  ~25k 以降、目安 25–35k）。1 epoch（~52k=2.5日/本）固定は不要。
+- **`solver_valid_dof_mean` 最小での ckpt 選択は禁止**（DoF 最小＝over-constrained 偏り＝over-dim 主張と逆）。matched step の
+  固定 ckpt（save_last / epoch ckpt）を使う。狙った step の ckpt が残るよう保存設定を確保。
+- eval は **held-out fiverr**、ckpt 選択基準は train-val のみ（test 選択回避）。
+
 ---
 
 ## 5. 補足: motion_angle が触れない軸（参考）
