@@ -85,6 +85,13 @@ class RewardContext:
     # are ``HThetaMetrics | None`` from ``response_metric_reward.py``; keep the
     # type loose here to avoid a reward-module import cycle.
     h_theta_metrics: dict[int, Any] = field(default_factory=dict)
+    # Producer/consumer cache for PREFIX-level response metrics.  Keyed by
+    # batch index, each value is ``list[PrefixBlockMetric] | None`` (one entry
+    # per completed constraint block) from ``response_metric_reward.py``.  The
+    # ``PrefixResponseMetricEvaluator`` producer does the expensive per-prefix
+    # sketch/native rebuild once; ``PrefixMotionAngleReward`` and
+    # ``PrefixLeakAngleReward`` consume it.  Loose type to avoid an import cycle.
+    prefix_metrics: dict[int, Any] = field(default_factory=dict)
     sketch_tokenizer: "SketchTokenizer | None" = None
     # RLOO group size K: the batch is laid out as B contiguous blocks of K
     # rollouts (sample index = b*K + k), matching the (B, K) regrouping used for

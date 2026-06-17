@@ -68,6 +68,8 @@ import sketchgraphs.data as datalib
 from src.metrics.edit_response_distance import (
     NativeResponse,
     _is_relational,
+    compute_native_response,
+    pairwise_distance_observable,
 )
 from src.models.rewards.base import BaseReward, RewardContext, RewardOutput
 from src.models.rewards.utils.geometry import (
@@ -78,6 +80,7 @@ from src.models.rewards.utils.geometry import (
     stack_relation_jacobians_at as _stack_relation_jacobians_at,
 )
 from src.models.rewards.utils.sketch_builder import (
+    build_pred_sketch,
     first_stop_and_pad,
     get_or_build_pred_native,
     get_or_compute_gt_motion_full_subspace,
@@ -86,7 +89,10 @@ from src.models.rewards.utils.sketch_builder import (
     get_or_compute_gt_relation_nullspace,
     get_or_compute_j_phi,
 )
-from src.sketch_handlers.constants import ConstraintToken
+from src.sketch_handlers.constants import (
+    ConstraintToken,
+    DIMENSIONAL_CONSTRAINT_TOKEN_IDS,
+)
 from src.sketch_handlers.context import SketchContext
 from src.sketch_handlers.sketch_tokenizer import SketchTokenizer
 
@@ -1194,6 +1200,756 @@ class LeakAngleReward(_CachedAngleReward):
         super().__init__(coeff=coeff, gate=gate, **kwargs)
 
 
+_PREFIX_DELTA_MODES = ("positive", "signed")
+
+
+def _iter_constraint_block_prefixes(
+    cons_i: np.ndarray,
+    first_stop_idx: int,
+    prefix_len: int,
+    block_size: int,
+    max_prefixes: int | None,
+):
+    """Yield ``(block_idx, block_tail, prefix_cons)`` for each completed block.
+
+    ``cons_i`` must already be truncated by :func:`first_stop_and_pad` so no STOP
+    appears before ``first_stop_idx`` and the constraint body is a contiguous run
+    of ``block_size``-token blocks starting at ``prefix_len``.  For each completed
+    block ``k`` (0-indexed), a prefix sequence is produced that keeps blocks
+    ``0..k`` and closes immediately after block ``k`` with a STOP at
+    ``block_tail + 1`` (the remainder padded).  ``block_tail`` is the last token
+    of block ``k``, i.e. the placement target for that block's prefix reward —
+    matching the SolverReward convention of scoring a constraint at its own
+    block-end token.
+    """
+    if block_size <= 0 or first_stop_idx <= prefix_len:
+        return
+    n_blocks = (first_stop_idx - prefix_len) // block_size
+    if max_prefixes is not None:
+        n_blocks = min(n_blocks, int(max_prefixes))
+    L = cons_i.shape[0]
+    for k in range(n_blocks):
+        block_tail = prefix_len + (k + 1) * block_size - 1
+        stop_pos = block_tail + 1
+        if stop_pos >= L:
+            break
+        prefix = cons_i.copy()
+        prefix[stop_pos] = int(ConstraintToken.Stop)
+        if stop_pos + 1 < L:
+            prefix[stop_pos + 1:] = int(ConstraintToken.Pad)
+        yield k, block_tail, prefix
+
+
+def _prefix_motion_deltas(
+    angles: Sequence[float],
+    block_tails: Sequence[int],
+    coeff: float,
+    cap: float,
+    delta_mode: str,
+    min_delta: float,
+) -> tuple[list[tuple[int, float]], list[float]]:
+    """Convert a prefix angle trajectory into ``(tail, delta)`` placements.
+
+    ``Phi_t = coeff * (1 - clip(angle_t)/cap)`` and the per-block reward is the
+    delta against the previous prefix potential (``Phi_0 = 0`` for the empty
+    prefix).  ``positive`` clips to ``max(0, delta - min_delta)`` (non-telescoping,
+    rewards each improving block); ``signed`` keeps the sign and zeroes only
+    sub-``min_delta`` moves (telescopes to ``Phi_T``).  Returns the non-zero
+    placements and the list of strictly-positive deltas (for logging).
+    """
+    prev_phi = 0.0
+    placements: list[tuple[int, float]] = []
+    pos_deltas: list[float] = []
+    for angle, tail in zip(angles, block_tails):
+        phi = _linear_bonus(angle, cap, coeff)
+        delta = phi - prev_phi
+        prev_phi = phi
+        if delta_mode == "positive":
+            delta = max(0.0, delta - min_delta)
+        elif abs(delta) < min_delta:
+            delta = 0.0
+        if delta != 0.0:
+            placements.append((tail, delta))
+            if delta > 0.0:
+                pos_deltas.append(delta)
+    return placements, pos_deltas
+
+
+def _prefix_leak_penalties(
+    leaks: Sequence[float],
+    is_dimensional: Sequence[bool],
+    block_tails: Sequence[int],
+    coeff: float,
+    cap: float,
+    min_delta: float,
+) -> tuple[list[tuple[int, float]], list[float]]:
+    """Convert a prefix leak trajectory into ``(tail, penalty)`` placements.
+
+    Unlike motion, leak must NOT be rewarded as a bonus: ``leak=0`` is trivially
+    reached by emitting no dimensions, so a symmetric/positive-delta bonus would
+    reward the under-constrained corner.  Instead this is an increase-only
+    penalty applied at *dimensional* block tails:
+
+        penalty_t = -coeff * max(0, clip(leak_t) - clip(leak_{t-1}) - min_delta)
+
+    A dimensional constraint that drives a direction GT closes relationally
+    raises leak and is penalized at its own block tail; a legitimate dimension
+    (orthogonal to GT's relation row space) leaves leak unchanged and is not.
+    ``prev`` is the previous prefix's (clipped) leak regardless of block type —
+    leak is measured on the whole prefix — but only dimensional blocks are
+    charged.  ``prev`` starts at 0 so no-dims prefixes never earn a bonus.
+    Returns the non-zero placements and the penalty magnitudes (for logging).
+    """
+    prev = 0.0
+    placements: list[tuple[int, float]] = []
+    pen_mags: list[float] = []
+    for leak, dim, tail in zip(leaks, is_dimensional, block_tails):
+        leak_c = min(max(leak, 0.0), cap) if cap > 0.0 else max(leak, 0.0)
+        if dim:
+            penalty = -coeff * max(0.0, leak_c - prev - min_delta)
+            if penalty != 0.0:
+                placements.append((tail, penalty))
+                pen_mags.append(-penalty)
+        prev = leak_c
+    return placements, pen_mags
+
+
+@dataclass(frozen=True)
+class PrefixBlockMetric:
+    """Per-prefix response metrics for one completed constraint block.
+
+    Produced by ``PrefixResponseMetricEvaluator`` (one entry per completed block)
+    and consumed by ``PrefixMotionAngleReward`` / ``PrefixLeakAngleReward``.
+
+    Fields:
+        block_tail: token index of the block's last token (reward placement
+            target).
+        is_dimensional: whether the block this prefix newly added is a
+            dimensional constraint (Distance/DistanceX/Y/Radius/Diameter/Angle).
+            Only dimensional blocks receive a prefix leak penalty.
+        motion_relational_angle: normalized relation-only motion angle of the
+            prefix vs the pseudo target, in [0, 1].
+        leak_relational_angle: relation-leak angle of the prefix, in [0, 1].
+    """
+
+    block_tail: int
+    is_dimensional: bool
+    motion_relational_angle: float
+    leak_relational_angle: float
+
+
+@dataclass
+class PrefixEvalBatchStats:
+    """Aggregation buffer for ``PrefixResponseMetricEvaluator`` logging."""
+
+    num_prefixes_vals: list[int] = field(default_factory=list)
+    num_dimensional_vals: list[int] = field(default_factory=list)
+    first_motion_vals: list[float] = field(default_factory=list)
+    last_motion_vals: list[float] = field(default_factory=list)
+    first_leak_vals: list[float] = field(default_factory=list)
+    last_leak_vals: list[float] = field(default_factory=list)
+
+    def extend(self, other: "PrefixEvalBatchStats") -> None:
+        self.num_prefixes_vals.extend(other.num_prefixes_vals)
+        self.num_dimensional_vals.extend(other.num_dimensional_vals)
+        self.first_motion_vals.extend(other.first_motion_vals)
+        self.last_motion_vals.extend(other.last_motion_vals)
+        self.first_leak_vals.extend(other.first_leak_vals)
+        self.last_leak_vals.extend(other.last_leak_vals)
+
+    def add_sample(self, blocks: list[PrefixBlockMetric]) -> None:
+        if not blocks:
+            return
+        self.num_prefixes_vals.append(len(blocks))
+        self.num_dimensional_vals.append(sum(1 for b in blocks if b.is_dimensional))
+        self.first_motion_vals.append(blocks[0].motion_relational_angle)
+        self.last_motion_vals.append(blocks[-1].motion_relational_angle)
+        self.first_leak_vals.append(blocks[0].leak_relational_angle)
+        self.last_leak_vals.append(blocks[-1].leak_relational_angle)
+
+    def to_metrics_dict(self) -> dict[str, float]:
+        return {
+            "prefix_num_prefixes_mean": _mean(self.num_prefixes_vals),
+            "prefix_num_dimensional_blocks_mean": _mean(self.num_dimensional_vals),
+            "prefix_first_motion_angle_mean": _mean(self.first_motion_vals),
+            "prefix_last_motion_angle_mean": _mean(self.last_motion_vals),
+            "prefix_first_leak_mean": _mean(self.first_leak_vals),
+            "prefix_last_leak_mean": _mean(self.last_leak_vals),
+        }
+
+
+@dataclass(frozen=True)
+class PrefixEvalAsyncHandle:
+    """Deferred prefix-eval work that needs solver status at collect time."""
+
+    ctx: RewardContext
+    prim_np: np.ndarray
+    cons_np: np.ndarray
+    length: int
+
+
+class PrefixResponseMetricEvaluator(BaseReward):
+    """Producer for per-prefix response metrics (motion + leak).
+
+    The full-sequence producer (:class:`ResponseMetricEvaluator`) only caches the
+    metric of the completed sketch.  This producer re-evaluates the relation-only
+    motion angle *and* the relation-leak angle on the growing prefix after each
+    completed constraint block, and caches the per-block trajectory in
+    ``ctx.prefix_metrics[i]``.  It contributes zero reward; the reward-bearing
+    consumers are :class:`PrefixMotionAngleReward` and
+    :class:`PrefixLeakAngleReward`.
+
+    Doing both angles in one pass matters because the dominant per-prefix cost is
+    rebuilding the prefix sketch and its native response; motion and leak then
+    share that work instead of paying it twice.  GT-side subspaces are pure
+    functions of ``gt_sketch`` and are reused across prefixes and the K rollouts
+    of an RLOO group via the shared ``ctx`` caches; ``J_phi`` for the predicted
+    side is identical across prefixes (primitive geometry is overwritten with the
+    original) and is computed once per sample.
+    """
+
+    name = "prefix_response_eval"
+    is_async = True
+
+    def __init__(
+        self,
+        context: SketchContext,
+        eps: float = 1e-9,
+        motion_relational_angle_mode: str = "symmetric",
+        motion_relational_reverse_weight: float = 0.5,
+        gate: str = "converged",
+        max_prefixes: int | None = None,
+        num_workers: int = 0,
+        weight: float = 1.0,
+        enabled: bool = True,
+        **unused_kwargs: Any,
+    ):
+        super().__init__(weight=weight, enabled=enabled)
+        if gate not in _GATE_MODES:
+            raise ValueError(f"gate must be one of {_GATE_MODES}, got {gate!r}")
+        if motion_relational_angle_mode not in MOTION_RELATIONAL_ANGLE_MODES:
+            raise ValueError(
+                "motion_relational_angle_mode must be one of "
+                f"{sorted(MOTION_RELATIONAL_ANGLE_MODES)}, got "
+                f"{motion_relational_angle_mode!r}"
+            )
+        if motion_relational_reverse_weight < 0.0:
+            raise ValueError(
+                "motion_relational_reverse_weight must be non-negative, got "
+                f"{motion_relational_reverse_weight}"
+            )
+        if max_prefixes is not None and max_prefixes <= 0:
+            raise ValueError(
+                f"max_prefixes must be positive or None, got {max_prefixes}"
+            )
+        if unused_kwargs:
+            logger.debug(
+                "PrefixResponseMetricEvaluator ignoring unexpected kwargs: %s",
+                sorted(unused_kwargs),
+            )
+
+        self.context = context
+        self.eps = eps
+        self.mode = motion_relational_angle_mode
+        self.reverse_weight = float(motion_relational_reverse_weight)
+        self.gate = gate
+        self.max_prefixes = None if max_prefixes is None else int(max_prefixes)
+        self.num_workers = max(0, int(num_workers))
+        self._block_size = int(context.align_constraint_token_length_to)
+        self._prefix_len = 1
+        self._dim_token_ids = set(int(t) for t in DIMENSIONAL_CONSTRAINT_TOKEN_IDS)
+        self.tokenizer = SketchTokenizer(context)
+        self._executor: ProcessPoolExecutor | None = None
+
+    def __del__(self):
+        executor = getattr(self, "_executor", None)
+        if executor is not None:
+            executor.shutdown(wait=False, cancel_futures=True)
+            self._executor = None
+
+    def _get_executor(self) -> ProcessPoolExecutor:
+        if self._executor is None:
+            self._executor = ProcessPoolExecutor(
+                max_workers=self.num_workers,
+                mp_context=mp.get_context("spawn"),
+                initializer=_init_prefix_eval_worker,
+                initargs=(
+                    self.context,
+                    self.eps,
+                    self.mode,
+                    self.reverse_weight,
+                    self.gate,
+                    self.max_prefixes,
+                ),
+            )
+        return self._executor
+
+    def _reset_executor(self) -> None:
+        executor = self._executor
+        self._executor = None
+        if executor is None:
+            return
+        processes = getattr(executor, "_processes", None) or {}
+        for proc in list(processes.values()):
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+        executor.shutdown(wait=False, cancel_futures=True)
+
+    def _gate_pass(self, status: str | None) -> bool:
+        return _status_passes_gate(status, self.gate)
+
+    def _block_is_dimensional(self, cons_i: np.ndarray, block_idx: int) -> bool:
+        head = self._prefix_len + block_idx * self._block_size
+        if head >= cons_i.shape[0]:
+            return False
+        return int(cons_i[head]) in self._dim_token_ids
+
+    def _score_sample(
+        self,
+        ctx: RewardContext,
+        i: int,
+        length: int,
+        prim_i: np.ndarray,
+        cons_i_raw: np.ndarray,
+        gt_sketch: datalib.Sketch,
+        solver_status: str | None,
+        stats: PrefixEvalBatchStats,
+    ) -> list[PrefixBlockMetric] | None:
+        """Return the per-block prefix metric list for one sample, or ``None``."""
+        if not self._gate_pass(solver_status):
+            return None
+
+        cons_i, first_stop_idx = first_stop_and_pad(cons_i_raw, length)
+        prefixes = list(
+            _iter_constraint_block_prefixes(
+                cons_i,
+                first_stop_idx,
+                self._prefix_len,
+                self._block_size,
+                self.max_prefixes,
+            )
+        )
+        if not prefixes:
+            return None
+
+        try:
+            gt_native = get_or_compute_gt_native(
+                ctx, gt_sketch, self.context, self.eps
+            )
+            J_phi_gt = get_or_compute_j_phi(ctx, gt_sketch, gt_native.R.dtype)
+            gt_motion_relational = get_or_compute_gt_motion_relational_subspace(
+                ctx, gt_sketch, gt_native, self.context, self.eps, J_phi_gt
+            )
+            gt_relation_nullspace = get_or_compute_gt_relation_nullspace(
+                ctx, gt_sketch, gt_native, self.context, self.eps
+            )
+        except Exception as exc:
+            logger.debug(
+                "prefix eval: skipped sample %d (gt failure: %s)", i, exc
+            )
+            return None
+
+        J_phi_pred: torch.Tensor | None = None
+        blocks: list[PrefixBlockMetric] = []
+        for block_idx, block_tail, prefix_cons in prefixes:
+            try:
+                prefix_sketch = build_pred_sketch(
+                    self.tokenizer, prefix_cons, prim_i, gt_sketch
+                )
+                prefix_native = compute_native_response(
+                    prefix_sketch, self.context, eps=self.eps
+                )
+                if J_phi_pred is None:
+                    # Geometry is overwritten with the original sketch, so J_phi
+                    # is identical for every prefix of this sample; compute once.
+                    J_phi_pred = pairwise_distance_observable(
+                        prefix_sketch, dtype=prefix_native.R.dtype
+                    ).to(dtype=prefix_native.R.dtype)
+                motion_rel = _motion_relational_angle(
+                    prefix_sketch,
+                    gt_sketch,
+                    prefix_native,
+                    self.context,
+                    self.eps,
+                    angle_mode=self.mode,
+                    reverse_weight=self.reverse_weight,
+                    J_phi_pred=J_phi_pred,
+                    gt_motion_relational=gt_motion_relational,
+                )
+                leak = _leak_relational_angle(
+                    gt_sketch,
+                    prefix_native,
+                    self.context,
+                    self.eps,
+                    gt_relation_nullspace=gt_relation_nullspace,
+                )
+            except Exception as exc:
+                logger.debug(
+                    "prefix eval: skipped prefix of sample %d (%s)", i, exc
+                )
+                continue
+            motion_angle = _normalized_motion_relational_angle(
+                motion_rel.angle,
+                self.mode,
+                motion_rel.dim_pred,
+                motion_rel.dim_gt,
+                self.reverse_weight,
+            )
+            blocks.append(
+                PrefixBlockMetric(
+                    block_tail=int(block_tail),
+                    is_dimensional=self._block_is_dimensional(cons_i, block_idx),
+                    motion_relational_angle=motion_angle,
+                    leak_relational_angle=leak.angle,
+                )
+            )
+
+        if not blocks:
+            return None
+        stats.add_sample(blocks)
+        return blocks
+
+    def _score_serial_from_arrays(
+        self,
+        ctx: RewardContext,
+        prim_np: np.ndarray,
+        cons_np: np.ndarray,
+        statuses: list[str | None],
+        length: int,
+    ) -> tuple[dict[int, list[PrefixBlockMetric]], PrefixEvalBatchStats]:
+        metric_map: dict[int, list[PrefixBlockMetric]] = {}
+        stats = PrefixEvalBatchStats()
+        for i in range(cons_np.shape[0]):
+            blocks = self._score_sample(
+                ctx,
+                i,
+                length,
+                prim_np[i],
+                cons_np[i],
+                ctx.sketch_original_list[i],
+                statuses[i],
+                stats,
+            )
+            if blocks is not None:
+                metric_map[i] = blocks
+        return metric_map, stats
+
+    def _score_parallel_from_arrays(
+        self,
+        ctx: RewardContext,
+        prim_np: np.ndarray,
+        cons_np: np.ndarray,
+        statuses: list[str | None],
+        length: int,
+    ) -> tuple[dict[int, list[PrefixBlockMetric]], PrefixEvalBatchStats]:
+        metric_map: dict[int, list[PrefixBlockMetric]] = {}
+        stats = PrefixEvalBatchStats()
+
+        grouped: dict[int, tuple[datalib.Sketch, list[int]]] = {}
+        for i, sketch in enumerate(ctx.sketch_original_list):
+            key = id(sketch)
+            if key not in grouped:
+                grouped[key] = (sketch, [])
+            grouped[key][1].append(i)
+
+        if len(grouped) <= 1:
+            return self._score_serial_from_arrays(
+                ctx, prim_np, cons_np, statuses, length
+            )
+
+        payloads = []
+        for sketch, indices in grouped.values():
+            payloads.append(
+                (
+                    indices,
+                    prim_np[indices].copy(),
+                    cons_np[indices].copy(),
+                    sketch,
+                    [statuses[i] for i in indices],
+                    length,
+                )
+            )
+
+        try:
+            executor = self._get_executor()
+            futures = [
+                executor.submit(_score_prefix_eval_group, payload)
+                for payload in payloads
+            ]
+            for future in as_completed(futures):
+                part_metrics, part_stats = future.result()
+                stats.extend(part_stats)
+                for i, blocks in part_metrics:
+                    metric_map[i] = blocks
+        except Exception as exc:
+            logger.warning(
+                "parallel prefix eval failed; falling back to serial: %s", exc
+            )
+            self._reset_executor()
+            return self._score_serial_from_arrays(
+                ctx, prim_np, cons_np, statuses, length
+            )
+
+        return metric_map, stats
+
+    def _compute_from_arrays(
+        self,
+        ctx: RewardContext,
+        prim_np: np.ndarray,
+        cons_np: np.ndarray,
+        statuses: list[str | None],
+        length: int,
+    ) -> RewardOutput:
+        B = cons_np.shape[0]
+        if self.num_workers > 0:
+            metric_map, stats = self._score_parallel_from_arrays(
+                ctx, prim_np, cons_np, statuses, length
+            )
+        else:
+            metric_map, stats = self._score_serial_from_arrays(
+                ctx, prim_np, cons_np, statuses, length
+            )
+
+        ctx.prefix_metrics.clear()
+        for i in range(B):
+            ctx.prefix_metrics[i] = metric_map.get(i)
+
+        scores = torch.zeros((B, length), dtype=torch.float32)
+        return RewardOutput(scores=scores, metrics=stats.to_metrics_dict())
+
+    def submit_async(self, ctx: RewardContext) -> PrefixEvalAsyncHandle:
+        return PrefixEvalAsyncHandle(
+            ctx=ctx,
+            prim_np=ctx.prim_tokens.detach().cpu().numpy(),
+            cons_np=ctx.cons_tokens.detach().cpu().numpy(),
+            length=int(ctx.cons_tokens.shape[1]),
+        )
+
+    def collect_results(self, handle: PrefixEvalAsyncHandle) -> RewardOutput:
+        ctx = handle.ctx
+        statuses = ctx.per_sample_solver_status
+        if statuses is None:
+            statuses = ["FC"] * handle.cons_np.shape[0]
+        return self._compute_from_arrays(
+            ctx, handle.prim_np, handle.cons_np, list(statuses), handle.length
+        )
+
+    @torch.no_grad()
+    def compute(self, ctx: RewardContext) -> RewardOutput:
+        """Synchronous path used by validation and direct unit tests."""
+        B, L = ctx.cons_tokens.shape
+        assert len(ctx.sketch_original_list) == B
+        statuses = ctx.per_sample_solver_status
+        if statuses is None:
+            statuses = ["FC"] * B
+        return self._compute_from_arrays(
+            ctx,
+            ctx.prim_tokens.detach().cpu().numpy(),
+            ctx.cons_tokens.detach().cpu().numpy(),
+            list(statuses),
+            L,
+        )
+
+
+class _PrefixCachedReward(BaseReward):
+    """Shared implementation for ``ctx.prefix_metrics`` consumers.
+
+    Mirrors :class:`_CachedAngleReward`: a thin reward that reads the per-prefix
+    trajectory produced by :class:`PrefixResponseMetricEvaluator`, applies a
+    per-sample solver-status gate weight (``always``/``converged``/``fc`` step
+    gates or the continuous ``dof`` ramp), and lets the subclass turn the
+    trajectory into ``(block_tail, value)`` placements.
+    """
+
+    def __init__(
+        self,
+        coeff: float,
+        cap: float = 0.70,
+        gate: str = "converged",
+        weight: float = 1.0,
+        enabled: bool = True,
+        context: SketchContext | None = None,
+        **unused_kwargs: Any,
+    ):
+        del context
+        if gate not in _CONSUMER_GATE_MODES:
+            raise ValueError(
+                f"gate must be one of {_CONSUMER_GATE_MODES}, got {gate!r}"
+            )
+        if unused_kwargs:
+            logger.debug(
+                "%s ignoring unexpected kwargs: %s",
+                type(self).__name__,
+                sorted(unused_kwargs),
+            )
+        super().__init__(weight=weight, enabled=enabled)
+        self.coeff = float(coeff)
+        self.cap = float(cap)
+        self.gate = gate
+
+    def _gate_weight(self, status: str | None, rate: float | None) -> float:
+        if self.gate == "dof":
+            return 0.0 if rate is None else float(min(max(rate, 0.0), 1.0))
+        return 1.0 if _status_passes_gate(status, self.gate) else 0.0
+
+    def _placements(
+        self, blocks: list[PrefixBlockMetric]
+    ) -> tuple[list[tuple[int, float]], list[float]]:
+        """Return ``(placements, log_values)`` for one sample's trajectory."""
+        raise NotImplementedError
+
+    @torch.no_grad()
+    def compute(self, ctx: RewardContext) -> RewardOutput:
+        B, L = ctx.cons_tokens.shape
+        scores = torch.zeros((B, L), dtype=torch.float32)
+        statuses = ctx.per_sample_solver_status
+        if statuses is None:
+            statuses = ["FC"] * B
+        rates = ctx.per_sample_dof_reduction_rate
+        if self.gate == "dof" and rates is None:
+            logger.debug(
+                "%s gate='dof' but ctx.per_sample_dof_reduction_rate is unset "
+                "(SolverReward must run first); contributing zero reward.",
+                type(self).__name__,
+            )
+        cache = ctx.prefix_metrics
+        reward_vals: list[float] = []
+        num_blocks_vals: list[int] = []
+        for i in range(B):
+            rate_i = rates[i] if rates is not None else None
+            weight = self._gate_weight(statuses[i], rate_i)
+            if weight <= 0.0:
+                continue
+            blocks = cache.get(i)
+            if not blocks:
+                continue
+            placements, log_vals = self._placements(blocks)
+            if not placements:
+                continue
+            for pos, val in placements:
+                scores[i, pos] += weight * val
+            reward_vals.append(weight * sum(v for _, v in placements))
+            num_blocks_vals.append(len(placements))
+
+        metrics = {
+            f"{self.name}_reward_mean": _mean(reward_vals),
+            f"{self.name}_reward_median": _median(reward_vals),
+            f"{self.name}_num_blocks_mean": _mean(num_blocks_vals),
+        }
+        return RewardOutput(scores=scores, metrics=metrics)
+
+
+class PrefixMotionAngleReward(_PrefixCachedReward):
+    """Prefix-shaped consumer variant of :class:`MotionAngleReward`.
+
+    ``MotionAngleReward`` places one ``motion_relational_angle`` bonus at the
+    final STOP.  Under the reverse-cumsum (return-to-go) RLOO advantage in
+    ``constraint_ar_module_rloo``, that single scalar contributes the *same*
+    constant to every preceding token's return, so the bonus pushes all
+    constraint tokens uniformly — no within-sequence credit assignment to the
+    constraint that actually moved the predicted relational motion subspace
+    toward the pseudo target.
+
+    This reward reads the per-prefix motion trajectory cached by
+    :class:`PrefixResponseMetricEvaluator` and places a *delta* potential
+    ``Phi_t - Phi_{t-1}`` at each completed block's tail, with
+    ``Phi_t = coeff * (1 - clip(angle_t)/cap)``.
+
+    ``delta_mode``:
+        - ``signed``: the episode sum telescopes to ``Phi_T`` (the final-STOP
+          bonus), a potential-based reshape that changes per-token credit
+          (variance) but not the optimum.
+        - ``positive`` (default): ``max(0, Phi_t - Phi_{t-1} - min_delta)`` does
+          NOT telescope (a worsening block is not penalized), so it changes the
+          objective and can reach an operating point distinct from a count-based
+          parsimony baseline, at the cost of a relation-count-reward / zig-zag
+          hacking risk (guarded by ``min_delta`` and the sibling SolverReward
+          redundant/conflict penalties).
+    """
+
+    name = "prefix_motion"
+
+    def __init__(
+        self,
+        coeff: float,
+        cap: float = 0.70,
+        gate: str = "converged",
+        delta_mode: str = "positive",
+        min_delta: float = 0.0,
+        **kwargs: Any,
+    ):
+        super().__init__(coeff=coeff, cap=cap, gate=gate, **kwargs)
+        if delta_mode not in _PREFIX_DELTA_MODES:
+            raise ValueError(
+                f"delta_mode must be one of {_PREFIX_DELTA_MODES}, got "
+                f"{delta_mode!r}"
+            )
+        if min_delta < 0.0:
+            raise ValueError(f"min_delta must be non-negative, got {min_delta}")
+        self.delta_mode = delta_mode
+        self.min_delta = float(min_delta)
+
+    def _placements(
+        self, blocks: list[PrefixBlockMetric]
+    ) -> tuple[list[tuple[int, float]], list[float]]:
+        angles = [b.motion_relational_angle for b in blocks]
+        tails = [b.block_tail for b in blocks]
+        placements, _pos = _prefix_motion_deltas(
+            angles, tails, self.coeff, self.cap, self.delta_mode, self.min_delta
+        )
+        return placements, [d for _, d in placements]
+
+
+class PrefixLeakAngleReward(_PrefixCachedReward):
+    """Prefix-shaped consumer variant of :class:`LeakAngleReward`.
+
+    Reads the per-prefix leak trajectory cached by
+    :class:`PrefixResponseMetricEvaluator` and places an increase-only penalty at
+    each *dimensional* block's tail:
+
+        penalty_t = -coeff * max(0, clip(leak_t) - clip(leak_{t-1}) - min_delta)
+
+    The penalty (rather than a leak bonus) is deliberate: ``leak=0`` is trivially
+    reached by emitting no dimensions, so a bonus would reward under-constraint.
+    Restricting to dimensional blocks matches the meaning of leak — Pred's
+    dimensional drivers leaking into GT's relation-forbidden directions — so a
+    dimensional constraint that substitutes for a relation GT closes is charged
+    at its own block tail, while a legitimate (orthogonal) dimension is not.
+
+    ``gate`` defaults to ``converged``; because there is no positive reward for
+    the no-dims corner, the ``dof`` ramp is optional rather than required (unlike
+    the full-sequence :class:`LeakAngleReward`).
+    """
+
+    name = "prefix_leak"
+
+    def __init__(
+        self,
+        coeff: float,
+        cap: float = 0.70,
+        gate: str = "converged",
+        min_delta: float = 0.0,
+        **kwargs: Any,
+    ):
+        super().__init__(coeff=coeff, cap=cap, gate=gate, **kwargs)
+        if min_delta < 0.0:
+            raise ValueError(f"min_delta must be non-negative, got {min_delta}")
+        self.min_delta = float(min_delta)
+
+    def _placements(
+        self, blocks: list[PrefixBlockMetric]
+    ) -> tuple[list[tuple[int, float]], list[float]]:
+        leaks = [b.leak_relational_angle for b in blocks]
+        is_dim = [b.is_dimensional for b in blocks]
+        tails = [b.block_tail for b in blocks]
+        placements, pen_mags = _prefix_leak_penalties(
+            leaks, is_dim, tails, self.coeff, self.cap, self.min_delta
+        )
+        return placements, pen_mags
+
+
 class ResponseIntentReward(BaseReward):
     """Deprecated sequence-level reward from Htheta / relation-intent angles.
 
@@ -1773,6 +2529,73 @@ def _score_response_metric_group(
         if metrics is not None:
             metric_items.append((global_i, metrics))
 
+    return metric_items, stats
+
+
+_PREFIX_EVAL_WORKER: PrefixResponseMetricEvaluator | None = None
+
+
+def _init_prefix_eval_worker(
+    context: SketchContext,
+    eps: float,
+    motion_relational_angle_mode: str,
+    motion_relational_reverse_weight: float,
+    gate: str,
+    max_prefixes: int | None,
+) -> None:
+    """Initialise one process-pool worker for prefix-eval metric computation."""
+    global _PREFIX_EVAL_WORKER
+    try:
+        torch.set_num_threads(1)
+    except Exception:
+        pass
+    _PREFIX_EVAL_WORKER = PrefixResponseMetricEvaluator(
+        context=context,
+        eps=eps,
+        motion_relational_angle_mode=motion_relational_angle_mode,
+        motion_relational_reverse_weight=motion_relational_reverse_weight,
+        gate=gate,
+        max_prefixes=max_prefixes,
+        num_workers=0,
+    )
+
+
+def _score_prefix_eval_group(
+    payload: tuple[
+        list[int],
+        np.ndarray,
+        np.ndarray,
+        datalib.Sketch,
+        list[str | None],
+        int,
+    ],
+) -> tuple[list[tuple[int, list[PrefixBlockMetric]]], PrefixEvalBatchStats]:
+    """Evaluate one GT-sketch group of prefix metrics in a worker."""
+    if _PREFIX_EVAL_WORKER is None:
+        raise RuntimeError("prefix eval worker was not initialised")
+
+    indices, prim_np, cons_np, gt_sketch, statuses, length = payload
+    local_b = len(indices)
+    ctx = RewardContext(
+        prim_tokens=torch.from_numpy(prim_np),
+        cons_tokens=torch.from_numpy(cons_np),
+        sketch_original_list=[gt_sketch] * local_b,
+    )
+    stats = PrefixEvalBatchStats()
+    metric_items: list[tuple[int, list[PrefixBlockMetric]]] = []
+    for local_i, global_i in enumerate(indices):
+        blocks = _PREFIX_EVAL_WORKER._score_sample(
+            ctx,
+            local_i,
+            length,
+            prim_np[local_i],
+            cons_np[local_i],
+            gt_sketch,
+            statuses[local_i],
+            stats,
+        )
+        if blocks:
+            metric_items.append((global_i, blocks))
     return metric_items, stats
 
 

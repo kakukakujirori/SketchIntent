@@ -1,0 +1,195 @@
+# @package _global_
+# >>> DimParsimony STRENGTH SWEEP point (Exp 1: 'is MotionReward necessary, or does
+# >>> strong count-parsimony alone suffice?'). Single-variable child of
+# >>> rloo_response_scaffold12_ablA_noML_dimprior_dimpars.yaml: ONLY DimParsimonyReward.coeff changes (0.30 -> 9.0).
+# >>> Read: even at strong coeff (collapse region), noML should NOT reach +M's
+# >>> key-rel / S_place / theta_motion^full -> count controls dim COUNT, not relational
+# >>> structure. DimPrior stays -0.03 (matched scaffold). All other arms unchanged.
+#
+#
+# ===== Table A appendix arm: NO-INTENT + DimParsimony (count-parsimony-only floor) =====
+# = ablA_noML_dimprior (M off, L off) PLUS DimParsimonyReward(coeff 9.0). This is the
+# pure count-parsimony baseline with NO motion/leak metric: the internal stand-in for
+# "the conventional dimensional-parsimony approach, without our reward."
+# Two appendix roles:
+#   (1) completes the {M off/on} x {DimParsim off/on} 2x2 at L=off:
+#         (noM,noDP)=ablA_noML_dimprior     (M,noDP)=ablA_m4.5_dimprior_intent
+#         (noM, DP)=THIS                     (M, DP)=ablA_m4.5_dimprior_dimpars_intent
+#   (2) rebuts the "the no-intent floor over-dims only because it has NO regularizer"
+#       strawman: shows count-parsimony alone controls dim COUNT but NOT relational
+#       design intent (leak / key-rel / type), which the M+L metric does.
+# Scaffold (Solver FC1.5 / RelPrior / DimPrior / flip / v2GT / distortion null->1/64)
+# is IDENTICAL to the four Table A arms; only M/L/DimParsimony vary.
+#
+# Smoke (CPU, 2 steps):
+#   conda run -n freecad python src/train.py experiment=rloo_response_scaffold12_ablA_noML_dimprior_dimpars_c9 \
+#     trainer.accelerator=cpu trainer.devices=1 trainer.strategy=auto trainer.precision=32 \
+#     data.batch_size=1 model.group_sample_size=3 \
+#     +trainer.max_steps=2 +trainer.limit_val_batches=0 +trainer.num_sanity_val_steps=0
+# Launch: conda run -n freecad python src/train.py experiment=rloo_response_scaffold12_ablA_noML_dimprior_dimpars_c9 trainer.devices=[N]
+
+defaults:
+  - override /data: constraint_rloo.yaml
+  - override /model: constraint_ar_rloo.yaml
+  - override /trainer: default
+
+tags: ["rloo", "response", "scaffold12", "ablationA", "appendix", "no_intent", "dimparsimony"]
+
+callbacks:
+  model_checkpoint_epoch:
+    every_n_train_steps: 100
+    save_top_k: 3
+    filename: "epoch_{epoch}_step_{step}"
+    save_last: true
+
+  model_checkpoint_loss: null
+
+  model_checkpoint_reward:
+    _target_: lightning.pytorch.callbacks.ModelCheckpoint
+    dirpath: ${paths.output_dir}/checkpoints
+    monitor: "validation_gen/solver_valid_dof_mean"
+    filename: "step_{step}_dof_{validation_gen/solver_valid_dof_mean:.3f}"
+    save_top_k: 3
+    mode: "min"
+    auto_insert_metric_name: false
+    every_n_train_steps: 100
+
+  # Fixed-interval, NON-overwriting checkpoints for matched-step ablation eval.
+  model_checkpoint_step:
+    _target_: lightning.pytorch.callbacks.ModelCheckpoint
+    dirpath: ${paths.output_dir}/checkpoints
+    filename: "stepsave_{step}"
+    every_n_train_steps: 5000
+    save_top_k: -1
+    save_last: false
+    auto_insert_metric_name: false
+
+data:
+  train_sequence_file: data_processed/sg_pseudo_rel_v2_full_all_full.npy
+  batch_size: 32
+  num_workers: 1
+
+model:
+  flip_augment_axes: [x, y]
+  group_sample_size: 9
+
+  entropy_bonus: 0.005
+  train_sample_temperature: 1.2
+  val_sample_temperature: 1.0
+
+  reward_composer:
+    _target_: src.models.rewards.composer.RewardComposer
+    rewards:
+      - _target_: src.models.rewards.solver_reward.SolverReward
+        context: ${data.context}
+        reward_dof_reduction: 4.0
+        reward_fully_constrained: 1.5
+        penalty_conflicting: -1.0
+        penalty_redundant: -1.0
+        penalty_malformed: -0.5
+        penalty_deformed: -0.25
+        penalty_per_problematic_constraint: -1.0
+        penalty_rigid_dimensional: -0.0
+        fully_constrained_dof: 2
+        distortion_threshold: null
+        penalty_near_zero_distance: -1.5
+        near_zero_distance_threshold: 0.001
+        near_zero_distance_cap: 3
+        near_zero_distance_gate: converged
+        penalty_axis_angle: -1.5
+        axis_angle_tolerance_rad: 0.001
+        axis_angle_cap: 3
+        axis_angle_gate: converged
+        num_workers: null
+
+      # count-parsimony ON, intent metric OFF (this arm's defining combination).
+      - _target_: src.models.rewards.dim_parsimony.DimParsimonyReward
+        context: ${data.context}
+        coeff: 9.0
+        mode: excess_over_gt_per_primitive
+        excess_margin: 1
+        gate: converged
+
+      - _target_: src.models.rewards.relational_class_prior.RelationalClassPriorReward
+        context: ${data.context}
+        gate: converged
+        cap_total: 1.0
+        cap_per_type: 3
+        coeff_by_type:
+          Mirror: 0.15
+          Equal: 0.129
+          Concentric: 0.055
+          Parallel: 0.053
+          Perpendicular: 0.046
+          Tangent: 0.048
+          Coincident: 0.012
+          Horizontal: 0.042
+          Vertical: 0.05
+          Midpoint: 0.112
+
+      - _target_: src.models.rewards.dimensional_class_prior.DimensionalClassPriorReward
+        context: ${data.context}
+        gate: converged
+        cap_positive_total: 0.10
+        cap_negative_total: -0.20
+        cap_per_type: 3
+        coeff_by_type:
+          Distance: -0.03
+          DistanceX: 0.02
+          DistanceY: 0.02
+          Angle: -0.05
+
+      # ResponseMetricEvaluator KEPT (zero reward; logs intent_* diagnostics).
+      # No MotionAngleReward / LeakAngleReward => no-intent arm.
+      - _target_: src.models.rewards.response_metric_reward.ResponseMetricEvaluator
+        context: ${data.context}
+        eps: 1.0e-9
+        motion_relational_angle_mode: symmetric
+        motion_relational_reverse_weight: 0.5
+        gate: converged
+        num_workers: 4
+
+  reward_val_composer:
+    _target_: src.models.rewards.composer.RewardValComposer
+    context: ${data.context}
+    metrics:
+      - _target_: src.models.rewards.solver_reward.SolverReward
+        context: ${data.context}
+        fully_constrained_dof: 2
+        penalty_near_zero_distance: 0.0
+        near_zero_distance_threshold: 0.001
+        penalty_axis_angle: 0.0
+        axis_angle_tolerance_rad: 0.001
+        num_workers: null
+      - _target_: src.models.rewards.response_metric_reward.ResponseMetricEvaluator
+        context: ${data.context}
+        eps: 1.0e-9
+        gate: always
+        num_workers: 0
+      - _target_: src.models.rewards.relational_class_prior.RelationalClassPriorReward
+        context: ${data.context}
+        gate: always
+        cap_total: 1.0
+        cap_per_type: 3
+        coeff_by_type:
+          Mirror: 0.15
+          Equal: 0.129
+          Concentric: 0.055
+          Parallel: 0.053
+          Perpendicular: 0.046
+          Tangent: 0.048
+          Coincident: 0.012
+          Horizontal: 0.042
+          Vertical: 0.05
+          Midpoint: 0.112
+
+  optimizer:
+    lr: 1e-5
+
+trainer:
+  check_val_every_n_epoch: null
+  val_check_interval: 100
+  devices: 1
+  max_epochs: 3
+
+pretrained_ckpt_path: logs/train/runs/2026-05-02_20-35-42/checkpoints/epoch_29.ckpt
