@@ -63,6 +63,8 @@ import Part  # noqa: E402
 import Sketcher  # noqa: E402
 
 _DIM_TYPES = {"Distance", "DistanceX", "DistanceY", "Radius", "Diameter", "Angle"}
+# "Remove Dimension" also drops Block, which fully pins a primitive's DoF.
+_STRIP_TYPES = _DIM_TYPES | {"Block"}
 MARGIN = 2.5           # camera-height / geometry-extent (room to deform + zoom-out)
 LABEL_FRAC = 0.07      # datum-label leader length as a fraction of extent
 MAX_SESSIONS = 8
@@ -87,6 +89,7 @@ class Session:
         self.frame = None               # (cx, cy, height) base framing
         self.gdoc = None                # Gui document
         self.view = None                # 3D inventor view
+        self.dims_stripped = False      # dimensional constraints removed?
 
 
 _SESSIONS: "OrderedDict[str, Session]" = OrderedDict()
@@ -542,6 +545,32 @@ def _response(sess: Session, w: int, h: int, frame) -> dict:
     }
 
 
+def _strip_dimensions(sess: Session) -> None:
+    """Remove every dimensional (and Block) constraint from the session's sketch
+    and recompute.  Geometry stays put -- the sketch just gains DoF and loses its
+    dimension labels.  Marks the session so we don't strip twice."""
+    sketch = sess.sketch
+    dim_ids = [i for i, c in enumerate(sketch.Constraints) if c.Type in _STRIP_TYPES]
+    for i in reversed(dim_ids):          # delete high->low so indices stay valid
+        try:
+            sketch.delConstraint(i)
+        except Exception:
+            pass
+    sketch.recompute()
+    sess.dims_stripped = True
+
+
+def _apply_strip_mode(src: str, kind: str, sess: Session, want_strip: bool) -> Session:
+    """Make the session match the 'remove dimensions' toggle.  Stripping is
+    destructive, so restoring the dimensions means reloading from disk (which
+    also discards edits); returns the (possibly reloaded) session."""
+    if want_strip and not sess.dims_stripped:
+        _strip_dimensions(sess)
+    elif not want_strip and sess.dims_stripped:
+        sess = get_session(src, kind, reload=True)
+    return sess
+
+
 # ===========================================================================
 # Ops
 # ===========================================================================
@@ -550,14 +579,18 @@ def handle_request(req: dict) -> dict:
     src = req["src"]
     kind = req.get("kind") or ("fcstd" if src.lower().endswith(".fcstd") else "py")
     w, h = int(req.get("w", 1600)), int(req.get("h", 1600))
+    want_strip = bool(req.get("strip_dims"))
 
     try:
         if op == "reset":
             sess = get_session(src, kind, reload=True)
+            if want_strip:
+                _strip_dimensions(sess)
             sess.frame = _frame_session(sess)
             return _response(sess, w, h, sess.frame)
 
         sess = get_session(src, kind)
+        sess = _apply_strip_mode(src, kind, sess, want_strip)
         if sess.frame is None or req.get("refit"):
             sess.frame = _frame_session(sess)
         # Client may override framing (pan/zoom that wants a fresh crisp render).

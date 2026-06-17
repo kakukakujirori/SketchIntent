@@ -177,7 +177,8 @@ def build_app(cfg: dict, client: RenderClient) -> FastAPI:
             raise HTTPException(404, "unknown sketch")
         src, kind = resolve_src(panel, stem, body.get("variant"))
         req = {k: body[k] for k in
-               ("op", "geo", "pos", "x", "y", "constr", "cx", "cy", "height", "refit")
+               ("op", "geo", "pos", "x", "y", "constr", "cx", "cy", "height", "refit",
+                "strip_dims")
                if k in body and body[k] is not None}
         req.update({"src": src, "kind": kind,
                     "w": cfg["res"], "h": cfg["res"]})
@@ -358,6 +359,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
     <div id="spacer"></div>
     <label class="ctrl"><input type="checkbox" id="gtToggle"/> GT</label>
     <div id="gtSeg"></div>
+    <label class="ctrl"><input type="checkbox" id="dimToggle"/> Remove Dimension</label>
     <button class="nav" id="fit" title="Fit all views">⤢</button>
   </div>
   <div id="picker"><input id="search" placeholder="Filter by batch / sketch…" autocomplete="off"/>
@@ -365,7 +367,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
   <div id="panels"></div>
 <script>
 const $=s=>document.querySelector(s);
-let META=null,I=0,GT_ON=false,GT_V=null,RES=1500;
+let META=null,I=0,GT_ON=false,GT_V=null,RES=1500,STRIP_DIMS=false;
 const viewers={};
 
 async function boot(){
@@ -448,6 +450,7 @@ function makeViewer(key){
 
   async function post(body){
     body.panel=key; body.stem=ctx.stem; if(key==='gt') body.variant=ctx.variant;
+    body.strip_dims=STRIP_DIMS;
     const r=await fetch('/api/op',{method:'POST',headers:{'Content-Type':'application/json'},
                                    body:JSON.stringify(body)});
     if(!r.ok){ let d='error'; try{d=(await r.json()).detail||d;}catch(e){} throw new Error(d); }
@@ -517,7 +520,10 @@ function buildGtSeg(){
     s.style.cssText='color:#8a97ab;padding:0 8px;line-height:28px'; seg.appendChild(s); }
 }
 function show(i){ if(!META.sketches.length)return;
-  I=(i+META.sketches.length)%META.sketches.length; const sk=META.sketches[I];
+  const ni=(i+META.sketches.length)%META.sketches.length;
+  // moving to a different sketch always clears "Remove Dimension"
+  if(ni!==I && STRIP_DIMS){ STRIP_DIMS=false; $('#dimToggle').checked=false; }
+  I=ni; const sk=META.sketches[I];
   if(GT_ON && (!GT_V||!sk.gt.includes(GT_V))) GT_V=sk.gt[0]||null;
   setTitle(); if(GT_ON) buildGtSeg();
   viewers.left.load(sk.stem,null); viewers.right.load(sk.stem,null);
@@ -552,6 +558,7 @@ $('#gtToggle').addEventListener('change',e=>{ GT_ON=e.target.checked;
   $('#gtSeg').style.display=GT_ON?'flex':'none';
   if(GT_ON){const sk=META.sketches[I]; GT_V=GT_V&&sk.gt.includes(GT_V)?GT_V:(sk.gt[0]||null);}
   buildPanels(); if(GT_ON)buildGtSeg(); show(I); });
+$('#dimToggle').addEventListener('change',e=>{ STRIP_DIMS=e.target.checked; show(I); });
 document.addEventListener('keydown',e=>{ if(e.target.id==='search'){if(e.key==='Escape')closePicker();return;}
   if(e.key==='ArrowLeft')show(I-1); else if(e.key==='ArrowRight')show(I+1); else if(e.key==='Escape')closePicker(); });
 document.addEventListener('click',e=>{ if(!$('#picker').contains(e.target)&&e.target.id!=='title'&&!$('#title').contains(e.target))closePicker(); });
