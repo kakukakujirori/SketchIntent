@@ -701,6 +701,12 @@ def _configure_background() -> None:
     pv.SetBool("UseBackgroundColorMid", False)
     pv.SetUnsigned("BackgroundColor", 0x336699FF)
     pv.SetUnsigned("BackgroundColor2", 0x002040FF)
+    # Construction geometry can otherwise be invisible: a centreline on the sketch
+    # Y-axis hides under the (brighter) axis line, and thin construction merges
+    # with nearby edges.  A distinct cyan + a wider line keeps it readable.
+    pv.SetUnsigned("ConstructionColor", 0x00FFFFFF)  # cyan, 0xRRGGBBAA
+    FreeCAD.ParamGet("User parameter:BaseApp/Preferences/Mod/Sketcher/View").SetInt(
+        "ConstructionWidth", 3)
 
 
 def main() -> None:
