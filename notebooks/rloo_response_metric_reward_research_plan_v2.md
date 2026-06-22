@@ -494,10 +494,14 @@ raw Distance≈0・leak・distFam が baseline を Pareto 優位**＝intent 品�
 
 読み: no-intent→+M→+M+L で M・L 各寄与。**+M+DimParsim vs +M+L** で「Leak(方向) が count-parsimony を性能で包含」
 → DimParsimony 不採用を**内部で**正当化。3 新規 config は Hydra compose + 2-step CPU smoke 通過済み（成分一致を確認）。
-表の列 = resp↓ / θ_motion^rel↓ / distFam＋(Distance vs DistanceX/Y 内訳) / key-rel↑ / leak↓ / FC。
+表の列 = resp↓ / θ_motion^rel↓ / dim-ratio＋(Distance vs DistanceX/Y/Angle 内訳) / key-rel↑ / RelDimAlign↓ / FC。
 
 **設計判断（確定）**:
-- **DimPrior は ablation しない**（RelPrior と同系の固定 prior、全 arm に常時 ON）。
+- **DimPrior は ablation しない**（RelPrior と同系の固定 prior、全 main arm に常時 ON）。main arm の
+  DimPrior 係数は `Distance=-0.03, DistanceX=DistanceY=0.02, Angle=-0.05` で統一する。
+  例外: 既存の低係数 run `s9rxgu3v` (`m2.25_l0.75_leakdof_dimprior`) は
+  `Distance=-0.02, DistanceX=DistanceY=0, Angle=-0.03` なので、M/L 低係数だけでなく DimPrior も
+  弱い confounded reference として appendix 扱いにする。
 - **faithful-Casey は DROP**（実装非公開・Fusion360・ハイパラ未公開＝忠実再現不可）。その役割は上記 DimParsimony↔Leak の
   内部置換 ablation が代替。
 - **distortion_threshold は全 run 1/64 で統一済み**（原典 Casey ≈ 0.25 より厳格）＝内部整合 OK、再走不要。論文に一文明記。
@@ -510,11 +514,418 @@ raw Distance≈0・leak・distFam が baseline を Pareto 優位**＝intent 品�
 figure、低coeff切替（`s9rxgu3v`）、FC崩壊（`a1e6s9en`）、flip on/off、shuffle。
 
 **評価 checkpoint 方針**:
-- **matched step で揃える**（各 run の best ckpt は使わない）。全 arm が val plateau する最早共通 step（28xstb2f の型切替完了
-  ~25k 以降、目安 25–35k）。1 epoch（~52k=2.5日/本）固定は不要。
-- **`solver_valid_dof_mean` 最小での ckpt 選択は禁止**（DoF 最小＝over-constrained 偏り＝over-dim 主張と逆）。matched step の
-  固定 ckpt（save_last / epoch ckpt）を使う。狙った step の ckpt が残るよう保存設定を確保。
+- preliminary / sanity check は matched step で見てよい。ただし最終比較は §4.10 P2 の通り
+  **FC-rate / solver status を揃えた operating point** と dense Pareto frontier で行う。
+- **`solver_valid_dof_mean` 最小での ckpt 選択は禁止**（DoF 最小＝over-constrained 偏り＝over-dim 主張と逆）。
+  代表点は train-val 上で事前に決めた FC 帯に最も近い ckpt を選び、held-out Fiverr を見て選ばない。
 - eval は **held-out fiverr**、ckpt 選択基準は train-val のみ（test 選択回避）。
+
+---
+
+### 4.9 Fiverr 全体評価: 「差分が出ない」問題の解消候補 (2026-06-18)
+
+> ⚠️ **更新 (2026-06-19): 本節は評価 iter5（solver-in-the-loop）の結果。§4.10「評価プロトコル変更」で
+> iter1 単発を既定にしたため、(a) 本節の **絶対 FC / 各指標の数値は superseded**（dim-ratio で Ours が
+> DP frontier の下、という方向の結論のみ不変・むしろ強化）、(b) **`S_place`/`asgn_sim` を headline の「勝ち軸」に置く方針は撤回**
+> （iter5 でも非有意、iter1 でも operating point ではタイ＝負けではないが勝ちでもない。S_place は未解決軸として正直に提示）。
+> 以下、矛盾箇所は取り消し線。→ §4.10 P4 直前の「評価プロトコル変更」と P4 を参照。**
+
+**Metric update**: paper 用の over-dim 軸は以後 `dimensional_ratio =
+(all dimensional constraints) / n_constraints` とする。旧 `distance_family_ratio`
+（Distance/DistanceX/DistanceY のみ）は後方互換・診断用に残すが、headline plot / table では使わない。
+
+検証を進める中で「SolverReward + DimParsimony のベースラインが over-dimensional になるのは、単に
+DimParsimony の weight が低いからではないか」という疑問が出た。そこで DimParsimony weight=1.0 の
+強い baseline (`DP_c1`, W&B `2ij8cdav`) を確認したところ、over-dim はかなり抑制され、学習曲線も
+Ours とかなり重なることが分かった。
+
+保存済み run / local directory:
+
+- Main: `seq_M4.5_L1.5` / `28xstb2f` ==> `2026-06-13_19-03-56`
+- Baseline: `DP_c1` / `2ij8cdav` ==> `2026-06-16_22-29-57`
+- 補助: `DP_c0.3` ==> `2026-06-16_22-40-00`
+- 補助: `DP_c3` ==> `2026-06-16_22-30-26`
+- 補助: `rloo_response_scaffold12_m2.25_l0.75_leakdof_dimprior_intent` ==> `2026-06-14_16-41-23`
+  - 注意: この run は DimPrior 係数も弱い（`Distance=-0.02, DistanceX/Y=0, Angle=-0.03`）ため、
+    低 M/L 係数だけの ablation ではない。main claim ではなく参考点に落とす。
+- 補助: `rloo_response_scaffold12_ablA_m4.5_dimprior_dimpars_intent` ==> `2026-06-15_14-39-13`
+
+当初の懸念は、`MotionReward(+LeakReward)` と `SolverReward+DimParsimony` が学習曲線上ではほぼ同じ
+終点へ落ち、**定性的にも定量的にも差分が見えない**ことだった。特に `motion_relational_angle` は
+「GT relational が張る motion subspace を真似する」だけなので、SolverReward が DoF を下げるために
+relational constraints を張る圧と区別しにくい可能性があった。一方 `LeakAngleReward` は
+「GT relational を violate する dimensional driver だけを選択的に罰する」ので、DimParsimony
+（寸法数を一律に罰する）とは質的に違う効果が期待された。
+
+この懸念に対し、Fiverr 全体（12 annotator split, n=292）で既存 ckpt と追加生成を評価した。
+集計は [artifacts/fiverr_eval/summary.md](../artifacts/fiverr_eval/summary.md)。図は2種類に分ける:
+
+- **headline / non-circular**:
+  [artifacts/fiverr_eval/fiverr_pareto_fc_vs_independent.png](../artifacts/fiverr_eval/fiverr_pareto_fc_vs_independent.png)
+  (`dimensional_ratio`, `theta_motion_full`, `asgn_sim` → §4.10: `asgn_sim`/S_place は **headline の「勝ち軸」からは外す**が図・表には残し、「どの手法も改善しない未解決軸＝今後の design-intent 研究の良い target 指標」として正直に提示)
+- **mechanism check**:
+  [artifacts/fiverr_eval/fiverr_pareto_fc_vs_angles.png](../artifacts/fiverr_eval/fiverr_pareto_fc_vs_angles.png)
+  (`motion_relational_angle`, `leak_relational_angle` = RelDimAlign angle, `response_relational_angle`)
+
+Fiverr 評価 JSON から表と図を再生成するスクリプトは
+[scripts/plot_fiverr_eval_pareto.py](../scripts/plot_fiverr_eval_pareto.py):
+
+```bash
+conda run -n freecad python scripts/plot_fiverr_eval_pareto.py
+```
+
+W&B の validation history から学習ログ上の Pareto/frontier 図を作るスクリプトは
+[scripts/diag_reward_pareto_frontier.py](../scripts/diag_reward_pareto_frontier.py)。
+
+| model | FC | valid DoF | dim-ratio↓ | θ_full↓ | θ_rel↓ | θ_misalign↓ | S_place↑ | rawDist↓ |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| S step12700 | 0.702 | 3.484 | 0.343 | 0.413 | 0.365 | 0.397 | 0.590 | 0.007 |
+| S+M step12200 | 0.651 | 3.380 | 0.292 | 0.350 | 0.295 | 0.301 | **0.665** | 0.119 |
+| Ours M4.5/L1.5 step52200 | 0.647 | 4.327 | **0.244** | 0.394 | **0.281** | **0.241** | 0.598 | 0.014 |
+| Ours M4.5/L1.5 step59800 | 0.712 | 3.918 | 0.252 | 0.386 | **0.272** | **0.230** | 0.608 | 0.005 |
+| DP c1 step21200 | 0.640 | 4.965 | 0.278 | 0.439 | 0.345 | 0.353 | 0.573 | 0.014 |
+| DP c0.3 step22500 | **0.774** | 3.682 | 0.328 | 0.402 | 0.353 | 0.380 | 0.603 | 0.006 |
+| DP c3 step15400 | 0.158 | 7.400 | 0.191 | 0.579 | 0.344 | 0.300 | 0.499 | 0.036 |
+| M+DimParsim step13300 | 0.596 | 3.927 | 0.273 | 0.371 | 0.296 | 0.285 | 0.652 | 0.128 |
+| M2.25/L0.75 step36000 | 0.736 | 4.093 | 0.281 | 0.417 | 0.310 | 0.310 | 0.593 | 0.068 |
+
+**critical review の採否**:
+
+- **採用**: headline を `leak/response/motion_relational_angle` に置くのは循環論法に見える。
+  これらは Motion/Leak reward と同一ファミリなので、main claim の縦軸は報酬非依存の
+  `dimensional_ratio` と ~~`S_place/asgn_sim`~~ に置き、必要なら `theta_motion_full` を隣接して示す。
+  報酬ファミリに近い angle 系は「報酬が設計通り効いた」機構確認として解釈する。
+  （→ **更新 §4.10**: 報酬非依存 headline は `dimensional_ratio`（＋隣接 `theta_motion_full`）に一本化。
+  ~~`S_place/asgn_sim`~~ は iter5 でも非有意・iter1 でも operating point ではタイのため headline の「勝ち軸」から外す（負けではない／未解決軸として提示）。）
+- **採用**: raw Distance は Ours vs DP c1 ではほぼ同じ（0.0136 vs 0.0140）なので、Ours-vs-DP の
+  headline 証拠にはならない。raw Distance が効くのは Ours vs M+DimParsim / M2.25 などの比較限定。
+- **採用**: `S+M` は floor を全面改善するが、独立指標 `dim-ratio` では `S+DP c1` とほぼ同じ frontier に
+  乗る。これは「Motion 単体は Solver/DP に subsume されやすい」という当初の疑問の実証になる。
+- **採用**: DP frontier を越える候補は Leak を足した `S+M+L`。ただし現状では `S+M step12200` と
+  `Ours step52200` の step が大きく違うため、Leak の寄与を確定するには dense trajectory / 再走が必要。
+
+**現時点の読み**:
+
+1. `S -> S+M` はほぼ同 step (12.7k vs 12.2k) で比較でき、Motion は floor を改善する
+   (~~`S_place` 0.590->0.665~~ ← iter5 限定・S_place 降格, `dim-ratio` 0.343->0.292, RelDimAlign angle 0.397->0.301)。MotionReward は無効ではない。
+2. ただし `S+M` は `S+DP c1` より dim-ratio が高い（0.292 vs 0.278）。**Motion 単体では DP frontier を
+   越えない**可能性が高い。
+3. `Ours step52200` と `DP c1 step21200` は FC がほぼ一致（0.647 vs 0.640）し、Ours は
+   independent headline の `dim-ratio` で 0.278->0.244 改善する。~~`S_place/asgn_sim` で 0.573->0.598 と改善する~~
+   （→ **更新 §4.10**: S_place の差は iter5 でも paired 非有意 (p=0.16)。iter1 単発 operating point でも有意差なし
+   （高FC終端 p=0.19）＝ headline 勝ち軸からは外すが負けではない）。
+   angle 系でも Ours が良いが、これは機構確認として扱う。
+4. `DP c0.3` は FC だけ高いが dim-ratio / angle は悪い。単純な FC 最大化や count-parsimony 強化では
+   design intent は保てない。
+5. したがって「差分が出ない」問題は、**step ではなく FC operating point / Pareto frontier で比較する**と
+   解消できる可能性が高い。ただし最終 claim は ~~`dim-ratio/S_place`~~ `dim-ratio`（→ §4.10: S_place 降格）の
+   held-out Fiverr dense Pareto と paired 統計で支える。
+
+### 4.10 今後の実験計画と TODO (2026-06-18)
+
+#### P0. 既存 ckpt の dense Pareto 化（学習なし・最優先）
+
+目的: 現在の Fiverr 図はまだスパースで、代表点 cherry-pick に見える。まず再学習せず、保存済み
+`stepsave_{5000*n}.ckpt` と既存 ckpt を Fiverr 全体で評価し、FC-rate vs `dim-ratio` の trajectory / frontier を描く（→ §4.10: 評価 iter1 単発。第3パネルは `S_place` を正直に併置＝勝ち軸ではなく未解決軸）。
+angle 図は mechanism check として併置する。
+
+推論:
+
+```python
+import subprocess
+for i in range(12):
+    subprocess.run(
+        f"CUDA_VISIBLE_DEVICES=1 python src/test.py "
+        f"--ckpt logs/train/runs/2026-06-dd_hh-mm-ss/checkpoints/stepsave_xxxxx.ckpt "
+        f"--data data_eval/{i}/ "
+        f"--outdir model_outputs/Vitruvion_scaffold_v12_<config名>_step_xxxxx/{i}",
+        shell=True,
+        check=True,
+    )
+```
+
+評価:
+
+```bash
+conda run -n freecad env CUDA_VISIBLE_DEVICES=1 PYTHONPATH=. \
+  python fusion360_annotation/evaluate.py model_outputs/<pred_dir> data_eval \
+  --json artifacts/fiverr_eval/<label>.json
+```
+
+作図:
+
+```bash
+conda run -n freecad python scripts/plot_fiverr_eval_pareto.py \
+  --input "LABEL=artifacts/fiverr_eval/<label>.json" ...
+```
+
+P0 対象:
+
+- `rloo_response_scaffold12_ablA_noML_dimprior_dimpars_c1`（DP c1 baseline）
+- `rloo_response_scaffold12_ablA_noML_dimprior_dimpars_c0.3` / `c3`（DimParsimony dose）
+- `rloo_response_scaffold12_ablA_m4.5_dimprior_dimpars_intent`（S+M+DP）
+- `rloo_response_scaffold12_m2.25_l0.75_leakdof_dimprior_intent`（低係数 Ours; DimPrior 係数も違うので appendix/reference）
+- 既存 Ours `28xstb2f` は保存 ckpt が少ないので、`52200/59800/60700` など使える点だけ載せる。
+- 既存 S / S+M (`s_noml_step12700`, `sm_m4.5_step12200`) は preliminary ablation として既に入れる。
+
+検証仮説:
+
+- 学習ログ Pareto で見えた seq_M4.5_L1.5 vs DP_c1 の FC-matched frontier 差を、held-out Fiverr の
+  independent metric (`dim-ratio` ~~`/S_place`~~) で再現できる（→ §4.10: S_place 降格）。
+- DP 系は FC を上げるほど dim-ratio が悪化する trade-off 上に乗る。
+- Ours は同 FC で DP frontier より低い dim-ratio を作る ~~/ 高い `S_place`~~（→ §4.10: S_place 降格。iter1 では非優位）。
+
+#### P1. 学習が必要な run 一覧
+
+**現在の W&B running 状態（2026-06-18, Singapore）**
+
+W&B project: `kakuda40611-nanyang-technological-university-singapore/vitruvion`
+
+| priority | run id | config / name | 位置づけ |
+|---|---|---|---|
+| A1 | `ad7gt99w` | `rloo_response_scaffold12_m4.5_l1.5_leakdof_dimprior_intent_retry` | Ours full stack retry。最優先で dense checkpoint を確保。 |
+| A2 | `7y0bg0oa` | `rloo_response_scaffold12_ablA_m4.5_dimprior_intent` | S+M。Motion 単体 frontier の確定。 |
+| A3 | `2ij8cdav` | `rloo_response_scaffold12_ablA_noML_dimprior_dimpars_c1` | DP c1 strongest baseline。既存 run で FC 帯が足りれば再走不要。 |
+| B4 | `cgraga0i` | `rloo_response_scaffold12_ablA_m4.5_dimprior_dimpars_intent` | S+M+DP。Leak と DimParsimony の置換比較。 |
+| B5 | `0ku9his9` | `rloo_response_scaffold12_ablA_noML_dimprior` | S floor。S→S+M 改善量の基準。 |
+| B6 | `ybk2qgdz` | `rloo_response_scaffold12_ablA_l1.5_leakdof_dimprior_intent` | **Leak-only。格上げ(2026-06-19): appendix → main-table control。** 「L 単体で足りるか／M は冗長か」を切る factorial の欠けセル（~~M=S_place, L=dim-ratio の軸別相補~~ → §4.10: S_place 降格で改訂）。学習中 (`2026-06-18_20-36-15`)。 |
+| C8 | `gef5u539`, `y2yu0h8b` | scaffold13 PrefixMotion / PrefixMotion+Leak | 勝った場合だけ appendix/future から昇格。 |
+| C9 | `d4hgnece`, `5103sq9n` | DP c0.3 / c3 | DimParsimony dose。既存 ckpt で足りるなら追加学習不要。 |
+
+**A. 必須（fast GPU 優先）**
+
+1. `rloo_response_scaffold12_m4.5_l1.5_leakdof_dimprior_intent`
+   - 目的: full stack Ours の dense checkpoint を確保する。`28xstb2f` は本命だが初期から stepsave が揃っていない。
+   - 保存: `stepsave_{5000*n}`、少なくとも 60k steps。
+   - 検証: Ours frontier が DP frontier より lower dim-ratio になるか ~~/ higher `S_place`~~（→ §4.10: S_place 降格）。
+
+2. `rloo_response_scaffold12_ablA_m4.5_dimprior_intent`
+   - 目的: S+M の dense trajectory。Motion 単体が DP frontier に collapse するか、独自 frontier を持つかを確定する。
+   - 保存: `stepsave_{5000*n}`、Ours と同じ上限。
+   - 検証: Motion は floor を改善するが、DP を越えないという thesis を確定する。
+
+3. `rloo_response_scaffold12_ablA_noML_dimprior_dimpars_c1`
+   - 目的: strongest DP baseline。論文上の必須評価対象だが、既存 run (`2ij8cdav`) の dense checkpoint / FC 帯が足りるなら高速 GPU 枠で再走しない。
+   - 保存: `stepsave_{5000*n}`、少なくとも Ours と同じ FC 帯を覆うまで。
+   - 検証: DP frontier の本当の上限を与える。
+
+**B. 強く推奨（slow GPU でも可）**
+
+4. `rloo_response_scaffold12_ablA_m4.5_dimprior_dimpars_intent`
+   - 目的: S+M+DP。Leak と DimParsimony の置換比較。
+   - 検証: 同じ Motion 下で、DimParsimony が dim-ratio / `S_place` / rawD をどこまで改善するか。
+
+5. `rloo_response_scaffold12_ablA_noML_dimprior`
+   - 目的: S floor。Motion / DP / Leak の改善量の基準。既存 run (`0ku9his9`) を継続して dense trajectory を補えばよい。
+   - 検証: S->S+M の効果を dense trajectory で確認。
+
+6. `SolverReward+LeakAngleReward`（Leak 単体, Motion なし。既存 config: `rloo_response_scaffold12_ablA_l1.5_leakdof_dimprior_intent`、run `2026-06-18_20-36-15`）
+   - **格上げ (2026-06-19): appendix → main-table control。** ~~理由: §4.9 のデータで M は S_place を 0.590→0.665 と強く改善する一方、dim-ratio headline では DP frontier を越えない＝「M は placement 軸で効く / L は over-dim 軸で効く」という**軸ごとの相補**ストーリー~~（→ **更新 §4.10**: S_place は降格したので「M=placement軸」基盤は撤回）。**改訂理由**: M と L はどちらも over-dim を抑え得るが経路が違う（M=relational subspace alignment / L=dimensional driver の選択的抑制）。「L 単体で足りるのか／M は冗長か」を切り分けるには S+L が必要、という factorial 上の必須セルである点は不変。これが無いと「Leak だけで十分」という contribution を弱める読みを排除できない。
+   - 検証（改訂）: S+L は dim-ratio を下げる（L の active ingredient 性）一方、~~S_place は DP 並みに留まる（M なしでは placement が出ない）か~~ relational alignment（motion_rel）は S+M+L より弱い、を確認。これが言えれば Ours（M+L 両方）が正当化される。逆に S+L ≈ Ours なら M 冗長＝再フレーミングが必要。
+   - 注意: relational target を増やす信号が弱いので FC は弱めに出る想定。
+   - 既に学習中（5k/10k と若い）。Ours retry と同様、stepsave が増えるたび dense 評価する。
+
+**C. 余裕があれば（appendix / reviewer 対応）**
+
+7. `S+M+L+DimParsimony`（既存 `rloo_response_scaffold12_ablA_m4.5_l1.5_leakdof_dimprior_dimpars`）
+   - 目的: Leak と DimParsimony が相補か冗長か。
+   - 判断: 主張には必須でない。DimParsimony が Leak 上に乗っても frontier を改善しない、という冗長性確認が必要になった場合だけ回す。
+
+8. PrefixMotion / PrefixMotion+Leak (`scaffold13` 系)
+   - 目的: STOP 版と同 frontier でも学習効率が良いか、または lower frontier を作るか。
+   - 判断: main claim には使わず、勝った場合のみ appendix / future から昇格。
+
+9. DP dose 追加 (`c0.3`, `c3`, `c9`)
+   - 目的: DimParsimony 強度 sweep の operating curve。
+   - 既存 ckpt で十分なら再走しない。足りない FC 帯だけ補う。
+
+**推奨マシン割当**:
+
+- 高速GPU 1: full stack Ours (`m4.5_l1.5_leakdof_dimprior_intent`)
+- 高速GPU 2: S+M (`ablA_m4.5_dimprior_intent`)
+- 低速GPU: DP c1 / S+M+DP / S floor を順に流す。既存 ckpt 評価で十分なら訓練を省く。
+
+#### P2. 代表点選択・定性評価・User Study
+
+step 数を揃えるより、**FC-rate または solver status を揃える**ほうが公平。学習の進み具合が違う run を
+同 step で比較すると、未収束 run を不当に弱く見せる危険がある。
+
+最終手順は paper で事前宣言する（定性/US だけでなく quantitative の代表点比較にも適用）:
+
+1. train-val 上で目標 FC 帯（例: 0.63--0.67）に最も近い ckpt を選ぶ。
+2. 選ばれた ckpt を full Fiverr で一度だけ評価する。
+3. dense Pareto 図は全 stepsave を Fiverr 評価して trajectory として描いてよい。ただし本文で報告する
+   単一代表点は train-val 選択で決め、Fiverr を見て選ばない。
+4. User Study は両者が valid/FC で比較可能な同一 sketch subset から、dim-ratio / `S_place` / motion 指標の差が大きい例と
+   ランダム例を混ぜる。出力順は blind/randomize。
+
+現時点の provisional FC-matched 候補:
+
+- Ours `step52200`（FC 0.647） vs DP c1 `step21200`（FC 0.640）
+- ただし最終採用は dense trajectory 完成後、train-val rule で決める。
+
+#### P3. 図と統計
+
+main paper の representative table:
+
+- FC rate / valid DoF
+- dimensional ratio（全 dimensional constraints の比率; lower is better）
+- `theta_motion_full`（lower is better）
+- `theta_motion_relational`（lower is better; MotionReward 系の mechanism check でもある）
+- `theta_misalign_relational` / RelDimAlign angle（lower is better; RelDimAlignReward の mechanism check）
+- ~~`S_place` / `asgn_sim`（higher is better）~~ → §4.10: 降格。表には完全性のため残すが headline ではない。
+
+main paper の Pareto 図（→ **更新 §4.10**: 評価 iter1 単発・[scripts/run_iter1_pareto.py](../scripts/run_iter1_pareto.py)）:
+
+- FC-rate vs dimensional ratio（headline）
+- FC-rate vs `S_place` / `asgn_sim` → 第3パネルとして残す（**勝ち軸ではなく**、どの手法も改善しない未解決軸として正直に提示）。機構角 `leak_relational_angle` は表＋appendix へ。
+- FC-rate vs `theta_motion_full` を併置する。
+
+mechanism / appendix 図:
+
+- FC-rate vs `motion_relational_angle`
+- FC-rate vs RelDimAlign angle (`leak_relational_angle` in code)
+- FC-rate vs `response_relational_angle`
+- FC-rate vs raw/axis Distance 内訳
+- FC-rate vs `valid_dof_mean`
+
+統計:
+
+- Ours vs DP c1 at FC-matched point の paired bootstrap / Wilcoxon。
+- headline は FC-matched Pareto 上の dimensional ratio / ~~`S_place`~~ / `theta_motion_full`（→ §4.10: S_place 降格）。
+  `theta_motion_relational` と RelDimAlign angle は提案指標として表に併記するが、報酬同一ファミリなので mechanism confirmation として解釈する。
+
+**予備 paired 統計 (2026-06-19, FC-matched preliminary)**: `evaluate.py` に per-sketch dump を追加
+（`composition.per_sketch` / `reference.per_sketch`、batch-qualified id）。
+[scripts/paired_stats_fc_matched.py](../scripts/paired_stats_fc_matched.py) で Ours `step52200`(FC 0.647)
+vs DP c1 `step20000`(FC 0.658) を paired 比較（Wilcoxon 符号順位 two-sided + bootstrap mean-Δ 95%CI、
+delta=ours−base）:
+
+| metric | meanΔ | 95%CI | Wilcoxon p | 判定 |
+|---|---:|---|---:|---|
+| dimensional_ratio↓ | **−0.051** | [−0.062,−0.040] | **2e-19** | Ours 有意に低い（headline） |
+| raw_distance_ratio↓ | −0.0045 | [−0.0087,−0.0003] | 3e-2 | Ours 微減 |
+| asgn_sim (S_place)↑ | +0.013 | [−0.011,+0.037] | 0.16 | 方向は Ours だが**この1点では非有意** |
+| motion_full_angle↓ | −0.032 | [−0.060,−0.004] | 0.31 | bootstrap-sig / rank-test 非有意（境界） |
+| motion_relational_angle↓ | −0.062 | [−0.081,−0.045] | 3e-13 | Ours（報酬同族 = 機構確認） |
+| leak_relational_angle↓ | −0.120 | [−0.149,−0.091] | 4e-11 | Ours（報酬同族 = 機構確認） |
+
+→ （上表は iter5 = solver-in-the-loop の旧結果。下記 2026-06-19 の評価プロトコル変更で **iter1 単発を既定**としたため絶対値は superseded。dim-ratio の結論は不変・むしろ強化。S_place は headline の「勝ち軸」からは外すが operating point ではタイ＝負けではない。）
+
+**評価プロトコル変更: iter5 → iter1 単発に統一 (2026-06-19, 重要)**
+
+W&B 学習ログ（`validation_gen/solver_fc_rate` ≈ 0.30 @ step5k）と Pareto 評価（FC 0.473）の乖離を追跡した結果、
+[test.py](../src/test.py) の **`n_iter=5` solver-in-the-loop 自己修正**（生成→ソルバ→壊れた制約を再生成、最大5回）が
+原因と判明（学習時 val は[単発1回](../src/models/constraint_ar_module.py#L195)）。同 step5000・全Fiverr で
+`--n_iter 1` にすると **FC 0.281**（W&B の ~0.30 と一致 ＝ データ分割の問題ではない）。
+
+solver 介入は **FC だけでなく出力スケッチ自体を書き換える**ため、dim-ratio / S_place / motion 角度まで「policy
+ではなく solver 後処理の産物」になる（compound effect）。本論文の主張は「報酬が policy に何を教えたか」なので、
+**全評価を単発 (`n_iter=1`) に統一**。`src/test.py` の既定を `n_iter=1` に変更。Sec.5 は Base/Solver-RL が iter5
+だったが、Solver-RL は今回 c1 に合わせ再走するので追加コストは **Base を iter1 で再評価するだけ**。
+
+**iter1 検証ゲート結果（FC-matched paired, single-shot）**:
+- 低FC寄り (Ours 52200 FC0.551 vs DP c1 20k FC0.579): dim-ratio meanΔ −0.058, CI[−.070,−.047], **p=6e-22**（Ours 決定的）。
+  S_place meanΔ −0.034, **p=0.058**（DP 寄りだが境界）。θ_full ほぼタイ。
+- **高FC終端 (Ours 59800 FC0.640 vs DP c1 35k FC0.644): dim-ratio p=2e-16（Ours 勝ち）、θ_full p=0.07 (n.s.)、
+  S_place p=0.19 (n.s.) ＝ operating point ではクリーンなタイ。** motion_rel/leak_rel は両点とも強く Ours
+  （p≈1e-10〜1e-19, leak 中央値 0.000）＝機構確認。
+
+**ストーリーライン（確定 2026-06-19, ユーザ合意）**:
+> **序盤（低FC・under-constrained）では θ_full / S_place で DP に負ける。しかし operating point（高FC終端）では
+> θ_full・S_place ともに有意差なし（タイ）になり、それでいて dim-ratio では勝つ。よって「over-dimensioning を
+> 有意に減らしつつ、redesign 挙動 (θ_full) と placement (S_place) は犠牲にしない」で OK。**
+> 補足: **dim-ratio は低FC・高FC両方で Ours 勝ち**（序盤負けは θ_full/S_place のみ）。「タイ」は図の見た目だけでなく
+> **paired Wilcoxon（θ_full p=0.07, S_place p=0.19）を本文・キャプションに併記**して担保する
+> （集計平均の Pareto 図だけだと手前で小差に見えるため）。
+
+**iter1 / iter5 の採否（決定 2026-06-19）**:
+> 両プロトコルを出し、**効果がより明確かつ正直に示せる方を採用**する。
+> [run_iter1_pareto.py](../scripts/run_iter1_pareto.py) に `--iter N` を追加し出力を完全名前空間分離：
+> iter1 → `model_outputs/` + `iter1_*.json` + `paper/figs/rl_reward_pareto_iter1.pdf`、
+> iter5 → `model_outputs_iter5/` + `iter5_*.json` + `..._iter5.pdf`（上書きなし）。論文は採用側を
+> `\includegraphics` で指定（現状 `_iter1`、切替は1行）。**integrity 条件**: どちらでも (a) 全 variant に同条件適用、
+> (b) プロトコル明記、(c) iter5 を採るなら「なぜ solver 介入が Ours を助けるか」（仮説: Ours は GT に自然完備する
+> design-intent スキャフォールドを予測 → 開けた DoF が GT 一致で埋まる）の説明/検証を付す。後付けで都合の良い数字だけ拾わない。
+> iter5 は 2026-06-19 にバックグラウンド実行開始。
+
+**図方針**: main 図は **FC vs {dim-ratio, θ_motion_full, S_place} の Pareto 軌跡**（モデル成長を見せる）。
+forest plot（1点2モデル比較で成長を見せられない）は不採用。operating point のタイは上記 paired 統計で支える。
+
+**一括評価スクリプト**: [scripts/run_iter1_pareto.py](../scripts/run_iter1_pareto.py)（推論 `test.py --n_iter {1|5}` →
+`evaluate.py` → Pareto 図 → paired統計を1ファイル・冪等・stepsave 増加に追従）。出力規約
+`model_outputs[_iter5]/Vitruvion_scaffold_v12_<config>_step_<step>`（base→`model_outputs/base`）。
+
+#### P4. 論文 thesis の整理
+
+本文 thesis は **design intent != DoF 削減** に寄せる。**評価は iter1（単発, 既定）／ iter5（deployed）両方を出し、
+効果が明確かつ honest な方を採用**（§4.10 の採否条件）。ストーリーは「序盤負け→ operating point で θ_full/S_place タイ
+→ dim-ratio で勝ち」。
+
+- Motion: relational target alignment を改善（motion_rel）。MotionReward は placement に構造的に盲目。
+- Leak: 「どの方向を自由に残すか」の選択性を担い、dimensional substitution を抑える active ingredient
+  （leak_rel を ~0 にする）。LeakReward は placement を間接的に動かしうるが、**実測では S_place を有意に改善しない**。
+- **S_place の扱い（2026-06-19 決定, ユーザ方針）**: 「効果なしだから除く」ではなく**正直に提示**。どの手法
+  （Solver/DimParsimony/Motion/Leak）も S_place を改善しない＝ placement intent は現行 reward 群が触れない**未解決軸**。
+  これは「S_place は今後の design-intent-aware constraint prediction の良い discriminative target 指標」という
+  **締めくくり（future-work hook）**になる。よって**表・図ともに S_place を残し**、headline の「勝ち軸」からのみ外す。
+  図 第3パネル＝S_place（全手法横並び）、機構角 leak_rel/motion_rel は表＋appendix。
+- DimPrior: raw Distance -> axis Distance への型切替を助ける固定 prior。
+- したがって main claim は「Motion+Leak(+DimPrior) が **independent な dim-ratio** 上で Solver+DimParsimony frontier
+  の下に出る（単発で p<1e-20）」。θ_motion_full は隣接 redesign 軸、motion_rel/leak_rel は機構確認。
+
+#### TODO 優先順位
+
+> **更新 (2026-06-19)**: 評価は iter1 単発に統一・一括スクリプト [scripts/run_iter1_pareto.py](../scripts/run_iter1_pareto.py)。
+> headline は `dim-ratio`（＋隣接 `theta_motion_full`）、S_place は降格。下記の `S_place` は取り消し線。→ §4.10。
+
+1. **P0評価**: 既存 stepsave/ckpt を full Fiverr（iter1）で評価し、`dim-ratio` ~~`/S_place`~~ Pareto を dense 化する。
+2. **必須学習A**: Ours full stack / S+M / DP c1 を stepsave 付きで揃える。
+3. **推奨学習B**: S+M+DP / S floor / **S+L（Leak-only, 格上げ control）** を揃え、Motion・Leak・DimParsimony の成分分解を完成させる。S+L は「L 単体で足りるか／M 冗長か」を切る factorial の欠けセル（~~M=S_place / L=dim-ratio の軸別相補~~ → §4.10 で改訂）。
+4. **統計**: FC-matched Ours vs DP c1 の paired bootstrap / Wilcoxon（evaluate.py に per-sketch dump 追加済み 2026-06-19。iter1 で dim-ratio p=6e-22）。
+5. **定性/US準備**: train-val rule で代表点を選び、同一 sketch subset を blind 化する。
+6. **appendix学習C**: S+M+L+DimParsimony / Prefix / DP dose を必要に応じて追加。
+7. **論文反映**: Sec.6 reward と results を `dim-ratio` ~~`/S_place`~~ headline + angle mechanism の構成へ修正（→ 反映済み 2026-06-19）。
+
+#### Handoff Checklist
+
+この節だけで別エージェントへ引き継ぐ場合、次の順に進める:
+
+1. W&B で上表の running run が継続中か確認し、各 local run dir に `stepsave_{5000*n}.ckpt` が保存されているか見る。
+2. A1/A2/A3 を優先し、少なくとも Ours と DP c1 が同じ FC 帯（例: 0.63--0.72）を覆うまで待つ。
+3. ~~各 checkpoint について `src/test.py` で `data_eval/{0..11}` へ推論を出す。~~
+4. ~~`fusion360_annotation/evaluate.py` で full Fiverr JSON を作る。~~
+5. ~~`scripts/plot_fiverr_eval_pareto.py` で `FC-rate vs dim-ratio/S_place/theta_motion_full` を更新する。~~ angle 図は mechanism check として見る。
+   → **更新 (2026-06-19)**: 手順 3–5 は **一括 [scripts/run_iter1_pareto.py](../scripts/run_iter1_pareto.py)** に統合（推論 `test.py --n_iter 1`→evaluate→図→paired統計、冪等）。`src/test.py` 既定は `n_iter=1`。図は `FC-rate vs dim-ratio / theta_motion_full / leak_relational_angle`（S_place 降格）。
+6. 本文代表点は Fiverr 結果ではなく train-val 上の FC 帯で選ぶ。Fiverr は最終評価として一度だけ使う。
+7. Ours vs DP c1 の FC-matched paired bootstrap / Wilcoxon と、同一 sketch subset の定性/User Study 候補を作る。
+
+### 4.11 確定: Ch.5 再走（c1-70k/iter1）と Ch.6 Table1 充填 (2026-06-22)
+
+**Ch.5（[5_experiments.tex](../paper/sec/5_experiments.tex)）= Solver-RL を DimParsimony c1 の最大実力点で再評価。**
+- 代表点: DP c1 は `2ij8cdav` が **70k で停止＝収束**、step70000 が FC0.750/DoF4.64 で最大。Ours の 60k に matched せず Solver-RL 本来の最大で見る方針（ユーザ決定）。
+- 全評価を **iter1 単発**に統一（Base も iter1 で再評価）。eda_code は `config.py` の `MODEL_OUTPUT_ROOTS["solver_rl"]` を c1-70k に向けて 04/06/07/08/11 を再走。
+- **新数値（multi-ref median）**: Base 0.839/0.707/0.283/OES0.792/F1 0.486（n552）、Solver-RL 0.488/0.471/0.628/OES0.200/F1 0.479（n810）、Human 0/0/0.831/0.343/0.700。
+- **大きく動いたのは Base（iter5→iter1 が主因、c1 でなく）**: θ_full 0.667→0.839 等。Solver-RL(c1) 自体は旧c0とほぼ同等。**論旨は保持・強化**（Base が iter1 で明確に under-constrained＝OES バイアス露呈が鮮明）。tex の Table・inが既に反映済み（ユーザ承認 A）。
+
+**Ch.6 Table1 + inline（[6_rl_reward.tex](../paper/sec/6_rl_reward.tex)）充填完了。**
+- **代表点 = 提案モデル最終 ckpt（Ours `ad7gt99w` step60000）の train-val FC 0.591 に最近接**（train-val FC は W&B `validation_gen/solver_fc_rate` を `trainer/global_step` で stepsave に対応づけ取得）。held-out では選ばない＝6.3＋appendix A.4.4 の宣言通り。
+- 選ばれた点（step / held-out FC / dimR / θfull / θrel / leak / Splace）:
+  - Solver-RL(DP c1) 25k / 0.610 / 0.262 / 0.477 / 0.357 / 0.328 / 0.533
+  - +M(no DP) `7y0bg0oa` 35k / 0.630 / 0.299 / 0.382 / 0.322 / 0.328 / 0.627
+  - +L(no DP) `ybk2qgdz` 30k / 0.613 / 0.238 / 0.515 / 0.353 / 0.190 / 0.470
+  - Solver-RL+M(=S+M+DP) `cgraga0i` 35k / 0.565 / 0.289 / 0.373 / 0.310 / 0.297 / 0.637
+  - **Ours** `ad7gt99w` 60k / 0.620 / **0.205** / 0.485 / **0.280** / **0.133** / 0.489
+- **headline paired（Ours 60k vs DP c1 25k, FC 0.620/0.610）**: dim-ratio meanΔ **−0.063**, CI[−0.051,−0.075], **p=1.3e-24**。θ_full タイ（meanΔ+0.002, CI 0 跨ぎ）。mrel p=6e-13 / leak p=3e-23（機構）。
+- **factorial 確定（表で読める）**: +M 単体は dim-ratio で DP frontier を越えない（0.299>0.262）／+L 単体は dim-ratio↓（0.238）だが θ_full 回帰（0.515）＋Splace 低下（0.470）／**M+L だけ** dim-ratio 最小かつ θ_full 非回帰＝両方必要。
+- **⚠️ S_place の storyline 変化（§4.10 から要更新）**: 旧 §4.10 は operating point で「S_place タイ」としたが、train-val 選定の新点では **S_place は paired で p=0.018 で僅かに DP 有利**（Ours 0.489 < DP 0.533）。さらに **+M / +M+DP は S_place を baseline 超えに上げる**（0.627 / 0.637）＝「どの手法も S_place を改善しない」は誤り。正しい整理: **M は S_place を上げるが L を足すと baseline 付近へ戻り、Ours は S_place を勝たない／人間(0.831)には全手法届かない**。tex（Table キャプション・S_place 段落）はこの正しい表現に修正済み。**§4.10 の「S_place タイ」記述はこの 4.11 で上書き。**
+- **matched-strength control（M+DP c1）**: smdp は DimParsimony 0.30、baseline c1 は 1.0 で強度不一致だったため、**config [rloo_response_scaffold12_ablA_m4.5_dimprior_dimpars_c1_intent.yaml](../configs/experiment/rloo_response_scaffold12_ablA_m4.5_dimprior_dimpars_c1_intent.yaml)** を新規作成（coeff 0.30→1.0 のみ差分）。**別マシンで学習予定**（このリポジトリでは投入しない）。leak の weight-robust 機構（DimParsimony 0.3/1/3 全域で leak 高止まり・Leak のみ低下）で公平性は既に担保されるため load-bearing ではない。
+- **図**: [run_iter1_pareto.py](../scripts/run_iter1_pareto.py) の `AXES` に θ_motion^rel / θ_misalign^rel(leak) を追加し **5パネル**化（mechanism として明示）。smdp は `plot=False` で評価のみ（表用、メイン図には出さない）。
+- **更新 (2026-06-22, Ours を 70k へ延長)**: oursretry が stepsave_70000 まで完了。**新ターゲット = Ours@70k train-val FC 0.624**。再選定 → Table1 を 70k operating point に更新（tex は 60k 行を `%` コメント保存・70k 行を下に記載）。新点（step / hoFC / dimR / θfull / θrel / leak / Splace）: DP c1 30k/0.630/0.278/0.449/0.349/0.336/0.563、+M 40k/0.654/0.305/0.367/0.309/0.314/0.633、+L 40k/0.644/0.239/0.513/0.344/0.186/0.476、S-RL+M 40k/0.596/0.302/0.379/0.318/0.328/0.633、**Ours 70k/0.627/0.221/0.448/0.279/0.159/0.530**。
+  - **headline paired（Ours 70k vs DP c1 30k, FC 0.627/0.630）**: dim-ratio meanΔ **−0.061**, CI[−0.049,−0.073], **p=9.9e-23**（gap は 60k と同じ Δ≈0.057・不変）。**θ_full clean tie（p=0.72）、S_place clean tie（p=0.17）** ＝ 60k で出た S_place 弱有意（p=0.018）は解消し、**§4.10 の「operating point で θ_full・S_place ともにタイ」storyline に綺麗に一致**。S_place の tex 表現（M が上げる/Ours は勝たない/人間未達）はそのまま有効。
+  - factorial も不変（+M dim-ratio 越えず 0.305、+L θ_full 回帰 0.513、M+L のみ両立）。
+
+- **残**: User Study（ユーザが 300 件目視 → Table2）、LaTeX 実ビルド確認、必要なら M+DP c1 完了後に smdp 行を差し替え。
 
 ---
 
@@ -523,8 +934,12 @@ figure、低coeff切替（`s9rxgu3v`）、FC崩壊（`a1e6s9en`）、flip on/off
 `motion_relational_angle` は dimensioning **placement**（どの primitive 対に寸法を置くか）に
 構造的に盲目（§1.1、意図的）。この軸を測るため別指標 **participation**（dim_uglify 合成統制で
 p=3.8e-59）と **set_sim**（motion-basis 一致）を検討したが、いずれも GT 慣習依存・count
-混同で実 model 評価には使えず、diversity descriptor 止まり。**ランキングの主指標は
-`motion_full_angle` + `leak_relational_angle` のまま**。詳細は v1 §17 / §18。
+混同で実 model 評価には使えず、diversity descriptor 止まり。**RL 報酬の機構確認には
+`motion_relational_angle` / `leak_relational_angle` を使うが、paper headline の model 比較は
+~~§4.9 の通り `dimensional_ratio` / `S_place(asgn_sim)` / `theta_motion_full` を主軸にする~~**。
+（→ **更新 §4.10**: `S_place(asgn_sim)` は headline から降格。主軸は `dimensional_ratio`＋隣接 `theta_motion_full`。
+そもそも本段落が言う通り motion は placement に盲目なので、S_place を M の勝ち筋にするのは機構的に無理筋だった
+＝ iter1 の非有意・逆転結果と整合。）詳細は v1 §17 / §18。
 
 > 更新 (2026-06-10, v1 §18.8): set_sim の max-matching を Hungarian 1:1 割当に替えた
 > **`asgn_sim`**（max-count 正規化）が dim/rel drop 単調・model 分離 z≈+12 で、しかも

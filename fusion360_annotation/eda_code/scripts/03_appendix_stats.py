@@ -10,13 +10,6 @@ from _bootstrap import bootstrap
 
 bootstrap()
 
-import matplotlib
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt  # noqa: E402
-
-from fusion360_annotation.eda_code.config import DIMENSIONAL_DISPLAY_TYPES
-
 HERE = Path(__file__).resolve().parents[1]
 
 
@@ -119,29 +112,6 @@ def main() -> None:
         },
     }
     (out_dir / "appendix_stats.json").write_text(json.dumps(stats, indent=2))
-
-    anns = list(per_annotator)
-    fig, ax = plt.subplots(figsize=(6.5, 3.2))
-    x = range(len(anns))
-    ax.bar([i - 0.2 for i in x], [per_annotator[a]["relational_pct"] for a in anns], width=0.4, color="#2c7fb8", label="relational %")
-    ax2 = ax.twinx()
-    ax2.bar([i + 0.2 for i in x], [per_annotator[a]["mean_construction"] for a in anns], width=0.4, color="#d95f0e", label="mean construction")
-    ax.set_xticks(list(x))
-    ax.set_xticklabels(anns, rotation=20, ha="right")
-    ax.set_ylabel("relational %", color="#2c7fb8")
-    ax2.set_ylabel("mean construction / sketch", color="#d95f0e")
-    ax.set_title("Per-annotator bias")
-    fig.tight_layout()
-    fig.savefig(out_dir / "appendix_per_annotator.png", dpi=150)
-
-    fig2, (a1, a2) = plt.subplots(1, 2, figsize=(8.0, 3.0))
-    a1.hist([r["n_constraints"] for r in recs], bins=20, color="#2c7fb8")
-    a1.set_xlabel("constraints / annotation")
-    a1.set_ylabel("count")
-    a2.hist([r["n_primitives"] for r in recs], bins=range(3, 18), color="#41ab5d")
-    a2.set_xlabel("primitives / annotation")
-    fig2.tight_layout()
-    fig2.savefig(out_dir / "appendix_count_hist.png", dpi=150)
     print(json.dumps(stats, indent=2))
 
 

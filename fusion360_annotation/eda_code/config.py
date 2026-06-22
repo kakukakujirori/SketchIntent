@@ -11,9 +11,14 @@ ANNOTATION_LABELS = frozenset({"D", "E", "J", "R", "S", "T"})
 
 # Edit these paths when model inference outputs are available. Each root must
 # mirror data_eval, i.e. contain 0-11 subdirectories with <sketch_id>.py files.
+# Sec.5 model rows. solver_rl -> DimParsimony c1 at its converged best step 70000
+# (single-shot / iter1; the run stopped at 70k with FC 0.750, DoF 4.64 = its max
+# operating point, NOT matched to Ours). Previous Sec.5 numbers used an older
+# solver-only ("c0") iter5 output at model_outputs/solver_rl.
 MODEL_OUTPUT_ROOTS = {
     "base": REPO_ROOT / "model_outputs" / "base",
-    "solver_rl": REPO_ROOT / "model_outputs" / "solver_rl",
+    "solver_rl": REPO_ROOT / "model_outputs"
+    / "Vitruvion_scaffold_v12_ablA_noML_dimprior_dimpars_c1_step_70000",
 }
 
 DIMENSIONAL_DISPLAY_TYPES = {

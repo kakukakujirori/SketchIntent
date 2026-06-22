@@ -12,6 +12,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from src.metrics.edit_response_distance import (  # noqa: E402
+    _is_relational,
     compute_native_response,
     pairwise_distance_observable,
 )
@@ -19,6 +20,7 @@ from src.models.rewards.utils.geometry import (  # noqa: E402
     motion_relational_subspace,
     orthonormal_range,
     principal_cos2_sum,
+    stack_relation_jacobians_at,
 )
 from src.sketch_handlers.context import SketchContext  # noqa: E402
 
@@ -31,7 +33,12 @@ class SketchMotion:
 
     def __init__(self, sketch, context: SketchContext, base_eids, eps: float = EPS_DEFAULT):
         self.eps = eps
+        # Kept for the relation-leak metric, which needs this sketch's native
+        # response (R, state) and, for the GT side, its relational constraints.
+        self.sketch = sketch
+        self.context = context
         native = compute_native_response(sketch, context, eps=eps)
+        self.native = native
         j_phi = pairwise_distance_observable(sketch, base_eids=base_eids).to(dtype=native.R.dtype)
         self.m_phi = int(j_phi.shape[0])
 
@@ -115,12 +122,42 @@ def _omp_sim(Ua: torch.Tensor, Ub: torch.Tensor, tol: float = 1e-9) -> float:
     return num / den
 
 
+def leak_relational_angle(pred: SketchMotion, gt: SketchMotion, eps: float = EPS_DEFAULT) -> float:
+    r"""theta_misalign^rel: relation-intent leakage of Pred against GT relations.
+
+    RMS cosine between the directions Pred allows through its (dimensional)
+    response map and the GT relation-forbidden directions (the row space of the
+    GT relation Jacobians):
+
+        theta_misalign^rel ** 2 = || orth(row(J_R^G))^T U_P ||_F^2 / dim(U_P)
+
+    Jacobians are evaluated at Pred's primitive state, with GT's relational
+    constraints. This is a direct port of
+    ``src.models.rewards.response_metric_reward._leak_relational_angle`` so the
+    held-out-human reference matches the model-side ``leak_relational_angle``.
+    """
+    U_P, dim_P = orthonormal_range(pred.native.R, eps)
+    if dim_P == 0:
+        return 0.0
+    gt_rels = [c for c in gt.sketch.constraints.values() if _is_relational(c)]
+    J_R, n_R = stack_relation_jacobians_at(gt_rels, pred.native.state, pred.context)
+    if J_R is None or n_R == 0:
+        return 0.0
+    N_G, dim_N = orthonormal_range(J_R.T, eps)
+    if dim_N == 0:
+        return 0.0
+    overlap = N_G.T @ U_P
+    leak_sq = float((overlap ** 2).sum()) / float(dim_P)
+    return math.sqrt(min(max(leak_sq, 0.0), 1.0))
+
+
 def pair_paper_metrics(pred: SketchMotion, gt: SketchMotion) -> dict | None:
     if pred.m_phi != gt.m_phi or pred.m_phi == 0:
         return None
     out = dict(
         theta_full=subspace_angle(pred.U_full, pred.k_full, gt.U_full, gt.k_full),
         theta_rel=subspace_angle(pred.U_rel, pred.k_rel, gt.U_rel, gt.k_rel),
+        theta_leak=leak_relational_angle(pred, gt, pred.eps),
         k_full_pred=pred.k_full,
         k_full_gt=gt.k_full,
         k_rel_pred=pred.k_rel,

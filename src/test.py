@@ -13,7 +13,8 @@ Algorithm:
 
 Usage:
     python src/test.py --ckpt logs/train/runs/2026-03-12_20-30-34/checkpoints/epoch_2999.ckpt \
-                       --data data_ryotaro_prim5.npy --n_iter 5 --batch_size 8
+                       --data data_ryotaro_prim5.npy --batch_size 8
+    # n_iter defaults to 1 (single-shot). Pass --n_iter 5 for solver-in-the-loop.
 """
 import argparse
 import json
@@ -490,8 +491,9 @@ def main():
                         help="Path to input data (.npy or directory/file of .py)")
     parser.add_argument("--outdir", type=str, required=True,
                         help="Output directory")
-    parser.add_argument("--n_iter", type=int, default=5,
-                        help="Max solver intervention iterations")
+    parser.add_argument("--n_iter", type=int, default=1,
+                        help="Max solver intervention iterations (default 1 = single-shot, "
+                             "no solver-in-the-loop self-correction)")
     parser.add_argument("--batch_size", type=int, default=32,
                         help="Batch size for generation")
     parser.add_argument("--fully_constrained_dof", type=int, default=2,

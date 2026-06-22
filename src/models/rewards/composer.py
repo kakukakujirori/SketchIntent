@@ -321,6 +321,9 @@ class RewardValComposer(torch.nn.Module):
             return float((fam.float() / n_total_f).mean())
 
         merged["eval_key_rel_ratio_mean"] = _family_ratio(self._key_rel_token_ids)
+        merged["eval_dimensional_ratio_mean"] = _family_ratio(
+            self._dim_token_ids
+        )
         merged["eval_distance_family_ratio_mean"] = _family_ratio(
             self._distance_family_token_ids
         )

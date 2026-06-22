@@ -183,9 +183,13 @@ def _latest_checkpoint(run_dir: Path) -> Path | None:
     ckpt_dir = run_dir / "checkpoints"
     if not ckpt_dir.exists():
         return None
-    last_ckpt = ckpt_dir / "last.ckpt"
-    if last_ckpt.exists():
-        return last_ckpt
+    # Match last.ckpt and auto-versioned checkpoints like last-v1.ckpt
+    last_ckpts = sorted(
+        ckpt_dir.glob("last*.ckpt"),
+        key=lambda p: p.stat().st_mtime,
+    )
+    if last_ckpts:
+        return last_ckpts[-1]
     ckpts = sorted(
         ckpt_dir.glob("*.ckpt"),
         key=lambda p: p.stat().st_mtime,
@@ -232,6 +236,18 @@ def _configure_resume_from(cfg: DictConfig) -> None:
             if wandb_id is not None:
                 cfg.logger.wandb.id = wandb_id
                 cfg.logger.wandb.resume = "allow"
+        # if cfg.get("callbacks") is not None:
+        #     if cfg.callbacks.get("model_checkpoint_step") is None:
+        #         log.info("Temporary hack: Adding 'model_checkpoint_step' to callbacks for this resume run.")
+        #         cfg.callbacks.model_checkpoint_step = {
+        #             "_target_": "lightning.pytorch.callbacks.ModelCheckpoint",
+        #             "dirpath": "${paths.output_dir}/checkpoints",
+        #             "filename": "stepsave_{step}",
+        #             "every_n_train_steps": 5000,
+        #             "save_top_k": -1,
+        #             "save_last": False,
+        #             "auto_insert_metric_name": False,
+        #         }
 
     if ckpt_path is None:
         log.warning(f"No checkpoint found under {run_dir}/checkpoints; starting without trainer resume.")

@@ -3,10 +3,11 @@ from __future__ import annotations
 import argparse
 import csv
 import glob
+import json
 import os
 import statistics as st
 import sys
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 from scipy.stats import norm, wilcoxon
 
@@ -14,11 +15,18 @@ from _bootstrap import bootstrap
 
 bootstrap()
 
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt  # noqa: E402
+import numpy as np  # noqa: E402
+
 from fusion360_annotation.eda_code.runtime_warnings import MODEL_LABELS, has_model_rows  # noqa: E402
 
 HERE = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 
-ANGLES = ["theta_full", "theta_rel"]
+ANGLES = ["theta_full", "theta_rel", "theta_leak"]
 SIMS = ["asgn_sim", "asgn_min", "set_sim", "omp_sim"]
 METRICS = ANGLES + SIMS
 VARIANT_ORDER = [
@@ -115,6 +123,142 @@ def fmt_metric(value: float | None) -> str:
     return "---" if value is None else f"{value:.3f}"
 
 
+def plot_appendix_dataset_figures(out_dir: Path, fig_dir: Path) -> None:
+    stats_path = out_dir / "appendix_stats.json"
+    records_path = out_dir / "records.json"
+    if not stats_path.exists() or not records_path.exists():
+        print(
+            f"[warn] skip appendix dataset figures; missing {stats_path.name} or {records_path.name}",
+            file=sys.stderr,
+        )
+        return
+
+    fig_dir.mkdir(parents=True, exist_ok=True)
+    stats = json.loads(stats_path.read_text())
+    recs = json.loads(records_path.read_text())
+    out_annotators = fig_dir / "appendix_annotator_summary.pdf"
+    out_overview = fig_dir / "appendix_dataset_overview.pdf"
+
+    plt.rcParams.update(
+        {
+            "font.size": 9,
+            "axes.titlesize": 9,
+            "axes.labelsize": 9,
+            "xtick.labelsize": 8,
+            "ytick.labelsize": 8,
+            "legend.fontsize": 8,
+        }
+    )
+
+    per_annotator = stats["per_annotator"]
+    anns = list(per_annotator)
+    anon = [f"A{i + 1}" for i in range(len(anns))]
+
+    fig, axs = plt.subplots(
+        1,
+        2,
+        figsize=(5.9, 2.45),
+        sharey=True,
+        gridspec_kw={"width_ratios": [1.08, 1.0], "wspace": 0.10},
+    )
+    y = np.arange(len(anns))
+    rel_values = [per_annotator[a]["relational_pct"] for a in anns]
+    dim_values = [100.0 - v for v in rel_values]
+    cons_values = [per_annotator[a]["mean_constraints"] for a in anns]
+
+    axs[0].barh(y, rel_values, color="#4C78A8", label="Relational")
+    axs[0].barh(y, dim_values, left=rel_values, color="#F58518", label="Dimensional")
+    axs[0].set_yticks(y, anon)
+    axs[0].invert_yaxis()
+    axs[0].set_xlim(0, 100)
+    axs[0].set_xlabel("constraint-family share (%)")
+    axs[0].spines[["right", "top"]].set_visible(False)
+
+    handles, labels = axs[0].get_legend_handles_labels()
+    fig.legend(
+        handles,
+        labels,
+        frameon=False,
+        loc="upper left",
+        bbox_to_anchor=(0.13, 0.98),
+        ncol=2,
+        columnspacing=1.2,
+        handlelength=1.2,
+    )
+
+    axs[1].barh(y, cons_values, color="#6B7280")
+    axs[1].set_xlim(0, 30)
+    axs[1].set_xlabel("constraints / annotated sketch")
+    axs[1].set_title("Mean constraint count")
+    axs[1].spines[["right", "top"]].set_visible(False)
+
+    fig.subplots_adjust(left=0.10, right=0.98, bottom=0.23, top=0.80, wspace=0.10)
+    fig.savefig(out_annotators, bbox_inches="tight")
+    plt.close(fig)
+
+    fig = plt.figure(figsize=(3.35, 3.35), constrained_layout=True)
+    gs = fig.add_gridspec(2, 1, height_ratios=[0.85, 1.35], hspace=0.12)
+    axs = [fig.add_subplot(gs[i, 0]) for i in range(2)]
+
+    ax = axs[0]
+    primitive_dist = stats["primitive_distribution"]
+    primitive_order = ["Line", "Circle", "Arc", "Point"]
+    primitive_values = [primitive_dist.get(k, {}).get("pct", 0.0) for k in primitive_order]
+    primitive_colors = ["#4C78A8", "#F58518", "#54A24B", "#B279A2"]
+    y = np.arange(len(primitive_order))
+    ax.barh(y, primitive_values, color=primitive_colors)
+    ax.set_yticks(y, primitive_order)
+    ax.invert_yaxis()
+    for i, value in enumerate(primitive_values):
+        if value >= 0.1:
+            ax.text(value + 1.5, i, f"{value:.1f}%", ha="left", va="center", fontsize=8)
+    ax.set_xlim(0, 86)
+    ax.set_xlabel("share (%)")
+    ax.set_title("Primitives")
+    ax.spines[["right", "top"]].set_visible(False)
+
+    ax = axs[1]
+    pair_counts = Counter((r["n_constraints"], r["n_primitives"]) for r in recs)
+    min_constraints = min(c for c, _ in pair_counts)
+    max_constraints = max(c for c, _ in pair_counts)
+    min_primitives = min(p for _, p in pair_counts)
+    max_primitives = max(p for _, p in pair_counts)
+    heat = np.zeros(
+        (max_primitives - min_primitives + 1, max_constraints - min_constraints + 1),
+        dtype=int,
+    )
+    for (constraints, primitives), count in pair_counts.items():
+        heat[primitives - min_primitives, constraints - min_constraints] = count
+    im = ax.imshow(
+        heat,
+        aspect="auto",
+        origin="lower",
+        cmap="Blues",
+        extent=(
+            min_constraints - 0.5,
+            max_constraints + 0.5,
+            min_primitives - 0.5,
+            max_primitives + 0.5,
+        ),
+    )
+    ax.set_xlim(min_constraints - 0.5, max_constraints + 0.5)
+    ax.set_ylim(min_primitives - 0.5, max_primitives + 0.5)
+    ax.set_xticks([10, 20, 30, 40, 50])
+    ax.set_yticks([4, 8, 12, 16])
+    ax.set_xlabel("constraints")
+    ax.set_ylabel("primitives")
+    ax.set_title("Sketch complexity")
+    ax.spines[["right", "top"]].set_visible(False)
+    cbar = fig.colorbar(im, ax=ax, fraction=0.05, pad=0.03)
+    cbar.set_label("count")
+
+    fig.savefig(out_overview, bbox_inches="tight")
+    plt.close(fig)
+    print(f"\n=== appendix dataset figures ===")
+    print(f"  wrote {out_annotators}")
+    print(f"  wrote {out_overview}")
+
+
 def print_paper_table(motion_rows: list[dict], oes_rows: list[dict], token_rows: list[dict]) -> None:
     motion_best = aggregate(motion_rows, METRICS, best=True) if motion_rows else {}
     oes_best = aggregate(oes_rows, ["oes"], best=True) if oes_rows else {}
@@ -176,8 +320,10 @@ def paired_tests(lv, metrics, vs="heldout", title=""):
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out-dir", default=str(HERE / "out"))
+    ap.add_argument("--paper-fig-dir", default=str(REPO_ROOT / "paper/figs"))
     args = ap.parse_args()
     rd = args.out_dir
+    plot_appendix_dataset_figures(Path(rd), Path(args.paper_fig_dir))
 
     motion = read_csvs(os.path.join(rd, "motion_eval*.csv"))
     oes = read_csvs(os.path.join(rd, "oes_eval*.csv"))
@@ -210,14 +356,17 @@ def main() -> None:
             f"files={len({(r['batch'], r['filename']) for r in motion})}"
         )
         lv_best = aggregate(motion, METRICS, best=True)
-        median_table(lv_best, ["theta_full", "theta_rel", "asgn_sim"], "controls (multi-ref best, ours only)")
-        paired_tests(lv_best, ["theta_full", "theta_rel", "asgn_sim"])
+        median_table(lv_best, ["theta_full", "theta_rel", "theta_leak", "asgn_sim"], "controls (multi-ref best, ours only)")
+        paired_tests(lv_best, ["theta_full", "theta_rel", "theta_leak", "asgn_sim"])
         median_table(lv_best, SIMS, "placement variants (multi-ref best, appendix)")
         lv_mean = aggregate(motion, METRICS, best=False)
         median_table(lv_mean, ["theta_full", "theta_rel", "asgn_sim"], "controls (mean-ref, appendix)")
         floor = [d["asgn_sim"] for (_rid, vv), d in lv_best.items() if vv == "heldout" and "asgn_sim" in d]
         if floor:
             print(f"\nasgn_sim human floor: median={st.median(floor):.3f} mean={st.fmean(floor):.3f} (n={len(floor)})")
+        leak_floor = [d["theta_leak"] for (_rid, vv), d in lv_best.items() if vv == "heldout" and "theta_leak" in d]
+        if leak_floor:
+            print(f"theta_leak human floor: median={st.median(leak_floor):.3f} mean={st.fmean(leak_floor):.3f} (n={len(leak_floor)})")
 
     if oes:
         print(f"\n[oes] rows={len(oes)}")

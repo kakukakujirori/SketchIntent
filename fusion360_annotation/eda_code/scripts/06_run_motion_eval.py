@@ -32,6 +32,7 @@ HERE = Path(__file__).resolve().parents[1]
 METRIC_COLS = [
     "theta_full",
     "theta_rel",
+    "theta_leak",
     "asgn_sim",
     "asgn_min",
     "set_sim",

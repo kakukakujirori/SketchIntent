@@ -90,7 +90,7 @@ python fusion360_annotation/eda_code/scripts/02_plot_ch3_distributions.py \
 
 ### 3. appendix dataset statistics
 
-`records.json` から appendix 用の dataset statistics と補助図を作ります。
+`records.json` から appendix 用の dataset statistics を作ります。
 
 ```bash
 python fusion360_annotation/eda_code/scripts/03_appendix_stats.py \
@@ -100,8 +100,6 @@ python fusion360_annotation/eda_code/scripts/03_appendix_stats.py \
 出力:
 
 - `out/appendix_stats.json`
-- `out/appendix_per_annotator.png`
-- `out/appendix_count_hist.png`
 
 ### 4. section 5 token-vs-motion extraction
 
@@ -226,14 +224,19 @@ python fusion360_annotation/eda_code/scripts/10_run_toy_placement.py
 
 ### 11. aggregate paper numbers
 
-`out/` の CSV shards を集計し、論文表・appendix 用の数値を表示します。`motion_eval*.csv`、`oes_eval*.csv`、`token_f1*.csv`、`agreement.csv` はこのスクリプトが直接読みます。最初に `paper/sec/5_experiments.tex` の Table 形式に合わせて、Ours (`theta_full` / `theta_rel` / `S_place`) と Baselines (OES / F1) を横並びで表示します。
+`out/` の CSV shards を集計し、論文表・appendix 用の数値を表示します。`motion_eval*.csv`、`oes_eval*.csv`、`token_f1*.csv`、`agreement.csv` はこのスクリプトが直接読みます。最初に `paper/sec/5_experiments.tex` の Table 形式に合わせて、Ours (`theta_full` / `theta_rel` / `S_place`) と Baselines (OES / F1) を横並びで表示します。さらに `records.json` と `appendix_stats.json` から appendix dataset figures を `paper/figs/` に生成します。
 
 ```bash
 python fusion360_annotation/eda_code/scripts/11_analyze_paper_numbers.py \
   --out-dir fusion360_annotation/eda_code/out
 ```
 
+出力:
+
+- `paper/figs/appendix_annotator_summary.pdf`
+- `paper/figs/appendix_dataset_overview.pdf`
+
 ## 注意
 
 - この版は「metric を変える」ためのものではなく、「完成済み `data_eval/` を唯一の dataset contract にする」ためのものです。
-- 既存論文図を更新する場合は、生成した PDF を明示的に `paper/figs/` へコピーしてください。
+- Appendix dataset figures は Step 11 が `paper/figs/` に直接生成します。
