@@ -1112,15 +1112,26 @@ function makeViewer(key){
   function setData(r){
     cam={cx:r.frame.cx,cy:r.frame.cy,height:r.frame.height,w:r.frame.w,h:r.frame.h,geom_height:r.frame.geom_height};
     H=r.handles||{v:[],l:[]};
-    setCap(r.dof);
+    setCap(r.dof,r.status); syncListDof(r.dof);
     img.onload=()=>{ if(!cam._fitted){cam._fitted=true; fit();} else { applyImg(); drawHandles(); } showMsg('',false); };
     img.src='data:image/png;base64,'+r.png;
   }
-  function setCap(dof){
-    const sk=META.sketches[I]; const c=key==='gt'?null:sk[key];
-    let s=''; if(key==='gt') s=`variant ${ctx.variant||'-'}`;
-    else if(c) s=`${c.status||'?'}`;
+  function setCap(dof,status){
+    // status is the LIVE solver result from this render (not the cached
+    // results.json); DoF is also live. Keeps the caption truthful about
+    // conflicting/redundant sketches that the cached status mislabels.
+    let s = key==='gt' ? `variant ${ctx.variant||'-'}` : (status||'');
     $('#cap-'+key).innerHTML = s + (dof!=null&&dof>=0?`<span class="dof">DoF ${dof}</span>`:'');
+  }
+  function syncListDof(dof){
+    // Self-heal the sidebar DoF to the live value as each sketch is viewed, so it
+    // never disagrees with the panel. Skip GT and strip-dims so the list keeps the
+    // canonical (full-constraint) DoF rather than the stripped one.
+    if(key==='gt'||STRIP_DIMS||dof==null||dof<0) return;
+    const sk=META.sketches[I]; if(!sk) return;
+    if(!sk[key]) sk[key]={}; sk[key].dof=dof;
+    const row=document.querySelector('.item[data-idx="'+I+'"]');
+    if(row){ const st=row.querySelector('.st'); if(st) st.textContent=listDofText(sk); }
   }
 
   async function post(body){
@@ -1146,7 +1157,7 @@ function makeViewer(key){
     if(inflight){return;} const job=queued; queued=null; if(!job) return; inflight=true;
     post(job).then(r=>{ inflight=false;
       cam={cx:r.frame.cx,cy:r.frame.cy,height:r.frame.height,w:r.frame.w,h:r.frame.h,geom_height:r.frame.geom_height};
-      H=r.handles; setCap(r.dof);
+      H=r.handles; setCap(r.dof,r.status); syncListDof(r.dof);
       img.onload=()=>{applyImg();drawHandles();}; img.src='data:image/png;base64,'+r.png;
       if(queued) sendMove();
     }).catch(e=>{ inflight=false; showMsg('⚠ '+e.message,true); });
@@ -1243,14 +1254,17 @@ function showDone(){ $('#done').classList.add('show'); }
 function hideDone(){ $('#done').classList.remove('show'); }
 
 // ---- filename / batch jump list ----
+function listDofText(sk){  // shared by buildList and live syncListDof
+  const ld=sk&&sk.left&&sk.left.dof!=null?`L DoF ${sk.left.dof}`:'';
+  const rd=sk&&sk.right&&sk.right.dof!=null?` · R DoF ${sk.right.dof}`:'';
+  return ld+rd;
+}
 function buildList(){ const list=$('#list'); list.innerHTML='';
   META.sketches.forEach((sk,idx)=>{ const d=document.createElement('div');
     d.className='item'; d.dataset.idx=idx;
     d.dataset.key=(sk.batch+'/'+sk.stem).toLowerCase();
-    const ld=sk.left&&sk.left.dof!=null?`L DoF ${sk.left.dof}`:'';
-    const rd=sk.right&&sk.right.dof!=null?` · R DoF ${sk.right.dof}`:'';
     d.innerHTML=`<span class="chk"></span><span class="bt">${sk.batch}</span><span class="stem">${sk.stem}</span>
-                 <span class="st">${ld}${rd}</span>`;
+                 <span class="st">${listDofText(sk)}</span>`;
     d.onclick=()=>{show(idx);closePicker();}; list.appendChild(d); });
 }
 function syncList(){ document.querySelectorAll('.item').forEach(el=>el.classList.toggle('cur',+el.dataset.idx===I));

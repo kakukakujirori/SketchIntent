@@ -23,7 +23,8 @@ Protocol: newline-delimited JSON.  Request ``{"op": ...}``:
 
 Response::
 
-    {"ok": true, "png": "<base64>", "handles": {...}, "frame": {...}, "dof": N}
+    {"ok": true, "png": "<base64>", "handles": {...}, "frame": {...}, "dof": N,
+     "status": "<live solver diagnostic, e.g. Solved / Redundant (1)>"}
     {"ok": false, "error": "<msg>"}
 
 ``frame`` = {cx, cy, height, w, h} is the orthographic camera framing the client
@@ -564,13 +565,39 @@ def _render(sess: Session, w: int, h: int, frame, settle: int = 2) -> str:
         return base64.b64encode(f.read()).decode()
 
 
+def _solver_status(sketch) -> str:
+    """Live solver diagnostic for the panel caption.  This re-reads THIS
+    FreeCAD's solver result (right after ``solve()``), so it reflects what the
+    annotator actually sees -- which can differ from the cached ``results.json``
+    that was produced by a different FreeCAD/solver build.  Problems are reported
+    most-severe first; a clean solve (any DoF) reads "Solved" and the DoF badge
+    carries the constraint level."""
+    def n(prop):
+        v = getattr(sketch, prop, None)
+        try:
+            return len(v) if v is not None else 0
+        except Exception:
+            return 0
+    if n("MalformedConstraints"):
+        return "Malformed (%d)" % n("MalformedConstraints")
+    if n("ConflictingConstraints"):
+        return "Conflicting (%d)" % n("ConflictingConstraints")
+    if n("RedundantConstraints"):
+        return "Redundant (%d)" % n("RedundantConstraints")
+    if n("PartiallyRedundantConstraints"):
+        return "Partially redundant (%d)" % n("PartiallyRedundantConstraints")
+    return "Solved"
+
+
 def _response(sess: Session, w: int, h: int, frame) -> dict:
     png = _render(sess, w, h, frame)
     try:
         sess.sketch.solve()
         dof = int(sess.sketch.DoF)
+        status = _solver_status(sess.sketch)
     except Exception:
         dof = -1
+        status = "?"
     try:
         centers = _scene_label_centers(sess)
     except Exception:
@@ -581,6 +608,7 @@ def _response(sess: Session, w: int, h: int, frame) -> dict:
         "frame": {"cx": frame[0], "cy": frame[1], "height": frame[2], "w": w, "h": h,
                   "geom_height": _geom_extent(sess)},
         "dof": dof,
+        "status": status,
     }
 
 
