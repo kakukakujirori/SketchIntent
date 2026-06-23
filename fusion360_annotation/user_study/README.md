@@ -6,12 +6,13 @@ opens in your browser. Works on **Windows, macOS, and Linux**.
 ## 1. Install FreeCAD 1.1.1
 
 Get the official **FreeCAD 1.1.1** for your OS from
-<https://www.freecad.org/downloads.php> (on Linux the AppImage is fine).
+<https://www.freecad.org/downloads.php>.
 
 ## 2. Launch
 
-Open FreeCAD → **View → Panels → Python console**, then paste these lines — replacing the
-path with wherever you put this `user_study` folder:
+We strongly recommend to save and close all existing FreeCAD documents beforehand.
+
+Open FreeCAD → **View → Panels → Python console**, then paste these lines — replacing [you] with your username.
 
 **Windows** (keep the `r"..."`):
 ```python
@@ -28,7 +29,8 @@ import compare; compare.main()
 ```
 
 A browser tab opens automatically (if not, go to <http://127.0.0.1:8000/>).
-Keep FreeCAD open while you work.
+FreeCAD then **minimizes itself** and you work entirely in the browser — that's
+expected; just leave FreeCAD running in the background.
 
 ## 3. What to judge
 
@@ -44,4 +46,7 @@ It auto-advances after each click. (Left/right are randomized and anonymized.)
 - The sketch's **DoF** is shown at the top-right of each panel.
 - **Remove Dimension** lets you compare only the *relational* constraints.
 - **Vertices and dimension labels are draggable** — test how each sketch holds its shape.
-- **GT (Reference)** shows other human annotators' versions for reference.
+
+![Dimensions On](assets/dim_on.png)
+
+![Dimensions Off](assets/dim_off.png)
