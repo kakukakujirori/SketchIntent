@@ -123,13 +123,13 @@ def _omp_sim(Ua: torch.Tensor, Ub: torch.Tensor, tol: float = 1e-9) -> float:
 
 
 def leak_relational_angle(pred: SketchMotion, gt: SketchMotion, eps: float = EPS_DEFAULT) -> float:
-    r"""theta_misalign^rel: relation-intent leakage of Pred against GT relations.
+    r"""theta_align^rel: relation-intent leakage of Pred against GT relations.
 
     RMS cosine between the directions Pred allows through its (dimensional)
     response map and the GT relation-forbidden directions (the row space of the
     GT relation Jacobians):
 
-        theta_misalign^rel ** 2 = || orth(row(J_R^G))^T U_P ||_F^2 / dim(U_P)
+        theta_align^rel ** 2 = || orth(row(J_R^G))^T U_P ||_F^2 / dim(U_P)
 
     Jacobians are evaluated at Pred's primitive state, with GT's relational
     constraints. This is a direct port of

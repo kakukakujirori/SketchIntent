@@ -577,7 +577,7 @@ conda run -n freecad python scripts/plot_fiverr_eval_pareto.py
 W&B の validation history から学習ログ上の Pareto/frontier 図を作るスクリプトは
 [scripts/diag_reward_pareto_frontier.py](../scripts/diag_reward_pareto_frontier.py)。
 
-| model | FC | valid DoF | dim-ratio↓ | θ_full↓ | θ_rel↓ | θ_misalign↓ | S_place↑ | rawDist↓ |
+| model | FC | valid DoF | dim-ratio↓ | θ_full↓ | θ_rel↓ | θ_align↓ | S_place↑ | rawDist↓ |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
 | S step12700 | 0.702 | 3.484 | 0.343 | 0.413 | 0.365 | 0.397 | 0.590 | 0.007 |
 | S+M step12200 | 0.651 | 3.380 | 0.292 | 0.350 | 0.295 | 0.301 | **0.665** | 0.119 |
@@ -772,7 +772,7 @@ main paper の representative table:
 - dimensional ratio（全 dimensional constraints の比率; lower is better）
 - `theta_motion_full`（lower is better）
 - `theta_motion_relational`（lower is better; MotionReward 系の mechanism check でもある）
-- `theta_misalign_relational` / RelDimAlign angle（lower is better; RelDimAlignReward の mechanism check）
+- `theta_align_relational` / RelDimAlign angle（lower is better; RelDimAlignReward の mechanism check）
 - ~~`S_place` / `asgn_sim`（higher is better）~~ → §4.10: 降格。表には完全性のため残すが headline ではない。
 
 main paper の Pareto 図（→ **更新 §4.10**: 評価 iter1 単発・[scripts/run_iter1_pareto.py](../scripts/run_iter1_pareto.py)）:
@@ -920,7 +920,7 @@ forest plot（1点2モデル比較で成長を見せられない）は不採用�
 - **factorial 確定（表で読める）**: +M 単体は dim-ratio で DP frontier を越えない（0.299>0.262）／+L 単体は dim-ratio↓（0.238）だが θ_full 回帰（0.515）＋Splace 低下（0.470）／**M+L だけ** dim-ratio 最小かつ θ_full 非回帰＝両方必要。
 - **⚠️ S_place の storyline 変化（§4.10 から要更新）**: 旧 §4.10 は operating point で「S_place タイ」としたが、train-val 選定の新点では **S_place は paired で p=0.018 で僅かに DP 有利**（Ours 0.489 < DP 0.533）。さらに **+M / +M+DP は S_place を baseline 超えに上げる**（0.627 / 0.637）＝「どの手法も S_place を改善しない」は誤り。正しい整理: **M は S_place を上げるが L を足すと baseline 付近へ戻り、Ours は S_place を勝たない／人間(0.831)には全手法届かない**。tex（Table キャプション・S_place 段落）はこの正しい表現に修正済み。**§4.10 の「S_place タイ」記述はこの 4.11 で上書き。**
 - **matched-strength control（M+DP c1）**: smdp は DimParsimony 0.30、baseline c1 は 1.0 で強度不一致だったため、**config [rloo_response_scaffold12_ablA_m4.5_dimprior_dimpars_c1_intent.yaml](../configs/experiment/rloo_response_scaffold12_ablA_m4.5_dimprior_dimpars_c1_intent.yaml)** を新規作成（coeff 0.30→1.0 のみ差分）。**別マシンで学習予定**（このリポジトリでは投入しない）。leak の weight-robust 機構（DimParsimony 0.3/1/3 全域で leak 高止まり・Leak のみ低下）で公平性は既に担保されるため load-bearing ではない。
-- **図**: [run_iter1_pareto.py](../scripts/run_iter1_pareto.py) の `AXES` に θ_motion^rel / θ_misalign^rel(leak) を追加し **5パネル**化（mechanism として明示）。smdp は `plot=False` で評価のみ（表用、メイン図には出さない）。
+- **図**: [run_iter1_pareto.py](../scripts/run_iter1_pareto.py) の `AXES` に θ_motion^rel / θ_align^rel(leak) を追加し **5パネル**化（mechanism として明示）。smdp は `plot=False` で評価のみ（表用、メイン図には出さない）。
 - **更新 (2026-06-22, Ours を 70k へ延長)**: oursretry が stepsave_70000 まで完了。**新ターゲット = Ours@70k train-val FC 0.624**。再選定 → Table1 を 70k operating point に更新（tex は 60k 行を `%` コメント保存・70k 行を下に記載）。新点（step / hoFC / dimR / θfull / θrel / leak / Splace）: DP c1 30k/0.630/0.278/0.449/0.349/0.336/0.563、+M 40k/0.654/0.305/0.367/0.309/0.314/0.633、+L 40k/0.644/0.239/0.513/0.344/0.186/0.476、S-RL+M 40k/0.596/0.302/0.379/0.318/0.328/0.633、**Ours 70k/0.627/0.221/0.448/0.279/0.159/0.530**。
   - **headline paired（Ours 70k vs DP c1 30k, FC 0.627/0.630）**: dim-ratio meanΔ **−0.061**, CI[−0.049,−0.073], **p=9.9e-23**（gap は 60k と同じ Δ≈0.057・不変）。**θ_full clean tie（p=0.72）、S_place clean tie（p=0.17）** ＝ 60k で出た S_place 弱有意（p=0.018）は解消し、**§4.10 の「operating point で θ_full・S_place ともにタイ」storyline に綺麗に一致**。S_place の tex 表現（M が上げる/Ours は勝たない/人間未達）はそのまま有効。
   - factorial も不変（+M dim-ratio 越えず 0.305、+L θ_full 回帰 0.513、M+L のみ両立）。
