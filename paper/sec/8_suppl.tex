@@ -1,0 +1,406 @@
+\clearpage
+\appendix
+\section{Supplementary Material}
+\label{sec:supplementary}
+
+\etocsettocstyle{\subsection*{Contents}}{}
+\etocsetnexttocdepth{subsubsection}
+\localtableofcontents
+
+\subsection{Dataset Details}
+\label{sec:appendix_dataset}
+This section records the construction, filtering, and annotation details behind the dataset summary in \S\ref{sec:dataset}.
+
+\subsubsection{Source Selection, Reconstruction, and Evaluation Subset}
+\label{sec:appendix_dataset_source}
+The source choice in \S\ref{sec:dataset} is motivated by platform-level separation from the Onshape-derived corpora commonly used for sketch-constraint models. SketchGraphs~\cite{seff2020sketchgraphs} is derived from Onshape, and widely used CAD datasets such as ABC~\cite{Koch_2019_CVPR} and DeepCAD~\cite{Wu_2021_ICCV} are also tied to Onshape-derived public models. Fusion 360 Gallery~\cite{willis2020fusion} therefore provides a separate source of sketches for evaluation.
+
+We convert each selected sketch into a FreeCAD Python script and keep only sketches that can be represented using the four SketchGraphs-compatible primitive types used by Vitruvion~\cite{seff2021vitruvion}: \texttt{Point}, \texttt{Line}, \texttt{Circle}, and \texttt{Arc}. Sketches with unsupported entities, numerical degeneracies, or FreeCAD reconstruction failures are discarded. This filtering leaves $1{,}448$ valid sketches, from which we sample $300$ while preserving the original DoF distribution. The sampled sketches were split into $12$ annotation batches; each batch was assigned to three annotators, and each annotator received six batches, giving three independent annotations per sketch.
+
+\textbf{Evaluation subset.} The benchmark used in \S\ref{sec:experiments} keeps the $292$ sketches whose three annotations are complete and pass screening, giving $876=292\times3$ annotations. The evaluation pipeline excludes files flagged as duplicates of other sketches or as having too few identifiable geometric relations to support reliable relational-constraint annotation.
+
+\subsubsection{Canonical Schema and FreeCAD Mapping}
+\label{sec:appendix_dataset_schema}
+
+Table~\ref{tab:appendix_schema} lists the FreeCAD primitive and constraint commands supported by the annotation interface and their canonical SketchGraphs counterparts. The mapping is many-to-one in a few cases, but the original command semantics are still recoverable from attributes or reference patterns.
+
+For dimensional constraints, \texttt{DistanceX} and \texttt{DistanceY} become \texttt{Distance} constraints with horizontal or vertical \texttt{direction} attributes, so the axis information is preserved. For relational constraints, FreeCAD \texttt{PointOnObject} becomes a canonical \texttt{Coincident} constraint whose references identify the point-on-curve case; line-line \texttt{Tangent}, used here for collinearity, is likewise stored as a \texttt{Coincident} constraint between line references. For Fig.~\ref{fig:constraint_dist}, we split these canonical types back into display categories: \texttt{Coincident}, \texttt{PointOnObject}, and \texttt{Collinear} by reference kind, and \texttt{Distance}, \texttt{DistanceX}, and \texttt{DistanceY} by direction.
+
+\begin{table}[t]
+    \centering
+    \footnotesize
+    \setlength{\tabcolsep}{4pt}
+    \caption{FreeCAD primitive and constraint commands and their SketchGraphs counterparts.}
+    \label{tab:appendix_schema}
+    \begin{tabularx}{\linewidth}{@{}>{\raggedright\arraybackslash}p{0.18\linewidth}>{\raggedright\arraybackslash}X>{\raggedright\arraybackslash}X@{}}
+        \toprule
+        Category & FreeCAD & SketchGraphs \\
+        \midrule
+        Primitives
+        & \texttt{Point}, \texttt{LineSegment}, \texttt{Circle}, \texttt{ArcOfCircle}
+        & \texttt{Point}, \texttt{Line}, \texttt{Circle}, \texttt{Arc} \\
+        \midrule
+        Relational
+        & \texttt{Coincident}, \texttt{PointOnObject}
+        & \texttt{Coincident} (reference pattern disambiguates) \\
+        Relational
+        & \texttt{Symmetric}
+        & \texttt{Mirror} or \texttt{Midpoint} \\
+        Relational
+        & \texttt{Horizontal}, \texttt{Vertical}, \texttt{Parallel}, \texttt{Perpendicular}, non-line-line \texttt{Tangent}, \texttt{Equal}
+        & same relation names \\
+        Relational
+        & line-line \texttt{Tangent} / collinearity
+        & \texttt{Coincident} between line references \\
+        \midrule
+        Dimensional
+        & \texttt{Distance}
+        & \texttt{Distance}; one-reference length constraints become \texttt{Length} \\
+        Dimensional
+        & \texttt{DistanceX}, \texttt{DistanceY}
+        & \texttt{Distance} with horizontal/vertical \texttt{direction} \\
+        Dimensional
+        & \texttt{Angle}, \texttt{Diameter}, \texttt{Radius}
+        & same dimension names \\
+        \bottomrule
+    \end{tabularx}
+\end{table}
+
+\subsubsection{Annotation Guidelines and Quality Control}
+\label{sec:appendix_dataset_guidelines}
+\textbf{Annotation task.}
+The annotation interface presents the original incomplete FreeCAD sketch and asks annotators to preserve the geometry while adding design-intent-aware constraints until the sketch is fully constrained. A pilot study showed that even human annotators sometimes tended to add excessive, non-meaningful dimensions. We therefore adopted the following annotation guidelines:
+\begin{enumerate}[leftmargin=*, itemsep=1pt, topsep=2pt]
+    \item Favor relational constraints over dimensional constraints.
+    \item Following Nerenst~\etal~\cite{nerenst2023parametric}, avoid \texttt{Angle} constraints where possible, prefer horizontal or vertical chain dimensions, and avoid dimensioning across empty gaps in concave areas.
+    \item Prohibit referencing the global $x$/$y$ axes and the origin, as this obscures sketch-intrinsic features and reduces reusability. \texttt{Horizontal} and \texttt{Vertical} constraints are allowed as practical exceptions for spatial organization. This restriction intentionally leaves a minimal DoF of $2$, representing global translation.
+\end{enumerate}
+Annotators may delete and replace existing constraints when a new configuration better captures design intent (e.g., replacing several identical \texttt{Radius} constraints with an \texttt{Equal} constraint). Once the intended constraint set reaches the residual DoF of $2$, annotators add exactly one \texttt{Block} constraint to an arbitrary primitive to satisfy FreeCAD's fully constrained solver state. This terminal \texttt{Block} is treated strictly as a technical anchoring artifact and excluded from design-intent evaluation.
+
+\textbf{Restrictions and quality control.}
+Annotators were prohibited from deleting, redrawing, or reordering existing sketch primitives, including construction geometry. This keeps the original geometry fixed across all three annotations of the same input. However, we allowed annotators to add up to two new construction geometries when necessary to express an important structural relationship; typical permitted use cases were mirror axes or centerlines, centers of point or rotational symmetry, and construction circles for regular polygons or circular arrangements. \texttt{Lock}, \texttt{Group}, and \texttt{Refraction} commands were disallowed.
+
+\subsubsection{Annotation and Dataset Statistics}
+\label{sec:appendix_dataset_statistics}
+Fig.~\ref{fig:appendix_annotators} summarizes per-annotator statistics (annotators anonymized as A1--A6). Relational share is tight across annotators ($73$--$77\%$), and the mean number of constraints per annotation varies only mildly.
+Fig.~\ref{fig:appendix_dataset_overview} summarizes source-geometry composition and annotation complexity.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{figs/appendix_annotator_summary.pdf}
+    \caption{Per-annotator constraint-family composition and mean constraint count per annotated sketch over the evaluation subset.}
+    \label{fig:appendix_annotators}
+\end{figure}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{figs/appendix_dataset_overview.pdf}
+    \caption{Extended dataset statistics over the evaluation subset. The plots summarize primitive composition and the exact joint distribution of primitive and constraint counts per annotated sketch.}
+    \label{fig:appendix_dataset_overview}
+\end{figure}
+
+\subsection{Metric Details}
+\label{sec:appendix_metric_details}
+
+\subsubsection{Observable Measurements for Motion Metrics}
+\label{sec:appendix_observable_projection}
+The main text defines motion subspaces in the primitive parameters $x$ for clarity. In practice, we take one additional care: we compare intra-sketch measurements rather than raw primitive-coordinate entries. Raw primitive parameters heterogeneously mix point coordinates, circle/arc radii, and scalar parameters that define line extent or arc sweep. Moreover, construction geometry can differ across annotators because our guidelines allow adding auxiliary construction primitives when needed (\S~\ref{sec:appendix_dataset_guidelines}). We therefore measure only pairwise distances among original sketch landmarks and circle/arc radii, which are unit-consistent and agnostic to annotator-specific construction geometry.
+
+Let $\mathcal{P}$ be the set of non-construction landmark points from the input sketch: point entities, line endpoints, circle centers, and arc centers and endpoints. Let $E^\mathrm{circle/arc}$ be the set of non-construction circles and arcs. We define
+\begin{equation}
+    \phi(x)
+    =
+    \begin{bmatrix}
+    \{\lVert p_a(x)-p_b(x)\rVert_2\}_{a<b,\;p_a,p_b\in\mathcal{P}}\\
+    \{e.\mathtt{radius}(x)\}_{e\in E^\mathrm{circle/arc}}
+    \end{bmatrix}
+    \in\mathbb{R}^{n_\phi}.
+    \label{eq:appendix_observation_map}
+\end{equation}
+We observe the infinitesimal motion of $\phi(x)$ instead of $x$. With $J_\phi=\partial\phi/\partial x$ evaluated at the original sketch, any raw tangent vector is pushed forward as
+\begin{equation}
+    d\phi = J_\phi\,dx.
+    \label{eq:appendix_observation_linearization}
+\end{equation}
+This is the only change from the main-text definitions. For dimensional edits, Eq.~\ref{eq:full_linearized} gives $dx=R_C\,dp_C$, hence
+\begin{equation}
+    d\phi = (J_\phi R_C)\,dp_C,
+    \qquad
+    \bar{R}_C := J_\phi R_C,
+    \qquad
+    \bar{\mathcal{W}}_C=\operatorname{range}(\bar{R}_C).
+    \label{eq:appendix_projected_full_space}
+\end{equation}
+For relation-only motion, if $N_C$ is an orthonormal basis of $\ker(J_R)$ from Eq.~\ref{eq:rel_linearized}, then
+\begin{equation}
+    \bar{\mathcal{W}}^\mathrm{rel}_C
+    =
+    \operatorname{range}(J_\phi N_C).
+    \label{eq:appendix_projected_rel_space}
+\end{equation}
+The reported subspace distances use Eq.~\ref{eq:principal_angle} on these measurement-space representations:
+\begin{align}
+    \theta_\mathrm{motion}^\mathrm{full}(C_P;C_G)
+    &=
+    d_\angle(\bar{\mathcal{W}}_{C_P},\bar{\mathcal{W}}_{C_G}),\\
+    \theta_\mathrm{motion}^\mathrm{rel}(C_P;C_G)
+    &=
+    d_\angle(\bar{\mathcal{W}}^\mathrm{rel}_{C_P},
+             \bar{\mathcal{W}}^\mathrm{rel}_{C_G}).
+    \label{eq:appendix_projected_motion_distances}
+\end{align}
+
+The placement score uses the same assignment as Eq.~\ref{eq:asgn_sim}, with each dimensional response direction taken from the corresponding column of $\bar{R}_C$:
+\begin{equation}
+    \bar{z}_j^C = \bar{R}_C[:,j],
+    \qquad
+    \bar{u}_j^C =
+    \begin{cases}
+    \bar{z}_j^C/\lVert\bar{z}_j^C\rVert_2, & \lVert\bar{z}_j^C\rVert_2>\varepsilon,\\
+    0, & \text{otherwise}.
+    \end{cases}
+    \label{eq:appendix_projected_dimension_direction}
+\end{equation}
+By contrast, the leak score remains exactly as defined in Eq.~\ref{eq:rel_leak_distance}. It is not a comparison between two observed motion representations; it directly asks whether the predicted dimensional motions violate the reference relational equations, so we measure their overlap with the reference relation row space in the primitive tangent space.
+The multi-reference aggregation in Sec.~\ref{sec:motion_metrics} is applied after these scores are computed for each reference.
+
+\subsection{Reinforcement-Learning Reward Details}
+\label{sec:appendix_rl}
+This section describes implementation details for the reward experiment in \S\ref{sec:rl_reward}, focusing on the components specific to motion-subspace reward training.
+
+\subsubsection{Training Setup}
+\label{sec:appendix_rl_setup}
+
+All RL training starts from the same supervised Vitruvion checkpoint and follows the solver-feedback RLOO \cite{ahmadian2024back} framework of Casey~\etal~\cite{casey2025aligning}. As a brief recap of the shared model interface, each input sketch is normalized to the $[-0.5,0.5]^2$ coordinate range; primitive types, discretized $x/y$ coordinates with $64$ bins per axis, and construction-geometry flags are tokenized per primitive and flattened into a 1D sequence. From this input, the policy then autoregressively samples a constraint-token sequence, which is truncated at the \texttt{STOP} token and decoded into a SketchGraphs constraint set on the original primitives.
+
+On top of this shared setup, and in addition to MotionReward and DimRelAlign introduced in \S\ref{sec:rl_reward}, we use the following training modifications to improve model performance. They are not regarded as the main contribution and are kept fixed across the reward comparisons unless explicitly ablated. Table~\ref{tab:appendix_rl_components} summarizes the reward components used in the RL experiments.
+
+\paragraph{ClassPriorReward.}
+\label{sec:appendix_rl_class_prior}
+Sketch constraint generation is highly class-imbalanced: frequent relations such as \texttt{Coincident} are easy to sample, while less frequent but design-relevant relations may appear rarely in the rollout set for a selection reward to exploit. We therefore add small capped bonus rewards that encourage rare relational tokens such as \texttt{Equal}, \texttt{Parallel}, \texttt{Tangent}, and \texttt{Midpoint}. We also add dimensional class bonuses aligned with the annotation guideline in App.~\ref{sec:appendix_dataset_guidelines}: generic oblique \texttt{Distance} and \texttt{Angle} constraints are mildly discouraged, while axis-aligned \texttt{DistanceX}/\texttt{DistanceY} constraints are mildly encouraged. These priors are fixed across the main reward comparisons and are not interpreted as evidence for the motion-subspace reward itself.
+
+\paragraph{DimRelAlign weighting.}
+\label{sec:appendix_rl_reldim_weight}
+DimRelAlign asks whether predicted dimensional edits move in directions that are compatible with the pseudo-reference relations (\S~\ref{sec:rl_reward_design}). This is meaningful only when the rollout has introduced dimensional drivers: if no dimensional constraint is generated, there is simply no edit direction to test, so the relation-violation penalty becomes zero for the wrong reason. We therefore scale this term by the solver closure progress already computed by SolverReward.
+
+Let $D_{\emptyset}$ be the DoF of the input primitives before applying any constraints, $D(C_P)$ the remaining DoF after applying the predicted constraint set, and $D_{\mathrm{FC}}=2$ the residual translation gauge treated as fully constrained. We scale the effective DimRelAlign weight by
+\begin{equation}
+\lambda_A \leftarrow \lambda_A \cdot
+\mathrm{clip}\!\left(
+\frac{D_{\emptyset}-D(C_P)}{D_{\emptyset}-D_{\mathrm{FC}}},
+0,1
+\right)
+\end{equation}
+Invalid or non-converged rollouts use an effective $\lambda_A=0$. Thus, DimRelAlign is weak for largely open sketches and becomes active only as the solver reward moves the rollout toward closure.
+
+\paragraph{Flip augmentation.}
+\label{sec:appendix_rl_flip_aug}
+We also use input-sketch flip augmentation inside each RLOO group. Some rollouts are conditioned on the original primitive tokens, while others are conditioned on an $x$- or $y$-reflected view obtained by mapping the corresponding coordinate bin $q$ to \texttt{num\_bins}$-1-q$. Crucially, this reflection does not require changing the CAD constraint command space: constraints refer to primitive identities and relation types, and these commands remain valid under global axis reflections. For example, coincidence, tangency, equality, parallelism, perpendicularity, and axis-aligned distance commands keep the same primitive references and constraint types.
+
+The generated constraint sequence is therefore decoded directly on the original primitives and rewarded in the original coordinate frame. Flip augmentation only changes the conditioning view seen by the policy, increasing within-group rollout diversity and the exploration power of RLOO without changing the target constraint semantics.
+
+\begin{table}[t]
+    \centering
+    \footnotesize
+    \setlength{\tabcolsep}{3pt}
+    \caption{Reward components used in RL training. The upper block lists inherited or fixed auxiliary rewards, while the lower block lists the proposed motion-subspace rewards.}
+    \label{tab:appendix_rl_components}
+    \begin{tabularx}{\linewidth}{@{}p{0.31\linewidth}X@{}}
+    \toprule
+    Component & Role \\
+    \midrule
+    SolverReward & FreeCAD solver feedback for reducing remaining degrees of freedom, reaching full constrainedness, and penalizing invalid constraint sets. \\
+    DimParsimony & Penalty on dimensional-constraint usage; varied in the dimensional-parsimony ablations. \\
+    ClassPriorReward & Fixed auxiliary prior that encourages rare relational classes and lightly biases dimensional classes toward the annotation guidelines. \\
+    \midrule
+    MotionReward & Matches relation-preserving motion to the relational pseudo-reference. \\
+    DimRelAlign & Penalizes dimensional edit directions that violate pseudo-reference relations, with closure-progress weighting. \\
+    \bottomrule
+    \end{tabularx}
+\end{table}
+
+\subsubsection{Rule-Based Relational Pseudo-Reference}
+\label{sec:appendix_rl_pseudo_rules}
+Section~\ref{sec:rl_pseudo_targets} introduces the relational pseudo-reference $C_G^\star$. Here we specify the rule detector used to instantiate it. For each detectable relation, we enumerate the applicable primitive tuples in the input sketch and compute a normalized margin at the original geometry. The margin definitions and tolerances are listed in Table~\ref{tab:appendix_pseudo_rules}; a candidate relation is kept when its margin falls below the corresponding tolerance. The detector does not test whether a candidate would be redundant in a CAD solver or whether it is needed to reduce DoF; such command-level redundancy is absorbed by motion-subspace canonicalization.
+
+\begin{table*}[t]
+    \centering
+    \footnotesize
+    \setlength{\tabcolsep}{4pt}
+    \caption{Rule-based predicates used to construct the relational pseudo-reference $C_G^\star$. Each candidate is accepted when its normalized margin is below the listed tolerance.}
+    \label{tab:appendix_pseudo_rules}
+    \begin{tabularx}{\linewidth}{@{}>{\raggedright\arraybackslash}p{0.17\linewidth}>{\raggedright\arraybackslash}X>{\raggedright\arraybackslash}p{0.10\linewidth}>{\raggedright\arraybackslash}p{0.25\linewidth}@{}}
+        \toprule
+        Detected relation & Normalized margin & Tolerance & Notes \\
+        \midrule
+        \begin{tabular}[t]{@{}l@{}}\texttt{Horizontal}\\\texttt{Vertical}\end{tabular}
+        & Off-axis coordinate gap divided by the line length or point-pair distance.
+        & $\sin 0.5^\circ$
+        & Includes single-line constraints and two-point alignments between endpoints, point entities, and curve centers. \\
+
+        \begin{tabular}[t]{@{}l@{}}\texttt{Parallel}\\\texttt{Perpendicular}\end{tabular}
+        & For \texttt{Parallel}, use $|d_1 \times d_2|/(\|d_1\|\|d_2\|)$. For \texttt{Perpendicular}, use $|d_1\cdot d_2|/(\|d_1\|\|d_2\|)$.
+        & $\sin 0.5^\circ$
+        & Tests angular closeness to parallel or perpendicular directions. \\
+
+        \begin{tabular}[t]{@{}l@{}}\texttt{Coincident}\\\texttt{Concentric}\end{tabular}
+        & Point-point, point-on-object, or center-center distance divided by the sketch bounding-box diagonal.
+        & $0.0025$
+        & Point-on-object uses the same \texttt{Coincident} command with reference-pattern disambiguation. \\
+
+        \texttt{Midpoint}
+        & Distance between the candidate midpoint and the midpoint implied by the referenced endpoints or line, divided by the bounding-box diagonal.
+        & $0.0025$
+        & Includes point-line midpoint and selected three-reference midpoint forms. \\
+
+        \texttt{Mirror}
+        & Combined symmetry residual divided by the bounding-box diagonal: midpoint-on-axis error and reflected-pair direction error.
+        & $0.0025$
+        & Uses existing line primitives as mirror-axis candidates. \\
+
+        \texttt{Tangent}
+        & For line--circle/arc candidates, checks whether the curve center is one radius away from the line. For arc--arc candidates, checks whether the center distance matches external or internal tangency. Point-specified forms additionally require the specified contact point to lie on the referenced object and the local tangent directions to agree.
+        & $0.0025$
+        & Line-line collinearity is excluded because it overlaps \texttt{Parallel} and has mixed residual scales. \\
+
+        \texttt{Equal}
+        & Difference in line length or curve radius divided by the larger magnitude.
+        & $0.005$
+        & Detects equal line lengths and equal circle/arc radii. \\
+        \bottomrule
+    \end{tabularx}
+\end{table*}
+
+A possible risk of this high-recall construction is false-positive relations. For example, two geometrically equal but semantically unrelated features may be linked by an \texttt{Equal} constraint, making the pseudo-reference overly restrictive and potentially rewarding unintended structure. To test this risk, we compare the full pseudo-reference with a pruned variant that removes the relation families most likely to create long-range accidental matches: \texttt{Equal}, \texttt{Parallel}, \texttt{Perpendicular}, \texttt{Midpoint}, and \texttt{Mirror}. These families can connect primitives that are spatially distant, and are therefore more vulnerable to incidental geometric agreement.
+Note that this pruning does not trivially remove all orientation structure and make $C_G^\star$ excessively under-constrained, since many axis-aligned parallel and perpendicular relations remain partially covered by \texttt{Horizontal} and \texttt{Vertical} constraints.
+
+We train both variants with the identical configuration and compare them at the same $70$k-update budget. Table~\ref{tab:appendix_pseudo_ambiguous} shows that the two reach comparable closure (FC $0.647$ vs.\ $0.627$, DoF $\approx 5.1$ for both), yet the pruned variant uses more dimensional constraints (dim-ratio $0.255$ vs.\ $0.221$); the higher dimensional ratio is therefore not an operating-point artifact but reflects the model compensating for the lost relational coverage with additional dimensions. The pruned variant is also worse on the motion-subspace metrics ($\theta_{\mathrm{motion}}^{\mathrm{full}}$ and $\theta_{\mathrm{motion}}^{\mathrm{rel}}$) and on the leak distance ($\theta_{\mathrm{leak}}^{\mathrm{dim}}$ $0.239$ vs.\ $0.164$), indicating that the extra dimensions act in part as relation-violating shortcuts, while placement ($S_{\mathrm{place}}$) is essentially unchanged. This suggests that, for reward construction, the loss of relational coverage is more harmful than the potential false positives removed by pruning. We therefore use the full relational closure in the main RL experiments.
+
+\begin{table}[t]
+    \centering
+    \footnotesize
+    \setlength{\tabcolsep}{3pt}
+    \caption{Effect of pruning high-risk false-positive relation families from the pseudo-reference $C_G^\star$. The pruned variant removes relation families that could create long-range accidental matches; its higher dimensional ratio indicates that pruning weakens the relational target and encourages over-dimensioning.}
+    \label{tab:appendix_pseudo_ambiguous}
+    \begin{tabularx}{\linewidth}{@{}lccccccc@{}}
+        \toprule
+        Pseudo-ref. & FC & DoF & dim-ratio & $\theta_{\mathrm{motion}}^{\mathrm{full}}$ & $\theta_{\mathrm{motion}}^{\mathrm{rel}}$ & $\theta_{\mathrm{leak}}^{\mathrm{dim}}$ & $S_{\mathrm{place}}$ \\
+        \midrule
+        Pruned $C_G^\star$ & 0.647 & 5.12 & 0.255 & 0.519 & 0.370 & 0.239 & 0.495 \\
+        Full $C_G^\star$ & 0.627 & 5.11 & 0.221 & 0.500 & 0.326 & 0.164 & 0.504 \\
+        \bottomrule
+    \end{tabularx}
+\end{table}
+
+\subsubsection{Reward Computation Pipeline}
+\label{sec:appendix_rl_online_metric}
+Figure~\ref{fig:appendix_rl_pipeline} summarizes the reward computation pipeline. Each sampled constraint sequence is truncated at its first \texttt{STOP} token and decoded into a SketchGraphs sketch using the input sketch as the primitive reference. The decoded sketch is evaluated through two CPU-side paths and one GPU-side path. (i) The SketchGraphs metric path computes the Jacobian-based quantities required by MotionReward and DimRelAlign, reusing cached pseudo-reference subspaces and observation Jacobians whenever possible. (ii) In parallel, FreeCAD solver workers evaluate solver status and remaining DoF, while (iii) the GPU computes policy/reference log-probabilities, KL regularization, and entropy for the RLOO update. After these paths are collected, the terminal motion-subspace and solver rewards are written to the \texttt{STOP} position in the token-aligned reward tensor. Token-local solver-feedback terms, such as malformed or redundant constraint penalties, are placed at their corresponding constraint-token positions.
+Autoregressive rollout generation is further accelerated with KV caching. With these optimizations, one RLOO training iteration takes about $4.17$ seconds, or $0.24$ iterations per second.
+
+\begin{figure*}[t]
+    \centering
+    \resizebox{0.98\linewidth}{!}{%
+    \begin{tikzpicture}[
+        font=\footnotesize,
+        node distance=6mm and 10mm,
+        box/.style={draw, rounded corners=1.5pt, align=center, inner sep=4pt, minimum height=8mm},
+        token/.style={box, fill=blue!6, draw=blue!45!black},
+        sg/.style={box, fill=green!7, draw=green!45!black},
+        fc/.style={box, fill=red!5, draw=red!45!black},
+        reward/.style={box, fill=green!7, draw=green!45!black},
+        arr/.style={-{Latex[length=2mm]}, thick},
+        branch note/.style={font=\scriptsize\itshape, text=gray!65!black, align=center},
+        legend box/.style={draw, rounded corners=1pt, inner sep=0pt},
+        legend text/.style={font=\scriptsize, anchor=west, inner sep=0pt},
+        swatch/.style={draw, minimum width=3.5mm, minimum height=2.5mm, inner sep=0pt}
+    ]
+        \node[token] (sample) {GPU rollout\\constraint tokens};
+        \node[sg, right=of sample] (decode) {\texttt{STOP} truncate\\detokenize\\restore geometry};
+        \node[sg, above right=4mm and 10mm of decode] (metric) {ResponseMetricEvaluator\\CPU collect: $R_C$, $J_\phi$, $J_R$};
+        \node[fc, below right=4mm and 10mm of decode] (solver) {FreeCAD solver workers\\status + DoF};
+        \node[sg, right=of metric] (cache) {shared metric caches\\pseudo-ref subspaces, $J_\phi$, sketches};
+        \node[reward, right=of solver] (terms) {reward computation\\Motion + DimRelAlign\\+ Solver feedback};
+        \node[token, right=of terms] (stopreward) {assemble token-aligned\\reward tensor};
+        \node[token, below=of terms] (logp) {GPU policy/ref forward\\log-probs, KL, entropy};
+        \node[token, right=of stopreward] (rloo) {RLOO returns\\leave-one-out advantage};
+        \node[legend box, minimum width=34mm, minimum height=13mm, above=15mm of rloo.north east, anchor=south east] (legend) {};
+        \begin{scope}[shift={(legend.north west)}]
+            \node[swatch, anchor=west, fill=blue!6, draw=blue!45!black] at (2mm,-3mm) {};
+            \node[legend text] at (7mm,-3mm) {Token / GPU};
+            \node[swatch, anchor=west, fill=green!7, draw=green!45!black] at (2mm,-6.5mm) {};
+            \node[legend text] at (7mm,-6.5mm) {SketchGraphs / CPU};
+            \node[swatch, anchor=west, fill=red!5, draw=red!45!black] at (2mm,-10mm) {};
+            \node[legend text] at (7mm,-10mm) {FreeCAD / CPU};
+        \end{scope}
+
+        \node[branch note, above=1mm of solver] {async solver branch};
+        \node[branch note, below=1mm of logp] {overlapped GPU branch};
+
+        \draw[arr] (sample.east) -- (decode.west);
+        \draw[arr] (decode.north east) -- (metric.south west);
+        \draw[arr] (decode.south east) -- (solver.north west);
+        \draw[arr] (metric.east) -- (cache.west);
+        \draw[arr] (cache.south) -- ++(0,-3mm) -| (terms.north);
+        \draw[arr] (solver.east) -- (terms.west);
+        \draw[arr] (terms.east) -- (stopreward.west);
+        \draw[arr] (sample.south) |- (logp.west);
+        \draw[arr] (logp.east) -- (rloo.south);
+        \draw[arr] (stopreward.east) -- (rloo.west);
+    \end{tikzpicture}}
+    \caption{Online reward computation for RLOO fine-tuning. A sampled token sequence is decoded once, evaluated by the SketchGraphs/Jacobian metric path and FreeCAD solver workers, and combined with GPU log-probability and KL terms to form token-aligned rewards. Sequence-level rewards are placed at \texttt{STOP}; token-local solver-feedback terms are placed on the corresponding constraint tokens. FreeCAD solver work overlaps with the GPU policy/reference forward pass, while cached pseudo-reference and Jacobian quantities are reused across MotionReward and DimRelAlign.}
+    \label{fig:appendix_rl_pipeline}
+\end{figure*}
+
+\subsubsection{Human-Preference Study Protocol}
+\label{sec:appendix_rl_user_study}
+The preference study compares Solver-RL and Ours at the same $70$k training step. We sample $49$ held-out input sketches (two evaluation shards), render both decoded constraint sets in a shared visual format, and present randomized blinded pairs to four raters using the interface in Fig.~\ref{fig:appendix_user_study_ui}. Four pairs contain one invalid model output; the main analysis excludes them to match the scorable-output metric protocol. Raters can remove dimensional constraints and drag vertices or dimension labels to inspect edit behavior. They are asked: ``Which constraint set would you use if you had to constrain this sketch yourself and could make modifications on top of the generated constraints?'' The $45$ valid pairs give $180$ choices ($69$ for Ours, $63$ for Solver-RL, and $48$ ties); all $49$ presented pairs give $196$ choices ($81$ for Ours, $67$ for Solver-RL, and $48$ ties). Table~\ref{tab:rl_user_study} reports metric means on the same valid pairs and graded preference-margin correlations.
+
+\textcolor{red}{TODO (Spearman definition): per sketch, define the preference margin $v_s=(\#\text{Ours}-\#\text{Solver})/4\in[-1,1]$ and the signed metric advantage $\Delta_s$ (oriented so positive favors Ours: $\theta_\text{Solver}-\theta_\text{Ours}$ for distances, $S_\text{Ours}-S_\text{Solver}$ for placement); the reported $\rho$ is Spearman's rank correlation between $\{\Delta_s\}$ and $\{v_s\}$.}
+
+\textcolor{red}{TODO (n): all $45$ study sketches are scored. The relational-motion subspace of each annotation is evaluated at its own primitive state and mapped through $\phi$ into the shared observable space, so annotations that add construction geometry (a larger parameter vector) are compared correctly.}
+
+\textcolor{red}{TODO (significance and agreement): add $p$-values / significance for each $\rho$ (n.s.\ for $\theta_\text{rel}$, $\theta_\text{leak}$, Dim) and an inter-rater agreement statistic; note that three of four raters favor Ours while one favors Solver-RL.}
+
+\begin{figure*}[t]
+    \centering
+    \begin{minipage}[t]{0.49\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figs/user_study_dim_on.png}\\[-0.3em]
+        \footnotesize Dimensions shown
+    \end{minipage}\hfill
+    \begin{minipage}[t]{0.49\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figs/user_study_dim_off.png}\\[-0.3em]
+        \footnotesize After pressing Remove Dimension
+    \end{minipage}
+    \caption{Browser interface used for the human-preference study. Left/right outputs are anonymized and randomized. Each panel shows the remaining DoF; raters can press Remove Dimension to inspect only the relational constraints, and can drag vertices or dimension labels to test how each constraint set preserves the sketch shape.}
+    \label{fig:appendix_user_study_ui}
+\end{figure*}
+
+\subsubsection{Additional Results}
+\label{sec:appendix_rl_additional_results}
+
+\textcolor{red}{TODO: Add supplementary qualitative examples or failure cases before the supplementary deadline.}
+
+\subsection{Limitations}
+\label{sec:appendix_limitations}
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=0.96\linewidth]{figs/rl_reward_pareto_iter5.pdf}
+    \caption{Pareto-style RL evaluation with test-time solver intervention. Compared with Fig.~\ref{fig:rl_reward_pareto}, each output may be regenerated for up to five solver-feedback iterations, removing invalid constraints before resampling the remaining suffix. Although Solver-RL remains higher on FC, the intervention moves Ours into a higher-FC regime, while making its lower dimensional ratio and stronger motion-subspace diagnostics more visually apparent than Fig.~\ref{fig:rl_reward_pareto}.}
+    \label{fig:appendix_rl_iter5}
+\end{figure*}
+
+\subsubsection{Scope of the Metrics}
+We first emphasize that our proposed metrics do not capture the entirety of design intent. As Otey \etal~\cite{otey2018revisiting} note, design intent has many aspects, most of which require external knowledge unattached to a CAD model itself. Incorporating such meta-knowledge into design-intent quantification is an important direction for future work.
+
+Being specific to our metrics design, they measure infinitesimal redesign behavior. Therefore, they cannot distinguish constraint sets whose finite-edit behavior differs but whose first-order behavior agrees at the original sketch. Comparing motion manifolds rather than only their tangent spaces, i.e., motion subspaces, will be a possible extension.
+
+\subsubsection{RL Application Limitations}
+
+In the RL application, although this is not the core of this work, it has two limitations. First, the present reward cannot learn human-like dimensional placement. The training signal contains no dimensional-placement target: it never specifies which length, radius, or angle should become a driving dimension. Therefore, $S_{\mathrm{place}}$ and full dimensional-response matching are impossible to optimize from this supervision alone. This will fundamentally require new supervision, such as human-annotated dimensions, interactive edit traces, or preference data that explicitly distinguishes dimensional placements.
+
+Second, our proposed rewards slow model convergence relative to Solver-RL. As our MotionReward and DimRelAlign provide finer-grained behavioral signals than Solver-RL's DimParsimony, they make the reward landscape harder to optimize and require more policy exploration.
+
+As a remedy, we tested inference-time solver intervention: after a sampled constraint sequence is decoded, FreeCAD checks the result; invalid constraints are removed, and the model resamples the remaining suffix for up to five iterations. As shown in Fig.~\ref{fig:appendix_rl_iter5}, this raises Ours' FC rate from $0.627$ to $0.716$. Solver-RL still reaches a higher FC rate, but compared with Fig.~\ref{fig:rl_reward_pareto}, the advantage of Ours becomes clearer: in the higher-FC regime, it has a lower dimensional ratio, better motion-subspace diagnostics, and higher $S_{\mathrm{place}}$ than Solver-RL.
