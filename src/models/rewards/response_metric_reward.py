@@ -526,15 +526,24 @@ def _motion_relational_angle(
     reverse_weight: float = 0.5,
     J_phi_pred: torch.Tensor | None = None,
     J_phi_gt: torch.Tensor | None = None,
+    gt_native: NativeResponse | None = None,
     gt_motion_relational: tuple[torch.Tensor, int] | None = None,
 ) -> SubspaceAngleResult:
     """Compare relation-only motion subspaces in observable space.
 
     The reward-oriented sibling of ``_motion_full_angle``: dimensional drivers
     are deliberately ignored and only the primitive motions allowed by the
-    sketch's relational constraints are compared.  Pred and GT subspaces are
-    both evaluated at ``pred_native.state`` so the principal-angle SVD lives
-    in a common coordinate system.
+    sketch's relational constraints are compared.  Each subspace is evaluated
+    at its own native state (pred at ``pred_native.state``, GT at
+    ``gt_native.state``) and mapped through ``J_phi`` into the shared
+    pairwise-distance observable space, so the principal-angle SVD lives in a
+    common coordinate system even when GT carries extra construction geometry
+    (a larger primitive parameter vector).  When ``gt_native`` is omitted we
+    fall back to ``pred_native.state`` for backward compatibility; this is
+    numerically identical whenever pred and GT share the same primitives (the
+    geometry is overwritten with the original), but mismatches and errors out
+    when GT added construction primitives, which is why the GT state is
+    preferred.
 
     The returned ``angle`` is the *raw* motion-relational angle whose ceiling
     depends on the comparison mode; higher-level callers normalize it into
@@ -567,8 +576,9 @@ def _motion_relational_angle(
     if gt_motion_relational is not None:
         U_gt, dim_gt = gt_motion_relational
     else:
+        gt_state = gt_native.state if gt_native is not None else state
         U_gt, dim_gt = _motion_relational_subspace(
-            gt_sketch, state, context, eps, J_phi=J_phi_gt
+            gt_sketch, gt_state, context, eps, J_phi=J_phi_gt
         )
 
     cos2_sum = _principal_cos2_sum(U_pred, U_gt)
@@ -716,6 +726,7 @@ def _compute_h_theta_metrics(
         reverse_weight=motion_relational_reverse_weight,
         J_phi_pred=J_phi_pred,
         J_phi_gt=J_phi_gt,
+        gt_native=gt_native,
         gt_motion_relational=gt_motion_relational,
     )
     motion_relational_angle = _normalized_motion_relational_angle(
