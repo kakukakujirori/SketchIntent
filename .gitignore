@@ -137,3 +137,7 @@ vitruvion.sif
 
 # Logs
 logs/
+
+# dataset
+SketchIntent-292/
+*.zip
