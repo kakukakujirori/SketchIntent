@@ -18,10 +18,10 @@ Idempotent / resumable (stepsave_*.ckpt grow over time):
   * all 12 inference splits already present -> only (re)evaluate
   * otherwise                               -> generate just the missing splits, then eval
 
-    conda run -n freecad python scripts/run_iter1_pareto.py              # full run (single-shot)
-    conda run -n freecad python scripts/run_iter1_pareto.py --iter 5     # deployed solver-in-the-loop
-    conda run -n freecad python scripts/run_iter1_pareto.py --plot-only  # redraw only
-    conda run -n freecad python scripts/run_iter1_pareto.py --variants dpc1,ours
+    conda run -n freecad python paper/scripts/run_iter1_pareto.py              # full run (single-shot)
+    conda run -n freecad python paper/scripts/run_iter1_pareto.py --iter 5     # deployed solver-in-the-loop
+    conda run -n freecad python paper/scripts/run_iter1_pareto.py --plot-only  # redraw only
+    conda run -n freecad python paper/scripts/run_iter1_pareto.py --variants dpc1,ours
 
 --iter namespaces all outputs (model_outputs/ + iter1_*.json for 1; model_outputs_iter<N>/ +
 iter<N>_*.json otherwise), so the single-shot and deployed protocols never overwrite.
@@ -40,7 +40,7 @@ import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 from matplotlib.patches import Rectangle
 
-REPO = Path(__file__).resolve().parent.parent
+REPO = Path(__file__).resolve().parents[2]  # paper/scripts/<file> -> repo root
 MODEL_OUTPUTS = REPO / "model_outputs"
 ART = REPO / "artifacts" / "fiverr_eval"
 DATA_EVAL = REPO / "data_eval"
@@ -355,7 +355,7 @@ def paired_stats(rows: dict) -> None:
     dp_json = jkey("dpc1", dp_step)
     print(f"\n[paired stats] Ours step52200 (FC {ours_pt['fc_rate']:.3f}) "
           f"vs DP c1 step{dp_step} (FC {dp[1]['fc_rate']:.3f})")
-    subprocess.run([sys.executable, "scripts/paired_stats_fc_matched.py",
+    subprocess.run([sys.executable, "paper/scripts/paired_stats_fc_matched.py",
                     "--ours", str(ours_json), "--base", str(dp_json)], cwd=REPO, check=False)
 
 

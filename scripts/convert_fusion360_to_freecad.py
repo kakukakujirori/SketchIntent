@@ -16,7 +16,6 @@ import rootutils
 
 rootutils.setup_root(__file__, indicator=".project-root", pythonpath=True)
 
-from scripts.draw_constraints import export_sketch_to_dict, visualize_sketch_for_vlm
 from src.models.components.solver_feedback import SolverFeedback
 from src.sketch_handlers.context import SketchContext
 from src.sketch_handlers.freecad_utils import ensure_freecad_imported
@@ -892,19 +891,8 @@ if __name__ == '__main__':
                     f.write("\n".join(freecad_script))
                 doc.saveAs(command_file_path.replace('.py', '.FCStd'))
 
-                # 4. Export the sketch
-                # sketch_file_path = os.path.join(args.sketch_dump_dir, f"{os.path.basename(json_path).replace('.json', f'_sketch{sketch_id:02d}.jpg')}")
-                # visualize_sketch_for_vlm(
-                #     export_sketch_to_dict(fc_sketch),
-                #     save_path=sketch_file_path,
-                #     title=None,
-                #     icon_fontsize=10,
-                #     figsize=(640, 640),
-                # )
-                # plt.close()
-
             except KeyError:
-                # NOTE: Ellipses are not supported in visualize_sketch_for_vlm, and emit key errors. We skip them.
+                # Skip sketches with unsupported entities (e.g. ellipses) that raise KeyError.
                 continue
             except Exception as e:
                 print(f"Error processing {sketch_id}-th sketch in {json_path}:\n{traceback.format_exc()}")

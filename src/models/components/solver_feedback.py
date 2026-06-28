@@ -294,8 +294,7 @@ class SolverFeedback:
 
             # Safety net: FreeCAD occasionally returns Status="Converged" while
             # also reporting problematic constraints.  Override in severity order
-            # (Malformed > Conflicting > Redundant > Distorted).  Mirrors the
-            # logic in scripts/qwen3_refine_data_with_solver.py L1722-1739.
+            # (Malformed > Conflicting > Redundant > Distorted).
             if status.Status == "Converged":
                 if status.MalformedConstraints:
                     status.Status = "Malformed"

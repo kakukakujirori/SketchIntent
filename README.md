@@ -48,7 +48,7 @@ fc_sketch.getSolverStatus()
 # }
 ```
 Note that the constraint indices are 0-based.
-Please refer to [scripts/qwen3_refine_data_with_solver.py](scripts/qwen3_refine_data_with_solver.py) and [src/models/components/solver_feedback.py](src/models/components/solver_feedback.py) for its usage.
+Please refer to [src/models/components/solver_feedback.py](src/models/components/solver_feedback.py) for its usage.
 
 ## Install Dependencies
 
@@ -75,16 +75,13 @@ pip install -r requirements.txt
   python scripts/cleanse_seq_for_freecad.py data_processed/sg_filtered.npy
   ```
 
-- Qwen3 Augmented Dataset
+- Rule-Augmented Data (RLOO)
+
+  Every geometric relation detected by the rule-based predicates is added as a relational constraint, producing `data_processed/sg_filtered_unique_augmented.npy` used as the RLOO relational pseudo-reference:
   ```bash
-  python scripts/qwen3_refine_data_with_solver.py           # `data_qwen3_refined_with_solver` generated
-  python scripts/qwen3_sieve_generated_data.py [--fc_only]    # `data_qwen3_refined_with_solver/commands_refined[_fc]` generated
-  python scripts/convert_freecad_to_seq.py \
-    --data_dir ./data_qwen3_refined_with_solver/commands_refined[_fc] \
-    --out_path ./data_processed/data_qwen3[_fc].npy
-  python scripts/cleanse_seq_for_freecad.py data_processed/data_qwen3[_fc].npy
+  bash scripts/generate_rule_augmented_dataset.sh
   ```
-  After the preprocessing, you will obtain `data_processed/data_qwen3[_fc]_unique_valid.npy`.
+  The script runs 12 parallel shards (logging per-shard progress to `/tmp/rule_augmented.shard*.log`) and merges them into the output npy.
 
 ## Training
 
@@ -92,9 +89,9 @@ pip install -r requirements.txt
 # Pretraining
 python src/train.py
 
-# SFT
-python src/train.py experiment=sft
-
-# RLOO
+# RLOO (Solver-RL)
 python src/train.py experiment=rloo
+
+# RLOO (SolverReward + MotionReward + DimRelAlign)
+python src/train.py experiment=rloo_motion
 ```

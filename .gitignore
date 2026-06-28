@@ -144,3 +144,5 @@ SketchIntent-292/
 
 # others
 notebooks/
+# Deprecated scripts holding area (pre-deletion)
+scripts_dep/

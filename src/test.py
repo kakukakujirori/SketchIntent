@@ -532,13 +532,11 @@ def main():
         print(f"Pre-processing python data from {input_data_dir}...")
         tmp_npy = "/tmp/test_data.npy"
         try:
-            # 1. Sieve
-            subprocess.run([sys.executable, "scripts/qwen3_sieve_generated_data.py"], check=False)
-            # 2. Convert to npy
+            # 1. Convert to npy
             subprocess.run([sys.executable, "scripts/convert_freecad_to_seq.py",
                             "--data_dir", input_data_dir,
                             "--out_path", tmp_npy], check=True)
-            # 3. Cleanse
+            # 2. Cleanse
             subprocess.run([sys.executable, "scripts/cleanse_seq_for_freecad.py", tmp_npy], check=True)
 
             # Update args.data to the cleansed npy
