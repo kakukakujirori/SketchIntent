@@ -141,3 +141,6 @@ logs/
 # dataset
 SketchIntent-292/
 *.zip
+
+# others
+notebooks/

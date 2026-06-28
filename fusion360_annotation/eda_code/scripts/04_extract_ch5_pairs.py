@@ -16,7 +16,7 @@ from fusion360_annotation.eda_code.config import BASE_POLICY
 from fusion360_annotation.eda_code.dataset_features import display_type
 from fusion360_annotation.eda_code.manifest import discover_groups
 from fusion360_annotation.eda_code.progress import progress
-from metrics_v4 import V4Hyperparams, compute_metrics_v4  # noqa: E402
+from fusion360_annotation.eda_code.metrics_v4 import V4Hyperparams, compute_metrics_v4  # noqa: E402
 from src.metrics.constraint_token_f1 import pair_f1  # noqa: E402
 from src.metrics.edit_response_distance import _is_relational, collect_probes, constraint_signature  # noqa: E402
 from src.sketch_handlers.context import SketchContext  # noqa: E402

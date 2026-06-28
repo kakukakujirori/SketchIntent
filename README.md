@@ -1,8 +1,8 @@
-# My-Vitruvion
+# Motion Subspace Canonicalization for Design-Intent Evaluation in CAD Sketches
 
 ## Install FreeCAD
 
-We first need to build our custom FreeCAD for inference-time solver feedback:
+We first need to build our custom FreeCAD for the CAD solver feedback in reinforcement learning (RL):
 
 ```bash
 git clone https://github.com/kakukakujirori/FreeCAD.git
@@ -57,20 +57,18 @@ git clone https://github.com/kakukakujirori/My-Vitruvion.git
 cd My-Vitruvion
 mamba activate freecad
 pip install -r requirements.txt
-CMAKE_ARGS="-DGGML_CUDA=on" pip install "llama-cpp-python @ git+https://github.com/JamePeng/llama-cpp-python.git"
-```
-
-## Qwen3-VL Weight Download
-
-```bash
-mkdir -p qwen_weights
-wget "https://huggingface.co/Qwen/Qwen3-VL-30B-A3B-Thinking-GGUF/resolve/main/Qwen3VL-30B-A3B-Thinking-Q8_0.gguf?download=true" -O qwen_weights/Qwen3VL-30B-A3B-Thinking-Q8_0.gguf
-wget "https://huggingface.co/Qwen/Qwen3-VL-30B-A3B-Thinking-GGUF/resolve/main/mmproj-Qwen3VL-30B-A3B-Thinking-F16.gguf?download=true" -O qwen_weights/mmproj-Qwen3VL-30B-A3B-Thinking-F16.gguf
 ```
 
 ## Data
 
-- SketchGraphs Dataset
+- SketchIntent-292 (Evaluation Benchmark)
+  ```bash
+  wget "https://github.com/kakukakujirori/My-Vitruvion/releases/download/v.1.0.0/SketchIntent-292.zip"
+  unzip SketchIntent-292.zip
+  rm SketchIntent-292.zip
+  ```
+
+- SketchGraphs Dataset (Training)
   ```bash
   bash scripts/download_shards.sh data_shards
   python scripts/convert_sketchgraphs_to_seq.py

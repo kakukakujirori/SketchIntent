@@ -44,13 +44,11 @@ from dataclasses import dataclass
 import torch
 
 # Sys-path setup so this module can be run from anywhere under the repo.
+# _HERE = fusion360_annotation/eda_code, so ../.. is the repo root.
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _REPO = os.path.abspath(os.path.join(_HERE, "..", ".."))
 if _REPO not in sys.path:
     sys.path.insert(0, _REPO)
-_NOTEBOOKS = os.path.abspath(os.path.join(_HERE, ".."))
-if _NOTEBOOKS not in sys.path:
-    sys.path.insert(0, _NOTEBOOKS)
 
 from src.metrics.edit_response_distance import (  # noqa: E402
     NativeResponse,

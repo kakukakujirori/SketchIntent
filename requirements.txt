@@ -1,19 +1,24 @@
 cairosvg
 einops
+fastapi
 hydra-core
 hydra-colorlog
 huggingface_hub
 lightning
 lz4
 matplotlib
-numpy #<2.0.0
+numpy
 omegaconf
+Pillow
+pygraphviz
 requests
 rich
 rootutils
+scikit-learn
 scipy
 tensorboard
-torchmetrics #==0.8.2
+torchmetrics
 tqdm
+uvicorn
 wandb
 zstandard
