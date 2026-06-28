@@ -1,37 +1,14 @@
 # @package _global_
 
-# scaffold-v3 PROBE (B) — EXPLORATION STRENGTH (plan §14.7.4 item 5).
-#
-# Motivation (2026-05-31 diagnostics): scaffold-v2's exploration knobs were a near
-# no-op — train/entropy moved only 0.371 -> 0.377 (+0.006), and on fiverr the policy
-# under-samples Perpendicular (56% train -> 7.7% fiverr) and Parallel (54% -> 0.4%):
-# a train->fiverr SAMPLING collapse, not reward suppression (#1).  This probe asks
-# whether genuinely stronger exploration (a) raises steady-state entropy at all and
-# (b) recovers the non-substitutable Perpendicular/Tangent sampling on human data —
-# or just degrades FC further (which would re-implicate reward balance, probe A).
-#
-# Diff vs scaffold2_intent: entropy_bonus 0.005 -> 0.02, train_sample_temperature
-# 1.2 -> 1.5.  Reward stack IDENTICAL to scaffold2_intent (so this is a clean
-# one-axis change: exploration only).
-#
-# DoF-cause control (isolates whether scaffold-v2's DoF 3.85 -> 4.69 came from temp
-# or from the -1.5 hygiene): re-run this with temperature back to 1.0 via CLI, no
-# extra file needed:
-#   ... experiment=rloo_response_scaffold3_explore_intent model.train_sample_temperature=1.0 model.entropy_bonus=0.005
-#
-# Smoke test (CPU, 2 steps):
-#   conda run -n freecad python src/train.py experiment=rloo_response_scaffold3_explore_intent \
-#     trainer.accelerator=cpu trainer.devices=1 trainer.strategy=auto trainer.precision=32 \
-#     data.batch_size=1 model.group_sample_size=2 \
-#     +trainer.max_steps=2 +trainer.limit_val_batches=0 +trainer.num_sanity_val_steps=0
-# Launch (GPU): conda run -n freecad python src/train.py experiment=rloo_response_scaffold3_explore_intent
+# to execute this experiment run:
+# python train.py experiment=rloo_solver_motion_dimrelalign
 
 defaults:
   - override /data: constraint_rloo.yaml
   - override /model: constraint_ar_rloo.yaml
   - override /trainer: default
 
-tags: ["rloo", "response", "scaffold3", "explore", "intent", "probe"]
+tags: ["rloo", "solver_reward", "motion_reward", "dimrel_align"]
 
 callbacks:
   model_checkpoint_epoch:
@@ -52,15 +29,27 @@ callbacks:
     auto_insert_metric_name: false
     every_n_train_steps: 100
 
+  model_checkpoint_step:
+    _target_: lightning.pytorch.callbacks.ModelCheckpoint
+    dirpath: ${paths.output_dir}/checkpoints
+    filename: "stepsave_{step}"
+    every_n_train_steps: 5000
+    save_top_k: -1
+    save_last: false
+    auto_insert_metric_name: false
+
 data:
-  train_sequence_file: data_processed/sg_pseudo_rel_167k_unique_valid.npy
+  train_sequence_file: data_processed/sg_filtered_unique_augmented.npy
   batch_size: 32
   num_workers: 1
 
 model:
-  # PROBE: genuinely stronger exploration (scaffold-v2 was 0.005 / 1.2).
-  entropy_bonus: 0.02
-  train_sample_temperature: 1.5
+  # PHASE 2: flip-augmented rollouts (the counterfactual generator) + even 3-way split.
+  flip_augment_axes: [x, y]
+  group_sample_size: 9
+
+  entropy_bonus: 0.005
+  train_sample_temperature: 1.2
   val_sample_temperature: 1.0
 
   reward_composer:
@@ -68,8 +57,8 @@ model:
     rewards:
       - _target_: src.models.rewards.solver_reward.SolverReward
         context: ${data.context}
-        reward_dof_reduction: 10.0
-        reward_fully_constrained: 5.0
+        reward_dof_reduction: 4.0
+        reward_fully_constrained: 1.5
         penalty_conflicting: -1.0
         penalty_redundant: -1.0
         penalty_malformed: -0.5
@@ -88,12 +77,7 @@ model:
         axis_angle_gate: converged
         num_workers: null
 
-      - _target_: src.models.rewards.dim_parsimony.DimParsimonyReward
-        context: ${data.context}
-        coeff: 0.30
-        mode: excess_over_gt_per_primitive
-        excess_margin: 1
-        gate: converged
+      # scaffold9 DROP DimParsimonyReward (see leak_fc20 header).
 
       - _target_: src.models.rewards.relational_class_prior.RelationalClassPriorReward
         context: ${data.context}
@@ -112,17 +96,37 @@ model:
           Vertical: 0.05
           Midpoint: 0.112
 
-      - _target_: src.models.rewards.response_metric_reward.ResponseIntentReward
+      - _target_: src.models.rewards.dimensional_class_prior.DimensionalClassPriorReward
+        context: ${data.context}
+        gate: converged
+        cap_positive_total: 0.10
+        cap_negative_total: -0.20
+        cap_per_type: 3
+        coeff_by_type:
+          Distance: -0.03
+          DistanceX: 0.02
+          DistanceY: 0.02
+          Angle: -0.05
+
+      - _target_: src.models.rewards.response_metric_reward.ResponseMetricEvaluator
         context: ${data.context}
         eps: 1.0e-9
-        coeff_h_angle: 3.0
-        cap_h_angle: 0.70
-        h_angle_reward_metric: motion_relational_angle
         motion_relational_angle_mode: symmetric
         motion_relational_reverse_weight: 0.5
         gate: converged
         num_workers: 4
 
+      # - _target_: src.models.rewards.response_metric_reward.MotionAngleReward
+      #   coeff: 4.5
+      #   cap: 0.70
+      #   gate: converged
+
+      - _target_: src.models.rewards.response_metric_reward.LeakAngleReward
+        coeff: 1.5
+        cap: 0.70
+        gate: dof
+
+  # Val composer LEFT IDENTICAL to scaffold2 (eval must not move with the treatment).
   reward_val_composer:
     _target_: src.models.rewards.composer.RewardValComposer
     context: ${data.context}
@@ -135,12 +139,13 @@ model:
         penalty_axis_angle: 0.0
         axis_angle_tolerance_rad: 0.001
         num_workers: null
-      - _target_: src.models.rewards.response_metric_reward.ResponseIntentReward
+
+      - _target_: src.models.rewards.response_metric_reward.ResponseMetricEvaluator
         context: ${data.context}
         eps: 1.0e-9
         gate: always
-        h_angle_reward_metric: response_full_angle
         num_workers: 0
+
       - _target_: src.models.rewards.relational_class_prior.RelationalClassPriorReward
         context: ${data.context}
         gate: always
@@ -167,4 +172,4 @@ trainer:
   devices: 1
   max_epochs: 3
 
-pretrained_ckpt_path: logs/train/runs/2026-05-02_20-35-42/checkpoints/epoch_29.ckpt
+pretrained_ckpt_path: logs/train/runs/[yyyy-mm-dd_hh-mm-ss]/checkpoints/epoch_29.ckpt

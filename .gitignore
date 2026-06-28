@@ -146,3 +146,6 @@ SketchIntent-292/
 notebooks/
 # Deprecated scripts holding area (pre-deletion)
 scripts_dep/
+
+# Deprecated experiment configs holding area (pre-deletion)
+configs/experiment_dep/

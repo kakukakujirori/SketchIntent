@@ -1,38 +1,14 @@
 # @package _global_
 
-# scaffold-v6 SHUFFLED-INTENT negative control (research plan §16.8 #6 / §3 R_shuffled,
-# [[intent-effectiveness-ablation]]).
-#
-# IDENTICAL to rloo_response_scaffold6_v2gt_flip_rebalance_intent at commit d82a42b
-# (= the config of run o0xgo75k, BEFORE DimensionalClassPriorReward was added) EXCEPT
-# the single train-side line `shuffle_within_group: true` on ResponseIntentReward.
-# DimensionalClassPriorReward is intentionally absent so this matches o0xgo75k/13f89l4i.
-#
-# Purpose: the scale-matched, baseline-preserving negative control. The per-sample
-# intent reward scalars are permuted WITHIN each RLOO group of K=9 (flip views pooled),
-# so the reward distribution and the leave-one-out baseline mean are unchanged but the
-# sample<->reward (i.e. sample<->GT) correspondence is destroyed. If S+R̃ collapses to
-# the no-intent run (13f89l4i) on resp/mrel/leak/distFam/keyrel, the o0xgo75k gain is
-# from GT correspondence, not reward scale -> §8.1 strong success. If S+R̃ ≈ S+R
-# (o0xgo75k), the apparent intent effect was just reward magnitude/variance and the
-# claim weakens.
-#
-# Compare ALL THREE at matched step (~15.6k): S = 13f89l4i (no intent),
-# S+R̃ = this run, S+R = o0xgo75k (intent). The logged intent_* metrics here are the
-# TRUE (unshuffled) angles — only the training signal is scrambled.
-#
-# Smoke (CPU, 2 steps):
-#   conda run -n freecad python src/train.py experiment=rloo_response_scaffold6_v2gt_flip_rebalance_shuffled_intent \
-#     trainer.accelerator=cpu trainer.devices=1 trainer.strategy=auto trainer.precision=32 \
-#     data.batch_size=1 model.group_sample_size=3 \
-#     +trainer.max_steps=2 +trainer.limit_val_batches=0 +trainer.num_sanity_val_steps=0
-# Launch (GPU): conda run -n freecad python src/train.py experiment=rloo_response_scaffold6_v2gt_flip_rebalance_shuffled_intent
+# to execute this experiment run:
+# python train.py experiment=rloo_solver_rl
+
 defaults:
   - override /data: constraint_rloo.yaml
   - override /model: constraint_ar_rloo.yaml
   - override /trainer: default
 
-tags: ["rloo", "response", "scaffold6", "v2gt", "flip", "rebalance", "shuffled", "intent"]
+tags: ["rloo", "solver_reward", "dim_parsimony"]
 
 callbacks:
   model_checkpoint_epoch:
@@ -53,15 +29,21 @@ callbacks:
     auto_insert_metric_name: false
     every_n_train_steps: 100
 
+  model_checkpoint_step:
+    _target_: lightning.pytorch.callbacks.ModelCheckpoint
+    dirpath: ${paths.output_dir}/checkpoints
+    filename: "stepsave_{step}"
+    every_n_train_steps: 5000
+    save_top_k: -1
+    save_last: false
+    auto_insert_metric_name: false
+
 data:
-  # v2 rule-augmenter GT (per-sketch complete closure). Swap to
-  # sg_pseudo_rel_v2_full_all.npy for the Mirror ablation.
-  train_sequence_file: data_processed/sg_pseudo_rel_v2_no_mirror.npy
+  train_sequence_file: data_processed/sg_filtered_unique_augmented.npy
   batch_size: 32
   num_workers: 1
 
 model:
-  # PHASE 2: flip-augmented rollouts (the counterfactual generator) + even 3-way split.
   flip_augment_axes: [x, y]
   group_sample_size: 9
 
@@ -74,9 +56,8 @@ model:
     rewards:
       - _target_: src.models.rewards.solver_reward.SolverReward
         context: ${data.context}
-        # PHASE 2: compress the solver dynamic range (alpha ~= 0.4), as in scaffold4.
         reward_dof_reduction: 4.0
-        reward_fully_constrained: 2.0
+        reward_fully_constrained: 1.5
         penalty_conflicting: -1.0
         penalty_redundant: -1.0
         penalty_malformed: -0.5
@@ -97,7 +78,7 @@ model:
 
       - _target_: src.models.rewards.dim_parsimony.DimParsimonyReward
         context: ${data.context}
-        coeff: 0.30
+        coeff: 3.0
         mode: excess_over_gt_per_primitive
         excess_margin: 1
         gate: converged
@@ -119,19 +100,28 @@ model:
           Vertical: 0.05
           Midpoint: 0.112
 
-      - _target_: src.models.rewards.response_metric_reward.ResponseIntentReward
+      - _target_: src.models.rewards.dimensional_class_prior.DimensionalClassPriorReward
+        context: ${data.context}
+        gate: converged
+        cap_positive_total: 0.10
+        cap_negative_total: -0.20
+        cap_per_type: 3
+        coeff_by_type:
+          Distance: -0.03
+          DistanceX: 0.02
+          DistanceY: 0.02
+          Angle: -0.05
+
+      # ResponseMetricEvaluator KEPT (zero reward; logs intent_* diagnostics).
+      # No MotionAngleReward / LeakAngleReward => no-intent arm.
+      - _target_: src.models.rewards.response_metric_reward.ResponseMetricEvaluator
         context: ${data.context}
         eps: 1.0e-9
-        coeff_h_angle: 3.0
-        cap_h_angle: 0.70
-        h_angle_reward_metric: motion_relational_angle
         motion_relational_angle_mode: symmetric
         motion_relational_reverse_weight: 0.5
         gate: converged
         num_workers: 4
-        shuffle_within_group: true
 
-  # Val composer LEFT IDENTICAL to scaffold2 (eval must not move with the treatment).
   reward_val_composer:
     _target_: src.models.rewards.composer.RewardValComposer
     context: ${data.context}
@@ -144,12 +134,13 @@ model:
         penalty_axis_angle: 0.0
         axis_angle_tolerance_rad: 0.001
         num_workers: null
-      - _target_: src.models.rewards.response_metric_reward.ResponseIntentReward
+
+      - _target_: src.models.rewards.response_metric_reward.ResponseMetricEvaluator
         context: ${data.context}
         eps: 1.0e-9
         gate: always
-        h_angle_reward_metric: response_full_angle
         num_workers: 0
+
       - _target_: src.models.rewards.relational_class_prior.RelationalClassPriorReward
         context: ${data.context}
         gate: always
@@ -176,4 +167,4 @@ trainer:
   devices: 1
   max_epochs: 3
 
-pretrained_ckpt_path: logs/train/runs/2026-05-02_20-35-42/checkpoints/epoch_29.ckpt
+pretrained_ckpt_path: logs/train/runs/[yyyy-mm-dd_hh-mm-ss]/checkpoints/epoch_29.ckpt

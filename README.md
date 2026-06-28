@@ -89,9 +89,9 @@ pip install -r requirements.txt
 # Pretraining
 python src/train.py
 
-# RLOO (Solver-RL)
-python src/train.py experiment=rloo
+# RLOO (Solver-RL, lambda_D=1.0)
+python src/train.py experiment=rloo_solver_rl_coeff1.0
 
 # RLOO (SolverReward + MotionReward + DimRelAlign)
-python src/train.py experiment=rloo_motion
+python src/train.py experiment=rloo_solver_motion_dimrelalign
 ```

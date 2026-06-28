@@ -1,25 +1,23 @@
-"""Generate pseudo-relational GT (v2) with the rule augmenter (no model).
+"""Generate the rule-augmented relational pseudo-reference (no model).
 
-Unlike ``scripts/generate_pseudo_rel_dataset.py`` (which runs a rel-only RLOO
-*model* to predict relational constraints), this script populates the pseudo-GT
-purely geometrically with ``src.sketch_handlers.rule_augmenter``: for every input
-sketch it detects all relations whose handler residual is ~0 at the real
-geometry and writes them back as the preservation/target relation set R_G.
+Rather than predicting relational constraints with a trained model, this script
+populates the pseudo-GT purely geometrically with
+``src.sketch_handlers.rule_augmenter``: for every input sketch it detects all
+relations whose handler residual is ~0 at the real geometry and writes them back
+as the preservation/target relation set R_G. (This is the per-shard worker
+invoked by ``scripts/generate_rule_augmented_dataset.sh``.)
 
-Why a separate script (see notebooks/rloo_response_metric_reward_research_plan.md
-§15 and the pipeline trace in notebooks/pseudo_rel_v2_augmenter_pipeline_trace.md):
+Design notes:
 
   * The augmenter emits the *full relational closure* (e.g. Horizontal+Horizontal
     AND the implied Parallel).  That closure is intentionally redundant.  The
     reward consumes the GT as a ``datalib.Sketch`` object (``batch['sketch']``)
     and reduces its relations to a motion subspace via an SVD rank, so redundant
-    rows are absorbed (rank-bounded) — verified empirically: round-trip
-    motion_relational dim is preserved 59/59 and dim never grows with added
-    redundant relations.
-  * ``generate_pseudo_rel_dataset.py`` solver-gates on ``Status == 'Converged'``,
-    but ``get_solver_status`` reclassifies Converged+redundant -> ``'Redundant'``,
-    so that gate would reject essentially every augmented sketch.  Solver
-    validation is therefore OFF by default here; ``--solver_validate`` enables a
+    rows are absorbed (rank-bounded): the round-trip motion_relational dim is
+    preserved and never grows with added redundant relations.
+  * Solver validation is OFF by default: ``get_solver_status`` reclassifies
+    Converged+redundant -> ``'Redundant'``, so a strict ``Converged`` gate would
+    reject essentially every augmented sketch.  ``--solver_validate`` enables a
     *relaxed* gate that tolerates Redundant and only rejects
     Conflicting/Malformed/Distorting.
 
@@ -30,17 +28,17 @@ is computed.  Samples that would raise at train time, or that end up with no
 relational constraints, are dropped — so the saved npy is safe-by-construction
 for training and has a well-defined relational GT subspace.
 
-Typical usage:
+Typical usage (normally run per-shard via scripts/generate_rule_augmented_dataset.sh):
     conda run -n freecad python -m scripts.generate_pseudo_rel_augmented_dataset \\
         --input_npy  data_processed/sg_filtered_unique_valid.npy \\
-        --output_npy data_processed/sg_pseudo_rel_v2_full_all.npy \\
+        --output_npy data_processed/sg_filtered_unique_augmented.npy \\
         --scale 0.25
 
-    # exclude Mirror (precision 0.006) for the full_no_mirror ablation:
-    ... --output_npy data_processed/sg_pseudo_rel_v2_no_mirror.npy --no_mirror
+    # exclude Mirror (precision 0.006) for the no-Mirror ablation:
+    ... --output_npy data_processed/sg_filtered_unique_augmented_no_mirror.npy --no_mirror
 
     # shard 0 of 8 for parallel generation:
-    ... --shard 0/8 --output_npy data_processed/sg_pseudo_rel_v2_full_all.shard0.npy
+    ... --shard 0/8 --output_npy data_processed/sg_filtered_unique_augmented.shard0.npy
 """
 import argparse
 import sys
