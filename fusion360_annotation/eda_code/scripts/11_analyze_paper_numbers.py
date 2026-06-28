@@ -210,8 +210,9 @@ def plot_appendix_dataset_figures(out_dir: Path, fig_dir: Path) -> None:
     ax.set_yticks(y, primitive_order)
     ax.invert_yaxis()
     for i, value in enumerate(primitive_values):
-        if value >= 0.1:
-            ax.text(value + 1.5, i, f"{value:.1f}%", ha="left", va="center", fontsize=8)
+        if value > 0:
+            label = "<0.1%" if value < 0.1 else f"{value:.1f}%"
+            ax.text(value + 1.5, i, label, ha="left", va="center", fontsize=8)
     ax.set_xlim(0, 86)
     ax.set_xlabel("share (%)")
     ax.set_title("Primitives")

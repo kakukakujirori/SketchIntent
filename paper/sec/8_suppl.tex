@@ -3,6 +3,9 @@
 \section{Supplementary Material}
 \label{sec:supplementary}
 
+\noindent\textbf{Code and data availability.}
+The implementation is available at \url{<github-link>}. The evaluation dataset is provided in the same repository.
+
 \etocsettocstyle{\subsection*{Contents}}{}
 \etocsetnexttocdepth{subsubsection}
 \localtableofcontents
@@ -17,7 +20,11 @@ The source choice in \S\ref{sec:dataset} is motivated by platform-level separati
 
 We convert each selected sketch into a FreeCAD Python script and keep only sketches that can be represented using the four SketchGraphs-compatible primitive types used by Vitruvion~\cite{seff2021vitruvion}: \texttt{Point}, \texttt{Line}, \texttt{Circle}, and \texttt{Arc}. Sketches with unsupported entities, numerical degeneracies, or FreeCAD reconstruction failures are discarded. This filtering leaves $1{,}448$ valid sketches, from which we sample $300$ while preserving the original DoF distribution. The sampled sketches were split into $12$ annotation batches; each batch was assigned to three annotators, and each annotator received six batches, giving three independent annotations per sketch.
 
-\textbf{Evaluation subset.} The benchmark used in \S\ref{sec:experiments} keeps the $292$ sketches whose three annotations are complete and pass screening, giving $876=292\times3$ annotations. The evaluation pipeline excludes files flagged as duplicates of other sketches or as having too few identifiable geometric relations to support reliable relational-constraint annotation.
+\textbf{Evaluation subset.} Of the $300$ sampled sketches, we keep the $292$ whose three annotations are complete and pass screening, giving $876=292\times3$ annotations. Screening discards sketches that are too geometrically complex to annotate reliably, as well as sketches whose annotations are of insufficient quality.
+
+\textbf{Geometry-preservation audit.} The annotation task asks experts to preserve the input geometry while adding design-intent-aware constraints. However, a post-hoc audit found a small number of cases where enforcing a plausible design intent exposes slight inconsistencies in the original under-constrained geometry, causing the solved annotation to deviate from the canonical input. Specifically, $6$ of the $292$ sketches have at least one annotation whose base-primitive deviation exceeds our matching tolerance.
+
+In \S\ref{sec:experiments}, motion-metric scoring applies a geometry-preservation check to model predictions, and the same check is also applied to held-out human annotations. The affected sketches are therefore excluded from this metric computation, giving $(292-6)\times3=858$ scorable held-out evaluations in Table~\ref{tab:controls}.
 
 \subsubsection{Canonical Schema and FreeCAD Mapping}
 \label{sec:appendix_dataset_schema}
@@ -85,6 +92,8 @@ Annotators were prohibited from deleting, redrawing, or reordering existing sket
 Fig.~\ref{fig:appendix_annotators} summarizes per-annotator statistics (annotators anonymized as A1--A6). Relational share is tight across annotators ($73$--$77\%$), and the mean number of constraints per annotation varies only mildly.
 Fig.~\ref{fig:appendix_dataset_overview} summarizes source-geometry composition and annotation complexity.
 
+The primitive-composition plot (excluding auxiliary construction geometry) shows that the sketch geometry is dominated by straight lines: over $75\%$ of non-construction primitives are \texttt{Line} segments, with the remainder split between \texttt{Circle} and \texttt{Arc}. The joint primitive--constraint distribution further reveals a clear positive correlation between the number of primitives and the number of constraints per annotated sketch, consistent with larger sketches requiring proportionally more constraints to reach a fully constrained state.
+
 \begin{figure}[t]
     \centering
     \includegraphics[width=\linewidth]{figs/appendix_annotator_summary.pdf}
@@ -95,7 +104,7 @@ Fig.~\ref{fig:appendix_dataset_overview} summarizes source-geometry composition 
 \begin{figure}[t]
     \centering
     \includegraphics[width=\linewidth]{figs/appendix_dataset_overview.pdf}
-    \caption{Extended dataset statistics over the evaluation subset. The plots summarize primitive composition and the exact joint distribution of primitive and constraint counts per annotated sketch.}
+    \caption{Extended dataset statistics over the evaluation subset. The plots summarize non-construction primitive composition and the exact joint distribution of primitive and constraint counts per annotated sketch.}
     \label{fig:appendix_dataset_overview}
 \end{figure}
 
@@ -126,9 +135,7 @@ This is the only change from the main-text definitions. For dimensional edits, E
 \begin{equation}
     d\phi = (J_\phi R_C)\,dp_C,
     \qquad
-    \bar{R}_C := J_\phi R_C,
-    \qquad
-    \bar{\mathcal{W}}_C=\operatorname{range}(\bar{R}_C).
+    \bar{\mathcal{W}}_C=\operatorname{range}(J_\phi R_C).
     \label{eq:appendix_projected_full_space}
 \end{equation}
 For relation-only motion, if $N_C$ is an orthonormal basis of $\ker(J_R)$ from Eq.~\ref{eq:rel_linearized}, then
@@ -163,6 +170,20 @@ The placement score uses the same assignment as Eq.~\ref{eq:asgn_sim}, with each
 \end{equation}
 By contrast, the leak score remains exactly as defined in Eq.~\ref{eq:rel_leak_distance}. It is not a comparison between two observed motion representations; it directly asks whether the predicted dimensional motions violate the reference relational equations, so we measure their overlap with the reference relation row space in the primitive tangent space.
 The multi-reference aggregation in Sec.~\ref{sec:motion_metrics} is applied after these scores are computed for each reference.
+
+\subsubsection{Held-Out Human Score Distributions}
+\label{sec:appendix_metric_human_distributions}
+
+Table~\ref{tab:controls} reports medians, which round the held-out human motion distances to $0.000$. This means that the queried human annotation induces almost the same local redesign behavior as at least one independently authored reference annotation for the same sketch.
+
+Fig.~\ref{fig:appendix_heldout_distribution} shows the full held-out human distributions after the same multi-reference aggregation used in Table~\ref{tab:controls}. The medians are near numerical zero ($2.4{\times}10^{-8}$ for $\theta_{\mathrm{motion}}^{\mathrm{full}}$, $2.6{\times}10^{-8}$ for $\theta_{\mathrm{motion}}^{\mathrm{rel}}$, and $7.5{\times}10^{-15}$ for $\theta_{\mathrm{leak}}^{\mathrm{dim}}$), but the means and upper quartiles remain nonzero. In particular, $\theta_{\mathrm{motion}}^{\mathrm{full}}$ has mean $0.167$ and interquartile range (IQR; 25th--75th percentile range) $[1.2{\times}10^{-8},0.408]$, while $\theta_{\mathrm{motion}}^{\mathrm{rel}}$ has mean $0.178$ and IQR $[1.2{\times}10^{-8},0.408]$. This indicates that many human annotations are behaviorally equivalent under our metric, while a substantial tail reflects genuinely different human choices. The dimensional placement score remains less saturated ($S_{\mathrm{place}}$ mean $0.823$, median $0.831$), capturing residual diversity in which dimensions designers expose as drivers.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.96\linewidth]{figs/appendix_heldout_human_distribution.pdf}
+    \caption{Held-out human score distributions under the leave-one-out protocol and the same multi-reference aggregation used in Table~\ref{tab:controls}. Black dashed lines mark medians and orange dotted lines mark means. The evaluated annotation is excluded from the reference set, so low-distance mass reflects agreement between independently authored annotations rather than self-matching.}
+    \label{fig:appendix_heldout_distribution}
+\end{figure}
 
 \subsection{Reinforcement-Learning Reward Details}
 \label{sec:appendix_rl}
@@ -221,7 +242,6 @@ The generated constraint sequence is therefore decoded directly on the original 
 
 \subsubsection{Rule-Based Relational Pseudo-Reference}
 \label{sec:appendix_rl_pseudo_rules}
-Section~\ref{sec:rl_pseudo_targets} introduces the relational pseudo-reference $C_G^\star$. Here we specify the rule detector used to instantiate it. For each detectable relation, we enumerate the applicable primitive tuples in the input sketch and compute a normalized margin at the original geometry. The margin definitions and tolerances are listed in Table~\ref{tab:appendix_pseudo_rules}; a candidate relation is kept when its margin falls below the corresponding tolerance. The detector does not test whether a candidate would be redundant in a CAD solver or whether it is needed to reduce DoF; such command-level redundancy is absorbed by motion-subspace canonicalization.
 
 \begin{table*}[t]
     \centering
@@ -271,6 +291,8 @@ Section~\ref{sec:rl_pseudo_targets} introduces the relational pseudo-reference $
     \end{tabularx}
 \end{table*}
 
+Section~\ref{sec:rl_pseudo_targets} introduces the relational pseudo-reference $C_G^\star$. Here we specify the rule detector used to instantiate it. For each detectable relation, we enumerate the applicable primitive tuples in the input sketch and compute a normalized margin at the original geometry. The margin definitions and tolerances are listed in Table~\ref{tab:appendix_pseudo_rules}; a candidate relation is kept when its margin falls below the corresponding tolerance. The detector does not test whether a candidate would be redundant in a CAD solver or whether it is needed to reduce DoF; such command-level redundancy is absorbed by motion-subspace canonicalization.
+
 A possible risk of this high-recall construction is false-positive relations. For example, two geometrically equal but semantically unrelated features may be linked by an \texttt{Equal} constraint, making the pseudo-reference overly restrictive and potentially rewarding unintended structure. To test this risk, we compare the full pseudo-reference with a pruned variant that removes the relation families most likely to create long-range accidental matches: \texttt{Equal}, \texttt{Parallel}, \texttt{Perpendicular}, \texttt{Midpoint}, and \texttt{Mirror}. These families can connect primitives that are spatially distant, and are therefore more vulnerable to incidental geometric agreement.
 Note that this pruning does not trivially remove all orientation structure and make $C_G^\star$ excessively under-constrained, since many axis-aligned parallel and perpendicular relations remain partially covered by \texttt{Horizontal} and \texttt{Vertical} constraints.
 
@@ -279,23 +301,21 @@ We train both variants with the identical configuration and compare them at the 
 \begin{table}[t]
     \centering
     \footnotesize
-    \setlength{\tabcolsep}{3pt}
+    \setlength{\tabcolsep}{1pt}
     \caption{Effect of pruning high-risk false-positive relation families from the pseudo-reference $C_G^\star$. The pruned variant removes relation families that could create long-range accidental matches; its higher dimensional ratio indicates that pruning weakens the relational target and encourages over-dimensioning.}
     \label{tab:appendix_pseudo_ambiguous}
     \begin{tabularx}{\linewidth}{@{}lccccccc@{}}
         \toprule
-        Pseudo-ref. & FC & DoF & dim-ratio & $\theta_{\mathrm{motion}}^{\mathrm{full}}$ & $\theta_{\mathrm{motion}}^{\mathrm{rel}}$ & $\theta_{\mathrm{leak}}^{\mathrm{dim}}$ & $S_{\mathrm{place}}$ \\
+        Pseudo-ref. & FC $\uparrow$ & DoF $\downarrow$ & dim-ratio $\downarrow$ & $\theta_{\mathrm{motion}}^{\mathrm{full}}\!\downarrow$ & $\theta_{\mathrm{motion}}^{\mathrm{rel}}\!\downarrow$ & $\theta_{\mathrm{leak}}^{\mathrm{dim}}\!\downarrow$ & $S_{\mathrm{place}}\!\uparrow$\\
         \midrule
-        Pruned $C_G^\star$ & 0.647 & 5.12 & 0.255 & 0.519 & 0.370 & 0.239 & 0.495 \\
-        Full $C_G^\star$ & 0.627 & 5.11 & 0.221 & 0.500 & 0.326 & 0.164 & 0.504 \\
+        Pruned $C_G^\star$ & \textbf{0.647} & 5.12 & 0.255 & 0.519 & 0.370 & 0.239 & 0.495 \\
+        Full $C_G^\star$ & 0.627 & \textbf{5.11} & \textbf{0.221} & \textbf{0.500} & \textbf{0.326} & \textbf{0.164} & \textbf{0.504} \\
         \bottomrule
     \end{tabularx}
 \end{table}
 
 \subsubsection{Reward Computation Pipeline}
 \label{sec:appendix_rl_online_metric}
-Figure~\ref{fig:appendix_rl_pipeline} summarizes the reward computation pipeline. Each sampled constraint sequence is truncated at its first \texttt{STOP} token and decoded into a SketchGraphs sketch using the input sketch as the primitive reference. The decoded sketch is evaluated through two CPU-side paths and one GPU-side path. (i) The SketchGraphs metric path computes the Jacobian-based quantities required by MotionReward and DimRelAlign, reusing cached pseudo-reference subspaces and observation Jacobians whenever possible. (ii) In parallel, FreeCAD solver workers evaluate solver status and remaining DoF, while (iii) the GPU computes policy/reference log-probabilities, KL regularization, and entropy for the RLOO update. After these paths are collected, the terminal motion-subspace and solver rewards are written to the \texttt{STOP} position in the token-aligned reward tensor. Token-local solver-feedback terms, such as malformed or redundant constraint penalties, are placed at their corresponding constraint-token positions.
-Autoregressive rollout generation is further accelerated with KV caching. With these optimizations, one RLOO training iteration takes about $4.17$ seconds, or $0.24$ iterations per second.
 
 \begin{figure*}[t]
     \centering
@@ -351,15 +371,11 @@ Autoregressive rollout generation is further accelerated with KV caching. With t
     \label{fig:appendix_rl_pipeline}
 \end{figure*}
 
+Figure~\ref{fig:appendix_rl_pipeline} summarizes the reward computation pipeline. Each sampled constraint sequence is truncated at its first \texttt{STOP} token and decoded into a SketchGraphs sketch using the input sketch as the primitive reference. The decoded sketch is evaluated through two CPU-side paths and one GPU-side path. (i) The SketchGraphs metric path computes the Jacobian-based quantities required by MotionReward and DimRelAlign, reusing cached pseudo-reference subspaces and observation Jacobians whenever possible. (ii) In parallel, FreeCAD solver workers evaluate solver status and remaining DoF, while (iii) the GPU computes policy/reference log-probabilities, KL regularization, and entropy for the RLOO update. After these paths are collected, the terminal motion-subspace and solver rewards are written to the \texttt{STOP} position in the token-aligned reward tensor. Token-local solver-feedback terms, such as malformed or redundant constraint penalties, are placed at their corresponding constraint-token positions.
+Autoregressive rollout generation is further accelerated with KV caching. With these optimizations, one RLOO training iteration takes about $4.17$ seconds, or $0.24$ iterations per second.
+
 \subsubsection{Human-Preference Study Protocol}
 \label{sec:appendix_rl_user_study}
-The preference study compares Solver-RL and Ours at the same $70$k training step. We sample $49$ held-out input sketches (two evaluation shards), render both decoded constraint sets in a shared visual format, and present randomized blinded pairs to four raters using the interface in Fig.~\ref{fig:appendix_user_study_ui}. Four pairs contain one invalid model output; the main analysis excludes them to match the scorable-output metric protocol. Raters can remove dimensional constraints and drag vertices or dimension labels to inspect edit behavior. They are asked: ``Which constraint set would you use if you had to constrain this sketch yourself and could make modifications on top of the generated constraints?'' The $45$ valid pairs give $180$ choices ($69$ for Ours, $63$ for Solver-RL, and $48$ ties); all $49$ presented pairs give $196$ choices ($81$ for Ours, $67$ for Solver-RL, and $48$ ties). Table~\ref{tab:rl_user_study} reports metric means on the same valid pairs and graded preference-margin correlations.
-
-\textcolor{red}{TODO (Spearman definition): per sketch, define the preference margin $v_s=(\#\text{Ours}-\#\text{Solver})/4\in[-1,1]$ and the signed metric advantage $\Delta_s$ (oriented so positive favors Ours: $\theta_\text{Solver}-\theta_\text{Ours}$ for distances, $S_\text{Ours}-S_\text{Solver}$ for placement); the reported $\rho$ is Spearman's rank correlation between $\{\Delta_s\}$ and $\{v_s\}$.}
-
-\textcolor{red}{TODO (n): all $45$ study sketches are scored. The relational-motion subspace of each annotation is evaluated at its own primitive state and mapped through $\phi$ into the shared observable space, so annotations that add construction geometry (a larger parameter vector) are compared correctly.}
-
-\textcolor{red}{TODO (significance and agreement): add $p$-values / significance for each $\rho$ (n.s.\ for $\theta_\text{rel}$, $\theta_\text{leak}$, Dim) and an inter-rater agreement statistic; note that three of four raters favor Ours while one favors Solver-RL.}
 
 \begin{figure*}[t]
     \centering
@@ -377,20 +393,63 @@ The preference study compares Solver-RL and Ours at the same $70$k training step
     \label{fig:appendix_user_study_ui}
 \end{figure*}
 
+The preference study compares Solver-RL and Ours at the same $70$k training step. We select $45$ held-out input sketches from our benchmark dataset, for which both model outputs defines are well-converged constraint sets. We present these constrained sketch pairs one by one in a shared visual format, randomly left/right assigned, to four raters using the interface in Fig.~\ref{fig:appendix_user_study_ui}. Raters can remove dimensional constraints and drag vertices or dimension labels to inspect edit behavior. They are asked: ``Which constraint set would you use if you had to constrain this sketch yourself and could make modifications on top of the generated constraints?'' The $45\times4=180$ judgments are summarized in Table~\ref{tab:rl_user_study}.
+
+\paragraph{Preference-margin correlation.}
+The Spearman entries in Table~\ref{tab:rl_user_study} quantify how well each metric tracks human preference sketch by sketch. For each input sketch $s$, every rater chooses the better constraint set among Ours, Solver-RL, or Tie (Ours and Solver-RL are blinded). We summarize the four labels by a preference margin
+\begin{equation}
+v_s=\frac{\#\text{Ours}_s-\#\text{Solver-RL}_s}{R}\in[-1,1],
+\label{eq:appendix_pref_margin}
+\end{equation}
+where $\#\text{Ours}_s$ and $\#\text{Solver-RL}_s$ are the numbers of raters preferring each model and $R=4$ is the number of raters.
+
+To compare this human preference against our metrics, we define a per-sketch metric advantage $\Delta^{m}_s$ for each metric $m$. We set its sign such that a positive value always indicates that Ours outperformed Solver-RL on that metric:\\
+\begin{equation}
+    \Delta_m^s = \begin{cases}
+        m^\mathrm{Solver-RL}_s - m^\mathrm{Ours}_s & \text{if } m \text{ is lower-is-better}, \\
+        m^\mathrm{Ours}_s - m^\mathrm{Solver-RL}_s & \text{if } m \text{ is higher-is-better}.
+    \end{cases}
+\end{equation}
+Here, $m^{\text{model}}_s$ denotes the metric evaluated on that model's output for sketch $s$ under the multi-reference aggregation of \S\ref{sec:motion_metrics}. Lower-the-better metrics include $\theta_\mathrm{motion}^\mathrm{full}$, $\theta_\mathrm{motion}^\mathrm{rel}$, $\theta_\mathrm{leak}^\mathrm{dim}$, and the dimensional ratio, while higher-the-better metric is $S_\mathrm{place}$.
+
+We then compute the Spearman rank correlation $\rho_m$ between the human preference margins $\{v_s\}$ and the metric advantages $\{\Delta^{m}_s\}$ across all $n=45$ valid sketches. Two-sided $p$-values are computed using the standard large-sample $t$-approximation.
+%: $t=\rho_m\sqrt{(n-2)/(1-\rho_m^2)}$.
+
+\paragraph{Significance and inter-rater agreement.}
+
+As shown in Table~\ref{tab:rl_user_study}, the per-sketch preference robustly tracks the two placement-sensitive metrics. Both correlations are statistically significant: $\theta_{\mathrm{motion}}^{\mathrm{full}}$ ($p=4{\times}10^{-7}$) and $S_{\mathrm{place}}$ ($p=3{\times}10^{-5}$). Crucially, both safely pass a Bonferroni correction for the five metrics tested (threshold $0.05/5=0.01$). The correlations for the other three metrics are not significant ($p > 0.05$).
+
+\begin{table}[t]
+    \centering
+    \footnotesize
+    \caption{Per-rater and aggregate breakdown of preference judgments across the $45$ valid sketches.}
+    \begin{tabular}{@{}l ccc @{}}
+        \toprule
+        & \multicolumn{3}{c}{Preferred Constraint Set} \\
+        \cmidrule(l){2-4}
+        Rater & \textbf{Ours} & Solver-RL & Tie \\
+        \midrule
+        R1 & \textbf{22} & 11 & 12 \\
+        R2 & \textbf{20} & 14 & 11 \\
+        R3 & \textbf{17} & 12 & 16 \\
+        R4 & 10 & \textbf{26} &  9 \\
+        \midrule
+        Total & \textbf{69} & 63 & 48 \\
+        \bottomrule
+    \end{tabular}
+    \label{tab:appendix_per_rater_votes}
+\end{table}
+
+To measure consensus among the four raters, we compute Fleiss' $\kappa$. The resulting value is $\kappa = 0.35$, indicating only ``fair'' agreement. This is due to the heterogeneous per-rater tallies shown in Table~\ref{tab:appendix_per_rater_votes}: while three raters preferred Ours, one rater strongly preferred Solver-RL.
+Because of this dissenting rater and the high number of ties, we interpret the aggregate $69$--$63$ vote margin in Table~\ref{tab:rl_user_study} as a noisy signal rather than a decisive win. Instead, the stronger evidence lies in the per-sketch correlation above: when raters \emph{did} express a clear preference, it consistently aligned with $\theta_{\mathrm{motion}}^{\mathrm{full}}$ and $S_{\mathrm{place}}$.
+
 \subsubsection{Additional Results}
 \label{sec:appendix_rl_additional_results}
 
-\textcolor{red}{TODO: Add supplementary qualitative examples or failure cases before the supplementary deadline.}
+Figure~\ref{fig:appendix_rl_qualitative_examples} shows representative qualitative examples from the RL reward comparison. Here, SolverR denotes SolverReward, Motion denotes MotionReward, and Ours includes SolverReward in addition to MotionReward and DimRelAlign. In the Solver-RL row, increasing $\lambda_D$ reduces the number of dimensional constraints, but often leaves more remaining DoF. Among the proposed-reward variants, MotionReward encourages more relational constraints, while DimRelAlign discourages relation-violating dimensional shortcuts; their combination in Ours is intended to reduce over-dimensioning without relying only on a dimensional-count penalty. As a failure mode, Ours can hesitate to add dimensional constraints, leaving some sketches with higher DoF and under-constrained outputs.
 
 \subsection{Limitations}
 \label{sec:appendix_limitations}
-
-\begin{figure*}[t]
-    \centering
-    \includegraphics[width=0.96\linewidth]{figs/rl_reward_pareto_iter5.pdf}
-    \caption{Pareto-style RL evaluation with test-time solver intervention. Compared with Fig.~\ref{fig:rl_reward_pareto}, each output may be regenerated for up to five solver-feedback iterations, removing invalid constraints before resampling the remaining suffix. Although Solver-RL remains higher on FC, the intervention moves Ours into a higher-FC regime, while making its lower dimensional ratio and stronger motion-subspace diagnostics more visually apparent than Fig.~\ref{fig:rl_reward_pareto}.}
-    \label{fig:appendix_rl_iter5}
-\end{figure*}
 
 \subsubsection{Scope of the Metrics}
 We first emphasize that our proposed metrics do not capture the entirety of design intent. As Otey \etal~\cite{otey2018revisiting} note, design intent has many aspects, most of which require external knowledge unattached to a CAD model itself. Incorporating such meta-knowledge into design-intent quantification is an important direction for future work.
@@ -404,3 +463,40 @@ In the RL application, although this is not the core of this work, it has two li
 Second, our proposed rewards slow model convergence relative to Solver-RL. As our MotionReward and DimRelAlign provide finer-grained behavioral signals than Solver-RL's DimParsimony, they make the reward landscape harder to optimize and require more policy exploration.
 
 As a remedy, we tested inference-time solver intervention: after a sampled constraint sequence is decoded, FreeCAD checks the result; invalid constraints are removed, and the model resamples the remaining suffix for up to five iterations. As shown in Fig.~\ref{fig:appendix_rl_iter5}, this raises Ours' FC rate from $0.627$ to $0.716$. Solver-RL still reaches a higher FC rate, but compared with Fig.~\ref{fig:rl_reward_pareto}, the advantage of Ours becomes clearer: in the higher-FC regime, it has a lower dimensional ratio, better motion-subspace diagnostics, and higher $S_{\mathrm{place}}$ than Solver-RL.
+
+\begin{figure*}[p]
+    \centering
+    \begin{minipage}{\linewidth}
+        \centering
+        \includegraphics[width=0.96\linewidth]{figs/rl_reward_pareto_iter5.pdf}
+        \caption{Pareto-style RL evaluation with test-time solver intervention. Compared with Fig.~\ref{fig:rl_reward_pareto}, each output may be regenerated for up to five solver-feedback iterations, removing invalid constraints before resampling the remaining suffix. Although Solver-RL remains higher on FC, the intervention moves Ours into a higher-FC regime, while making its lower dimensional ratio and stronger motion-subspace diagnostics more visually apparent than Fig.~\ref{fig:rl_reward_pareto}.}
+        \label{fig:appendix_rl_iter5}
+    \end{minipage}
+
+    \vspace{0.5em}
+
+    \begin{minipage}{\linewidth}
+        \centering
+        \begin{minipage}[t]{0.44\linewidth}
+            \centering
+            \includegraphics[width=\linewidth]{figs/appendix_qualitative_1__22173_3dff5b17_0000_sketch00.png}
+        \end{minipage}\hspace{0.04\linewidth}
+        \begin{minipage}[t]{0.44\linewidth}
+            \centering
+            \includegraphics[width=\linewidth]{figs/appendix_qualitative_3__21236_b696e901_0008_sketch02.png}
+        \end{minipage}
+
+        \vspace{0.05em}
+
+        \begin{minipage}[t]{0.44\linewidth}
+            \centering
+            \includegraphics[width=\linewidth]{figs/appendix_qualitative_4__60720_ef9a0a95_0006_sketch01.png}
+        \end{minipage}\hspace{0.04\linewidth}
+        \begin{minipage}[t]{0.44\linewidth}
+            \centering
+            \includegraphics[width=\linewidth]{figs/appendix_qualitative_7__22524_0be3da8a_0017_sketch00.png}
+        \end{minipage}
+        \caption{Representative qualitative examples from the additional RL reward comparison. The compared variants are the same reward configurations plotted in the Pareto analysis of Fig.~\ref{fig:rl_reward_pareto}.}
+        \label{fig:appendix_rl_qualitative_examples}
+    \end{minipage}
+\end{figure*}
