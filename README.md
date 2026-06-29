@@ -8,9 +8,10 @@ Design intent has long been central to CAD because it enables parametric models 
 We first need to build our custom FreeCAD for the CAD solver feedback in reinforcement learning (RL):
 
 ```bash
-git clone https://github.com/kakukakujirori/FreeCAD.git
+git clone https://github.com/FreeCAD/FreeCAD.git
 cd FreeCAD
-git checkout -b solver-api origin/solver-api
+git checkout 1.0.2
+git apply ../patches/freecad-1.0.2-get-solver-status.patch
 git submodule update --init --recursive
 ```
 

@@ -1,0 +1,255 @@
+diff --git a/src/Mod/Sketcher/App/Sketch.cpp b/src/Mod/Sketcher/App/Sketch.cpp
+index a12383efe2..c9414b267e 100644
+--- a/src/Mod/Sketcher/App/Sketch.cpp
++++ b/src/Mod/Sketcher/App/Sketch.cpp
+@@ -142,6 +142,7 @@ void Sketch::clear()
+     Conflicting.clear();
+     Redundant.clear();
+     PartiallyRedundant.clear();
++    ConflictingGroups.clear();
+     MalformedConstraints.clear();
+ }
+ 
+@@ -335,6 +336,7 @@ int Sketch::setUpSketch(const std::vector<Part::Geometry*>& GeoList,
+     GCSsys.getRedundant(Redundant);
+     GCSsys.getPartiallyRedundant(PartiallyRedundant);
+     GCSsys.getDependentParams(pDependentParametersList);
++    GCSsys.getPotentialConflictGroups(ConflictingGroups);
+ 
+     calculateDependentParametersElements();
+ 
+@@ -645,6 +647,7 @@ int Sketch::resetSolver()
+     GCSsys.getRedundant(Redundant);
+     GCSsys.getPartiallyRedundant(PartiallyRedundant);
+     GCSsys.getDependentParams(pDependentParametersList);
++    GCSsys.getPotentialConflictGroups(ConflictingGroups);
+ 
+     calculateDependentParametersElements();
+ 
+diff --git a/src/Mod/Sketcher/App/Sketch.h b/src/Mod/Sketcher/App/Sketch.h
+index 0ffff0ed26..d0097bd8d0 100644
+--- a/src/Mod/Sketcher/App/Sketch.h
++++ b/src/Mod/Sketcher/App/Sketch.h
+@@ -131,12 +131,6 @@ public:
+     {
+         return PartiallyRedundant;
+     }
+-
+-    inline float getSolveTime() const
+-    {
+-        return SolveTime;
+-    }
+-
+     inline bool hasMalformedConstraints() const
+     {
+         return !MalformedConstraints.empty();
+@@ -145,6 +139,15 @@ public:
+     {
+         return MalformedConstraints;
+     }
++    inline const std::vector<std::vector<int>>& getConflictingGroups() const
++    {
++        return ConflictingGroups;
++    }
++
++    inline float getSolveTime() const
++    {
++        return SolveTime;
++    }
+ 
+ public:
+     std::set<std::pair<int, Sketcher::PointPos>> getDependencyGroup(int geoId, PointPos pos) const;
+@@ -573,6 +576,7 @@ private:
+     std::vector<int> Conflicting;
+     std::vector<int> Redundant;
+     std::vector<int> PartiallyRedundant;
++    std::vector<std::vector<int>> ConflictingGroups;
+     std::vector<int> MalformedConstraints;
+ 
+     std::vector<double*> pDependentParametersList;
+diff --git a/src/Mod/Sketcher/App/SketchObject.cpp b/src/Mod/Sketcher/App/SketchObject.cpp
+index 2518eb21f0..35a662355d 100644
+--- a/src/Mod/Sketcher/App/SketchObject.cpp
++++ b/src/Mod/Sketcher/App/SketchObject.cpp
+@@ -491,6 +491,7 @@ void SketchObject::retrieveSolverDiagnostics()
+     lastConflicting = solvedSketch.getConflicting();
+     lastRedundant = solvedSketch.getRedundant();
+     lastPartiallyRedundant = solvedSketch.getPartiallyRedundant();
++    lastConflictingGroups = solvedSketch.getConflictingGroups();
+     lastMalformedConstraints = solvedSketch.getMalformedConstraints();
+ }
+ 
+diff --git a/src/Mod/Sketcher/App/SketchObject.h b/src/Mod/Sketcher/App/SketchObject.h
+index dd32a9a936..1ebee19afe 100644
+--- a/src/Mod/Sketcher/App/SketchObject.h
++++ b/src/Mod/Sketcher/App/SketchObject.h
+@@ -619,6 +619,11 @@ public:
+     {
+         return lastMalformedConstraints;
+     }
++    /// gets the conflicting groups of last solver execution
++    inline const std::vector<std::vector<int>>& getLastConflictingGroups() const
++    {
++        return lastConflictingGroups;
++    }
+ 
+ public: /* Solver exposed interface */
+     /// gets the solved sketch as a reference
+@@ -949,8 +954,8 @@ private:
+     std::vector<int> lastConflicting;
+     std::vector<int> lastRedundant;
+     std::vector<int> lastPartiallyRedundant;
++    std::vector<std::vector<int>> lastConflictingGroups;
+     std::vector<int> lastMalformedConstraints;
+-
+     boost::signals2::scoped_connection constraintsRenamedConn;
+     boost::signals2::scoped_connection constraintsRemovedConn;
+ 
+diff --git a/src/Mod/Sketcher/App/SketchObjectPy.xml b/src/Mod/Sketcher/App/SketchObjectPy.xml
+index 06cdfec6b0..3a4840a484 100644
+--- a/src/Mod/Sketcher/App/SketchObjectPy.xml
++++ b/src/Mod/Sketcher/App/SketchObjectPy.xml
+@@ -31,6 +31,20 @@ solve()
+         </UserDocu>
+       </Documentation>
+     </Methode>
++    <Methode Name="getSolverStatus">
++        <Documentation>
++            <UserDocu>
++Returns a dictionary with the solver status.
++Keys:
++'DoF': Degree of Freedom
++'Status': Solver status ('Converged', 'Failed', 'OverConstrained', 'Conflicting', 'Redundant', 'Malformed')
++'ConflictingConstraints': List of conflicting constraint indices
++'RedundantConstraints': List of redundant constraint indices (auto-suggested for removal)
++'ConflictGroups': List of groups of constraints indices that are conflicting or redundant
++'MalformedConstraints': List of malformed constraint indices (0-indexed)
++            </UserDocu>
++        </Documentation>
++    </Methode>
+     <Methode Name="addGeometry">
+       <Documentation>
+         <UserDocu>
+diff --git a/src/Mod/Sketcher/App/SketchObjectPyImp.cpp b/src/Mod/Sketcher/App/SketchObjectPyImp.cpp
+index 48df945af0..a4bdf8edce 100644
+--- a/src/Mod/Sketcher/App/SketchObjectPyImp.cpp
++++ b/src/Mod/Sketcher/App/SketchObjectPyImp.cpp
+@@ -66,6 +66,68 @@ PyObject* SketchObjectPy::solve(PyObject* args)
+     return Py_BuildValue("i", ret);
+ }
+ 
++PyObject* SketchObjectPy::getSolverStatus(PyObject* args)
++{
++    if (!PyArg_ParseTuple(args, "")) {
++        return nullptr;
++    }
++
++    auto* sketch = this->getSketchObjectPtr();
++    Py::Dict ret;
++
++    ret.setItem("DoF", Py::Long(sketch->getLastDoF()));
++
++    // Status logic matching SketchObject::solve return codes
++    std::string status = "Converged";
++    if (sketch->getLastHasMalformedConstraints()) {
++        status = "Malformed";
++    }
++    else if (sketch->getLastDoF() < 0) {
++        status = "OverConstrained";
++    }
++    else if (sketch->getLastHasConflicts()) {
++        status = "Conflicting";
++    }
++    else if (sketch->getLastHasRedundancies()) {
++        status = "Redundant";
++    }
++    else if (sketch->getLastSolverStatus() != 0) { // GCS::Success == 0
++        status = "Failed";
++    }
++
++    ret.setItem("Status", Py::String(status));
++
++    // ConflictingConstraints
++    Py::List conflicting;
++    const auto& c = sketch->getLastConflicting();
++    for(int idx : c) conflicting.append(Py::Long(idx - 1));
++    ret.setItem("ConflictingConstraints", conflicting);
++
++    // RedundantConstraints (the ones suggested for removal)
++    Py::List redundant;
++    const auto& r = sketch->getLastRedundant();
++    for(int idx : r) redundant.append(Py::Long(idx - 1));
++    ret.setItem("RedundantConstraints", redundant);
++
++    // ConflictGroups (potential conflict/redundant groups)
++    Py::List groups;
++    const auto& g = sketch->getLastConflictingGroups();
++    for(const auto& group : g) {
++        Py::List pyGroup;
++        for(int idx : group) pyGroup.append(Py::Long(idx - 1));
++        groups.append(pyGroup);
++    }
++    ret.setItem("ConflictGroups", groups);
++
++    // MalformedConstraints
++    Py::List malformed;
++    const auto& m = sketch->getLastMalformedConstraints();
++    for(int idx : m) malformed.append(Py::Long(idx - 1));
++    ret.setItem("MalformedConstraints", malformed);
++
++    return Py::new_reference_to(ret);
++}
++
+ PyObject* SketchObjectPy::addGeometry(PyObject* args)
+ {
+     PyObject* pcObj;
+diff --git a/src/Mod/Sketcher/App/planegcs/GCS.cpp b/src/Mod/Sketcher/App/planegcs/GCS.cpp
+index b630489a7c..a767825643 100644
+--- a/src/Mod/Sketcher/App/planegcs/GCS.cpp
++++ b/src/Mod/Sketcher/App/planegcs/GCS.cpp
+@@ -4961,6 +4961,7 @@ int System::diagnose(Algorithm alg)
+     conflictingTags.clear();
+     redundantTags.clear();
+     partiallyRedundantTags.clear();
++    potentialConflictGroups.clear();
+ 
+     // This QR diagnosis uses a reduced Jacobian matrix to calculate the rank of the system
+     // and identify conflicting and redundant constraints.
+@@ -5593,6 +5594,13 @@ void System::identifyConflictingRedundantConstraints(
+         conflictGroups[j - rank].push_back(clist[jacobianconstraintmap.at(origCol)]);
+     }
+ 
++    potentialConflictGroups.resize(conflictGroups.size());
++    for(size_t i = 0; i < conflictGroups.size(); ++i) {
++        for(auto* c : conflictGroups[i]) {
++            potentialConflictGroups[i].push_back(c->getTag());
++        }
++    }
++
+     // Augment the information regarding the group of constraints that are conflicting or redundant.
+     if (debugMode == IterationLevel) {
+         SolverReportingManager::Manager().LogGroupOfConstraints(
+diff --git a/src/Mod/Sketcher/App/planegcs/GCS.h b/src/Mod/Sketcher/App/planegcs/GCS.h
+index 6b0b12da05..fc3e606084 100644
+--- a/src/Mod/Sketcher/App/planegcs/GCS.h
++++ b/src/Mod/Sketcher/App/planegcs/GCS.h
+@@ -136,6 +136,7 @@ private:
+     int dofs;
+     std::set<Constraint*> redundant;
+     VEC_I conflictingTags, redundantTags, partiallyRedundantTags;
++    std::vector<std::vector<int>> potentialConflictGroups;
+ 
+     bool hasUnknowns;   // if plist is filled with the unknown parameters
+     bool hasDiagnosis;  // if dofs, conflictingTags, redundantTags are up to date
+@@ -613,6 +614,11 @@ public:
+         return !(hasDiagnosis && partiallyRedundantTags.empty());
+     }
+ 
++    void getPotentialConflictGroups(std::vector<std::vector<int>>& conflictGroupsOut) const
++    {
++        conflictGroupsOut = hasDiagnosis ? potentialConflictGroups : std::vector<std::vector<int>>(0);
++    }
++
+     void invalidatedDiagnosis();
+ 
+     // Unit testing interface - not intended for use by production code
