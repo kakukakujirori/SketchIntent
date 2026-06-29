@@ -9,10 +9,10 @@ from _bootstrap import bootstrap
 
 bootstrap()
 
-from fusion360_annotation.eda_code.config import data_root
+from src.eval.config import data_root
 from fusion360_annotation.eda_code.dataset_features import extract_features
-from fusion360_annotation.eda_code.manifest import discover_groups
-from fusion360_annotation.eda_code.progress import progress
+from src.eval.manifest import discover_groups
+from src.eval.progress import progress
 
 HERE = Path(__file__).resolve().parents[1]
 

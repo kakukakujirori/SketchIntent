@@ -15,7 +15,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
-from fusion360_annotation.eda_code.config import DIMENSIONAL_DISPLAY_TYPES
+from src.eval.config import DIMENSIONAL_DISPLAY_TYPES
 
 HERE = Path(__file__).resolve().parents[1]
 REL_COLOR = "#2c7fb8"

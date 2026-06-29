@@ -6,9 +6,9 @@ from _bootstrap import bootstrap
 
 bootstrap()
 
-from fusion360_annotation.eda_code.canonical import canonical_dir_for
-from fusion360_annotation.eda_code.config import data_root
-from fusion360_annotation.eda_code.manifest import discover_manifest
+from src.eval.canonical import canonical_dir_for
+from src.eval.config import data_root
+from src.eval.manifest import discover_manifest
 
 
 def main() -> None:

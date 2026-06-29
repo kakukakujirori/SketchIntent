@@ -122,7 +122,7 @@ python src/train.py experiment=rloo_solver_rl_coeff1.0
 python src/train.py experiment=rloo_solver_motion_dimrelalign
 ```
 
-Notes:
+**Notes:**
 
 - The RLOO configs read the rule-augmented pseudo-reference (`data/processed/sg_filtered_unique_augmented.npy`) generated in the [Data](#data) section, so run that step first.
 - Before fine-tuning, set `pretrained_ckpt_path` in the chosen experiment config yaml to the checkpoint produced by pretraining:
@@ -132,7 +132,7 @@ Notes:
 
 ## Inference
 
-`src/test.py` generates a constraint set for each input sketch. `--n_iter 1` is single-shot generation (the honest "pure policy" protocol used in the paper); `--n_iter 5` enables deployed solver-in-the-loop self-correction. The input `--data` can be a `.npy`, a single `.py`, or a directory of `.py` files (FreeCAD `.py` inputs are converted and cleansed automatically).
+`src/test.py` generates a constraint set for each input sketch. The input `--data` can be a `.npy`, a single `.py`, or a directory of `.py` files (FreeCAD `.py` inputs are converted and cleansed automatically).
 
 Run inference over the 12 benchmark batches, writing one output directory per batch:
 
@@ -142,19 +142,21 @@ OUT=model_outputs/my_run
 
 for split in $(seq 0 11); do
   python src/test.py --ckpt "$CKPT" --data data/SketchIntent-292/$split \
-      --n_iter 1 --outdir "$OUT/$split"
+      --outdir "$OUT/$split" --n_iter 1
 done
 ```
 
-Each `$OUT/<split>/` then holds the predicted `<id>.py` files plus a `results.json`
-with per-sketch solver status (DoF, fully-constrained / under-constrained / etc.).
+**Notes:**
+
+- Each `$OUT/<split>/` holds the predicted `<id>.py` files plus a `results.json` with per-sketch solver status (DoF, fully-constrained / under-constrained / etc.).
+- `--n_iter 1` is single-shot generation with no solver feedback (the evaluation protocol used in the paper); `--n_iter 5` runs up to five rounds of solver-in-the-loop self-correction, deleting malformed/conflicting/redundant constraints and rerun the model so it can refine its output.
 
 ## Evaluation
 
-`fusion360_annotation/evaluate.py` scores a model-output directory against the SketchIntent-292 human annotations and reports three metric families: population solver metrics (FC / Under / Distorted rates, DoF), composition / over-dimensioning KPIs (dimensional ratio, relational ratios), and reference-geometry metrics (`motion_full` / `motion_relational` / `leak` angles and `asgn_sim` = S_place) — the last computed against each of the three human references and using the same motion-subspace implementation as the training reward.
+`src/eval/evaluate.py` scores a model-output directory against the SketchIntent-292 human annotations and reports three metric families: population solver metrics (FC / Under / Distorted rates, DoF), composition / over-dimensioning KPIs (dimensional ratio, relational ratios), and reference-geometry metrics (`motion_full` / `motion_relational` / `leak` angles and `asgn_sim` = S_place) — the last computed against each of the three human references and using the same motion-subspace implementation as the training reward.
 
 ```bash
-python fusion360_annotation/evaluate.py "$OUT" data/SketchIntent-292 --json "$OUT/metrics.json"
+python src/eval/evaluate.py "$OUT" data/SketchIntent-292 --json "$OUT/metrics.json"
 ```
 
 ### Reproduce the paper's Pareto study

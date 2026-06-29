@@ -5,7 +5,7 @@ import sys
 from collections.abc import Iterable
 from pathlib import Path
 
-from .config import MODEL_OUTPUT_ROOTS, missing_model_roots
+from src.eval.config import MODEL_OUTPUT_ROOTS, missing_model_roots
 
 MODEL_LABELS = tuple(MODEL_OUTPUT_ROOTS)
 

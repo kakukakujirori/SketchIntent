@@ -12,8 +12,8 @@ from _bootstrap import bootstrap
 bootstrap()
 
 from fusion360_annotation.eda_code.bundle_loader import build_bundle
-from fusion360_annotation.eda_code.manifest import discover_manifest
-from fusion360_annotation.eda_code.progress import progress
+from src.eval.manifest import discover_manifest
+from src.eval.progress import progress
 from src.metrics.edit_response_distance import _is_dimensional, _ref_strings, constraint_signature  # noqa: E402
 from src.sketch_handlers.context import SketchContext  # noqa: E402
 from src.sketch_handlers.sketch_freecad_converter import SketchFreecadConverter  # noqa: E402

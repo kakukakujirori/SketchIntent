@@ -45,7 +45,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-REPO_ROOT = HERE.parent
+REPO_ROOT = HERE.parents[1]  # src/eval/<file> -> repo root
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
@@ -165,16 +165,16 @@ def reference_metrics(pred_dir: Path, *, eps: float, geometry_tol: float,
     """Compare each predicted sketch to its human annotations in the canonical frame."""
     import torch  # noqa: F401  (imported lazily; heavy + only needed here)
 
-    from fusion360_annotation.eda_code.config import BASE_POLICY
-    from fusion360_annotation.eda_code.canonical import canonical_dir_for
-    from fusion360_annotation.eda_code.file_bundle import (
+    from src.eval.config import BASE_POLICY
+    from src.eval.canonical import canonical_dir_for
+    from src.eval.file_bundle import (
         base_policy_pass,
         build_base_eids,
         build_file_bundle,
     )
-    from fusion360_annotation.eda_code.manifest import discover_manifest
-    from fusion360_annotation.eda_code.motion_metrics import placement_sims
-    from fusion360_annotation.eda_code.progress import progress
+    from src.eval.manifest import discover_manifest
+    from src.eval.motion_metrics import placement_sims
+    from src.eval.progress import progress
     from src.metrics.edit_response_distance import (
         compute_native_response,
         pairwise_distance_observable,
@@ -297,7 +297,7 @@ def reference_metrics(pred_dir: Path, *, eps: float, geometry_tol: float,
 
 
 # Module-global so reference_metrics' nested lambda can reach the GT root that
-# main() resolved (also patched into eda_code.config).
+# main() resolved (also patched into src.eval.config).
 _GT_ROOT: str | None = None
 
 
@@ -381,7 +381,7 @@ def main() -> None:
     # module global at call time, so reassigning it reroutes manifest/canonical).
     global _GT_ROOT
     _GT_ROOT = str(args.gt_dir)
-    from fusion360_annotation.eda_code import config as eda_config
+    from src.eval import config as eda_config
     eda_config.DATA_EVAL_ROOT = args.gt_dir.resolve()
 
     solver = solver_metrics(load_results(args.pred_dir))

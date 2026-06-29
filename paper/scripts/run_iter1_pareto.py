@@ -3,7 +3,7 @@
 ONE auditable script. For every variant checkpoint it:
   1. runs single-shot inference  -> src/test.py --n_iter 1 over data/SketchIntent-292/0..11
      into  model_outputs/Vitruvion_<variant>_step_<step>/<split>/
-  2. evaluates                    -> fusion360_annotation/evaluate.py --json
+  2. evaluates                    -> src/eval/evaluate.py --json
      into  artifacts/fiverr_eval/iter1_<variant>_step<step>.json
      (composition incl. per-sketch dump + reference geometry metrics)
   3. draws the Pareto figure (FC vs dimensional-ratio / theta_motion_full / S_place)
@@ -200,7 +200,7 @@ def infer_split(ckpt: str, split: int, outdir: Path) -> None:
 
 
 def evaluate(outdir: Path, json_path: Path) -> None:
-    cmd = [sys.executable, "fusion360_annotation/evaluate.py",
+    cmd = [sys.executable, "src/eval/evaluate.py",
            str(outdir), "data/SketchIntent-292", "--json", str(json_path)]
     env = {**os.environ, "PYTHONPATH": str(REPO)}
     subprocess.run(cmd, cwd=REPO, check=True, env=env,

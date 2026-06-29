@@ -10,9 +10,9 @@ from _bootstrap import bootstrap
 bootstrap()
 
 from fusion360_annotation.eda_code.bundle_loader import build_bundle
-from fusion360_annotation.eda_code.config import BASE_POLICY
+from src.eval.config import BASE_POLICY
 from fusion360_annotation.eda_code.controls import relation_dropout_variant
-from fusion360_annotation.eda_code.file_bundle import (
+from src.eval.file_bundle import (
     base_policy_pass,
     dropout_variant,
     histcad_score,
@@ -20,8 +20,8 @@ from fusion360_annotation.eda_code.file_bundle import (
     stable_seed,
     validate_probes_on_source,
 )
-from fusion360_annotation.eda_code.manifest import discover_manifest
-from fusion360_annotation.eda_code.progress import progress
+from src.eval.manifest import discover_manifest
+from src.eval.progress import progress
 from fusion360_annotation.eda_code.runtime_warnings import (
     validate_model_outputs,
     warn_missing_model_roots,

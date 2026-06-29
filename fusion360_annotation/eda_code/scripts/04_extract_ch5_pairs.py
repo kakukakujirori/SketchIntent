@@ -11,11 +11,11 @@ from _bootstrap import bootstrap
 bootstrap()
 
 from fusion360_annotation.eda_code.bundle_loader import build_bundle
-from fusion360_annotation.eda_code.canonical import metric_base_eids
-from fusion360_annotation.eda_code.config import BASE_POLICY
+from src.eval.canonical import metric_base_eids
+from src.eval.config import BASE_POLICY
 from fusion360_annotation.eda_code.dataset_features import display_type
-from fusion360_annotation.eda_code.manifest import discover_groups
-from fusion360_annotation.eda_code.progress import progress
+from src.eval.manifest import discover_groups
+from src.eval.progress import progress
 from fusion360_annotation.eda_code.metrics_v4 import V4Hyperparams, compute_metrics_v4  # noqa: E402
 from src.metrics.constraint_token_f1 import pair_f1  # noqa: E402
 from src.metrics.edit_response_distance import _is_relational, collect_probes, constraint_signature  # noqa: E402

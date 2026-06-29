@@ -3,9 +3,9 @@ from __future__ import annotations
 
 import sys
 
-from .canonical import canonical_dir_for
-from .config import REPO_ROOT, data_root, model_specs
-from .file_bundle import build_file_bundle
+from src.eval.canonical import canonical_dir_for
+from src.eval.config import REPO_ROOT, data_root, model_specs
+from src.eval.file_bundle import build_file_bundle
 
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))

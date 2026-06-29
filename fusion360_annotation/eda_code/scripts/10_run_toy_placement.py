@@ -8,7 +8,7 @@ bootstrap()
 
 import torch
 
-from fusion360_annotation.eda_code.motion_metrics import placement_sims
+from src.eval.motion_metrics import placement_sims
 
 torch.set_default_dtype(torch.float64)
 
