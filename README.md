@@ -139,7 +139,7 @@ Run inference over the 12 benchmark batches, writing one output directory per ba
 
 ```bash
 CKPT=logs/train/runs/<timestamp>/checkpoints/<checkpoint>.ckpt
-OUT=model_outputs/my_run
+OUT=model_outputs/<my_run_name>
 
 for split in $(seq 0 11); do
   python src/test.py --ckpt "$CKPT" --data data/SketchIntent-292/$split \
@@ -154,38 +154,23 @@ done
 
 ## Evaluation
 
-`src/eval/evaluate.py` scores a model-output directory against the SketchIntent-292 human annotations and reports three metric families: population solver metrics (FC / Under / Distorted rates, DoF), composition / over-dimensioning KPIs (dimensional ratio, relational ratios), and reference-geometry metrics (`motion_full` / `motion_relational` / `leak` angles and `asgn_sim` = S_place) — the last computed against each of the three human references and using the same motion-subspace implementation as the training reward.
+`src/eval/evaluate.py` scores a model-output directory against the SketchIntent-292 human annotations and reports three metric families: population solver metrics (FC / Under / Distorted rates, DoF), composition / over-dimensioning KPIs (dimensional ratio, relational ratios), and reference-geometry metrics (`motion_full` / `motion_relational` / `leak` angles and `asgn_sim` = S_place).
 
 ```bash
 python src/eval/evaluate.py "$OUT" data/SketchIntent-292 --json "$OUT/metrics.json"
 ```
 
-### Reproduce the paper's Pareto study
-
-[`paper/scripts/run_iter1_pareto.py`](paper/scripts/run_iter1_pareto.py) wraps the two commands above for every variant checkpoint and draws the FC-vs-metric Pareto figure. It is the single auditable entry point for the Sec. 6 RL-reward study (the loop above is exactly its `infer_split` + `evaluate` steps unpacked):
-
-```bash
-conda run -n freecad python paper/scripts/run_iter1_pareto.py             # single-shot (n_iter=1)
-conda run -n freecad python paper/scripts/run_iter1_pareto.py --iter 5    # deployed solver-in-the-loop
-conda run -n freecad python paper/scripts/run_iter1_pareto.py --plot-only # redraw figure only
-```
-
 ## Visualization
 
-Both viewers render the **real FreeCAD Sketcher geometry** of a prediction (not a schematic), so run them with the `freecad` environment.
+The generated python scripts can be loaded directly by FreeCAD GUI, by pasting them into its Python console.
 
-- **Side-by-side interactive viewer** — compare two runs (and the human GT) sketch by
-  sketch in a browser; drag a vertex to watch an under-constrained sketch deform along its remaining degrees of freedom:
-  ```bash
-  python fusion360_annotation/compare.py model_outputs/run_a model_outputs/run_b
-  ```
+To make the comparison of different model outputs easier, we provide a **Side-by-side interactive viewer**. It also displays the human-annotated references. You can also drag a vertex to watch an under-constrained sketch deform along its remaining degrees of freedom:
+```bash
+python src/eval/viz/compare.py model_outputs/run_a model_outputs/run_b
+```
 
-- **Batch qualitative grids** — tile each sketch's predictions across variants next to
-  the three human references into one labeled PNG (used for the appendix figure pool):
-  ```bash
-  conda run -n freecad python fusion360_annotation/qualitative_grid.py --workers 3
-  ```
+**Note:** It boots a headless FreeCAD GUI under `xvfb`, so it is **Linux-only**.
 
-## Pretrained Weights
+### Pretrained Weights
 
-Pretrained and RLOO-fine-tuned checkpoints: **TODO: add download link**. Place a checkpoint anywhere and pass it via `--ckpt` (inference) or the experiment config (fine-tuning).
+Reproducing the paper's evaluation does not require any checkpoint: the [Evaluation](#evaluation) and [Visualization](#visualization) tools score the provided model predictions (`model_outputs/`) against SketchIntent-292 directly. Pretrained and RLOO-fine-tuned checkpoints are needed only to run [Inference](#inference) from scratch or to continue [Training](#training), and will be released on publication. Once available, place a checkpoint anywhere and pass it via `--ckpt` (inference) or `pretrained_ckpt_path` in the experiment config (fine-tuning).

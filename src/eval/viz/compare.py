@@ -44,7 +44,7 @@ from fastapi import Body, FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
 
 HERE = Path(__file__).resolve().parent
-REPO_ROOT = HERE.parent
+REPO_ROOT = HERE.parents[2]  # src/eval/viz/ -> repo root
 
 
 # ===========================================================================
