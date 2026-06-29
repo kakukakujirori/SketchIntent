@@ -367,7 +367,7 @@ def verify_primitives_freecad(directory: str, limit: int = 10000):
     return passed_files == num_files
 
 if __name__ == "__main__":
-    test_directory = 'data_ryotaro_prim5'
+    test_directory = 'data/SketchIntent-292/0'
     if verify_primitives_freecad(test_directory):
         sys.exit(0)
     else:

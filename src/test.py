@@ -12,8 +12,8 @@ Algorithm:
 8. Log all intermediate results
 
 Usage:
-    python src/test.py --ckpt logs/train/runs/2026-03-12_20-30-34/checkpoints/epoch_2999.ckpt \
-                       --data data_ryotaro_prim5.npy --batch_size 8
+    python src/test.py --ckpt logs/train/runs/[yyyy-mm-dd_hh-mm-ss]/checkpoints/[xxx].ckpt \
+                       --data [.npy or .py or a folder containing .py files] --batch_size 8
     # n_iter defaults to 1 (single-shot). Pass --n_iter 5 for solver-in-the-loop.
 """
 import argparse
@@ -207,7 +207,7 @@ def sample_metadata(batch: dict, batch_idx: int, batch_size: int, sample_idx: in
     sketch_id = batch_item(batch, "sketch_id", sample_idx)
     return {
         "dataset_index": int(dataset_index) if isinstance(dataset_index, (int, np.integer)) else dataset_index,
-        "source_file": str(source_file) if source_file is not None else None,
+        "source_file": Path(str(source_file)).name if source_file is not None else None,
         "sketch_id": str(sketch_id) if sketch_id is not None else None,
     }
 

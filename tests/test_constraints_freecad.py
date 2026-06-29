@@ -452,7 +452,7 @@ class TestConstraintRoundTrip(unittest.TestCase):
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser(description='Constraint roundtrip verification')
-    parser.add_argument('--dir', default='data_ryotaro_prim5', help='Directory with .py sketch scripts')
+    parser.add_argument('--dir', default='data/SketchIntent-292/0', help='Directory with .py sketch scripts')
     parser.add_argument('--start_idx', type=int, default=0, help='Start index')
     parser.add_argument('--process_num', type=int, default=-1, help='Number of files to process')
     parser.add_argument('--unit', action='store_true', help='Run unit tests only')
