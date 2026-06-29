@@ -8,8 +8,9 @@ Design intent has long been central to CAD because it enables parametric models 
 Download and extract this repository first, then keep its path in `REPO_ROOT`.
 
 ```bash
-git clone https://github.com/kakukakujirori/My-Vitruvion.git
-export REPO_ROOT="$(pwd)/My-Vitruvion"
+# Download and extract this repository first
+unzip SketchIntent-75BE.zip -d SketchIntent
+export REPO_ROOT="$(pwd)/SketchIntent"
 ```
 
 ## Install FreeCAD
@@ -86,7 +87,7 @@ Read [data/SketchIntent-292/README.md](data/SketchIntent-292/README.md) for the 
 
 ### Validation Set (Pretrain / RL)
 
-The training-time validation set (`val_sequence_file` in the configs) is derived from SketchIntent-292: gather the `_R.FCStd` annotation (one of the six designers) from every batch and run it through the same FreeCAD→sequence pipeline as SketchGraphs, producing `data/processed/intent292_val_unique_valid.npy`:
+We use a small subset of SketchIntent-292 as the validation set during training (`val_sequence_file` in the configs): we gather the `_R.FCStd` annotation (one of the six designers) from every batch and run it through the same FreeCAD→sequence pipeline as SketchGraphs, producing `data/processed/intent292_val_unique_valid.npy`:
 ```bash
 mkdir -p /tmp/val_R
 cp data/SketchIntent-292/*/*_R.FCStd /tmp/val_R/
