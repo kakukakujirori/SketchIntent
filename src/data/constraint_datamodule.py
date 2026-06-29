@@ -108,11 +108,15 @@ class ConstraintDataModule(L.LightningDataModule):
             self.hparams.relational_only,
         )
 
-        self._test_dataset = ConstraintDataset(
-            self.hparams.test_sequence_file,
-            self.hparams.context,
-            self.hparams.primitive_noise,
-            self.hparams.relational_only,
+        self._test_dataset = (
+            ConstraintDataset(
+                self.hparams.test_sequence_file,
+                self.hparams.context,
+                self.hparams.primitive_noise,
+                self.hparams.relational_only,
+            )
+            if self.hparams.test_sequence_file
+            else None
         )
 
         # self._train_dataset, self._val_dataset, self._test_dataset = split_dataset(

@@ -1,7 +1,7 @@
 """End-to-end single-shot (n_iter=1) Pareto pipeline for the Sec.6 RL-reward study.
 
 ONE auditable script. For every variant checkpoint it:
-  1. runs single-shot inference  -> src/test.py --n_iter 1 over data_eval/0..11
+  1. runs single-shot inference  -> src/test.py --n_iter 1 over data/SketchIntent-292/0..11
      into  model_outputs/Vitruvion_<variant>_step_<step>/<split>/
   2. evaluates                    -> fusion360_annotation/evaluate.py --json
      into  artifacts/fiverr_eval/iter1_<variant>_step<step>.json
@@ -43,7 +43,7 @@ from matplotlib.patches import Rectangle
 REPO = Path(__file__).resolve().parents[2]  # paper/scripts/<file> -> repo root
 MODEL_OUTPUTS = REPO / "model_outputs"
 ART = REPO / "artifacts" / "fiverr_eval"
-DATA_EVAL = REPO / "data_eval"
+DATA_EVAL = REPO / "data/SketchIntent-292"
 
 # Solver-intervention iterations at inference (1 = single-shot = the honest "pure policy"
 # evaluation; 5 = the deployed solver-in-the-loop). Set from --iter in main(). Outputs are
@@ -192,7 +192,7 @@ def jobs_for(variant: str, spec: dict) -> list[tuple[int, str]]:
 # --- the two (and only two) evaluation operations ---------------------------
 def infer_split(ckpt: str, split: int, outdir: Path) -> None:
     cmd = [sys.executable, "src/test.py", "--ckpt", ckpt,
-           "--data", f"data_eval/{split}", "--n_iter", str(ITER),
+           "--data", f"data/SketchIntent-292/{split}", "--n_iter", str(ITER),
            "--outdir", str(outdir / str(split))]
     subprocess.run(cmd, cwd=REPO, check=True,
                    stdout=open(outdir.parent / f".gen_{outdir.name}.log", "a"),
@@ -201,7 +201,7 @@ def infer_split(ckpt: str, split: int, outdir: Path) -> None:
 
 def evaluate(outdir: Path, json_path: Path) -> None:
     cmd = [sys.executable, "fusion360_annotation/evaluate.py",
-           str(outdir), "data_eval", "--json", str(json_path)]
+           str(outdir), "data/SketchIntent-292", "--json", str(json_path)]
     env = {**os.environ, "PYTHONPATH": str(REPO)}
     subprocess.run(cmd, cwd=REPO, check=True, env=env,
                    stdout=open(str(json_path) + ".log", "w"), stderr=subprocess.STDOUT)

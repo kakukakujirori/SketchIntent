@@ -1,9 +1,9 @@
 # eda_code
 
 論文の実験セクションの数値を得るためのコードです。
-データ入力は repo root の `data_eval/` に固定されています。
+データ入力は repo root の `data/SketchIntent-292/` に固定されています。
 
-`data_eval/<batch>/` には次が同梱されている前提です。
+`data/SketchIntent-292/<batch>/` には次が同梱されている前提です。
 
 - `<sketch_id>.py`: annotation 前の入力 sketch
 - `<sketch_id>_<label>.FCStd`: annotation 済み sketch
@@ -12,11 +12,11 @@
 
 | module | 責務 |
 |---|---|
-| `config.py` | `data_eval/` 固定パス、annotation label、共通定数。 |
-| `manifest.py` | `data_eval/` の走査、除外規則、complete trio 判定。 |
-| `canonical.py` | `data_eval/<batch>/<sketch_id>.py` の lookup、sketch load、canonical geometry remap。 |
+| `config.py` | `data/SketchIntent-292/` 固定パス、annotation label、共通定数。 |
+| `manifest.py` | `data/SketchIntent-292/` の走査、除外規則、complete trio 判定。 |
+| `canonical.py` | `data/SketchIntent-292/<batch>/<sketch_id>.py` の lookup、sketch load、canonical geometry remap。 |
 | `file_bundle.py` | annotation `.FCStd` と model `.py` を canonical geometry に remap した `FileBundle` を作る。 |
-| `bundle_loader.py` | `data_eval/` manifest 形式から `FileBundle` 構築引数へ変換する薄い adapter。 |
+| `bundle_loader.py` | `data/SketchIntent-292/` manifest 形式から `FileBundle` 構築引数へ変換する薄い adapter。 |
 | `dataset_features.py` | `.FCStd` から dataset statistics 用 feature を抽出。 |
 | `controls.py` | synthetic degradation control、現在は relational dropout。 |
 | `motion_metrics.py` | 論文の `theta_full`, `theta_rel`, `asgn_sim` 実装。 |
@@ -26,9 +26,9 @@
 
 すべて repo root から `freecad` env で実行してください。
 
-データルートを切り替える CLI option はありません。常に `./data_eval` を使います。
+データルートを切り替える CLI option はありません。常に `./data/SketchIntent-292` を使います。
 
-モデル推論結果を評価する場合は、`config.py` の `MODEL_OUTPUT_ROOTS` を編集してください。各 root は `data_eval/` と同じく `0` から `11` の subdirectory を持ち、各 batch directory の中に `<sketch_id>.py` が入っている必要があります。
+モデル推論結果を評価する場合は、`config.py` の `MODEL_OUTPUT_ROOTS` を編集してください。各 root は `data/SketchIntent-292/` と同じく `0` から `11` の subdirectory を持ち、各 batch directory の中に `<sketch_id>.py` が入っている必要があります。
 
 ```python
 MODEL_OUTPUT_ROOTS = {
@@ -53,7 +53,7 @@ rm -rf fusion360_annotation/eda_code/out
 
 ### 0. manifest sanity check
 
-`data_eval/` を走査し、complete trio 数、除外数、canonical `.py` 欠落を確認します。
+`data/SketchIntent-292/` を走査し、complete trio 数、除外数、canonical `.py` 欠落を確認します。
 
 ```bash
 python fusion360_annotation/eda_code/scripts/00_check_manifest.py
@@ -238,5 +238,5 @@ python fusion360_annotation/eda_code/scripts/11_analyze_paper_numbers.py \
 
 ## 注意
 
-- この版は「metric を変える」ためのものではなく、「完成済み `data_eval/` を唯一の dataset contract にする」ためのものです。
+- この版は「metric を変える」ためのものではなく、「完成済み `data/SketchIntent-292/` を唯一の dataset contract にする」ためのものです。
 - Appendix dataset figures は Step 11 が `paper/figs/` に直接生成します。

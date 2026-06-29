@@ -79,7 +79,7 @@ def test_complete_constraint_values(sketch_ori: datalib.Sketch, eps: float = 0.1
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--sequence_path", type=str, default="/home/ryotaro/my_works/My-Vitruvion/data_processed/sg_filtered_unique_valid.npy")
+    parser.add_argument("--sequence_path", type=str, default="/home/ryotaro/my_works/My-Vitruvion/data/processed/sg_filtered_unique_valid.npy")
     parser.add_argument("--start_idx", type=int, default=0, help="Start index")
     parser.add_argument("--process_num", type=int, default=1, help="Number of sketches to process")
     parser.add_argument("--eps", type=float, default=0.1, help="Tolerance for comparison")

@@ -128,24 +128,24 @@ dmypy.json
 # Pyre type checker
 .pyre/
 
-# Downloaded data
-data_processed/
-data_qwen/
-data_shards/
+# Downloaded / generated data (raw shards, processed npy, eval benchmark)
+data/
 outputs/
 vitruvion.sif
 
 # Logs
 logs/
+wandb/
 
-# dataset
-SketchIntent-292/
+# archives
 *.zip
 
 # others
+artifacts/
 notebooks/
-# Deprecated scripts holding area (pre-deletion)
-scripts_dep/
+model_outputs/
+model_outputs_iter5/
 
-# Deprecated experiment configs holding area (pre-deletion)
+# Deprecated
+scripts_dep/
 configs/experiment_dep/

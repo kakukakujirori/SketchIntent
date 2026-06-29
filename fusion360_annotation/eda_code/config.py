@@ -5,12 +5,12 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 REPO_ROOT = HERE.parents[1]
-DATA_EVAL_ROOT = REPO_ROOT / "data_eval"
+DATA_EVAL_ROOT = REPO_ROOT / "data/SketchIntent-292"
 
 ANNOTATION_LABELS = frozenset({"D", "E", "J", "R", "S", "T"})
 
 # Edit these paths when model inference outputs are available. Each root must
-# mirror data_eval, i.e. contain 0-11 subdirectories with <sketch_id>.py files.
+# mirror data/SketchIntent-292, i.e. contain 0-11 subdirectories with <sketch_id>.py files.
 # Sec.5 model rows. solver_rl -> DimParsimony c1 at its converged best step 70000
 # (single-shot / iter1; the run stopped at 70k with FC 0.750, DoF 4.64 = its max
 # operating point, NOT matched to Ours). Previous Sec.5 numbers used an older

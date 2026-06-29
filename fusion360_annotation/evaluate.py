@@ -5,7 +5,7 @@
 
 ``<Pred dir>`` is one ``model_outputs/<run>/`` directory containing batch
 subdirectories ``0..11`` with per-sketch ``<sketch_id>.py`` and a ``results.json``
-(the layout produced by ``src/test.py``).  ``<GT dir>`` defaults to ``data_eval``
+(the layout produced by ``src/test.py``).  ``<GT dir>`` defaults to ``data/SketchIntent-292``
 and holds the human annotations ``<sketch_id>_<label>.FCStd`` plus the canonical
 input ``<sketch_id>.py``.
 
@@ -363,8 +363,8 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("pred_dir", type=Path, help="model_outputs/<run> directory")
-    ap.add_argument("gt_dir", type=Path, nargs="?", default=REPO_ROOT / "data_eval",
-                    help="annotation root (default: data_eval)")
+    ap.add_argument("gt_dir", type=Path, nargs="?", default=REPO_ROOT / "data/SketchIntent-292",
+                    help="annotation root (default: data/SketchIntent-292)")
     ap.add_argument("--no-reference", action="store_true",
                     help="skip the FreeCAD-heavy reference geometry metrics (A/B only)")
     ap.add_argument("--limit", type=int, default=None,

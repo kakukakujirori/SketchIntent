@@ -1,5 +1,8 @@
 # Motion Subspace Canonicalization for Design-Intent Evaluation in CAD Sketches
 
+## Abstract
+Design intent has long been central to CAD because it enables parametric models to remain reusable under later edits. In 2D sketches, one observable carrier is the constraint set, which specifies the geometric relations to preserve and the dimensions that drive redesign. Yet design-intent-aware constraints are hard to evaluate: valid annotations are non-unique, and existing token-level metrics and single-reference datasets conflate syntactic variation with intent-level errors. We address this with motion-subspace canonicalization, representing a constraint set by the local deformations it permits under infinitesimal dimension edits. This factors out command-level variation and reveals the behaviorally meaningful differences that govern redesign. We further introduce a multi-reference benchmark of 292 sketches, each independently annotated by three CAD designers. Experiments show that our metrics absorb syntactic annotation diversity while distinguishing model-predicted constraints from human designs and detecting constraint deficiencies. Beyond evaluation, the same canonical form yields reinforcement-learning signals for relation-aware constraint generation. Together, these results lay practical groundwork for design-intent-aware CAD evaluation and generation.
+
 ## Install FreeCAD
 
 We first need to build our custom FreeCAD for the CAD solver feedback in reinforcement learning (RL):
@@ -61,37 +64,125 @@ pip install -r requirements.txt
 
 ## Data
 
-- SketchIntent-292 (Evaluation Benchmark)
-  ```bash
-  wget "https://github.com/kakukakujirori/My-Vitruvion/releases/download/v.1.0.0/SketchIntent-292.zip"
-  unzip SketchIntent-292.zip
-  rm SketchIntent-292.zip
-  ```
+All datasets live under `data/`: the evaluation benchmark in `data/SketchIntent-292/`, the raw SketchGraphs shards in `data/SketchGraphs/`, and the converted / generated npy files in `data/processed/`.
 
-- SketchGraphs Dataset (Training)
-  ```bash
-  bash scripts/download_shards.sh data_shards
-  python scripts/convert_sketchgraphs_to_seq.py
-  python scripts/cleanse_seq_for_freecad.py data_processed/sg_filtered.npy
-  ```
+### SketchIntent-292 (Evaluation Benchmark)
 
-- Rule-Augmented Data (RLOO)
+Our proposed benchmark dataset is available from the GitHub Releases page. Download it and extract it under `data/`.
+```bash
+wget "https://github.com/kakukakujirori/My-Vitruvion/releases/download/v.1.0.0/SketchIntent-292.zip"
+unzip SketchIntent-292.zip -d data/
+rm SketchIntent-292.zip
+```
+Read [data/SketchIntent-292/README.md](data/SketchIntent-292/README.md) for the details.
 
-  Every geometric relation detected by the rule-based predicates is added as a relational constraint, producing `data_processed/sg_filtered_unique_augmented.npy` used as the RLOO relational pseudo-reference:
-  ```bash
-  bash scripts/generate_rule_augmented_dataset.sh
-  ```
-  The script runs 12 parallel shards (logging per-shard progress to `/tmp/rule_augmented.shard*.log`) and merges them into the output npy.
+### Validation Set (Pretrain / RL)
+
+The training-time validation set (`val_sequence_file` in the configs) is derived from SketchIntent-292: gather the `_R.FCStd` annotation (one of the six designers) from every batch and run it through the same FreeCAD→sequence pipeline as SketchGraphs, producing `data/processed/intent292_val_unique_valid.npy`:
+```bash
+mkdir -p /tmp/val_R
+cp data/SketchIntent-292/*/*_R.FCStd /tmp/val_R/
+python scripts/convert_freecad_to_seq.py --data_dir /tmp/val_R \
+    --data_ext FCStd --out_path data/processed/intent292_val.npy
+python scripts/cleanse_seq_for_freecad.py data/processed/intent292_val.npy
+```
+
+### SketchGraphs Dataset (Pretrain)
+
+Downloads the raw SketchGraphs shards, converts them to our sequence format, and cleanses sketches that the FreeCAD solver cannot load, producing `data/processed/sg_filtered_unique_valid.npy`:
+```bash
+bash scripts/download_shards.sh data/SketchGraphs
+python scripts/convert_sketchgraphs_to_seq.py
+python scripts/cleanse_seq_for_freecad.py data/processed/sg_filtered.npy
+```
+
+### Rule-Augmented Data (RL)
+
+Every geometric relation detected by the rule-based predicates is added as a relational constraint, producing `data/processed/sg_filtered_unique_augmented.npy` used as the RLOO relational pseudo-reference:
+```bash
+bash scripts/generate_rule_augmented_dataset.sh
+```
+The script runs 12 parallel shards (logging per-shard progress to `/tmp/rule_augmented.shard*.log`) and merges them into the output npy.
 
 ## Training
 
+Training is a two-phase pipeline: supervised pretraining on SketchGraphs, then RLOO
+fine-tuning with solver feedback. Configs live in [`configs/experiment/`](configs/experiment/) and are selected with Hydra's `experiment=` override. Checkpoints are written under `logs/train/runs/<timestamp>/checkpoints/`.
+
 ```bash
-# Pretraining
+# 1. Supervised pretraining (autoregressive constraint generation)
 python src/train.py
 
-# RLOO (Solver-RL, lambda_D=1.0)
+# 2. RLOO fine-tuning. Pick one of:
+
+#    Solver-RL baseline: SolverReward + DimParsimony
 python src/train.py experiment=rloo_solver_rl_coeff1.0
 
-# RLOO (SolverReward + MotionReward + DimRelAlign)
+#    Ours: SolverReward + MotionReward + DimRelAlign
 python src/train.py experiment=rloo_solver_motion_dimrelalign
 ```
+
+Notes:
+
+- The RLOO configs read the rule-augmented pseudo-reference (`data/processed/sg_filtered_unique_augmented.npy`) generated in the [Data](#data) section, so run that step first.
+- Before fine-tuning, set `pretrained_ckpt_path` in the chosen experiment config yaml to the checkpoint produced by pretraining:
+  ```yaml
+  pretrained_ckpt_path: logs/train/runs/[yyyy-mm-dd_hh-mm-ss]/checkpoints/epoch_29.ckpt
+  ```
+
+## Inference
+
+`src/test.py` generates a constraint set for each input sketch. `--n_iter 1` is single-shot generation (the honest "pure policy" protocol used in the paper); `--n_iter 5` enables deployed solver-in-the-loop self-correction. The input `--data` can be a `.npy`, a single `.py`, or a directory of `.py` files (FreeCAD `.py` inputs are converted and cleansed automatically).
+
+Run inference over the 12 benchmark batches, writing one output directory per batch:
+
+```bash
+CKPT=logs/train/runs/<timestamp>/checkpoints/<checkpoint>.ckpt
+OUT=model_outputs/my_run
+
+for split in $(seq 0 11); do
+  python src/test.py --ckpt "$CKPT" --data data/SketchIntent-292/$split \
+      --n_iter 1 --outdir "$OUT/$split"
+done
+```
+
+Each `$OUT/<split>/` then holds the predicted `<id>.py` files plus a `results.json`
+with per-sketch solver status (DoF, fully-constrained / under-constrained / etc.).
+
+## Evaluation
+
+`fusion360_annotation/evaluate.py` scores a model-output directory against the SketchIntent-292 human annotations and reports three metric families: population solver metrics (FC / Under / Distorted rates, DoF), composition / over-dimensioning KPIs (dimensional ratio, relational ratios), and reference-geometry metrics (`motion_full` / `motion_relational` / `leak` angles and `asgn_sim` = S_place) — the last computed against each of the three human references and using the same motion-subspace implementation as the training reward.
+
+```bash
+python fusion360_annotation/evaluate.py "$OUT" data/SketchIntent-292 --json "$OUT/metrics.json"
+```
+
+### Reproduce the paper's Pareto study
+
+[`paper/scripts/run_iter1_pareto.py`](paper/scripts/run_iter1_pareto.py) wraps the two commands above for every variant checkpoint and draws the FC-vs-metric Pareto figure. It is the single auditable entry point for the Sec. 6 RL-reward study (the loop above is exactly its `infer_split` + `evaluate` steps unpacked):
+
+```bash
+conda run -n freecad python paper/scripts/run_iter1_pareto.py             # single-shot (n_iter=1)
+conda run -n freecad python paper/scripts/run_iter1_pareto.py --iter 5    # deployed solver-in-the-loop
+conda run -n freecad python paper/scripts/run_iter1_pareto.py --plot-only # redraw figure only
+```
+
+## Visualization
+
+Both viewers render the **real FreeCAD Sketcher geometry** of a prediction (not a schematic), so run them with the `freecad` environment.
+
+- **Side-by-side interactive viewer** — compare two runs (and the human GT) sketch by
+  sketch in a browser; drag a vertex to watch an under-constrained sketch deform along its remaining degrees of freedom:
+  ```bash
+  python fusion360_annotation/compare.py model_outputs/run_a model_outputs/run_b
+  ```
+
+- **Batch qualitative grids** — tile each sketch's predictions across variants next to
+  the three human references into one labeled PNG (used for the appendix figure pool):
+  ```bash
+  conda run -n freecad python fusion360_annotation/qualitative_grid.py --workers 3
+  ```
+
+## Pretrained Weights
+
+Pretrained and RLOO-fine-tuned checkpoints: **TODO: add download link**. Place a checkpoint anywhere and pass it via `--ckpt` (inference) or the experiment config (fine-tuning).

@@ -24,7 +24,7 @@ def canonical_dir_for(
     batch: str,
     base_fcstd: str,
 ) -> Path | None:
-    """Directory containing the canonical unannotated ``<sketch>.py`` in ``data_eval``."""
+    """Directory containing the canonical unannotated ``<sketch>.py`` in ``data/SketchIntent-292``."""
     py_name = Path(base_fcstd).with_suffix(".py").name
     directory = data_root() / batch
     if (directory / py_name).exists():

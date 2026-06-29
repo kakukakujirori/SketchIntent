@@ -26,7 +26,7 @@ HERE = Path(__file__).resolve().parents[1]
 
 
 def build_ch5_bundle(group, converter, geometry_tol: float):
-    """Build a human bundle for the token-vs-motion figure from data_eval."""
+    """Build a human bundle for the token-vs-motion figure from data/SketchIntent-292."""
     anns = tuple(sorted(group.files))
     bundle = build_bundle(
         group.batch,

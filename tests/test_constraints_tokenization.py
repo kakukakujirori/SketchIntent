@@ -183,7 +183,7 @@ def verify_constraints_tokenization(data_npy: str, limit: int = 1000):
     return failures == 0
 
 if __name__ == "__main__":
-    data_npy = 'data_processed/sg_filtered_unique.npy'
+    data_npy = 'data/processed/sg_filtered_unique.npy'
     if verify_constraints_tokenization(data_npy, limit=10000):
         sys.exit(0)
     else:

@@ -149,5 +149,5 @@ def test_robust(data_npy: str, num_tests: int = -1):
 
 
 if __name__ == '__main__':
-    data_npy = 'data_processed/sg_filtered_unique.npy'
+    data_npy = 'data/processed/sg_filtered_unique.npy'
     test_robust(data_npy, num_tests=1000)

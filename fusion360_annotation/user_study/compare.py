@@ -2,7 +2,7 @@
 """User-study viewer: pick the better of **two** CAD sketches (left vs right).
 
 Shows the real FreeCAD Sketcher rendering of two model folders side by side, with
-an optional **ground-truth** reference (the 3 human annotations from ``data_eval``,
+an optional **ground-truth** reference (the 3 human annotations from ``data/SketchIntent-292``,
 viewable via the GT toggle). For every sketch the annotator clicks one of three
 buttons -- *Prefer left sketch* / *Tie* / *Prefer right sketch* -- and the choice
 is appended to a results file. Each panel is interactive (drag a vertex to deform
@@ -26,7 +26,7 @@ library (no ``fastapi``/``uvicorn`` to install). There is **no OS-specific code*
 
 * **Dev / headless Linux (the author)** -- run as a plain script::
 
-      python compare.py <folderA> <folderB> --gt-dir <data_eval>
+      python compare.py <folderA> <folderB> --gt-dir <data/SketchIntent-292>
 
   With no FreeCAD GUI present this falls back to spawning ``_render_server.py``
   under ``xvfb-run`` (the original architecture), so the existing workflow is
@@ -42,10 +42,10 @@ The data folders live either directly under ``user_study/`` or under
     user_study/            (or user_study/data/)
       <modelA>/<batch>/<stem>.py          # left  (A)
       <modelB>/<batch>/<stem>.py          # right (B)
-      data_eval/<batch>/<stem>_<V>.FCStd  # GT reference variants (D/J/R/S ...)
+      data/SketchIntent-292/<batch>/<stem>_<V>.FCStd  # GT reference variants (D/J/R/S ...)
 
 The two model folders are auto-discovered (preferring names starting with
-``Vitruvion``); ``data_eval`` is the GT root. Model names are hidden in the UI
+``Vitruvion``); ``data/SketchIntent-292`` is the GT root. Model names are hidden in the UI
 (blind A/B) so annotators can't tell which model is which.
 
 RESULTS
@@ -84,7 +84,7 @@ SHUFFLE_SIDES = True               # randomize which model is shown left/right
 SHUFFLE_SEED = "user-study-v1"     # fixed -> a given sketch always gets the same sides
 RESULTS_NAME = "user_study_results.json"
 DEFAULT_DATA_DIR = HERE / "data"
-GT_DIRNAME = "data_eval"           # ground-truth root under the data dir
+GT_DIRNAME = "data/SketchIntent-292"           # ground-truth root under the data dir
 
 # In the in-process (annotator GUI) path, FreeCAD's own window pops to the front
 # every time we switch the edited sketch (Sketcher ``setEdit`` activates its MDI
@@ -104,7 +104,7 @@ _LAYOUT_HELP = (
     "  {data_dir}/<modelA>/<batch>/*.py\n"
     "  {data_dir}/<modelB>/<batch>/*.py\n"
     "  {data_dir}/" + GT_DIRNAME + "/<batch>/*_<V>.FCStd   (ground-truth reference)\n"
-    "Or pass explicit folders: compare.main('<modelA>', '<modelB>', gt_dir='<data_eval>')"
+    "Or pass explicit folders: compare.main('<modelA>', '<modelB>', gt_dir='<data/SketchIntent-292>')"
 )
 
 
@@ -160,7 +160,7 @@ def gt_variants(gt_dir: Path, batch: str, stem: str) -> dict[str, str]:
 def discover(data_dir: Path, gt_dir: Path | None) -> tuple[list[Path], Path | None]:
     """Find the two model folders and the GT root under ``data_dir``.
 
-    GT = ``data_eval`` (or the first subdir that holds ``*.FCStd``). Model folders
+    GT = ``data/SketchIntent-292`` (or the first subdir that holds ``*.FCStd``). Model folders
     = the other subdirs that hold ``*/*.py`` (preferring ``Vitruvion*`` names)."""
     data_dir = Path(data_dir)
     if not data_dir.is_dir():

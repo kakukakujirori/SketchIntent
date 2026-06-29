@@ -322,7 +322,7 @@ def train(cfg: DictConfig) -> tuple[dict[str, Any], dict[str, Any]]:
 
     train_metrics = trainer.callback_metrics
 
-    if cfg.get("test"):
+    if cfg.get("test") and datamodule.hparams.test_sequence_file:
         log.info("Starting testing!")
         ckpt_path = trainer.checkpoint_callback.best_model_path
         if ckpt_path == "":
@@ -330,6 +330,9 @@ def train(cfg: DictConfig) -> tuple[dict[str, Any], dict[str, Any]]:
             ckpt_path = None
         trainer.test(model=model, datamodule=datamodule, ckpt_path=ckpt_path, weights_only=False)
         log.info(f"Best ckpt path: {ckpt_path}")
+    elif cfg.get("test"):
+        log.info("No test_sequence_file set; skipping Lightning test "
+                 "(benchmark evaluation is done via src/test.py + evaluate.py).")
 
     test_metrics = trainer.callback_metrics
 

@@ -10,11 +10,11 @@
 #   bash scripts/generate_rule_augmented_dataset.sh
 #
 # Override defaults via env vars, e.g.:
-#   NSHARDS=8 SCALE=0.25 OUTPUT_NPY=data_processed/sg_filtered_unique_augmented.npy \
+#   NSHARDS=8 SCALE=0.25 OUTPUT_NPY=data/processed/sg_filtered_unique_augmented.npy \
 #     bash scripts/generate_rule_augmented_dataset.sh
 #
 # Output:
-#   data_processed/sg_filtered_unique_augmented.npy   (~1.67M sketches)
+#   data/processed/sg_filtered_unique_augmented.npy   (~1.67M sketches)
 #
 # Monitoring (each shard processes ~139k sketches; --log_every 5000 prints
 # "processed/total valid=... rate/s ETA"):
@@ -29,8 +29,8 @@
 set -euo pipefail
 
 NSHARDS="${NSHARDS:-12}"
-INPUT_NPY="${INPUT_NPY:-data_processed/sg_filtered_unique_valid.npy}"
-OUTPUT_NPY="${OUTPUT_NPY:-data_processed/sg_filtered_unique_augmented.npy}"
+INPUT_NPY="${INPUT_NPY:-data/processed/sg_filtered_unique_valid.npy}"
+OUTPUT_NPY="${OUTPUT_NPY:-data/processed/sg_filtered_unique_augmented.npy}"
 SCALE="${SCALE:-0.25}"
 TMP="${TMPDIR:-/tmp}"
 

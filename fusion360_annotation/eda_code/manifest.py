@@ -1,4 +1,4 @@
-"""Dataset discovery for the completed ``data_eval`` layout."""
+"""Dataset discovery for the completed ``data/SketchIntent-292`` layout."""
 from __future__ import annotations
 
 import re

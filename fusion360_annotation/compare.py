@@ -5,7 +5,7 @@
 
 For every sketch the two runs share, shows the **real FreeCAD Sketcher rendering**
 of folder1's and folder2's predicted constraint sets side by side (and, optionally,
-the human ground-truth from ``data_eval``).  Each panel is interactive:
+the human ground-truth from ``data/SketchIntent-292``).  Each panel is interactive:
 
 * **drag a primitive vertex** -> ``movePoint`` -> the solver re-solves -> an
   under-constrained sketch *deforms* so you can see its remaining DoF;
@@ -21,7 +21,7 @@ proxies those ops and serves a single-page UI.
 Run with the FreeCAD-build Python (the one that can ``import FreeCAD``).
 
 Options:
-    --gt-dir DIR   ground-truth root (default: <repo>/data_eval)
+    --gt-dir DIR   ground-truth root (default: <repo>/data/SketchIntent-292)
     --port N       web port (default 8000)
     --res N        render resolution px (default 1500)
     --no-browser   do not auto-open a browser
@@ -237,7 +237,7 @@ def main() -> None:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("folder1", type=Path)
     ap.add_argument("folder2", type=Path)
-    ap.add_argument("--gt-dir", type=Path, default=REPO_ROOT / "data_eval")
+    ap.add_argument("--gt-dir", type=Path, default=REPO_ROOT / "data/SketchIntent-292")
     ap.add_argument("--port", type=int, default=8000)
     ap.add_argument("--res", type=int, default=1500)
     ap.add_argument("--no-browser", action="store_true")

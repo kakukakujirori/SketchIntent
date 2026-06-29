@@ -30,15 +30,15 @@ for training and has a well-defined relational GT subspace.
 
 Typical usage (normally run per-shard via scripts/generate_rule_augmented_dataset.sh):
     conda run -n freecad python -m scripts.generate_pseudo_rel_augmented_dataset \\
-        --input_npy  data_processed/sg_filtered_unique_valid.npy \\
-        --output_npy data_processed/sg_filtered_unique_augmented.npy \\
+        --input_npy  data/processed/sg_filtered_unique_valid.npy \\
+        --output_npy data/processed/sg_filtered_unique_augmented.npy \\
         --scale 0.25
 
     # exclude Mirror (precision 0.006) for the no-Mirror ablation:
-    ... --output_npy data_processed/sg_filtered_unique_augmented_no_mirror.npy --no_mirror
+    ... --output_npy data/processed/sg_filtered_unique_augmented_no_mirror.npy --no_mirror
 
     # shard 0 of 8 for parallel generation:
-    ... --shard 0/8 --output_npy data_processed/sg_filtered_unique_augmented.shard0.npy
+    ... --shard 0/8 --output_npy data/processed/sg_filtered_unique_augmented.shard0.npy
 """
 import argparse
 import sys
@@ -122,7 +122,7 @@ def dataset_preprocess(sketch, *, relational_only: bool):
 
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--input_npy", default="data_processed/sg_filtered_unique_valid.npy")
+    p.add_argument("--input_npy", default="data/processed/sg_filtered_unique_valid.npy")
     p.add_argument("--output_npy", required=True)
     p.add_argument("--scale", type=float, default=0.25, help="Multiplier on DEFAULT_TOLERANCES (operating point 0.25).")
     p.add_argument("--no_mirror", action="store_true", help="Exclude Mirror (precision 0.006) -> full_no_mirror ablation.")

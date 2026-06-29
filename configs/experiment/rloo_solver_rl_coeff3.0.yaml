@@ -39,7 +39,7 @@ callbacks:
     auto_insert_metric_name: false
 
 data:
-  train_sequence_file: data_processed/sg_filtered_unique_augmented.npy
+  train_sequence_file: data/processed/sg_filtered_unique_augmented.npy
   batch_size: 32
   num_workers: 1
 

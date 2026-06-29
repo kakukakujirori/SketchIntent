@@ -34,8 +34,8 @@ class FilterConfiguration:
 @dataclasses.dataclass
 class ConvertSketchgraphsRunConfiguration:
     filter: FilterConfiguration = dataclasses.field(default_factory=FilterConfiguration)
-    input_folder: str = "data_shards"
-    output_folder: str = "data_processed"
+    input_folder: str = "data/SketchGraphs"
+    output_folder: str = "data/processed"
     total_sketches: int = 16261381
 
 
