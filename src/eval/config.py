@@ -16,9 +16,9 @@ ANNOTATION_LABELS = frozenset({"D", "E", "J", "R", "S", "T"})
 # operating point, NOT matched to Ours). Previous Sec.5 numbers used an older
 # solver-only ("c0") iter5 output at model_outputs/solver_rl.
 MODEL_OUTPUT_ROOTS = {
-    "base": REPO_ROOT / "model_outputs" / "base",
-    "solver_rl": REPO_ROOT / "model_outputs"
-    / "Vitruvion_scaffold_v12_ablA_noML_dimprior_dimpars_c1_step_70000",
+    "base": REPO_ROOT / "model_outputs" / "pretrained",
+    "solver_rl": REPO_ROOT / "model_outputs" / "rloo_solver_rl_coeff1.0_step_70000",
+    "ours": REPO_ROOT / "model_outputs" / "rloo_solver_motion_dimrelalign_step_70000",
 }
 
 DIMENSIONAL_DISPLAY_TYPES = {

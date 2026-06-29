@@ -178,6 +178,12 @@ python src/eval/viz/compare.py model_outputs/run_a model_outputs/run_b
 
 **Note:** It boots a headless FreeCAD GUI under `xvfb`, so it is **Linux-only**.
 
+## Others
+
 ### Pretrained Weights
 
 Reproducing the paper's evaluation does not require any checkpoint: the [Evaluation](#evaluation) and [Visualization](#visualization) tools score the provided model predictions (`model_outputs/`) against SketchIntent-292 directly. Pretrained and RLOO-fine-tuned checkpoints are needed only to run [Inference](#inference) from scratch or to continue [Training](#training), and will be released on publication. Once available, place a checkpoint anywhere and pass it via `--ckpt` (inference) or `pretrained_ckpt_path` in the experiment config (fine-tuning).
+
+### Reproducing the Paper
+
+Please find [`ablation/README.md`](ablation/README.md) for the scripts to reproduce the paper's evaluation.
