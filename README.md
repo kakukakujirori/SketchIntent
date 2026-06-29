@@ -3,15 +3,24 @@
 ## Abstract
 Design intent has long been central to CAD because it enables parametric models to remain reusable under later edits. In 2D sketches, one observable carrier is the constraint set, which specifies the geometric relations to preserve and the dimensions that drive redesign. Yet design-intent-aware constraints are hard to evaluate: valid annotations are non-unique, and existing token-level metrics and single-reference datasets conflate syntactic variation with intent-level errors. We address this with motion-subspace canonicalization, representing a constraint set by the local deformations it permits under infinitesimal dimension edits. This factors out command-level variation and reveals the behaviorally meaningful differences that govern redesign. We further introduce a multi-reference benchmark of 292 sketches, each independently annotated by three CAD designers. Experiments show that our metrics absorb syntactic annotation diversity while distinguishing model-predicted constraints from human designs and detecting constraint deficiencies. Beyond evaluation, the same canonical form yields reinforcement-learning signals for relation-aware constraint generation. Together, these results lay practical groundwork for design-intent-aware CAD evaluation and generation.
 
+## Clone This Repository
+
+Download and extract this repository first, then keep its path in `REPO_ROOT`.
+
+```bash
+git clone https://github.com/kakukakujirori/My-Vitruvion.git
+export REPO_ROOT="$(pwd)/My-Vitruvion"
+```
+
 ## Install FreeCAD
 
-We first need to build our custom FreeCAD for the CAD solver feedback in reinforcement learning (RL):
+Next, build our custom FreeCAD for the CAD solver feedback in reinforcement learning (RL). Run these commands from wherever you want the FreeCAD source tree to live:
 
 ```bash
 git clone https://github.com/FreeCAD/FreeCAD.git
 cd FreeCAD
 git checkout 1.0.2
-git apply ../patches/freecad-1.0.2-get-solver-status.patch
+git apply "$REPO_ROOT/patches/freecad-1.0.2-get-solver-status.patch"
 git submodule update --init --recursive
 ```
 
@@ -57,8 +66,7 @@ Please refer to [src/models/components/solver_feedback.py](src/models/components
 ## Install Dependencies
 
 ```bash
-git clone https://github.com/kakukakujirori/My-Vitruvion.git
-cd My-Vitruvion
+cd "$REPO_ROOT"
 mamba activate freecad
 pip install -r requirements.txt
 ```
@@ -71,7 +79,6 @@ All datasets live under `data/`: the evaluation benchmark in `data/SketchIntent-
 
 Our proposed benchmark dataset is available from the GitHub Releases page. Download it and extract it under `data/`.
 ```bash
-wget "https://github.com/kakukakujirori/My-Vitruvion/releases/download/v.1.0.0/SketchIntent-292.zip"
 unzip SketchIntent-292.zip -d data/
 rm SketchIntent-292.zip
 ```
