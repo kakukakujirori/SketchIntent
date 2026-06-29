@@ -52,14 +52,15 @@ def test_constraints(doc: 'FreeCAD.Document', fc_sketch: 'Sketcher.SketchObject'
 
 def align_sketch(target_sketch, base_entities_dict):
     """
-    共通のエンティティを基準に、target_sketch 全体を異方性スケーリング・平行移動して整列させる。
+    Align the whole target_sketch by anisotropic scaling and translation,
+    using the common entities as the reference.
     """
     from src.sketch_handlers.sketch_utils import get_sketch_bbox, complete_constraint_values
 
     new_sketch = copy.deepcopy(target_sketch)
     base_ids = set(base_entities_dict.keys())
 
-    # 1. 共通エンティティの BBox を計算（Target側と Base側）
+    # 1. Compute the BBox of the common entities (Target side and Base side)
     target_common = {eid: new_sketch.entities[eid] for eid in base_ids if eid in new_sketch.entities}
 
     t_bbox = get_sketch_bbox(datalib.Sketch(entities=target_common))
@@ -70,19 +71,20 @@ def align_sketch(target_sketch, base_entities_dict):
     bx_min, by_min = b_bbox[0]
     bx_max, by_max = b_bbox[1]
 
-    # 中心点とサイズ（幅・高さ）を算出
+    # Compute center points and sizes (width / height)
     tcx, tcy = (tx_min + tx_max) / 2, (ty_min + ty_max) / 2
     bcx, bcy = (bx_min + bx_max) / 2, (by_min + by_max) / 2
     tw, th = (tx_max - tx_min), (ty_max - ty_min)
     bw, bh = (bx_max - bx_min), (by_max - by_min)
 
-    # X/Y 独立したスケーリング係数
+    # Independent X/Y scaling factors
     fx = bw / tw if tw > 1e-9 else 1.0
     fy = bh / th if th > 1e-9 else 1.0
 
-    # [Check] 異方性スケーリング比が極端すぎないか確認
-    # 縦横スケーリング比が極端に異なる場合は幾何構造が変化している可能性がある
-    SCALE_RATIO_TOL = 1.10  # 縦横スケーリング比の許容範囲 (10%)
+    # [Check] make sure the anisotropic scale ratio is not too extreme.
+    # A wildly different horizontal/vertical scale ratio may mean the geometric
+    # structure has changed.
+    SCALE_RATIO_TOL = 1.10  # allowed range of the horizontal/vertical scale ratio (10%)
     scale_ratio = fx / fy if fy > 1e-9 else float('inf')
     if not (1.0 / SCALE_RATIO_TOL <= scale_ratio <= SCALE_RATIO_TOL):
         raise ValueError(
@@ -91,7 +93,7 @@ def align_sketch(target_sketch, base_entities_dict):
             f"Sketch geometry may have been distorted."
         )
 
-    # 2. スケッチ全体に変換を適用
+    # 2. Apply the transform to the whole sketch
     for ent in new_sketch.entities.values():
         for px in ['pntX', 'xCenter', 'x']:
             if hasattr(ent, px):
@@ -105,17 +107,17 @@ def align_sketch(target_sketch, base_entities_dict):
         if hasattr(ent, 'radius'):
             ent.radius = ent.radius * (fx + fy) / 2.0
 
-    # 3. 共通エンティティを base_entities_dict で上書きして完全に一致させる、および追加エンティティの検証
+    # 3. Overwrite the common entities with base_entities_dict so they match exactly, and validate added entities
     missing_ids = base_ids - set(new_sketch.entities.keys())
     if missing_ids:
         raise ValueError(f"Original primitive(s) missing in target sketch: {missing_ids}. Primitives cannot be deleted.")
 
-    # [Check] 変換後の各共通エンティティが元のエンティティと整合しているか確認する。
-    # NOTE: この検証は必ずオーバーライド（下記）の前に行う必要がある。
-    #       オーバーライド後に比較すると base_ent のコピーと base_ent を比較することになり、
-    #       常にパスする空検証（vacuous validation）になってしまうため。
+    # [Check] verify that each transformed common entity is consistent with the original entity.
+    # NOTE: this check MUST run before the overwrite (below). If compared after
+    #       the overwrite, we would be comparing a copy of base_ent against
+    #       base_ent itself, which is a vacuous validation that always passes.
     bbox_size = max(bw, bh) if max(bw, bh) > 1e-9 else 1.0
-    POS_TOL_NORMALIZED = 0.015  # BBoxサイズに対する位置誤差の許容割合 (1.5%)
+    POS_TOL_NORMALIZED = 0.015  # allowed positional error relative to bbox size (1.5%)
     pos_tol_abs = POS_TOL_NORMALIZED * bbox_size
 
     for eid in base_ids:
@@ -144,7 +146,7 @@ def align_sketch(target_sketch, base_entities_dict):
             if not eid.startswith('-') and getattr(ent, 'isConstruction', False) == False:
                 raise ValueError(f"Added primitive ID '{eid}' ({type(ent).__name__}) must be a construction geometry.")
 
-    # 4. 寸法制約の再計算
+    # 4. Recompute the dimensional constraints
     new_sketch, _ = complete_constraint_values(new_sketch)
 
     return new_sketch

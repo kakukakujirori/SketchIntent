@@ -38,13 +38,13 @@ class SolverAsyncHandle:
     GPU work can be performed between submit_async() and collect_results() so
     that the CPU solver runs concurrently with GPU logprob / ref-model forward.
     """
-    futures:             list          # ProcessPoolExecutor Futures (キャッシュミス分)
-    indices_to_evaluate: list[int]    # futures に対応するバッチインデックス
-    cache_hits:          list[tuple]  # (batch_idx, cached_result) のリスト
-    first_stop_indices:  list[int]    # 各サンプルの STOP トークン位置
-    args_list:           list         # worker へ渡した (prim, cons, sketch) リスト（キャッシュ書き込み用）
-    B:                   int          # バッチサイズ
-    cons_shape:          tuple        # scores テンソルの形状
+    futures:             list          # ProcessPoolExecutor Futures (cache misses)
+    indices_to_evaluate: list[int]    # batch indices corresponding to futures
+    cache_hits:          list[tuple]  # list of (batch_idx, cached_result)
+    first_stop_indices:  list[int]    # STOP token position of each sample
+    args_list:           list         # (prim, cons, sketch) list passed to workers (for cache writeback)
+    B:                   int          # batch size
+    cons_shape:          tuple        # shape of the scores tensor
 
 
 class SolverReward(BaseReward):

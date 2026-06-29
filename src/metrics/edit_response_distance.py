@@ -1,31 +1,34 @@
 """
 edit_response_distance.py — Common Edit Response Distance (Proposed Metric 1).
 
-設計方針
---------
-GT と Pred の constraint set を直接比較する代わりに、
-**同じ編集要求 q を与えたときの形状応答 S_C^(q) = ∂x/∂q を比較**する。
+Design rationale
+----------------
+Instead of comparing the constraint sets of GT and Pred directly, **compare the
+shape response S_C^(q) = ∂x/∂q when the same edit request q is applied**.
 
-各 constraint set C は native dimensional parameters p_C を持つ。
-線形化すると J_x δx + J_p δp_C = 0 → δx = R_C δp_C, R_C = -pinv(J_x) J_p.
-共通編集 q (= h(x)) を実現するための native dim 変化は
-δp_C* = pinv(J_q R_C) δq, よって
+Each constraint set C has native dimensional parameters p_C. Linearizing gives
+J_x δx + J_p δp_C = 0 → δx = R_C δp_C, R_C = -pinv(J_x) J_p. The native dim
+change needed to realize the common edit q (= h(x)) is
+δp_C* = pinv(J_q R_C) δq, hence
         S_C^(q) = R_C pinv(J_q R_C).
-観測量 φ(x) を介したい場合は M_C^(q) = J_φ S_C^(q) を用いる。
+To go through an observable φ(x), use M_C^(q) = J_φ S_C^(q).
 
-距離:
+Distance:
     d_resp(P, G) = Σ_q w_q || M_P^(q) - M_G^(q) ||_F
 
-実装上の前提
-------------
-- edit probe q は `datalib.Constraint` (典型的には Distance/Length/...) として渡す。
-  そのハンドラの residual = h(x) - target なので ∂residual/∂x = J_h = J_q.
-- relational vs dimensional の判別は constraint_type 名で行う
-  (notebooks/canonical_sketch.py と同じセット)。
-- base_eids を渡すと、応答比較を当該 entity 群の primitive 座標に絞る。
-  (gauge / construction geometry を排除したいときに使う。)
+Implementation assumptions
+--------------------------
+- An edit probe q is passed as a `datalib.Constraint` (typically
+  Distance/Length/...). Its handler's residual = h(x) - target, so
+  ∂residual/∂x = J_h = J_q.
+- relational vs dimensional is decided by the constraint_type name
+  (same set as notebooks/canonical_sketch.py).
+- Passing base_eids restricts the response comparison to the primitive
+  coordinates of those entities (use it to exclude gauge / construction
+  geometry).
 
-参考: src/metrics/null_space_distance.py — Jacobian 計算と SVD ユーティリティを共有。
+See also: src/metrics/null_space_distance.py — shares the Jacobian computation
+and SVD utilities.
 """
 
 from __future__ import annotations

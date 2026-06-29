@@ -1,29 +1,31 @@
 """
 null_space_distance.py — Design intent evaluation metric via row-space alignment.
 
-設計方針 (Intent Recall):
-  GT primary制約の Jacobian の行空間 R_GT と、
-  Pred制約の Jacobian の行空間 R_Pred の間の「整合度」を測る。
+Design rationale (Intent Recall):
+  Measure the "agreement" between the row space R_GT of the Jacobian of the GT
+  primary constraints and the row space R_Pred of the Jacobian of the Pred
+  constraints.
 
-  主角 θ_i を用いた Intent Recall:
-    1. Q_GT  : R_GT の正規直交基底  (n × d_GT)
-    2. Q_Pred: R_Pred の正規直交基底 (n × d_Pred)
+  Intent Recall via principal angles θ_i:
+    1. Q_GT  : orthonormal basis of R_GT   (n × d_GT)
+    2. Q_Pred: orthonormal basis of R_Pred (n × d_Pred)
     3. M = Q_GT^T @ Q_Pred  →  SVD  →  σ_i = cos(θ_i)
     4. Score = Σ σ_i / dim(R_GT)  ∈ [0, 1]
 
-  Null space同士のGrassmann距離を使わない理由:
-    Pred=空制約のとき null space=全空間 → GT null spaceが自明に含まれ距離=0になる。
+  Why not a Grassmann distance between the null spaces:
+    When Pred has no constraints, its null space = the whole space, so the GT
+    null space is trivially contained and the distance collapses to 0.
 
-  Grassmann距離 (sqrt(Σ arccos(σ_i)²)) との違い:
-    - Intent Recall は arccos 不要・常に [0,1] に正規化される
-    - 次元差 (d_Pred < d_GT) は不足分が自然に σ=0 として反映される
-    - サンプル間で dim が異なっても横並び比較が可能
+  Difference from the Grassmann distance (sqrt(Σ arccos(σ_i)²)):
+    - Intent Recall needs no arccos and is always normalized to [0, 1]
+    - a dimension gap (d_Pred < d_GT) is naturally reflected as σ=0 for the deficit
+    - samples with different dim remain directly comparable side by side
 
 Pipeline:
-  1. GT_primary の Jacobian から row space R_gt を計算
-  2. Pred の各制約について Jacobian row が R_gt に含まれるか判定 (primary分類)
-  3. Pred primary制約の Jacobian から row space R_pred を計算
-  4. Grassmann distance(R_gt, R_pred) を返す
+  1. Compute the row space R_gt from the Jacobian of GT_primary
+  2. For each Pred constraint, test whether its Jacobian row lies in R_gt (primary classification)
+  3. Compute the row space R_pred from the Jacobian of the Pred primary constraints
+  4. Return Grassmann distance(R_gt, R_pred)
 
 Usage::
 
@@ -56,21 +58,22 @@ from src.sketch_handlers.sketch_solver import (
 
 def intent_recall(R_gt: torch.Tensor, R_pred: torch.Tensor) -> float:
     """
-    Intent Recall: GT行空間の方向をPredの行空間がどれだけカバーするかを測る。
+    Intent Recall: measure how much of the GT row-space directions the Pred row
+    space covers.
 
-    計算:
-      M = Q_GT^T @ Q_Pred  →  SVD  →  σ_i = cos(θ_i)  (主角のコサイン)
+    Computation:
+      M = Q_GT^T @ Q_Pred  →  SVD  →  σ_i = cos(θ_i)  (cosines of principal angles)
       Score = Σ σ_i / dim(R_GT)  ∈ [0, 1]
 
-    解釈:
-      - Score = 1: PredがGTの全設計意図方向を完全にカバー
-      - Score = 0: PredがGTの設計意図方向と全く重ならない
-      - d_pred < d_gt: 不足次元は σ=0 として自然に反映（恣意的な定数なし）
-      - d_pred = 0 (制約なし): Score = 0
+    Interpretation:
+      - Score = 1: Pred fully covers all GT design-intent directions
+      - Score = 0: Pred does not overlap the GT design-intent directions at all
+      - d_pred < d_gt: missing dimensions are naturally reflected as σ=0 (no arbitrary constant)
+      - d_pred = 0 (no constraints): Score = 0
 
     Args:
-      R_gt  : (n, d_gt)   GT primary行空間の正規直交基底
-      R_pred: (n, d_pred) Pred行空間の正規直交基底
+      R_gt  : (n, d_gt)   orthonormal basis of the GT primary row space
+      R_pred: (n, d_pred) orthonormal basis of the Pred row space
 
     Returns:
       float in [0, 1]
@@ -78,19 +81,19 @@ def intent_recall(R_gt: torch.Tensor, R_pred: torch.Tensor) -> float:
     d_gt = R_gt.shape[1]
 
     if d_gt == 0:
-        # GTに制約なし → 定義上 recall = 1
+        # No GT constraints → recall = 1 by definition
         return 1.0
 
     if R_pred.shape[1] == 0:
-        # Pred に制約なし → recall = 0
+        # No Pred constraints → recall = 0
         return 0.0
 
     M = R_gt.T @ R_pred  # (d_gt, d_pred)
     _, S, _ = torch.linalg.svd(M, full_matrices=False)
-    S = S.clamp(0.0, 1.0)  # 数値誤差で僅かに範囲外になる場合を防ぐ
-    # Σ σ_i (= Σ cos(θ_i)) を GT 次元数で正規化
-    # d_pred < d_gt のとき S のサイズは d_pred < d_gt であり、
-    # 不足分は和に寄与しない (σ=0 と等価)
+    S = S.clamp(0.0, 1.0)  # guard against slight out-of-range values from numerical error
+    # Normalize Σ σ_i (= Σ cos(θ_i)) by the GT dimension count.
+    # When d_pred < d_gt, S has size d_pred < d_gt, so the deficit does not
+    # contribute to the sum (equivalent to σ=0).
     return float(S.sum()) / d_gt
 
 
@@ -359,8 +362,9 @@ def classify_pred_constraints(
 
         ‖R_gt @ R_gt.T @ j‖ / ‖j‖ >= thresh
 
-    つまり制約の勾配方向が GT が束縛する方向空間と十分に揃う場合 = primary.
-    重ならない（GT の null space 内にある）場合 = auxiliary.
+    In other words, a constraint is primary when its gradient direction is
+    sufficiently aligned with the direction space that GT constrains; it is
+    auxiliary when it does not overlap (i.e. lies within GT's null space).
 
     Parameters
     ----------
@@ -400,13 +404,13 @@ def classify_pred_constraints(
             if jac.ndim == 1:
                 jac = jac.unsqueeze(0)
 
-            # primary: 勾配が GT row space と重なる
+            # primary: gradient overlaps the GT row space
             is_primary = False
             for row in jac:
                 j_norm = float(row.norm())
                 if j_norm < 1e-15:
                     continue
-                # 射影: R @ R.T @ j (GT row space への投影)
+                # projection: R @ R.T @ j (project onto the GT row space)
                 proj = R @ (R.T @ row)
                 proj_ratio = float(proj.norm()) / j_norm
                 if proj_ratio >= thresh:

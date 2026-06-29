@@ -208,8 +208,7 @@ def reflect_sketch(sketch: datalib.Sketch, axis: str = "x") -> None:
     Curve orientation (``clockwise``) and the local x-direction (``xDir``) are
     flipped together so the reflected arc/circle sweeps the mirrored geometry;
     ``startParam``/``endParam`` are angular offsets in that frame and are left
-    untouched.  Correctness is asserted by the pairwise-distance-preservation
-    check in ``scripts/diag_sample_vs_select.py`` / the flip unit test.
+    untouched.
     """
     if axis not in ("x", "y"):
         raise ValueError(f"axis must be 'x' or 'y', got {axis!r}")

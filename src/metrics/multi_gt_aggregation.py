@@ -1,20 +1,22 @@
 """
 multi_gt_aggregation.py — multi-reference scoring for design-intent metrics.
 
-1 つの sketch に対して 3 人の human GT がある設定に共通する後処理を提供する:
+Provides post-processing common to the setting where each sketch has 3 human
+GTs:
 
   - nearest-GT scoring:    d(P, {G_j}) = min_j d(P, G_j)
   - human-human variation: median_{a<b} d(G_a, G_b)
   - normalized score:      d(P, {G_j}) / (variation + eps)
 
-`d(., .)` は本モジュールに依存しない任意の対称あるいは非対称距離で良い。
+`d(., .)` may be any symmetric or asymmetric distance, independent of this
+module.
 
 Data layout helpers
 -------------------
-将来的には `xxxxxx_gt[0,2,3].FCStd` のような命名で 1 フォルダにまとめる
-予定なので、その配置を扱うローダを用意する。現在の 3 ディレクトリ配置
-(notebooks/exp1_human_baseline.py で使われている) も `discover_per_annotator_dir`
-で扱える。
+In the future we plan to consolidate annotations into a single folder with a
+naming scheme like `xxxxxx_gt[0,2,3].FCStd`, so a loader for that layout is
+provided. The current 3-directory layout (used in
+notebooks/exp1_human_baseline.py) is also handled by `discover_per_annotator_dir`.
 """
 
 from __future__ import annotations

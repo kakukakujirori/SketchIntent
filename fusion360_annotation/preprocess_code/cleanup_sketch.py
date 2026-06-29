@@ -817,8 +817,8 @@ def _coincident_lines_from_prim_map(constraints: dict, primitive_freecad_mapping
 
 
 def _parse_coincident_key(line: str) -> frozenset | None:
-    """Coincident制約行から (gid, vtx) ペアの frozenset を返す。
-    パース失敗時は None。"""
+    """Return a frozenset of (gid, vtx) pairs from a Coincident constraint line.
+    Returns None on parse failure."""
     m = re.search(
         r"Constraint\('Coincident',\s*(-?\d+),\s*(\d+),\s*(-?\d+),\s*(\d+)\)",
         line,
@@ -863,7 +863,7 @@ def _generate_cleaned_commands(
     # --- Geometry lines ---
     geometry_lines = [l for l in all_cmds if l.startswith("fc_sketch.addGeometry")]
 
-    # --- fcid_to_uuid の再構築 ---
+    # --- Reconstruct fcid_to_uuid ---
     new_fcid_to_uuid: dict[str, str] = {}
     for orig_id in sketch.entities:
         candidates = {v for k, v in prim_map.items() if k.split('.')[0] == orig_id}

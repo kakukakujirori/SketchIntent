@@ -1,4 +1,4 @@
-"""Rule-based geometric constraint detector ("規則付与器").
+"""Rule-based geometric constraint detector (rule augmenter).
 
 Model-free: given a ``datalib.Sketch`` carrying *real* primitive geometry, this
 module enumerates candidate relational constraints and keeps the ones whose

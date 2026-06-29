@@ -1,38 +1,40 @@
 """
 edit_invariant_relation.py — Edit-Invariant Relation Sensitivity (Proposed Metric 2).
 
-設計方針
---------
-edit probe q を与えたときに relation r が壊れる度合い:
+Design rationale
+----------------
+Compare how much a relation r breaks under a given edit probe q:
     s_C(r, q) = || J_r S_C^(q) ||
-を比較する。J_r はリレーションの residual の primitive 座標に対する Jacobian、
-S_C^(q) は edit response (Metric 1 を参照)。
+where J_r is the Jacobian of the relation's residual w.r.t. the primitive
+coordinates and S_C^(q) is the edit response (see Metric 1).
 
-距離:
+Distance:
     d_inv(P, G) = Σ_q Σ_r w_q w_r | s_P(r, q) - s_G(r, q) |
 
-Pred が GT と同じ relation を明示的に持っている必要はない —
-edit q の下でその relation が同じ程度保持されていれば良い、という解釈。
+Pred does not need to explicitly hold the same relation as GT — the
+interpretation is that it suffices for the relation to be preserved to the same
+degree under edit q.
 
 `d_inv_finite` (FreeCAD finite version)
 ---------------------------------------
-`d_inv` は元形状まわりの局所 sensitivity (一次) のみを見るので、
-FreeCAD solver の roundtrip や solver branch change のような有限効果は
-拾えない (notebooks/summary_histcad_complete_report.md 参照)。
+`d_inv` looks only at the local (first-order) sensitivity around the original
+shape, so it cannot capture finite effects such as a FreeCAD solver roundtrip or
+a solver branch change (see notebooks/summary_histcad_complete_report.md).
 
-`compute_edit_invariant_relation_finite_distance` は同じ probe / relation 集合の上で
-有限 edit を pred と gt 両方に FreeCAD で適用し、edit 後の relation residual を
-比較する:
+`compute_edit_invariant_relation_finite_distance` applies a finite edit to both
+pred and gt with FreeCAD over the same probe / relation sets, and compares the
+post-edit relation residuals:
 
     d_inv_finite(P, G) = Σ_q Σ_r w_q w_r | ||r(x_P*(q*))|| - ||r(x_G*(q*))|| |
 
-ここで x_P*(q*) は pred sketch を target q* で FreeCAD solve した結果、
-x_G*(q*) は gt sketch を同じ target q* で FreeCAD solve した結果。
-HistCAD cPCSR の binary preservation を連続値化した版とほぼ等価。
+Here x_P*(q*) is the result of FreeCAD-solving the pred sketch at target q*, and
+x_G*(q*) the result of solving the gt sketch at the same target q*. This is
+nearly equivalent to a continuous-valued version of HistCAD cPCSR's binary
+preservation.
 
-参考: src/metrics/edit_response_distance.py — ネイティブ次元応答 R_C と
-S_C^(q) の計算を共有。src/metrics/histcad_2d.py — finite edit + FreeCAD solve
-ヘルパを共有。
+See also: src/metrics/edit_response_distance.py — shares the computation of the
+native dimensional response R_C and S_C^(q). src/metrics/histcad_2d.py — shares
+the finite-edit + FreeCAD-solve helpers.
 """
 
 from __future__ import annotations

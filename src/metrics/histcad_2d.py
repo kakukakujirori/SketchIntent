@@ -1,39 +1,43 @@
 """
 histcad_2d.py — 2D port of HistCAD-style edit-based evaluation.
 
-HistCAD (arXiv 2602.19171) は 3D parametric CAD sequence に対して、
-parameter edit 後に target が達成され、preserved constraints が保たれるかを
-binary 的に評価する。本モジュールはその核心の 2D 版を実装する。
+For a 3D parametric CAD sequence, HistCAD (arXiv 2602.19171) evaluates, in a
+binary fashion, whether after a parameter edit the target is achieved and the
+preserved constraints are kept. This module implements the 2D version of its
+core idea.
 
 Per-sketch metric trio
 ----------------------
-各 (edit probe q, sign s ∈ {±1}) について、
+For each (edit probe q, sign s ∈ {±1}):
 
-  1. q の現在値 q0 を sketch 上で評価
-  2. target q* = q0 + s · Δ を設定 (Δ は config.delta_basis で決定)
-  3. q の制約をターゲット q* に書き換えた sketch を Newton-style に解く
+  1. Evaluate q's current value q0 on the sketch
+  2. Set target q* = q0 + s · Δ (Δ is determined by config.delta_basis)
+  3. Rewrite q's constraint to target q* and solve the sketch Newton-style
   4. **ER (Edit Reachability)**:
-        Newton が converge した上で |h(x*) - q*| ≤ tol
+        Newton converges and |h(x*) - q*| ≤ tol
   5. **cPCSR (Conditional Preserved Constraint Satisfaction Rate)**:
-        ER=True 時のみ、preserved relation 集合 R_pres について
-        |r_i(x*)| < tol_i の割合を計算
+        only when ER=True, the fraction of the preserved relation set R_pres with
+        |r_i(x*)| < tol_i
   6. **OES (Overall Editable Success)**:
-        ER × cPCSR (ER=False 時は 0 として probe 全体で平均)
+        ER × cPCSR (counted as 0 when ER=False, then averaged over all probes)
 
 Per-pair API (compute_histcad_2d_pair)
 --------------------------------------
-Pred を solve 対象、GT 由来の rel constraint を preserved 集合とする
-HistCAD 風 pair-wise scoring。`relation_source` を変えると intersection /
-union / pred-side も選べる。
+HistCAD-style pair-wise scoring that solves on Pred and uses the GT-derived rel
+constraints as the preserved set. Changing `relation_source` also selects
+intersection / union / pred-side.
 
-設計の意図
-----------
-- `HistCADConfig` で全閾値・編集スケール・relation source・newton 設定を外出し。
-- 提案 metric (edit_response_distance) と同じ probe / signature 機構を再利用し、
-  q を共通 edit probe として扱う (parameterization-invariance のため)。
-- 提案 metric が連続応答距離なのに対し、本モジュールは binary preservation。
-  両者を同一実験で並べて出すことで、HistCAD-style では同点だが提案 metric では
-  差が出る case を抽出するのが研究目的 (notebooks/plan_histcad.md §13.2)。
+Design intent
+-------------
+- `HistCADConfig` externalizes every threshold, edit scale, relation source, and
+  newton setting.
+- Reuses the same probe / signature machinery as the proposed metric
+  (edit_response_distance), treating q as a shared edit probe (for
+  parameterization-invariance).
+- Whereas the proposed metric is a continuous response distance, this module is
+  binary preservation. Reporting both side by side in the same experiment is the
+  research goal: surface cases that tie under HistCAD-style scoring but separate
+  under the proposed metric (notebooks/plan_histcad.md §13.2).
 """
 
 from __future__ import annotations

@@ -68,10 +68,6 @@ logger = logging.getLogger(__name__)
 
 _GATE_MODES = ("always", "converged", "fc")
 
-# ``coeff_by_type`` is derived from the human-GT relation frequencies by
-# ``scripts/derive_relational_class_prior_coeffs.py`` (reproducible); paste its
-# output into the configs.  Pass ``--subtypes`` there for sub-type-split coeffs.
-
 
 class RelationalClassPriorReward(BaseReward):
     """Capped per-(sub)type count bonus that puts rare relations in the candidate set."""
@@ -99,8 +95,7 @@ class RelationalClassPriorReward(BaseReward):
                 ``CONSTRAINT_SUBTYPE_LABELS``) to the per-occurrence bonus
                 coefficient.  All coefficients must be non-negative — this reward
                 only ever adds.  Required (supplied from config) so the
-                coefficients are recorded in the Hydra run config; derive them
-                with ``scripts/derive_relational_class_prior_coeffs.py``.
+                coefficients are recorded in the Hydra run config.
             gate: Solver-status gate.  ``converged`` scores FC/Under samples,
                 ``fc`` scores only FC, ``always`` scores everything.
             cap_total: Upper bound on the per-sequence bonus, so the prior can
