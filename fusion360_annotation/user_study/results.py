@@ -32,8 +32,8 @@ METRICS = (
     ("dim_ratio", "Dim.", True),
     ("motion_full_angle", "theta_full", True),
     ("motion_relational_angle", "theta_rel", True),
-    ("leak_relational_angle", "theta_leak", True),
-    ("asgn_sim", "S_place", False),
+    ("leak_dimensional_angle", "theta_leak", True),
+    ("placement_sim", "S_place", False),
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[2]

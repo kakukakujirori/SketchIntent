@@ -43,7 +43,7 @@ def toy_square():
     A = unit_cols(Jp @ dc_ds)
     B = unit_cols(Jp @ (dc_ds / (2**0.5)))
     sims = placement_sims(A, B)
-    print(f"square  side-vs-diagonal      asgn_sim={sims['asgn_sim']:.3f} set_sim={sims['set_sim']:.3f} theta={motion_angle(A, B):.3f}")
+    print(f"square  side-vs-diagonal      placement_sim={sims['placement_sim']:.3f} set_sim={sims['set_sim']:.3f} theta={motion_angle(A, B):.3f}")
 
 
 def toy_rectangle(w0, h0):
@@ -61,7 +61,7 @@ def toy_rectangle(w0, h0):
     A = unit_cols(Jp @ (Jc @ torch.linalg.inv(Jg_A)))
     B = unit_cols(Jp @ (Jc @ torch.linalg.inv(Jg_B)))
     sims = placement_sims(A, B)
-    print(f"rect {w0:g}:{h0:g}  sides-vs-diagonal  asgn_sim={sims['asgn_sim']:.3f} set_sim={sims['set_sim']:.3f} theta={motion_angle(A, B):.3f}")
+    print(f"rect {w0:g}:{h0:g}  sides-vs-diagonal  placement_sim={sims['placement_sim']:.3f} set_sim={sims['set_sim']:.3f} theta={motion_angle(A, B):.3f}")
 
 
 if __name__ == "__main__":

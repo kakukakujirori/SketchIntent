@@ -17,20 +17,16 @@ A. Population solver metrics (read from ``results.json``; no GT, no FreeCAD relo
    is the honest health number -- fc_rate hides the close-or-abandon bimodality.
 
 B. Composition / over-dim KPI (parsed from the predicted constraint set; no GT):
-   DimensionalRatio (= Distance/DistanceX/DistanceY/Angle), KeyRelational /
-   relational ratios, and the raw Distance-vs-DistanceX/Y split.
+   relational_ratio and dimensional_ratio, plus the distance / angle dimensional
+   family split.
 
 C. Reference geometry metrics (predicted sketch vs each human GT; FreeCAD + the
-   eda_code canonical remap).  motion_full / motion_relational / leak /
-   response_full / response_relational angles (identical implementation to the
-   training reward, so the numbers line up with the paper) plus asgn_sim (S_place,
-   the dimensional-placement axis).
+   eda_code canonical remap).  motion_full / motion_relational / leak_dimensional
+   angles (identical implementation to the training reward, so the numbers line up
+   with the paper) plus placement_sim (S_place, the dimensional-placement axis).
 
 Notes
 -----
-* ``response_full_angle`` is reported but is a pro-over-dim metric (its GT is the
-  fully-dimensioned human), so do NOT use it for checkpoint / ablation selection.
-  Discriminate the leak arms on leak + Distance-vs-DistanceX/Y + matched DoF/FC.
 * HistCAD OES is a heavy baseline-comparison artifact, not a selection metric, so
   it is omitted here.  Use ``fusion360_annotation/eda_code`` if you need it.
 """
@@ -127,7 +123,7 @@ def composition_metrics(pred_dir: Path) -> dict:
         per_sketch[sid] = {
             "n_constraints": t,
             "dimensional_ratio": ndim / t,
-            "rel_ratio": (t - ndim) / t,
+            "relational_ratio": (t - ndim) / t,
             "raw_distance_ratio": c["Distance"] / t,
             "axis_distance_ratio": (c["DistanceX"] + c["DistanceY"]) / t,
         }
@@ -144,7 +140,7 @@ def composition_metrics(pred_dir: Path) -> dict:
     return {
         "n_sketches": n_sketches,
         "n_constraints": total,
-        "rel_ratio": n_rel / total,
+        "relational_ratio": n_rel / total,
         "dimensional_ratio": n_dim / total,
         "distance_family_ratio": dist_fam / total,
         "angle_family_ratio": angle_fam / total,
@@ -209,10 +205,15 @@ def reference_metrics(pred_dir: Path, *, eps: float, geometry_tol: float,
             dirs = torch.zeros(j_phi.shape[0], 0, dtype=native.R.dtype)
         return native, dirs, j_phi
 
-    ANGLE_KEYS = [
-        "motion_full_angle", "motion_relational_angle", "leak_relational_angle",
-        "response_full_angle", "response_relational_angle",
+    # (HThetaMetrics attribute, paper-facing output key).  The training reward
+    # keeps its historical attribute names; the eval output uses the paper names
+    # (e.g. the dimensional-leak angle is ``leak_dimensional_angle`` here).
+    ANGLE_METRICS = [
+        ("motion_full_angle", "motion_full_angle"),
+        ("motion_relational_angle", "motion_relational_angle"),
+        ("leak_relational_angle", "leak_dimensional_angle"),
     ]
+    ANGLE_OUT_KEYS = [out_key for _, out_key in ANGLE_METRICS]
     per_sketch: list[dict] = []
     skipped: Counter = Counter()
 
@@ -235,7 +236,8 @@ def reference_metrics(pred_dir: Path, *, eps: float, geometry_tol: float,
             continue
 
         if "Vitruvion" not in bundle.sketches:
-            skipped[f"pred_{bundle.model_statuses.get('Vitruvion', 'missing')[:20]}"] += 1
+            status = bundle.model_statuses.get("Vitruvion", "missing")
+            skipped[f"pred_unavailable:{status}"] += 1
             continue
 
         humans = [n for n in files if n in bundle.sketches]
@@ -272,10 +274,10 @@ def reference_metrics(pred_dir: Path, *, eps: float, geometry_tol: float,
                 place = placement_sims(p_dirs, g_dirs)
             except Exception:  # noqa: BLE001
                 continue
-            for k in ANGLE_KEYS:
-                pair_vals[k].append(float(getattr(hth, k)))
-            if place.get("asgn_sim") is not None:
-                pair_vals["asgn_sim"].append(float(place["asgn_sim"]))
+            for src_attr, out_key in ANGLE_METRICS:
+                pair_vals[out_key].append(float(getattr(hth, src_attr)))
+            if place.get("placement_sim") is not None:
+                pair_vals["placement_sim"].append(float(place["placement_sim"]))
 
         if not pair_vals.get("motion_full_angle"):
             skipped["no_valid_pair"] += 1
@@ -287,7 +289,7 @@ def reference_metrics(pred_dir: Path, *, eps: float, geometry_tol: float,
         per_sketch.append(entry)
 
     out: dict = {"n_scored": len(per_sketch), "skipped": dict(skipped)}
-    for k in ANGLE_KEYS + ["asgn_sim"]:
+    for k in ANGLE_OUT_KEYS + ["placement_sim"]:
         vals = [s[k] for s in per_sketch if k in s]
         if vals:
             out[k] = {"mean": _mean(vals), "median": _median(vals), "n": len(vals)}
@@ -326,6 +328,27 @@ def _fmt(x) -> str:
     return f"{x:.3f}" if isinstance(x, float) and not math.isnan(x) else str(x)
 
 
+def _skip_label(reason: str) -> str:
+    """Human-readable gloss for a reference-metric skip reason."""
+    static = {
+        "no_human": "no human annotation could be loaded",
+        "pred_missing_solid": "prediction is missing the required base solid",
+        "humans_missing_solid": "every human annotation is missing the base solid",
+        "no_valid_pair": "no comparable predicted / GT motion pair",
+    }
+    if reason in static:
+        return f"{reason}  ({static[reason]})"
+    prefixes = {
+        "pred_unavailable:": "prediction could not be loaded; bundle status",
+        "bundle_error:": "file bundle failed to build",
+        "pred_motion_fail:": "motion computation failed for the prediction",
+    }
+    for prefix, desc in prefixes.items():
+        if reason.startswith(prefix):
+            return f"{reason}  ({desc}: {reason[len(prefix):]})"
+    return reason
+
+
 def report(pred_dir: Path, solver: dict, comp: dict, ref: dict | None) -> None:
     print("=" * 64)
     print(f"Evaluation: {pred_dir.name}")
@@ -338,9 +361,8 @@ def report(pred_dir: Path, solver: dict, comp: dict, ref: dict | None) -> None:
     print(f"    final_status         {solver.get('final_status')}")
 
     print("\n[B] Composition / over-dim KPI")
-    for k in ("rel_ratio", "dimensional_ratio", "distance_family_ratio",
-              "angle_family_ratio", "key_relational_ratio", "raw_distance_ratio",
-              "axis_distance_ratio"):
+    for k in ("relational_ratio", "dimensional_ratio", "distance_family_ratio",
+              "angle_family_ratio"):
         print(f"    {k:<22} {_fmt(comp.get(k))}")
     print(f"    per_type             {comp.get('per_type')}")
 
@@ -348,14 +370,14 @@ def report(pred_dir: Path, solver: dict, comp: dict, ref: dict | None) -> None:
         print("\n[C] Reference geometry   (scored {} / skipped {})".format(
             ref.get("n_scored"), sum(ref.get("skipped", {}).values())))
         for k in ("motion_full_angle", "motion_relational_angle",
-                  "leak_relational_angle", "response_relational_angle",
-                  "response_full_angle", "asgn_sim"):
+                  "leak_dimensional_angle", "placement_sim"):
             v = ref.get(k)
-            tag = "  <- pro-over-dim; not for selection" if k == "response_full_angle" else ""
             if v:
-                print(f"    {k:<26} mean {_fmt(v['mean'])}  median {_fmt(v['median'])}{tag}")
+                print(f"    {k:<26} mean {_fmt(v['mean'])}  median {_fmt(v['median'])}")
         if ref.get("skipped"):
-            print(f"    skipped breakdown    {ref['skipped']}")
+            print("    skipped breakdown:")
+            for reason, count in sorted(ref["skipped"].items(), key=lambda kv: -kv[1]):
+                print(f"        {count:>4}  {_skip_label(reason)}")
     print()
 
 

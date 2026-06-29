@@ -19,7 +19,7 @@ The data input is fixed to `data/SketchIntent-292/` at the repo root.
 | `bundle_loader.py` | a thin adapter that converts the `data/SketchIntent-292/` manifest format into `FileBundle` construction arguments. |
 | `dataset_features.py` | extracts features for dataset statistics from `.FCStd`. |
 | `controls.py` | synthetic degradation controls; currently relational dropout. |
-| `motion_metrics.py` | implementation of the paper's `theta_full`, `theta_rel`, `asgn_sim`. |
+| `motion_metrics.py` | implementation of the paper's `theta_full`, `theta_rel`, `placement_sim`. |
 | `scripts/` | CLI entrypoints, run in order from the top. |
 
 ## Data and environment
@@ -133,7 +133,7 @@ Output:
 
 ### 6. main motion metrics
 
-Evaluates leave-one-out rotations and dropout controls with `theta_full` / `theta_rel` / `asgn_sim`.
+Evaluates leave-one-out rotations and dropout controls with `theta_full` / `theta_rel` / `placement_sim`.
 
 ```bash
 python fusion360_annotation/eda_code/scripts/06_run_motion_eval.py \

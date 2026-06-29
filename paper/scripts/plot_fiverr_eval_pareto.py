@@ -58,7 +58,7 @@ SUMMARY_COLUMNS = (
     "solver_error_rate",
     "valid_dof_mean",
     "dof_mean",
-    "rel_ratio",
+    "relational_ratio",
     "dimensional_ratio",
     "distance_family_ratio",
     "angle_family_ratio",
@@ -70,12 +70,10 @@ SUMMARY_COLUMNS = (
     "motion_full_angle_median",
     "motion_relational_angle_mean",
     "motion_relational_angle_median",
-    "leak_relational_angle_mean",
-    "leak_relational_angle_median",
-    "response_relational_angle_mean",
-    "response_relational_angle_median",
-    "asgn_sim_mean",
-    "asgn_sim_median",
+    "leak_dimensional_angle_mean",
+    "leak_dimensional_angle_median",
+    "placement_sim_mean",
+    "placement_sim_median",
 )
 
 
@@ -130,7 +128,7 @@ def row_from_json(label: str, path: Path) -> dict[str, Any]:
         "solver_error_rate": solver["solver_error_rate"],
         "valid_dof_mean": solver["valid_dof_mean"],
         "dof_mean": solver["dof_mean"],
-        "rel_ratio": comp["rel_ratio"],
+        "relational_ratio": comp["relational_ratio"],
         "dimensional_ratio": comp_ratio(
             comp,
             "dimensional_ratio",
@@ -162,12 +160,10 @@ def row_from_json(label: str, path: Path) -> dict[str, Any]:
         "motion_full_angle_median": metric(ref, "motion_full_angle", "median"),
         "motion_relational_angle_mean": metric(ref, "motion_relational_angle", "mean"),
         "motion_relational_angle_median": metric(ref, "motion_relational_angle", "median"),
-        "leak_relational_angle_mean": metric(ref, "leak_relational_angle", "mean"),
-        "leak_relational_angle_median": metric(ref, "leak_relational_angle", "median"),
-        "response_relational_angle_mean": metric(ref, "response_relational_angle", "mean"),
-        "response_relational_angle_median": metric(ref, "response_relational_angle", "median"),
-        "asgn_sim_mean": metric(ref, "asgn_sim", "mean"),
-        "asgn_sim_median": metric(ref, "asgn_sim", "median"),
+        "leak_dimensional_angle_mean": metric(ref, "leak_dimensional_angle", "mean"),
+        "leak_dimensional_angle_median": metric(ref, "leak_dimensional_angle", "median"),
+        "placement_sim_mean": metric(ref, "placement_sim", "mean"),
+        "placement_sim_median": metric(ref, "placement_sim", "median"),
     }
 
 
@@ -192,8 +188,8 @@ def write_summary(rows: list[dict[str, Any]], outdir: Path) -> None:
                 f"{row['dimensional_ratio']:.3f} | "
                 f"{row['motion_full_angle_mean']:.3f} | "
                 f"{row['motion_relational_angle_mean']:.3f} | "
-                f"{row['leak_relational_angle_mean']:.3f} | "
-                f"{row['asgn_sim_mean']:.3f} | "
+                f"{row['leak_dimensional_angle_mean']:.3f} | "
+                f"{row['placement_sim_mean']:.3f} | "
                 f"{row['raw_distance_ratio']:.3f} |\n"
             )
 
@@ -221,10 +217,9 @@ def short_label(label: str) -> str:
 def plot(rows: list[dict[str, Any]], outdir: Path) -> None:
     specs = (
         ("motion_relational_angle_mean", "Motion relational angle"),
-        ("leak_relational_angle_mean", "RelDimAlign angle"),
-        ("response_relational_angle_mean", "Response relational angle"),
+        ("leak_dimensional_angle_mean", "Dimensional leak angle"),
     )
-    fig, axes = plt.subplots(1, 3, figsize=(16, 4.8), dpi=180)
+    fig, axes = plt.subplots(1, 2, figsize=(11, 4.8), dpi=180)
     for ax, (key, title) in zip(axes, specs):
         for row in rows:
             ax.scatter(
@@ -254,7 +249,7 @@ def plot(rows: list[dict[str, Any]], outdir: Path) -> None:
     independent_specs = (
         ("dimensional_ratio", "Dimensional ratio", "lower is better"),
         ("motion_full_angle_mean", "Full motion angle", "lower is better"),
-        ("asgn_sim_mean", "S_place / assignment similarity", "higher is better"),
+        ("placement_sim_mean", "S_place / assignment similarity", "higher is better"),
     )
     fig, axes = plt.subplots(1, 3, figsize=(16, 4.8), dpi=180)
     for ax, (key, title, direction) in zip(axes, independent_specs):

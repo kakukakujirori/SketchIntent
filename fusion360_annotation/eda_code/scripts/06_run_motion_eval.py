@@ -33,7 +33,7 @@ METRIC_COLS = [
     "theta_full",
     "theta_rel",
     "theta_leak",
-    "asgn_sim",
+    "placement_sim",
     "asgn_min",
     "set_sim",
     "omp_sim",

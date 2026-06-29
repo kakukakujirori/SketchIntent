@@ -27,7 +27,7 @@ HERE = Path(__file__).resolve().parents[1]
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 ANGLES = ["theta_full", "theta_rel", "theta_leak"]
-SIMS = ["asgn_sim", "asgn_min", "set_sim", "omp_sim"]
+SIMS = ["placement_sim", "asgn_min", "set_sim", "omp_sim"]
 METRICS = ANGLES + SIMS
 VARIANT_ORDER = [
     "source_self",
@@ -266,7 +266,7 @@ def print_paper_table(motion_rows: list[dict], oes_rows: list[dict], token_rows:
     columns = [
         ("theta_full", motion_best, "theta_full"),
         ("theta_rel", motion_best, "theta_rel"),
-        ("S_place", motion_best, "asgn_sim"),
+        ("S_place", motion_best, "placement_sim"),
         ("OES", oes_best, "oes"),
         ("F1", token_best, "token_f1"),
     ]
@@ -280,7 +280,7 @@ def print_paper_table(motion_rows: list[dict], oes_rows: list[dict], token_rows:
     for variant, label in PAPER_VARIANTS:
         n = max(
             len(metric_values(motion_best, variant, metric))
-            for metric in ("theta_full", "theta_rel", "asgn_sim")
+            for metric in ("theta_full", "theta_rel", "placement_sim")
         )
         if n == 0:
             n = max(
@@ -356,14 +356,14 @@ def main() -> None:
             f"files={len({(r['batch'], r['filename']) for r in motion})}"
         )
         lv_best = aggregate(motion, METRICS, best=True)
-        median_table(lv_best, ["theta_full", "theta_rel", "theta_leak", "asgn_sim"], "controls (multi-ref best, ours only)")
-        paired_tests(lv_best, ["theta_full", "theta_rel", "theta_leak", "asgn_sim"])
+        median_table(lv_best, ["theta_full", "theta_rel", "theta_leak", "placement_sim"], "controls (multi-ref best, ours only)")
+        paired_tests(lv_best, ["theta_full", "theta_rel", "theta_leak", "placement_sim"])
         median_table(lv_best, SIMS, "placement variants (multi-ref best, appendix)")
         lv_mean = aggregate(motion, METRICS, best=False)
-        median_table(lv_mean, ["theta_full", "theta_rel", "asgn_sim"], "controls (mean-ref, appendix)")
-        floor = [d["asgn_sim"] for (_rid, vv), d in lv_best.items() if vv == "heldout" and "asgn_sim" in d]
+        median_table(lv_mean, ["theta_full", "theta_rel", "placement_sim"], "controls (mean-ref, appendix)")
+        floor = [d["placement_sim"] for (_rid, vv), d in lv_best.items() if vv == "heldout" and "placement_sim" in d]
         if floor:
-            print(f"\nasgn_sim human floor: median={st.median(floor):.3f} mean={st.fmean(floor):.3f} (n={len(floor)})")
+            print(f"\nplacement_sim human floor: median={st.median(floor):.3f} mean={st.fmean(floor):.3f} (n={len(floor)})")
         leak_floor = [d["theta_leak"] for (_rid, vv), d in lv_best.items() if vv == "heldout" and "theta_leak" in d]
         if leak_floor:
             print(f"theta_leak human floor: median={st.median(leak_floor):.3f} mean={st.fmean(leak_floor):.3f} (n={len(leak_floor)})")
@@ -432,7 +432,7 @@ def main() -> None:
                 print(f"  {model:10s} files={n} loaded={len(loaded)} ({100 * len(loaded) / n:.1f}%) missing_pred={missing} FC(DoF<=2)={fc} ({100 * fc / n:.1f}%)")
 
     if motion and status_files:
-        print("\n=== gate sensitivity (theta_full / theta_rel / asgn_sim medians) ===")
+        print("\n=== gate sensitivity (theta_full / theta_rel / placement_sim medians) ===")
         lv_best = aggregate(motion, METRICS, best=True)
         rid_file = {r["rid"]: (r["batch"], r["filename"]) for r in motion}
         for model in MODELS:
@@ -440,7 +440,7 @@ def main() -> None:
             strict = {rid: d for rid, d in rows_m.items() if rid_file.get(rid) in fc_files[model]}
             for tag, sel in (("relaxed", rows_m), ("strict", strict)):
                 meds = []
-                for metric in ["theta_full", "theta_rel", "asgn_sim"]:
+                for metric in ["theta_full", "theta_rel", "placement_sim"]:
                     xs = [d[metric] for d in sel.values() if metric in d]
                     meds.append(f"{metric}={st.median(xs):.3f}" if xs else f"{metric}=NA")
                 print(f"  {model:10s} {tag:8s} n={len(sel):4d}  " + "  ".join(meds))
@@ -461,7 +461,7 @@ def main() -> None:
                 lv0 = aggregate(base_rows, METRICS, best=True)
                 line = "  eps=1e-9   "
                 for var in ("heldout", "base", "solver_rl"):
-                    for metric in ("theta_full", "theta_rel", "asgn_sim"):
+                    for metric in ("theta_full", "theta_rel", "placement_sim"):
                         xs = [d[metric] for (_rid, vv), d in lv0.items() if vv == var and metric in d]
                         if xs:
                             line += f" {var[:4]}.{metric[6:10]}={st.median(xs):.4f}"
@@ -470,7 +470,7 @@ def main() -> None:
             tag = os.path.basename(path).replace("motion_eval_", "").replace(".csv", "")
             line = f"  {tag:10s} "
             for var in ("heldout", "base", "solver_rl"):
-                for metric in ("theta_full", "theta_rel", "asgn_sim"):
+                for metric in ("theta_full", "theta_rel", "placement_sim"):
                     xs = [d[metric] for (_rid, vv), d in lv_e.items() if vv == var and metric in d]
                     if xs:
                         line += f" {var[:4]}.{metric[6:10]}={st.median(xs):.4f}"

@@ -77,15 +77,15 @@ def _hungarian_matched(C: torch.Tensor) -> torch.Tensor:
 def placement_sims(A: torch.Tensor, B: torch.Tensor) -> dict:
     ka, kb = int(A.shape[1]), int(B.shape[1])
     if ka == 0 and kb == 0:
-        return dict(asgn_sim=1.0, asgn_min=None, set_sim=1.0, omp_sim=1.0)
+        return dict(placement_sim=1.0, asgn_min=None, set_sim=1.0, omp_sim=1.0)
     if ka == 0 or kb == 0:
-        return dict(asgn_sim=0.0, asgn_min=None, set_sim=0.0, omp_sim=0.0)
+        return dict(placement_sim=0.0, asgn_min=None, set_sim=0.0, omp_sim=0.0)
     C = (A.T @ B).abs()
     matched = _hungarian_matched(C)
     asgn = float(matched.sum())
     set_sim = float((C.max(dim=0).values.mean() + C.max(dim=1).values.mean()) / 2)
     return dict(
-        asgn_sim=asgn / max(ka, kb),
+        placement_sim=asgn / max(ka, kb),
         asgn_min=asgn / min(ka, kb),
         set_sim=set_sim,
         omp_sim=_omp_sim(A, B),
@@ -122,19 +122,20 @@ def _omp_sim(Ua: torch.Tensor, Ub: torch.Tensor, tol: float = 1e-9) -> float:
     return num / den
 
 
-def leak_relational_angle(pred: SketchMotion, gt: SketchMotion, eps: float = EPS_DEFAULT) -> float:
-    r"""theta_align^rel: relation-intent leakage of Pred against GT relations.
+def leak_dimensional_angle(pred: SketchMotion, gt: SketchMotion, eps: float = EPS_DEFAULT) -> float:
+    r"""theta_leak^dim: dimensional-intent leakage of Pred against GT relations.
 
     RMS cosine between the directions Pred allows through its (dimensional)
     response map and the GT relation-forbidden directions (the row space of the
     GT relation Jacobians):
 
-        theta_align^rel ** 2 = || orth(row(J_R^G))^T U_P ||_F^2 / dim(U_P)
+        theta_leak^dim ** 2 = || orth(row(J_R^G))^T U_P ||_F^2 / dim(U_P)
 
     Jacobians are evaluated at Pred's primitive state, with GT's relational
     constraints. This is a direct port of
-    ``src.models.rewards.response_metric_reward._leak_relational_angle`` so the
-    held-out-human reference matches the model-side ``leak_relational_angle``.
+    ``src.models.rewards.response_metric_reward._leak_relational_angle`` (the
+    reward keeps its historical name) so the held-out-human reference matches the
+    model-side leak angle.
     """
     U_P, dim_P = orthonormal_range(pred.native.R, eps)
     if dim_P == 0:
@@ -157,7 +158,7 @@ def pair_paper_metrics(pred: SketchMotion, gt: SketchMotion) -> dict | None:
     out = dict(
         theta_full=subspace_angle(pred.U_full, pred.k_full, gt.U_full, gt.k_full),
         theta_rel=subspace_angle(pred.U_rel, pred.k_rel, gt.U_rel, gt.k_rel),
-        theta_leak=leak_relational_angle(pred, gt, pred.eps),
+        theta_leak=leak_dimensional_angle(pred, gt, pred.eps),
         k_full_pred=pred.k_full,
         k_full_gt=gt.k_full,
         k_rel_pred=pred.k_rel,

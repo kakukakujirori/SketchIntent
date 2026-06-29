@@ -154,7 +154,7 @@ done
 
 ## Evaluation
 
-`src/eval/evaluate.py` scores a model-output directory against the SketchIntent-292 human annotations and reports three metric families: population solver metrics (FC / Under / Distorted rates, DoF), composition / over-dimensioning KPIs (dimensional ratio, relational ratios), and reference-geometry metrics (`motion_full` / `motion_relational` / `leak` angles and `asgn_sim` = S_place).
+`src/eval/evaluate.py` scores a model-output directory against the SketchIntent-292 human annotations and reports three metric families: population solver metrics (FC / Under / Distorted rates, DoF), composition / over-dimensioning KPIs (`dimensional_ratio`, `relational_ratio`), and reference-geometry metrics (`motion_full` / `motion_relational` / `leak_dimensional` angles and `placement_sim`).
 
 ```bash
 python src/eval/evaluate.py "$OUT" data/SketchIntent-292 --json "$OUT/metrics.json"

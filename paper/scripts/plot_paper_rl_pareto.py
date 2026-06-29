@@ -74,7 +74,7 @@ SERIES = [
 AXES = [
     ("dimensional_ratio", "Dimensional ratio (lower better)"),
     ("motion_full_angle_mean", r"$\theta_{motion}^{full}$ (lower better)"),
-    ("asgn_sim_mean", r"$S_{place}$ (higher better)"),
+    ("placement_sim_mean", r"$S_{place}$ (higher better)"),
 ]
 
 TITLE_FS, LABEL_FS, TICK_FS, LEGEND_FS = 16, 14, 12, 12

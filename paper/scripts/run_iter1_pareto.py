@@ -131,18 +131,18 @@ VARIANTS = {
 AXES = [
     ("dimensional_ratio", "Dimensional ratio (lower better)"),
     ("motion_full_angle", r"$\theta_{motion}^{full}$ (lower better)"),
-    ("asgn_sim", r"$S_{place}$ (higher better)"),
+    ("placement_sim", r"$S_{place}$ (higher better)"),
     ("motion_relational_angle", r"$\theta_{motion}^{rel}$ (lower, mechanism)"),
-    ("leak_relational_angle", r"$\theta_{leak}^{dim}$ (lower, mechanism)"),
+    ("leak_dimensional_angle", r"$\theta_{leak}^{dim}$ (lower, mechanism)"),
 ]
-MECHANISM_AXES = {"motion_relational_angle", "leak_relational_angle"}
+MECHANISM_AXES = {"motion_relational_angle", "leak_dimensional_angle"}
 MECHANISM_PANEL_FACE = "#f2f2f2"
 # Human held-out level per axis: median multi-reference score of a held-out human
 # annotation (leave-one-out), i.e. the bar a prediction must reach to be
 # human-indistinguishable. Drawn as a horizontal reference so "model at/above (or below)
 # human level" is readable at a glance. All five use the same median-multi-ref convention:
-#   - motion_full / motion_relational / asgn_sim(S_place): Table 1 (tab:controls) human row.
-#   - leak_relational_angle (theta_leak^dim): not in Table 1; computed alongside the
+#   - motion_full / motion_relational / placement_sim(S_place): Table 1 (tab:controls) human row.
+#   - leak_dimensional_angle (theta_leak^dim): not in Table 1; computed alongside the
 #     other angles in fusion360_annotation/eda_code (06_run_motion_eval + 11_analyze...),
 #     human median = 0.000 (mean 0.090).
 #   - dimensional_ratio: human-annotation dimensional share from eda_code/out/records.json
@@ -152,8 +152,8 @@ HUMAN_HELDOUT = {
     "dimensional_ratio": 0.25,
     "motion_full_angle": 0.000,
     "motion_relational_angle": 0.000,
-    "asgn_sim": 0.833,
-    "leak_relational_angle": 0.000,
+    "placement_sim": 0.833,
+    "leak_dimensional_angle": 0.000,
 }
 
 TITLE_FS, LABEL_FS, TICK_FS, LEGEND_FS = 23, 21, 18, 20
@@ -250,9 +250,9 @@ def read_metrics(json_path: Path) -> dict:
         "fc_rate": s["fc_rate"], "valid_dof_mean": s.get("valid_dof_mean"),
         "dimensional_ratio": c.get("dimensional_ratio", float("nan")),
         "motion_full_angle": rm("motion_full_angle"),
-        "leak_relational_angle": rm("leak_relational_angle"),
+        "leak_dimensional_angle": rm("leak_dimensional_angle"),
         "motion_relational_angle": rm("motion_relational_angle"),
-        "asgn_sim": rm("asgn_sim"),
+        "placement_sim": rm("placement_sim"),
     }
 
 

@@ -20,12 +20,12 @@ HERE = Path(__file__).resolve().parents[1]
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 DISTANCE_METRICS = {"theta_full", "theta_rel", "theta_leak"}
-METRICS = ["theta_full", "theta_rel", "theta_leak", "asgn_sim"]
+METRICS = ["theta_full", "theta_rel", "theta_leak", "placement_sim"]
 PLOT_LABELS = {
     "theta_full": r"$\theta_{\mathrm{motion}}^{\mathrm{full}}$",
     "theta_rel": r"$\theta_{\mathrm{motion}}^{\mathrm{rel}}$",
     "theta_leak": r"$\theta_{\mathrm{leak}}^{\mathrm{dim}}$",
-    "asgn_sim": r"$S_{\mathrm{place}}$",
+    "placement_sim": r"$S_{\mathrm{place}}$",
 }
 
 
@@ -118,7 +118,7 @@ def plot(values: dict[str, list[float]], stats: dict[str, dict], output: Path) -
         mean = stats[metric]["mean"]
         median = stats[metric]["median"]
         note = f"mean {fmt(mean)}\nmedian {fmt(median)}"
-        note_x = 0.18 if metric == "asgn_sim" else 0.40
+        note_x = 0.18 if metric == "placement_sim" else 0.40
         ax.text(
             note_x,
             0.94,

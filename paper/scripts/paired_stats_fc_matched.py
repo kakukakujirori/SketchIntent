@@ -21,10 +21,10 @@ import numpy as np
 # metric -> (json section, "lower" or "higher" is better)
 COMP_METRICS = {"dimensional_ratio": "lower", "raw_distance_ratio": "lower"}
 REF_METRICS = {
-    "asgn_sim": "higher",
+    "placement_sim": "higher",
     "motion_full_angle": "lower",
     "motion_relational_angle": "lower",
-    "leak_relational_angle": "lower",
+    "leak_dimensional_angle": "lower",
 }
 
 
