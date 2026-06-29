@@ -207,7 +207,7 @@ def sample_metadata(batch: dict, batch_idx: int, batch_size: int, sample_idx: in
     sketch_id = batch_item(batch, "sketch_id", sample_idx)
     return {
         "dataset_index": int(dataset_index) if isinstance(dataset_index, (int, np.integer)) else dataset_index,
-        "source_file": Path(str(source_file)).name if source_file is not None else None,
+        "source_file": str(source_file) if source_file is not None else None,
         "sketch_id": str(sketch_id) if sketch_id is not None else None,
     }
 
@@ -611,7 +611,9 @@ def main():
         r_clean = {
             'sample_idx': r['sample_idx'],
             'dataset_index': r.get('dataset_index'),
-            'source_file': r.get('source_file'),
+            # Basename only: the full source path is kept in memory (it is opened
+            # during decode) but absolute paths are hidden in results.json (to reduce anonymization burden).
+            'source_file': Path(r['source_file']).name if r.get('source_file') else None,
             'sketch_id': r.get('sketch_id'),
             # 'solved' is True for both Solved and UnderConstrained
             'solved': r['solved'] or bool(r.get('under_constrained_converged')),
@@ -666,8 +668,6 @@ def main():
                 r.get('final_dof', '?'),
                 r.get('final_status', '?'),
             ))
-            if r.get('source_file'):
-                f.write("## Source: {}\n".format(r['source_file']))
             if r.get('last_iteration_status') != r.get('final_status'):
                 f.write("## Selected iteration: {} | Last attempted solver status: {}\n".format(
                     r.get('selected_iteration'),
