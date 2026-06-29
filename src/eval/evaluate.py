@@ -28,7 +28,7 @@ C. Reference geometry metrics (predicted sketch vs each human GT; FreeCAD + the
 Notes
 -----
 * HistCAD OES is a heavy baseline-comparison artifact, not a selection metric, so
-  it is omitted here.  Use ``fusion360_annotation/eda_code`` if you need it.
+  it is omitted here.
 """
 from __future__ import annotations
 

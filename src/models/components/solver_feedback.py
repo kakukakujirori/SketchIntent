@@ -208,7 +208,6 @@ class SolverFeedback:
         legitimately settle at a different absolute scale/position. We absorb that
         freedom by aligning post to pre via per-axis bbox scaling + translation,
         then comparing anchor residuals against ``distortion_threshold * max(bw, bh)``.
-        Mirrors ``fusion360_annotation/check_submission.py:align_sketch``.
         """
         coords_pre = SolverFeedback._extract_geometry_coords(fc_sketch_pre)
         coords_post = SolverFeedback._extract_geometry_coords(fc_sketch_post)
