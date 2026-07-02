@@ -14,13 +14,8 @@ def ensure_freecad_imported(libpath: str = "~/github/FreeCAD/build/release/lib")
     Raises:
         ImportError: If FreeCAD modules cannot be found or imported.
     """
-    # 1. Ensure FreeCAD path is in sys.path
-    # This is typically handled in __init__.py, but safe to double-check here
-    freecad_lib = os.path.expanduser(libpath)
-    if freecad_lib not in sys.path:
-        sys.path.insert(0, freecad_lib)
-
     try:
+        import freecad
         import FreeCAD
         import Part
         import Sketcher
@@ -31,8 +26,45 @@ def ensure_freecad_imported(libpath: str = "~/github/FreeCAD/build/release/lib")
                           "or that the path is configured correctly.") from e
 
 
+def get_solver_status(fc_sketch) -> dict[str, Any]:
+    """
+    Emulates the custom getSolverStatus() for a FreeCAD sketch using native FreeCAD 1.0 APIs.
+    """
+    solve_ret = fc_sketch.solve()
+
+    dof = fc_sketch.DoF
+
+    # Check constraints and adjust 1-based index to 0-based index
+    malformed = [idx - 1 for idx in fc_sketch.MalformedConstraints]
+    conflicting = [idx - 1 for idx in fc_sketch.ConflictingConstraints]
+    redundant = [idx - 1 for idx in fc_sketch.RedundantConstraints]
+    partially_redundant = [idx - 1 for idx in fc_sketch.PartiallyRedundantConstraints]
+    merged_redundant = sorted(list(set(redundant + partially_redundant)))
+
+    status = "Converged"
+    if malformed:
+        status = "Malformed"
+    elif dof < 0:
+        status = "OverConstrained"
+    elif conflicting:
+        status = "Conflicting"
+    elif merged_redundant:
+        status = "Redundant"
+    elif solve_ret != 0:
+        status = "Failed"
+
+    return {
+        "DoF": dof,
+        "Status": status,
+        "MalformedConstraints": malformed,
+        "ConflictingConstraints": conflicting,
+        "RedundantConstraints": merged_redundant,
+    }
+
+
 if TYPE_CHECKING:
     FreeCAD, Part, Sketcher = ensure_freecad_imported()
+
 
 
 def load_freecad_commands(commands_or_file: list[str] | str) -> tuple['FreeCAD.Document', 'Sketcher.SketchObject']:

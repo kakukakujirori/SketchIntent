@@ -37,7 +37,7 @@ TMP="${TMPDIR:-/tmp}"
 # Single-thread BLAS so the parallel shards do not oversubscribe CPU cores.
 export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
 
-RUN=(conda run --no-capture-output -n freecad python -u -m scripts.generate_pseudo_rel_augmented_dataset)
+RUN=(conda run --no-capture-output -n sketch_intent python -u -m scripts.generate_pseudo_rel_augmented_dataset)
 
 echo "Launching ${NSHARDS} shards over ${INPUT_NPY} (scale=${SCALE})..."
 pids=()

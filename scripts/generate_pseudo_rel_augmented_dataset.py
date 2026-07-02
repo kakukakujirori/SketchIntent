@@ -29,7 +29,7 @@ relational constraints, are dropped — so the saved npy is safe-by-construction
 for training and has a well-defined relational GT subspace.
 
 Typical usage (normally run per-shard via scripts/generate_rule_augmented_dataset.sh):
-    conda run -n freecad python -m scripts.generate_pseudo_rel_augmented_dataset \\
+    conda run -n sketch_intent python -m scripts.generate_pseudo_rel_augmented_dataset \\
         --input_npy  data/processed/sg_filtered_unique_valid.npy \\
         --output_npy data/processed/sg_filtered_unique_augmented.npy \\
         --scale 0.25

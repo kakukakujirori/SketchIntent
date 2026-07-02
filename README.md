@@ -13,62 +13,15 @@ unzip SketchIntent-75BE.zip -d SketchIntent
 export REPO_ROOT="$(pwd)/SketchIntent"
 ```
 
-## Install FreeCAD
-
-Next, build our custom FreeCAD for the CAD solver feedback in reinforcement learning (RL). Run these commands from wherever you want the FreeCAD source tree to live:
-
-```bash
-git clone https://github.com/FreeCAD/FreeCAD.git
-cd FreeCAD
-git checkout 1.0.2
-git apply "$REPO_ROOT/patches/freecad-1.0.2-get-solver-status.patch"
-git submodule update --init --recursive
-```
-
-We use a mamba environment, following the instruction of FreeCAD:
-
-```bash
-mamba env create -f conda/environment.devenv.yml
-mamba activate freecad
-
-# Remove non-existent HDF5 paths from the environment's compiler wrappers
-sed -i 's|-I/home/conda/[^ ]*H5FDsubfiling||g' $CONDA_PREFIX/bin/h5cc $CONDA_PREFIX/bin/h5c++ $CONDA_PREFIX/lib/libhdf5.settings
-
-cmake --preset conda-linux-release -DBUILD_FEM_NETGEN=OFF
-cmake --build build/release -j $(nproc)
-```
-
-After the build completes, modify the default argument of `ensure_freecad_imported` in [`src/sketch_handlers/freecad_utils.py`](src/sketch_handlers/freecad_utils.py) to your FreeCAD library directory path.
-
-### Usage
-
-This custom version exposes the `getSolverStatus()` API, which returns the CAD solver's diagnosis results:
-```python
-doc = FreeCAD.newDocument(doc_name)
-fc_sketch = doc.addObject("Sketcher::SketchObject", "Sketch")
-
-fc_sketch.addGeometry(...)
-fc_sketch.addConstraint(...)
-
-doc.recompute()
-fc_sketch.getSolverStatus()
-# {
-#   'DoF': xxx,
-#   'Status': 'Converged', 'Redundant', 'Conflicting', 'Malformed', or 'Failed'
-#   'RedundantConstraints': [c_id1, c_id2, ...],
-#   'ConflictingConstraints': [c_id1, c_id2, ...],
-#   'MalformedConstraints': [c_id1, c_id2, ...],
-#   'ConflictGroups': [[c_id1, c_id2, ...], [c_id3, c_id4, ...], ...]
-# }
-```
-Note that the constraint indices are 0-based.
-Please refer to [src/models/components/solver_feedback.py](src/models/components/solver_feedback.py) for its usage.
-
 ## Install Dependencies
 
 ```bash
-cd "$REPO_ROOT"
-mamba activate freecad
+conda create -y -n sketch_intent python=3.11 freecad -c conda-forge
+conda activate sketch_intent
+
+# install pytorch according to instructions
+# https://pytorch.org/get-started/
+
 pip install -r requirements.txt
 ```
 

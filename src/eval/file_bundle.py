@@ -32,7 +32,7 @@ from src.metrics.edit_response_distance import (  # noqa: E402
     _is_relational,
 )
 from src.metrics.histcad_2d import compute_histcad_2d_freecad  # noqa: E402
-from src.sketch_handlers.freecad_utils import ensure_freecad_imported, load_freecad_commands  # noqa: E402
+from src.sketch_handlers.freecad_utils import ensure_freecad_imported, get_solver_status, load_freecad_commands  # noqa: E402
 from src.sketch_handlers.sketch_utils import complete_constraint_values, get_sketch_bbox  # noqa: E402
 
 
@@ -87,7 +87,7 @@ def vitruvion_solver_status(path: str) -> tuple[int | None, str]:
     doc = None
     try:
         doc, fc_sketch = load_freecad_commands(path)
-        status = fc_sketch.getSolverStatus()
+        status = get_solver_status(fc_sketch)
         if isinstance(status, dict):
             return status.get("DoF"), status.get("Status")
         return None, str(status)

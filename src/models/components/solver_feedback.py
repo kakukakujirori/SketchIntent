@@ -19,7 +19,7 @@ import numpy as np
 
 import sketchgraphs.data as datalib
 from src.sketch_handlers.context import SketchContext
-from src.sketch_handlers.freecad_utils import ensure_freecad_imported
+from src.sketch_handlers.freecad_utils import ensure_freecad_imported, get_solver_status
 from src.sketch_handlers.sketch_freecad_converter import SketchFreecadConverter
 from src.sketch_handlers.sketch_tokenizer import SketchTokenizer
 from src.sketch_handlers.sketch_utils import complete_constraint_values
@@ -265,8 +265,7 @@ class SolverFeedback:
                 self.sketch_freecad_converter.to_freecad_primitives(sketch, doc_name="SolverEvalPrimitivesOnly")
 
             # CAD Solver
-            fc_sketch.solve()
-            fc_status = fc_sketch.getSolverStatus()
+            fc_status = get_solver_status(fc_sketch)
 
             # Other traits
             relational, dimensional = SolverFeedback.count_relational_and_dimensional_constraints(fc_sketch)
