@@ -16,10 +16,17 @@ export REPO_ROOT="$(pwd)/SketchIntent"
 ## Install Dependencies
 
 ```bash
+# Create environment (use mamba instead of conda if preferred)
 conda create -y -n sketch_intent python=3.11 freecad -c conda-forge
 conda activate sketch_intent
 
-# install pytorch according to instructions
+# Ensure Conda's newer C++ libraries are preferred (prevents CXXABI_1.3.15 not found errors)
+conda env config vars set LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
+
+# Reactivate the environment to apply the path changes
+conda deactivate && conda activate sketch_intent
+
+# Install PyTorch according to instructions
 # https://pytorch.org/get-started/
 
 pip install -r requirements.txt

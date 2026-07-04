@@ -12,8 +12,8 @@ model_checkpoint_epoch:
 model_checkpoint_loss:
   _target_: lightning.pytorch.callbacks.ModelCheckpoint
   dirpath: ${paths.output_dir}/checkpoints
-  monitor: "validation/loss"
-  filename: "epoch_{epoch}_vloss_{validation/loss:.3f}"
+  monitor: "validation/ce_loss"
+  filename: "epoch_{epoch}_vloss_{validation/ce_loss:.3f}"
   save_top_k: 1
   mode: "min"
   auto_insert_metric_name: false
