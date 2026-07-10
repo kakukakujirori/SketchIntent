@@ -657,7 +657,7 @@ def _leak_relational_angle(
     )
 
 
-def _compute_h_theta_metrics(
+def compute_h_theta_metrics(
     pred_sketch: datalib.Sketch,
     pred_native: NativeResponse,
     gt_sketch: datalib.Sketch,
@@ -674,6 +674,15 @@ def _compute_h_theta_metrics(
     gt_relation_nullspace: tuple[torch.Tensor, int] | None = None,
 ) -> HThetaMetrics:
     """Return canonical Htheta plus the RL-oriented relation-intent substitute.
+
+    Public entry point for the Hθ family: this is the single implementation used
+    both by the RLOO reward (training) and by the offline evaluator
+    (``src/eval/evaluate.py``), so the numbers the evaluator reports are exactly
+    the quantities the model optimizes.  It stays in the reward layer because
+    ``motion_relational_angle`` uses the reward's symmetric normalization
+    (``_motion_relational_angle`` / ``_RESPONSE_ANGLE_NORM``), a training-signal
+    choice that coincides with the paper's padded ``theta_motion^rel`` only when
+    the pred / GT relational-subspace dimensions match.
 
     Two related scalars are produced:
 
@@ -914,7 +923,7 @@ class ResponseMetricEvaluator(BaseReward):
             gt_relation_nullspace = get_or_compute_gt_relation_nullspace(
                 ctx, gt_sketch, gt_native, self.context, self.eps
             )
-            h_metrics = _compute_h_theta_metrics(
+            h_metrics = compute_h_theta_metrics(
                 pred_sketch,
                 pred_native,
                 gt_sketch,
@@ -2180,7 +2189,7 @@ class ResponseIntentReward(BaseReward):
         at full weight, so the always-wanted relational signal is preserved while the
         leak term is restricted to ``leak_gate`` samples.
         """
-        h_metrics = _compute_h_theta_metrics(
+        h_metrics = compute_h_theta_metrics(
             pred_sketch,
             pred_native,
             gt_sketch,

@@ -24,7 +24,7 @@ C. Reference geometry metrics (predicted sketch vs each human GT; FreeCAD + the
    src/eval canonical remap).  motion_full / motion_relational / leak_dimensional
    angles plus placement_sim (S_place, the dimensional-placement axis).
 
-   The angles are computed by the training reward (``_compute_h_theta_metrics``),
+   The angles are computed by the reward's public ``compute_h_theta_metrics``,
    so this tool reports exactly the quantities the model optimizes.  motion_full
    and leak_dimensional use the paper's padded principal-angle distance (Sec. 4,
    Eq. 4); motion_relational here is the reward's *symmetric* variant, which
@@ -182,7 +182,7 @@ def reference_metrics(pred_dir: Path, *, eps: float, geometry_tol: float,
         compute_native_response,
         pairwise_distance_observable,
     )
-    from src.models.rewards.response_metric_reward import _compute_h_theta_metrics
+    from src.models.rewards.response_metric_reward import compute_h_theta_metrics
     from src.sketch_handlers.context import SketchContext
     from src.sketch_handlers.sketch_freecad_converter import SketchFreecadConverter
 
@@ -274,7 +274,7 @@ def reference_metrics(pred_dir: Path, *, eps: float, geometry_tol: float,
                 g_native, g_dirs, g_jphi = prep(g_sketch, base_eids)
                 if p_jphi.shape[0] != g_jphi.shape[0] or p_jphi.shape[0] == 0:
                     continue
-                hth = _compute_h_theta_metrics(
+                hth = compute_h_theta_metrics(
                     pred_sketch, p_native, g_sketch, g_native, ctx, eps,
                     J_phi_pred=p_jphi, J_phi_gt=g_jphi,
                 )
