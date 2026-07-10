@@ -21,9 +21,16 @@ B. Composition / over-dim KPI (parsed from the predicted constraint set; no GT):
    family split.
 
 C. Reference geometry metrics (predicted sketch vs each human GT; FreeCAD + the
-   eda_code canonical remap).  motion_full / motion_relational / leak_dimensional
-   angles (identical implementation to the training reward, so the numbers line up
-   with the paper) plus placement_sim (S_place, the dimensional-placement axis).
+   src/eval canonical remap).  motion_full / motion_relational / leak_dimensional
+   angles plus placement_sim (S_place, the dimensional-placement axis).
+
+   The angles are computed by the training reward (``_compute_h_theta_metrics``),
+   so this tool reports exactly the quantities the model optimizes.  motion_full
+   and leak_dimensional use the paper's padded principal-angle distance (Sec. 4,
+   Eq. 4); motion_relational here is the reward's *symmetric* variant, which
+   coincides with the paper's padded theta_motion^rel only when the pred / GT
+   relational-subspace dimensions match.  The paper's Sec. 5 metric table (padded
+   throughout) is produced by ``ablation/run_motion.py``, not this tool.
 
 Notes
 -----

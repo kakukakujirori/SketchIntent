@@ -55,7 +55,7 @@ from sketchgraphs.data import flat_array
 
 from src.metrics.edit_response_distance import _is_relational, compute_native_response
 from src.models.components.solver_feedback import SolverFeedback
-from src.models.rewards.utils.geometry import motion_relational_subspace
+from src.metrics.motion_subspace import motion_relational_subspace
 from src.sketch_handlers.context import SketchContext
 from src.sketch_handlers.rule_augmenter import (
     DEFAULT_TOLERANCES,

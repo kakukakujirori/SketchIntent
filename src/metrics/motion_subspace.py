@@ -1,17 +1,16 @@
-"""Motion-subspace angle scalars (paper Section 4).
+"""Motion-subspace primitives and angle scalars (paper Section 4).
 
-Single, consumer-agnostic home for the *scalar* angle formulas derived from a
-pair of subspaces.  These are the paper's metric definitions; both the offline
-evaluator (``src/eval``) and the training reward
+Single, consumer-agnostic home for the motion-subspace math: the SVD / Jacobian
+/ null-space construction of the subspaces, the principal-cosine building block,
+and the scalar angle formulas derived from a pair of subspaces.  Both the
+offline evaluator (``src/eval``) and the training reward
 (``src/models/rewards/response_metric_reward``) compose their higher-level
 scores from these primitives, so the numbers reported in the paper and the
 numbers the model optimizes are guaranteed to use one implementation.
 
-The subspace *construction* (SVD range, relation Jacobians, ``J_phi``
-projection, ``principal_cos2_sum``) currently lives in
-``src/models/rewards/utils/geometry.py``; this module deliberately takes the
-already-reduced quantities (``cos2_sum``, an overlap matrix) so it stays free of
-any sketch / solver dependency.
+This module depends only on the constraint differential primitives
+(``src.metrics.edit_response_distance``) and the sketch context / solver; it has
+no dependency on the reward or model layers.
 
 Deliberately *not* here: the reward's symmetric two-sided motion-relational
 variant and its normalization (``_motion_relational_angle`` /
@@ -26,7 +25,179 @@ import math
 
 import torch
 
+import sketchgraphs.data as datalib
 
+from src.metrics.edit_response_distance import (
+    NativeResponse,
+    _constraint_refs_resolvable,
+    _is_relational,
+    _jacfwd_stacked_residuals,
+    _probe_residual_width,
+    pairwise_distance_observable,
+)
+from src.sketch_handlers.context import SketchContext
+from src.sketch_handlers.sketch_solver import SketchState, compute_null_space
+
+
+# ---------------------------------------------------------------------------
+# Subspace construction primitives
+# ---------------------------------------------------------------------------
+def orthonormal_range(R: torch.Tensor, eps: float) -> tuple[torch.Tensor, int]:
+    """SVD-based orthonormal basis of range(R), keeping singular values >= eps.
+
+    Returns (U, k) where U is (R.shape[0], k) and the columns span range(R).
+    """
+    if R.numel() == 0 or R.shape[1] == 0:
+        return torch.zeros(R.shape[0], 0, dtype=R.dtype, device=R.device), 0
+    U, S, _Vh = torch.linalg.svd(R, full_matrices=False)
+    keep = int((S >= eps).sum().item())
+    if keep == 0:
+        return torch.zeros(R.shape[0], 0, dtype=R.dtype, device=R.device), 0
+    return U[:, :keep].contiguous(), keep
+
+
+def stack_relation_jacobians_at(
+    rels,
+    state: SketchState,
+    context: SketchContext,
+) -> tuple[torch.Tensor | None, int]:
+    """Concatenate relation-constraint Jacobians evaluated at the given state.
+
+    Pre-filters constraints with the same checks as
+    :func:`src.metrics.edit_response_distance.constraint_jacobian` (handler
+    lookup, ref resolvability, residual probe) and then issues a single
+    ``jacfwd`` over the stacked residual vector instead of one call per relation.
+    """
+    entries: list[tuple[object, object, int]] = []
+    for rel in rels:
+        handler = context.get_constraint_handler(rel.constraint_type.name)
+        if handler is None:
+            continue
+        if not _constraint_refs_resolvable(rel, state):
+            continue
+        width = _probe_residual_width(rel, handler, state)
+        if width is None:
+            continue
+        entries.append((rel, handler, width))
+
+    if not entries:
+        return None, 0
+    Jr = _jacfwd_stacked_residuals(entries, state)
+    if Jr.shape[0] == 0:
+        return None, 0
+    return Jr, int(Jr.shape[0])
+
+
+def motion_full_subspace(
+    sketch: datalib.Sketch,
+    native: NativeResponse,
+    eps: float,
+    *,
+    J_phi: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, int]:
+    """Orthonormal basis of the *full* motion subspace in observable space.
+
+    "Full" here means the motion subspace driven by the full first-order
+    response map ``R_C`` (dimensional + relational null-space columns
+    together), projected through the pairwise-distance Jacobian ``J_phi`` so
+    that Pred and GT can be compared in a common, sketch-topology-independent
+    observable coordinate system:
+
+        W_C := range(J_phi @ R_C)
+
+    Contrast this with ``motion_relational_subspace``, which uses only
+    ``null(J_R)`` and ignores the placement of dimensional drivers.
+
+    ``J_phi`` may be passed in by the caller so that one pre-computed
+    pairwise-distance Jacobian is shared between this helper and
+    :func:`motion_relational_subspace` (and, in RLOO, between the K rollouts
+    that share the same ``gt_sketch``).  When ``None``, J_phi is recomputed
+    from ``sketch`` — the original standalone behavior used by tests.
+
+    Returns the orthonormal basis ``U`` of ``W_C`` and its dimension ``k``.
+    """
+    if J_phi is None:
+        J_phi = pairwise_distance_observable(
+            sketch,
+            dtype=native.R.dtype,
+        ).to(dtype=native.R.dtype)
+    if J_phi.shape[0] == 0 or native.R.shape[1] == 0:
+        return torch.zeros(J_phi.shape[0], 0, dtype=native.R.dtype), 0
+    return orthonormal_range(J_phi @ native.R, eps)
+
+
+def motion_relational_subspace(
+    sketch: datalib.Sketch,
+    state: SketchState,
+    context: SketchContext,
+    eps: float,
+    *,
+    J_phi: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, int]:
+    """Orthonormal basis of the *relational* motion subspace in observable space.
+
+    "Relational" means: only the primitive motions allowed by the sketch's
+    relational constraints, with dimensional drivers deliberately dropped:
+
+        N_C := null(J_R)               # motions allowed by relations alone
+        W_C := range(J_phi @ N_C)      # same motions, in pairwise-distance
+                                       # observable space
+
+    Jacobians are evaluated at ``state``.  When comparing two sketches at the
+    same geometric configuration (e.g. Pred and GT, where Pred's primitive
+    geometry has been overwritten with the original), the caller should pass
+    the same ``state`` for both sketches so that the two subspaces live in
+    coordinates that can be compared with a principal-angle SVD.
+
+    Contrast with ``motion_full_subspace``, which uses the full first-order
+    response map ``R_C`` and therefore mixes dimensional-driver placement into
+    the comparison.
+
+    ``J_phi`` may be passed in by the caller for the same caching reason
+    described in :func:`motion_full_subspace`.
+    """
+    n_x = state.num_dof()
+    dtype = state.q.dtype
+
+    rels = [c for c in sketch.constraints.values() if _is_relational(c)]
+    J_R, _ = stack_relation_jacobians_at(rels, state, context)
+    if J_R is None:
+        J_R = torch.zeros(0, n_x, dtype=dtype)
+    N_C = compute_null_space(J_R, eps=eps)
+
+    if J_phi is None:
+        J_phi = pairwise_distance_observable(sketch).to(dtype=dtype)
+    if J_phi.shape[0] == 0:
+        return torch.zeros(0, 0, dtype=dtype), 0
+    return orthonormal_range(J_phi @ N_C, eps)
+
+
+def principal_cos2_sum(U_P: torch.Tensor, U_G: torch.Tensor) -> float:
+    """Σ cos²θ_i between two orthonormal subspaces.
+
+    Computes the sum of squared principal cosines between ``range(U_P)`` and
+    ``range(U_G)`` via the SVD of ``U_G^T @ U_P``.  Returns 0 if either
+    subspace is empty.
+
+    This is the shared building block for the angle scalars used by Hθ:
+
+    - padded principal-angle distance: ``(d_norm - cos2_sum) / d_norm``
+    - symmetric projection distance:   ``(dim_P + dim_G - 2 cos2_sum) / d_norm``
+    - asymmetric subset distances:     ``(dim_? - cos2_sum) / dim_?``
+
+    Callers handle normalization by the relevant dimensions; this helper
+    intentionally returns the raw quantity.
+    """
+    if U_P.shape[1] == 0 or U_G.shape[1] == 0:
+        return 0.0
+    align = U_G.T @ U_P
+    sigmas = torch.linalg.svdvals(align).clamp(0.0, 1.0)
+    return float((sigmas ** 2).sum())
+
+
+# ---------------------------------------------------------------------------
+# Angle scalars (derived from cos2_sum / an overlap matrix)
+# ---------------------------------------------------------------------------
 def padded_subspace_angle(cos2_sum: float, dim_a: int, dim_b: int) -> float:
     r"""Normalized principal-angle distance :math:`d_\angle` (paper Eq. 4).
 
@@ -36,8 +207,8 @@ def padded_subspace_angle(cos2_sum: float, dim_a: int, dim_b: int) -> float:
                                         {\max(a, b)}} \in [0, 1]
 
     where ``cos2_sum`` :math:`= \lVert U_A^\top U_B\rVert_F^2 = \sum_i
-    \cos^2\theta_i` (i.e. the output of ``principal_cos2_sum``) and ``dim_a`` /
-    ``dim_b`` are the subspace dimensions ``a`` / ``b``.
+    \cos^2\theta_i` (i.e. the output of :func:`principal_cos2_sum`) and
+    ``dim_a`` / ``dim_b`` are the subspace dimensions ``a`` / ``b``.
 
     The ``max(a, b)`` normalization treats missing dimensions as orthogonal
     unmatched directions, so a dimension-count mismatch is penalized as a

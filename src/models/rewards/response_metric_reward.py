@@ -73,16 +73,14 @@ from src.metrics.edit_response_distance import (
 )
 from src.metrics.motion_subspace import (
     leak_angle_from_overlap as _leak_angle_from_overlap,
-    padded_subspace_angle as _padded_subspace_angle,
-)
-from src.models.rewards.base import BaseReward, RewardContext, RewardOutput
-from src.models.rewards.utils.geometry import (
     motion_full_subspace as _motion_full_subspace,
     motion_relational_subspace as _motion_relational_subspace,
     orthonormal_range as _orthonormal_range,
+    padded_subspace_angle as _padded_subspace_angle,
     principal_cos2_sum as _principal_cos2_sum,
     stack_relation_jacobians_at as _stack_relation_jacobians_at,
 )
+from src.models.rewards.base import BaseReward, RewardContext, RewardOutput
 from src.models.rewards.utils.sketch_builder import (
     build_pred_sketch,
     first_stop_and_pad,

@@ -18,11 +18,9 @@ from src.metrics.edit_response_distance import (  # noqa: E402
 )
 from src.metrics.motion_subspace import (  # noqa: E402
     leak_angle_from_overlap,
-    padded_subspace_angle,
-)
-from src.models.rewards.utils.geometry import (  # noqa: E402
     motion_relational_subspace,
     orthonormal_range,
+    padded_subspace_angle,
     principal_cos2_sum,
     stack_relation_jacobians_at,
 )
@@ -132,10 +130,9 @@ def leak_dimensional_angle(pred: SketchMotion, gt: SketchMotion, eps: float = EP
         theta_leak^dim ** 2 = || orth(row(J_R^G))^T U_P ||_F^2 / dim(U_P)
 
     Jacobians are evaluated at Pred's primitive state, with GT's relational
-    constraints. This is a direct port of
-    ``src.models.rewards.response_metric_reward._leak_relational_angle`` (the
-    reward keeps its historical name) so the held-out-human reference matches the
-    model-side leak angle.
+    constraints. Shares the scalar formula with the reward's
+    ``_leak_relational_angle`` via ``src.metrics.motion_subspace.leak_angle_from_overlap``,
+    so the held-out-human reference matches the model-side leak angle exactly.
     """
     U_P, dim_P = orthonormal_range(pred.native.R, eps)
     if dim_P == 0:

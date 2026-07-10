@@ -13,7 +13,7 @@ from src.metrics.edit_response_distance import (
 )
 from src.models.components.solver_feedback import SolverFeedback
 from src.models.rewards.base import RewardContext
-from src.models.rewards.utils.geometry import (
+from src.metrics.motion_subspace import (
     motion_full_subspace,
     motion_relational_subspace,
     orthonormal_range,
