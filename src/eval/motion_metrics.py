@@ -16,6 +16,10 @@ from src.metrics.edit_response_distance import (  # noqa: E402
     compute_native_response,
     pairwise_distance_observable,
 )
+from src.metrics.motion_subspace import (  # noqa: E402
+    leak_angle_from_overlap,
+    padded_subspace_angle,
+)
 from src.models.rewards.utils.geometry import (  # noqa: E402
     motion_relational_subspace,
     orthonormal_range,
@@ -59,12 +63,8 @@ class SketchMotion:
 
 
 def subspace_angle(U_a: torch.Tensor, k_a: int, U_b: torch.Tensor, k_b: int) -> float:
-    d_norm = max(k_a, k_b)
-    if d_norm == 0:
-        return 0.0
     cos2 = principal_cos2_sum(U_a, U_b) if (k_a > 0 and k_b > 0) else 0.0
-    d2 = (d_norm - cos2) / d_norm
-    return math.sqrt(min(max(d2, 0.0), 1.0))
+    return padded_subspace_angle(cos2, k_a, k_b)
 
 
 def _hungarian_matched(C: torch.Tensor) -> torch.Tensor:
@@ -148,8 +148,7 @@ def leak_dimensional_angle(pred: SketchMotion, gt: SketchMotion, eps: float = EP
     if dim_N == 0:
         return 0.0
     overlap = N_G.T @ U_P
-    leak_sq = float((overlap ** 2).sum()) / float(dim_P)
-    return math.sqrt(min(max(leak_sq, 0.0), 1.0))
+    return leak_angle_from_overlap(overlap, dim_P)
 
 
 def pair_paper_metrics(pred: SketchMotion, gt: SketchMotion) -> dict | None:

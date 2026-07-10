@@ -71,6 +71,10 @@ from src.metrics.edit_response_distance import (
     compute_native_response,
     pairwise_distance_observable,
 )
+from src.metrics.motion_subspace import (
+    leak_angle_from_overlap as _leak_angle_from_overlap,
+    padded_subspace_angle as _padded_subspace_angle,
+)
 from src.models.rewards.base import BaseReward, RewardContext, RewardOutput
 from src.models.rewards.utils.geometry import (
     motion_full_subspace as _motion_full_subspace,
@@ -506,10 +510,8 @@ def _motion_full_angle(
         return SubspaceAngleResult(angle=0.0, dim_pred=0, dim_gt=0)
 
     cos2_sum = _principal_cos2_sum(U_W_P, U_W_G)
-    d_norm = float(max(dim_P_full, dim_G_full, 1))
-    angle_sq = min(max((d_norm - cos2_sum) / d_norm, 0.0), 1.0)
     return SubspaceAngleResult(
-        angle=math.sqrt(angle_sq),
+        angle=_padded_subspace_angle(cos2_sum, dim_P_full, dim_G_full),
         dim_pred=int(dim_P_full),
         dim_gt=int(dim_G_full),
     )
@@ -646,13 +648,12 @@ def _leak_relational_angle(
             dim_N = 0
         else:
             N_G_prim, dim_N = _orthonormal_range(J_R.T, eps)
-    leak_sq = 0.0
+    leak_angle = 0.0
     if dim_P_prim > 0 and dim_N > 0:
         overlap = N_G_prim.T @ U_P_prim
-        leak_sq = float((overlap ** 2).sum()) / float(dim_P_prim)
-    leak_sq = min(max(leak_sq, 0.0), 1.0)
+        leak_angle = _leak_angle_from_overlap(overlap, dim_P_prim)
     return SubspaceAngleResult(
-        angle=math.sqrt(leak_sq),
+        angle=leak_angle,
         dim_pred=int(dim_P_prim),
         dim_gt=int(dim_N),
     )
