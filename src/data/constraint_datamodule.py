@@ -85,6 +85,7 @@ class ConstraintDataModule(L.LightningDataModule):
         # test_fraction: float = 0.05,
         batch_size: int = 32,
         num_workers: int = 0,
+        multiprocessing_context: str | None = None,
     ):
         super().__init__()
         self.save_hyperparameters(logger=False)
@@ -123,6 +124,12 @@ class ConstraintDataModule(L.LightningDataModule):
         #     self._train_dataset, self.hparams.validation_fraction, self.hparams.test_fraction)
 
     def _make_dataloader(self, dataset: torch.utils.data.Dataset, shuffle: bool) -> torch.utils.data.DataLoader[dict[str, torch.Tensor]]:
+        # PyTorch rejects multiprocessing_context when num_workers == 0.
+        worker_context = (
+            self.hparams.multiprocessing_context
+            if self.hparams.num_workers > 0
+            else None
+        )
         return torch.utils.data.DataLoader(
             dataset,
             batch_size=self.hparams.batch_size,
@@ -130,6 +137,7 @@ class ConstraintDataModule(L.LightningDataModule):
             num_workers=self.hparams.num_workers,
             pin_memory=True,
             persistent_workers=self.hparams.num_workers > 0,
+            multiprocessing_context=worker_context,
             collate_fn=sketch_collate_fn,
         )
 

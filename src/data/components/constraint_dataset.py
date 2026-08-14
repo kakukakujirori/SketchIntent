@@ -1,3 +1,4 @@
+import os
 import random
 import torch
 
@@ -60,10 +61,30 @@ class ConstraintDataset(torch.utils.data.Dataset):
         self.tokenizer = SketchTokenizer(self.context)
         self.relational_only = relational_only
 
-        sequence_array = flat_array.load_dictionary_flat(sequence_file)
+        # DataLoader workers for FreeCAD-backed training use ``spawn`` so they
+        # never inherit an initialized CUDA/FreeCAD native runtime.  Keep only
+        # the path in the pickled dataset and reopen the mmap in each worker;
+        # pickling the FlatSerializedArray itself would copy its multi-GB byte
+        # buffer and defeat the purpose of memory mapping.
+        self.sequence_file = os.path.abspath(os.fspath(sequence_file))
+        self._load_sequence_data()
+
+    def _load_sequence_data(self) -> None:
+        sequence_array = flat_array.load_dictionary_flat(self.sequence_file)
         self.sequences = sequence_array['sequences']
         self.source_files = sequence_array.get('source_files')
         self.sketch_ids = sequence_array.get('sketch_ids')
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        state["sequences"] = None
+        state["source_files"] = None
+        state["sketch_ids"] = None
+        return state
+
+    def __setstate__(self, state) -> None:
+        self.__dict__.update(state)
+        self._load_sequence_data()
 
     def __getitem__(self, index: int) -> dict[str, int | str | datalib.Sketch | torch.Tensor]:
         seq = self.sequences[index]

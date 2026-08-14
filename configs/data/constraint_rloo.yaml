@@ -19,3 +19,7 @@ primitive_noise:
 
 batch_size: 32
 num_workers: 32
+# Sanity validation initializes CUDA and FreeCAD before Lightning constructs
+# the train DataLoader.  Spawn workers from a clean interpreter instead of
+# forking that native runtime state.
+multiprocessing_context: spawn

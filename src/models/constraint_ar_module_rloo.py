@@ -102,7 +102,21 @@ class ConstraintARModuleRLOO(L.LightningModule):
         self.criterion = torch.nn.CrossEntropyLoss(ignore_index=ConstraintToken.Pad)
         self.tokenizer = SketchTokenizer(context)
         self.token_reordering = TokenReordering(context=context, prefix_len=1)  # NOTE: prefix_len is important
-        self.solver_feedback = SolverFeedback(context)
+        # SolverFeedback imports and initializes FreeCAD.  In current conda
+        # FreeCAD builds that starts native background threads (Qt / FreeCAD's
+        # recompute worker).  Constructing it here happens before PyTorch forks
+        # DataLoader workers, so those children inherit a partially forked native
+        # runtime and can later abort with SIGABRT.  RL training uses the spawned
+        # SolverReward pool instead; this in-process instance is needed only by
+        # test_step, after its DataLoader workers have already started.
+        self._solver_feedback_context = context
+        self.solver_feedback: SolverFeedback | None = None
+
+    def _get_solver_feedback(self) -> SolverFeedback:
+        """Lazily initialize the test-only in-process FreeCAD evaluator."""
+        if self.solver_feedback is None:
+            self.solver_feedback = SolverFeedback(self._solver_feedback_context)
+        return self.solver_feedback
 
     def setup(self, stage: str) -> None:
         if stage == "fit":
@@ -603,7 +617,7 @@ class ConstraintARModuleRLOO(L.LightningModule):
 
         # Evaluate solver constraints and log solver feedback metrics
         try:
-            solver_results = self.solver_feedback.evaluate_constraints_batch(
+            solver_results = self._get_solver_feedback().evaluate_constraints_batch(
                 batch['p_val'].cpu().numpy(),
                 generated.cpu().numpy(),
                 batch['sketch'],

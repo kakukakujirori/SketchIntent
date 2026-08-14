@@ -143,7 +143,7 @@ model:
         context: ${data.context}
         eps: 1.0e-9
         gate: always
-        num_workers: 0
+        num_workers: 1
 
       - _target_: src.models.rewards.relational_class_prior.RelationalClassPriorReward
         context: ${data.context}
