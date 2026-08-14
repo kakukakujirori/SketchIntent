@@ -16,7 +16,7 @@ needs is self-contained in this folder.
 
 ## Environment and inputs
 
-Run everything **from the repository root** in the `freecad` environment.
+Run everything **from the repository root** in the `sketch_intent` environment.
 
 Inputs are fixed to two locations:
 

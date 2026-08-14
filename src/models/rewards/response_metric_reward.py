@@ -33,7 +33,8 @@ The metric names are:
 ``response_relational_weighted_angle`` -> linear blend of the previous two with a
                                  config-set mixing ratio (``leak_weight``)
 ``motion_full_angle``         -> full motion-subspace angle (uses R_C)
-``motion_relational_angle``   -> mode-normalized relation-only motion angle
+``motion_relational_angle``   -> relation-only motion angle; defaults to the
+                                 paper's padded ``theta_motion^rel`` (Eq. 6)
 ``leak_relational_angle``     -> relation-leak angle
 
 The most important distinction is evaluation metric vs training reward.
@@ -120,6 +121,7 @@ H_THETA_REWARD_METRICS = {
 
 
 MOTION_RELATIONAL_ANGLE_MODES = {
+    "padded",
     "symmetric",
     "pred_subset_gt",
     "mixed_subset",
@@ -435,7 +437,7 @@ class ResponseIntentBatchStats:
 
 @dataclass(frozen=True)
 class SubspaceAngleResult:
-    """Padded principal-angle comparison between two orthonormal subspaces.
+    """Subspace-angle comparison between two orthonormal subspaces.
 
     Used as the uniform return type for ``_motion_full_angle``,
     ``_motion_relational_angle``, and ``_leak_relational_angle`` so all three
@@ -522,7 +524,7 @@ def _motion_relational_angle(
     context: SketchContext,
     eps: float,
     *,
-    angle_mode: str = "symmetric",
+    angle_mode: str = "padded",
     reverse_weight: float = 0.5,
     J_phi_pred: torch.Tensor | None = None,
     J_phi_gt: torch.Tensor | None = None,
@@ -548,7 +550,9 @@ def _motion_relational_angle(
     The returned ``angle`` is the *raw* motion-relational angle whose ceiling
     depends on the comparison mode; higher-level callers normalize it into
     [0, 1] via ``_normalized_motion_relational_angle`` before combining with
-    the leak term.
+    the leak term.  The default ``padded`` mode is already normalized and is
+    exactly the paper's ``theta_motion^rel`` (Eq. 6), implemented by
+    :func:`src.metrics.motion_subspace.padded_subspace_angle`.
 
     Args:
         pred_sketch / gt_sketch: Sketches to compare.
@@ -556,8 +560,9 @@ def _motion_relational_angle(
             Jacobians are evaluated.
         context: Sketch tokenization / solver context.
         eps: Numerical rank threshold for SVD and null-space computations.
-        angle_mode: How the two inclusions are combined into a single raw
-            angle scalar.  ``symmetric`` uses both inclusions equally;
+        angle_mode: How the two subspaces are combined into a single angle
+            scalar.  ``padded`` is the paper's ``theta_motion^rel``;
+            ``symmetric`` uses both inclusions equally;
             ``pred_subset_gt`` keeps only the Pred ⊄ GT direction;
             ``mixed_subset`` weights the GT ⊄ Pred direction by
             ``reverse_weight``.
@@ -592,15 +597,20 @@ def _motion_relational_angle(
         gt_subset_pred_sq = (dim_gt - cos2_sum) / float(dim_gt)
 
     d_norm = float(max(dim_pred, dim_gt, 1))
-    if angle_mode == "symmetric":
+    if angle_mode == "padded":
+        angle = _padded_subspace_angle(cos2_sum, dim_pred, dim_gt)
+    elif angle_mode == "symmetric":
         angle_sq = (dim_pred + dim_gt - 2.0 * cos2_sum) / d_norm
+        angle = math.sqrt(max(angle_sq, 0.0))
     elif angle_mode == "pred_subset_gt":
         angle_sq = pred_subset_gt_sq
+        angle = math.sqrt(max(angle_sq, 0.0))
     else:
         angle_sq = pred_subset_gt_sq + reverse_weight * gt_subset_pred_sq
+        angle = math.sqrt(max(angle_sq, 0.0))
 
     return SubspaceAngleResult(
-        angle=math.sqrt(max(angle_sq, 0.0)),
+        angle=angle,
         dim_pred=int(dim_pred),
         dim_gt=int(dim_gt),
         pred_subset_gt_angle=math.sqrt(max(pred_subset_gt_sq, 0.0)),
@@ -664,7 +674,7 @@ def compute_h_theta_metrics(
     gt_native: NativeResponse,
     context: SketchContext,
     eps: float,
-    motion_relational_angle_mode: str = "symmetric",
+    motion_relational_angle_mode: str = "padded",
     motion_relational_reverse_weight: float = 0.5,
     *,
     J_phi_pred: torch.Tensor | None = None,
@@ -678,11 +688,9 @@ def compute_h_theta_metrics(
     Public entry point for the Hθ family: this is the single implementation used
     both by the RLOO reward (training) and by the offline evaluator
     (``src/eval/evaluate.py``), so the numbers the evaluator reports are exactly
-    the quantities the model optimizes.  It stays in the reward layer because
-    ``motion_relational_angle`` uses the reward's symmetric normalization
-    (``_motion_relational_angle`` / ``_RESPONSE_ANGLE_NORM``), a training-signal
-    choice that coincides with the paper's padded ``theta_motion^rel`` only when
-    the pred / GT relational-subspace dimensions match.
+    the quantities the model optimizes.  The default ``padded`` mode computes
+    the paper's ``theta_motion^rel`` (Eq. 6); the historical symmetric and
+    asymmetric reward variants remain selectable for ablations.
 
     Two related scalars are produced:
 
@@ -701,9 +709,10 @@ def compute_h_theta_metrics(
       padded principal-angle / RMS-cosine formulas in [0, 1].
     - ``motion_relational_angle`` divides the raw motion-relational angle
       returned by ``_motion_relational_angle`` by the mode-specific maximum so
-      that orthogonal subspaces map to 1.  Maxima are: pair-specific symmetric
-      maximum for ``symmetric``, ``sqrt(1 + reverse_weight)`` for
-      ``mixed_subset``, and 1 for ``pred_subset_gt``.
+      that orthogonal subspaces map to 1.  The paper's ``padded`` mode and
+      ``pred_subset_gt`` already have maximum 1; the other maxima are the
+      pair-specific symmetric maximum and ``sqrt(1 + reverse_weight)`` for
+      ``mixed_subset``.
     - ``response_*_angle`` divides ``sqrt(motion^2 + leak^2)`` by ``sqrt(2)``
       to put the combined RMS angle on the same [0, 1] scale as the components.
     """
@@ -793,7 +802,7 @@ class ResponseMetricEvaluator(BaseReward):
         self,
         context: SketchContext,
         eps: float = 1e-9,
-        motion_relational_angle_mode: str = "symmetric",
+        motion_relational_angle_mode: str = "padded",
         motion_relational_reverse_weight: float = 0.5,
         gate: str = "converged",
         num_workers: int = 0,
@@ -1434,7 +1443,7 @@ class PrefixResponseMetricEvaluator(BaseReward):
         self,
         context: SketchContext,
         eps: float = 1e-9,
-        motion_relational_angle_mode: str = "symmetric",
+        motion_relational_angle_mode: str = "padded",
         motion_relational_reverse_weight: float = 0.5,
         gate: str = "converged",
         max_prefixes: int | None = None,
@@ -1999,7 +2008,7 @@ class ResponseIntentReward(BaseReward):
         cap_h_angle: float = 1.0,
         h_angle_reward_metric: str = "response_relational_angle",
         leak_weight: float = 0.5,
-        motion_relational_angle_mode: str = "symmetric",
+        motion_relational_angle_mode: str = "padded",
         motion_relational_reverse_weight: float = 0.5,
         gate: str = "fc",
         leak_gate: str | None = None,

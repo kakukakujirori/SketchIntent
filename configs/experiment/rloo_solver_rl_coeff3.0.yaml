@@ -117,8 +117,7 @@ model:
       - _target_: src.models.rewards.response_metric_reward.ResponseMetricEvaluator
         context: ${data.context}
         eps: 1.0e-9
-        motion_relational_angle_mode: symmetric
-        motion_relational_reverse_weight: 0.5
+        motion_relational_angle_mode: padded
         gate: converged
         num_workers: 4
 

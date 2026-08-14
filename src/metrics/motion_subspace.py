@@ -12,12 +12,10 @@ This module depends only on the constraint differential primitives
 (``src.metrics.edit_response_distance``) and the sketch context / solver; it has
 no dependency on the reward or model layers.
 
-Deliberately *not* here: the reward's symmetric two-sided motion-relational
-variant and its normalization (``_motion_relational_angle`` /
-``_RESPONSE_ANGLE_NORM``).  That is a training-signal design choice, not a paper
-metric, so it stays in the reward layer.  The symmetric variant coincides with
-``padded_subspace_angle`` exactly when the two subspace dimensions are equal and
-differs only for dimension-mismatched pairs.
+The reward uses ``padded_subspace_angle`` directly for its default
+``theta_motion^rel`` signal.  Alternative symmetric and asymmetric
+motion-relational variants remain in the reward layer because they are
+training-signal design choices rather than paper metrics.
 """
 from __future__ import annotations
 
@@ -218,7 +216,8 @@ def padded_subspace_angle(cos2_sum: float, dim_a: int, dim_b: int) -> float:
 
     This is the shared implementation behind the paper's full motion distance
     ``theta_motion^full`` (Eq. 5) and relational motion distance
-    ``theta_motion^rel`` (Eq. 6), and behind the reward's ``_motion_full_angle``.
+    ``theta_motion^rel`` (Eq. 6), and behind both corresponding padded reward
+    modes.
     """
     d_norm = max(dim_a, dim_b)
     if d_norm == 0:
