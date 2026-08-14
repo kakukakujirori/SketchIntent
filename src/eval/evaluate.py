@@ -176,7 +176,7 @@ def reference_metrics(pred_dir: Path, *, eps: float, geometry_tol: float,
         build_file_bundle,
     )
     from src.eval.manifest import discover_manifest
-    from src.eval.motion_metrics import placement_sims
+    from src.metrics.motion_subspace import placement_sims
     from src.eval.progress import progress
     from src.metrics.edit_response_distance import (
         compute_native_response,

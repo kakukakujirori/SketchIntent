@@ -38,6 +38,8 @@ from src.metrics.edit_response_distance import (
 from src.sketch_handlers.context import SketchContext
 from src.sketch_handlers.sketch_solver import SketchState, compute_null_space
 
+_TINY = 1e-12
+
 
 # ---------------------------------------------------------------------------
 # Subspace construction primitives
@@ -247,3 +249,70 @@ def leak_angle_from_overlap(overlap: torch.Tensor, dim_pred: int) -> float:
         return 0.0
     leak_sq = float((overlap ** 2).sum()) / float(dim_pred)
     return math.sqrt(min(max(leak_sq, 0.0), 1.0))
+
+
+# ---------------------------------------------------------------------------
+# Dimensional placement similarity (S_place, paper Eq. 7)
+# ---------------------------------------------------------------------------
+def _hungarian_matched(C: torch.Tensor) -> torch.Tensor:
+    from scipy.optimize import linear_sum_assignment
+
+    ri, ci = linear_sum_assignment((1.0 - C).numpy())
+    return C[ri, ci]
+
+
+def placement_sims(A: torch.Tensor, B: torch.Tensor) -> dict:
+    r"""Dimensional placement similarity ``S_place`` (paper Eq. 7) + variants.
+
+    ``A`` and ``B`` are the L2-normalized dimensional-response directions
+    ``u_j = R_C[:, j] / ‖R_C[:, j]‖`` of Pred and GT (one column per driving
+    dimension).  ``placement_sim`` is the paper's ``S_place``: the Hungarian
+    max-weight one-to-one matching of ``|⟨u_i^P, u_j^G⟩|`` normalized by
+    ``max(m_P, m_G)``.  ``asgn_min`` / ``set_sim`` / ``omp_sim`` are
+    instrument-tier variants used only in the ablation diagnostics.
+    """
+    ka, kb = int(A.shape[1]), int(B.shape[1])
+    if ka == 0 and kb == 0:
+        return dict(placement_sim=1.0, asgn_min=None, set_sim=1.0, omp_sim=1.0)
+    if ka == 0 or kb == 0:
+        return dict(placement_sim=0.0, asgn_min=None, set_sim=0.0, omp_sim=0.0)
+    C = (A.T @ B).abs()
+    matched = _hungarian_matched(C)
+    asgn = float(matched.sum())
+    set_sim = float((C.max(dim=0).values.mean() + C.max(dim=1).values.mean()) / 2)
+    return dict(
+        placement_sim=asgn / max(ka, kb),
+        asgn_min=asgn / min(ka, kb),
+        set_sim=set_sim,
+        omp_sim=_omp_sim(A, B),
+    )
+
+
+def _omp_sim(Ua: torch.Tensor, Ub: torch.Tensor, tol: float = 1e-9) -> float:
+    A, B = Ua.clone(), Ub.clone()
+    avail_a = list(range(A.shape[1]))
+    avail_b = list(range(B.shape[1]))
+    num = ea = eb = 0.0
+    while avail_a and avail_b:
+        C = (A[:, avail_a].T @ B[:, avail_b]).abs()
+        flat = int(torch.argmax(C))
+        i, j = flat // C.shape[1], flat % C.shape[1]
+        best = float(C[i, j])
+        if best < tol:
+            break
+        ia, jb = avail_a.pop(i), avail_b.pop(j)
+        num += best
+        ea += float(A[:, ia] @ A[:, ia])
+        eb += float(B[:, jb] @ B[:, jb])
+        da = A[:, ia] / max(float(A[:, ia].norm()), _TINY)
+        db = B[:, jb] / max(float(B[:, jb].norm()), _TINY)
+        if avail_a:
+            Ra = A[:, avail_a]
+            A[:, avail_a] = Ra - torch.outer(da, da @ Ra)
+        if avail_b:
+            Rb = B[:, avail_b]
+            B[:, avail_b] = Rb - torch.outer(db, db @ Rb)
+    ea_left = float(sum(float(A[:, i] @ A[:, i]) for i in avail_a))
+    eb_left = float(sum(float(B[:, i] @ B[:, i]) for i in avail_b))
+    den = math.sqrt(max((ea + ea_left) * (eb + eb_left), _TINY))
+    return num / den

@@ -1,7 +1,6 @@
 """Motion-subspace metrics reported in the paper."""
 from __future__ import annotations
 
-import math
 import sys
 
 import torch
@@ -21,13 +20,13 @@ from src.metrics.motion_subspace import (  # noqa: E402
     motion_relational_subspace,
     orthonormal_range,
     padded_subspace_angle,
+    placement_sims,
     principal_cos2_sum,
     stack_relation_jacobians_at,
 )
 from src.sketch_handlers.context import SketchContext  # noqa: E402
 
 EPS_DEFAULT = 1e-9
-_TINY = 1e-12
 
 
 class SketchMotion:
@@ -63,61 +62,6 @@ class SketchMotion:
 def subspace_angle(U_a: torch.Tensor, k_a: int, U_b: torch.Tensor, k_b: int) -> float:
     cos2 = principal_cos2_sum(U_a, U_b) if (k_a > 0 and k_b > 0) else 0.0
     return padded_subspace_angle(cos2, k_a, k_b)
-
-
-def _hungarian_matched(C: torch.Tensor) -> torch.Tensor:
-    from scipy.optimize import linear_sum_assignment
-
-    ri, ci = linear_sum_assignment((1.0 - C).numpy())
-    return C[ri, ci]
-
-
-def placement_sims(A: torch.Tensor, B: torch.Tensor) -> dict:
-    ka, kb = int(A.shape[1]), int(B.shape[1])
-    if ka == 0 and kb == 0:
-        return dict(placement_sim=1.0, asgn_min=None, set_sim=1.0, omp_sim=1.0)
-    if ka == 0 or kb == 0:
-        return dict(placement_sim=0.0, asgn_min=None, set_sim=0.0, omp_sim=0.0)
-    C = (A.T @ B).abs()
-    matched = _hungarian_matched(C)
-    asgn = float(matched.sum())
-    set_sim = float((C.max(dim=0).values.mean() + C.max(dim=1).values.mean()) / 2)
-    return dict(
-        placement_sim=asgn / max(ka, kb),
-        asgn_min=asgn / min(ka, kb),
-        set_sim=set_sim,
-        omp_sim=_omp_sim(A, B),
-    )
-
-
-def _omp_sim(Ua: torch.Tensor, Ub: torch.Tensor, tol: float = 1e-9) -> float:
-    A, B = Ua.clone(), Ub.clone()
-    avail_a = list(range(A.shape[1]))
-    avail_b = list(range(B.shape[1]))
-    num = ea = eb = 0.0
-    while avail_a and avail_b:
-        C = (A[:, avail_a].T @ B[:, avail_b]).abs()
-        flat = int(torch.argmax(C))
-        i, j = flat // C.shape[1], flat % C.shape[1]
-        best = float(C[i, j])
-        if best < tol:
-            break
-        ia, jb = avail_a.pop(i), avail_b.pop(j)
-        num += best
-        ea += float(A[:, ia] @ A[:, ia])
-        eb += float(B[:, jb] @ B[:, jb])
-        da = A[:, ia] / max(float(A[:, ia].norm()), _TINY)
-        db = B[:, jb] / max(float(B[:, jb].norm()), _TINY)
-        if avail_a:
-            Ra = A[:, avail_a]
-            A[:, avail_a] = Ra - torch.outer(da, da @ Ra)
-        if avail_b:
-            Rb = B[:, avail_b]
-            B[:, avail_b] = Rb - torch.outer(db, db @ Rb)
-    ea_left = float(sum(float(A[:, i] @ A[:, i]) for i in avail_a))
-    eb_left = float(sum(float(B[:, i] @ B[:, i]) for i in avail_b))
-    den = math.sqrt(max((ea + ea_left) * (eb + eb_left), _TINY))
-    return num / den
 
 
 def leak_dimensional_angle(pred: SketchMotion, gt: SketchMotion, eps: float = EPS_DEFAULT) -> float:
