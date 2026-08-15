@@ -105,6 +105,73 @@ Each shard writes to `<out>/shard_<i>_of_<n>/` and refuses to reuse a directory 
 
 ---
 
+## Experiment C — primitive parameterization (`rebuttal_experiments.md` §3)
+
+Answers *"it is unclear whether the metrics remain invariant under equivalent
+reparameterizations"*. Two representations that real CAD systems actually use are
+reproduced at Jacobian level. Both change the number of variables, so `B = ∂g/∂y` is
+rectangular and is applied by right multiplication — no inverse of `B` is ever formed:
+
+```
+C0  identity, B = I                                       integration gate, not a result
+C1  Line  [point, direction, start, end] (6) -> [start point, end point]        (4)
+C2  Arc   [center, radius, start, end angle] (5) -> [start, sweep midpoint, end] (6)
+```
+
+The response is recomputed from scratch as `R~ = -pinv(J_x B) J_p` under the native
+singular-value cutoff. Pushing the existing `R` through `B` would hide precisely what the
+experiment measures: the parameterization dependence of the minimum-norm solution.
+
+```bash
+# C0 gate first; C1/C2 are not aggregated unless it passes
+$CR python rebuttal_exp/parameterization_stress.py --scenarios native,C0 --limit 20 \
+    --out artifacts/rebuttal/parameterization_c0
+$CR python rebuttal_exp/analyze_parameterization.py --in artifacts/rebuttal/parameterization_c0
+
+$CR python rebuttal_exp/parameterization_stress.py --out artifacts/rebuttal/parameterization
+$CR python rebuttal_exp/analyze_parameterization.py --in artifacts/rebuttal/parameterization
+```
+
+### Outputs
+
+| file | contents |
+|---|---|
+| `transformed_pair_metrics.parquet` | one row per (rid, variant, reference, scenario): the four metrics, their subspace ranks (including `rank(R)` for `theta_leak`), `n_y` |
+| `transform_diagnostics.parquet` | per line/arc block: `rank_H`, `rank_B`, left-inverse error, dimensional/wrapped-angle/point round-trip errors, span, circumcircle condition, chosen 2π branch, gauge residuals |
+| `skip_summary.csv` | designed / skipped counts by reason |
+| `identity_gate.csv`, `identity_gate_ranks.csv` | the C0 gate |
+| `summary.csv` | paired \|d'−d\| median/Q90/Q95/max, moved-record counts split by whether a subspace dimension also changed, Spearman with bootstrap CI |
+| `ranking_changes.csv` | full and method-only variant ordering, per-sketch winner flip rate |
+| `worst_cases.csv` | worst 20 per metric with the sketch's chart diagnostics alongside |
+
+### Protocol decisions
+
+- **Analysis unit** is the Sec. 5 row structure (`ablation/run_motion.py`): held-out human,
+  dimensional/relational dropout controls, and each model run against two human references.
+  Dropout variants use the same `stable_seed`, so all scenarios see identical variant
+  sketches and the comparison is paired.
+- **Reference aggregation** reuses `ablation.aggregate.aggregate` and is applied
+  independently within each scenario; no reference id is carried across scenarios.
+- **Paired populations.** A transformed scenario only covers sketches holding its target
+  primitive, so every comparison — deltas *and* orderings — is restricted to the records
+  both scenarios produced. Comparing an ordering over all sketches with one over the
+  arc-bearing subset would measure the sample, not the chart.
+- **Charts must earn their use.** Each block reports `rank(H)`, `rank(B)`, `H B ≈ I` (line)
+  or `B H ≈ I` (arc), and a round-trip check; the arc's 2π branch integer is fixed at the
+  baseline and never differentiated. Blocks failing the documented thresholds are skipped
+  as `degenerate_line_span` / `ill_conditioned_arc_three_point` / `arc_reconstruction_failed`.
+  Arc angle reconstruction is compared modulo 2π, and the arc's one-dimensional
+  `ker(B)` (sliding the through-point along the same arc) is kept rather than squared away.
+- **Gauge.** `ker(H_line)` is the native gauge the endpoint chart cannot see. An annotation
+  whose `J_x`, `J_R` or `J_φ` still sees it above `1e-8` is excluded as
+  `line_gauge_not_annihilated`; its residuals are still written to the diagnostics.
+- **The C0 gate is split by magnitude.** `θ = sqrt(1 − cos²/max)` has a sqrt(machine eps)
+  noise floor wherever two subspaces coincide, so resolved values must match to machine
+  precision while near-zero values only have to stay inside that band. Both are reported.
+- **Numerics vs dependence.** The null-space and range cutoffs are absolute, so a chart that
+  rescales singular values can push a borderline direction across them. `summary.csv`
+  therefore splits moved records by whether a subspace dimension also changed.
+
 ## Module map
 
 | module | responsibility |
@@ -115,3 +182,7 @@ Each shard writes to `<out>/shard_<i>_of_<n>/` and refuses to reuse a directory 
 | `driver_matching.py` | strict common-driver matching |
 | `finite_edit_validation.py` | experiment A runner |
 | `analyze_finite_edit.py` | correlations, failure accounting, figures |
+| `primitive_charts.py` | the rectangular C1/C2 charts, their validation and gauge diagnostics |
+| `transformed_motion.py` | the four metrics recomputed with `B` injected into every Jacobian |
+| `parameterization_stress.py` | experiment C runner |
+| `analyze_parameterization.py` | delta distributions, ordering stability, figures |

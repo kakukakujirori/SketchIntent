@@ -19,10 +19,15 @@ def circle(eid: str, cx: float, cy: float, r: float) -> datalib.Circle:
     )
 
 
-def arc(eid: str, cx: float, cy: float, r: float) -> datalib.Arc:
+def arc(
+    eid: str, cx: float, cy: float, r: float,
+    *, start_param: float = 0.0, end_param: float = 1.2,
+    clockwise: bool = False, x_dir: float = 1.0, y_dir: float = 0.0,
+) -> datalib.Arc:
     return datalib.Arc(
         entityId=eid, isConstruction=False, xCenter=cx, yCenter=cy,
-        xDir=1.0, yDir=0.0, radius=r, clockwise=False, startParam=0.0, endParam=1.2,
+        xDir=x_dir, yDir=y_dir, radius=r, clockwise=clockwise,
+        startParam=start_param, endParam=end_param,
     )
 
 

@@ -399,7 +399,7 @@ m representation:  scale factor 0.001
 - length/distance dimensional values
 - solver tolerance が物理単位を持つ場合は、その tolerance
 
-angle、dimensionless flag、entity ID は変えない。degree/radian の切替は unit test ではなく parameterization test に含める。
+angle、dimensionless flag、entity ID は変えない。degree/radian の切替は length-unit test ではなく、今回の primary parameterization test C1/C2 の対象にも含めない。
 
 各 representation で通常 bundle を再構築し、同じ pair の
 
@@ -436,47 +436,69 @@ theta_full, theta_rel, theta_leak, S_place
 
 > Principal-angle distances are computed in the raw sketch-state space, which mixes coordinates, radii, angles, and different primitive parameterizations. It is unclear whether the metrics remain invariant under equivalent reparameterizations ...
 
-本実験では CAD importer と solver を別 primitive schema に全面改修しない。既存 state の同じ局所 geometry を表す可逆な座標変換を、Jacobian level で挿入する。これにより、solver や constraint semantics を変えずに、metric の coordinate dependence を直接測る。
-
-### 3.2 変換式
-
-局所的に可逆な reparameterization
-
-\[
-x'=h(x),\qquad A=\left.\frac{\partial h}{\partial x}\right|_{x_0}
-\]
-
-を考える。baseline における Jacobian を次のように変換する。
-
-\[
-J_{x'}=J_x A^{-1},\qquad
-J_R'=J_R A^{-1},\qquad
-J_\phi'=J_\phi A^{-1},\qquad
-J_p'=J_p.
-\]
-
-新しい raw-coordinate response は
-
-\[
-R'=-J_{x'}^\dagger J_p
-\]
-
-で再計算する。古い \(R\) に単純に \(A\) を掛けるだけでは、Moore–Penrose pseudoinverse 自体の coordinate dependence を評価できないため不可とする。
-
-その後、現行 metric 実装と同じ式で
+本実験では、人工的な座標回転・group scaling・log-radius・degree/radian 変換を primary stress test にはしない。実際の CAD primitive schema 間で起こりうる、次元も異なる二つの表現差を Jacobian level で再現する。
 
 ```text
-theta_full'
-theta_rel'
-theta_leak'
-S_place'
+C1: Line  [point(2), direction(2), start, end] (6 variables)
+          <-> [start point(2), end point(2)]    (4 variables)
+
+C2: Arc   [center(2), radius, start angle, end angle] (5 variables)
+          <-> [start point(2), arc midpoint(2), end point(2)] (6 variables)
 ```
 
-を計算する。`theta_leak'` は raw \(x'\)-space における ground-truth relation Jacobian と response の関係として計算し、勝手に observable space へ移さない。
+円弧の第3点は、baseline arc の向き付き sweep のちょうど中点に固定する。中点を sweep の 1/3 や 2/3 に移す感度分析は行わない。
+
+CAD importer、constraint handler、solver を別 schema に全面改修するのではなく、代替 state から現行 native state への局所写像を constraint/observable Jacobian に合成する。これにより、constraint semantics と baseline geometry を保ったまま、現行 metric が primitive chart の変更にどの程度影響されるかを測る。
+
+なお、`theta_full`、`theta_rel`、`S_place` の比較自体は rigid-motion-invariant observable space で行われるが、その入力 response \(R=-J_x^\dagger J_p\) は native state の parameterization に依存しうる。`theta_leak` は response と relation row space を raw primitive tangent space で直接比較する。したがって、四指標すべてを再計算する。
+
+### 3.2 長方形 Jacobian による変換式
+
+native state を \(x\in\mathbb{R}^{n_x}\)、代替 state を \(y\in\mathbb{R}^{n_y}\) とし、baseline の近傍で代替表現を native 表現へ戻す写像
+
+\[
+x=g(y),\qquad
+B=\left.\frac{\partial g}{\partial y}\right|_{y_0}
+\in\mathbb{R}^{n_x\times n_y}
+\]
+
+を構築する。C1/C2 は次元の異なる表現間の写像であり、\(B\) は正方行列ではない。したがって、旧案のような可逆行列 \(A\) と \(A^{-1}\) は使用しない。
+
+annotation \(C\) の full constraint Jacobian、relation-only Jacobian、dimensional-parameter Jacobian をそれぞれ \(J_{x,C}\)、\(J_{R,C}\)、\(J_{p,C}\) とすると、代替表現での Jacobian は
+
+\[
+\widetilde J_{x,C}=J_{x,C}B,\qquad
+\widetilde J_{R,C}=J_{R,C}B,\qquad
+\widetilde J_\phi=J_\phi B,\qquad
+\widetilde J_{p,C}=J_{p,C}
+\]
+
+である。新しい response は、現行実装と同じ absolute/relative singular-value cutoff を用いて
+
+\[
+\widetilde R_C
+=-\widetilde J_{x,C}^{\dagger}J_{p,C}
+\]
+
+と最初から再計算する。既存の \(R_C\) に \(B\) またはその pseudoinverse を掛けて作ってはならない。後者では、Moore--Penrose solution の parameterization dependence を測れないためである。
+
+その後、現行 metric と同じ定義で
+
+```text
+theta_full_tilde  = distance(range(J_phi_tilde R_P_tilde),
+                             range(J_phi_tilde R_G_tilde))
+theta_rel_tilde   = distance(range(J_phi_tilde ker(J_R,P_tilde)),
+                             range(J_phi_tilde ker(J_R,G_tilde)))
+S_place_tilde     = assignment over normalized columns of J_phi_tilde R_tilde
+theta_leak_tilde  = raw-y-space overlap between range(R_P_tilde)
+                    and row(J_R,G_tilde)
+```
+
+を計算する。`theta_leak_tilde` は従来どおり Pred→GT の非対称量であり、勝手に observable space へ移さない。Pred と GT は同じ baseline geometry/entity ordering を持つため、同じ \(B\) と \(\widetilde J_\phi\) を使用する。
 
 ### 3.3 現行 primitive state layout の確認
 
-実装前に `NativeResponse.state` と各 Jacobian column の対応を assertion 付きで確認する。現時点で想定される layout は次であるが、コードを source of truth とする。
+実装前に `NativeResponse.state` と各 Jacobian column の対応を assertion 付きで確認する。現時点の layout は次であるが、コードを source of truth とする。
 
 ```text
 Line:   6 variables [point(2), direction(2), start, end]
@@ -485,65 +507,115 @@ Arc:    5 variables [center(2), radius, start_angle, end_angle]
 Point:  2 variables [point(2)]
 ```
 
-`A` は global state ordering に沿った block diagonal matrix として組み立てる。entity ID/order のずれは即時 error にする。
+`B` は global state ordering に沿った block-diagonal の長方形行列として組み立てる。変換対象でない primitive は identity block とする。entity ID/order のずれ、Pred/GT 間の geometry mismatch、想定外の state slice size は即時 error にする。
 
 ### 3.4 必須 transformation scenarios
 
-各 sketch/annotation pair について以下を評価する。
+同じ raw pair records に対して、native baseline、C0、C1、C2 を別々に計算する。一つの scenario 内では、対象 type の全 primitive block を同時に置換する。
 
-#### T0: Identity
+#### C0: Identity pipeline test
 
-`A = I`。既存 metric と新スクリプトが numerical tolerance 内で一致することを確認する。このテストに失敗したら他の結果を信用しない。
+\(B=I\)。standalone pipeline が既存 metric の全 raw-pair 値、subspace rank、response shape と numerical tolerance 内で一致することを確認する。これは paper に載せる stress result ではなく、C1/C2 の前提となる integration test である。このテストに失敗した場合は C1/C2 を実行しない。
 
-#### T1: Orthogonal sanity check
+#### C1: Line 6-parameter representation → endpoint 4-parameter representation
 
-各同種 variable block に、固定 seed で生成した orthogonal matrixを適用する。Euclidean inner product を保つため、raw-space principal angles は理論上ほぼ不変である。実装と線形代数の sanity check として使う。
+native line block を
 
-primitive 間を無意味に混ぜる global random rotationは避け、同じ semantic group 内で block を作る。
+\[
+x_\ell=(p_x,p_y,d_x,d_y,s,t),\qquad
+a=p+s d,\quad b=p+t d
+\]
 
-#### T2: Diagonal/groupwise scaling
+とする。代替 block は \(y_\ell=(a_x,a_y,b_x,b_y)\) である。baseline の \(s_0,t_0\) を固定した局所 lift
 
-parameter groups の relative numerical scale を変更する。
+\[
+d(y_\ell)=\frac{b-a}{t_0-s_0},\qquad
+p(y_\ell)=a-s_0d(y_\ell),\qquad
+s(y_\ell)=s_0,\quad t(y_\ell)=t_0
+\]
+
+を用い、\(B_\ell=\partial x_\ell/\partial y_\ell\in\mathbb{R}^{6\times4}\) を autograd または解析式で求める。この写像は baseline native state を厳密に通り、任意の局所 endpoint perturbation を同じ endpoints を持つ native line に戻す。
+
+実装では forward endpoint map \(h_\ell(x_\ell)=(a,b)\) の Jacobian \(H_\ell\in\mathbb{R}^{4\times6}\) も作り、各 line で
 
 ```text
-scale factors = {0.01, 0.1, 1, 10, 100}
+rank(H_line) == 4
+rank(B_line) == 4
+H_line @ B_line ≈ I_4
+g_line(h_line(x0)) ≈ x0
 ```
 
-少なくとも以下を別々に stress する。
+を確認する。`ker(H_line)` は endpoints を変えない native representation gauge である。lift の選び方が constraint semantics に影響していないことを確認するため、orthonormal basis \(K_\ell=\ker(H_\ell)\) に対して、annotation ごとに
 
-- translational coordinates
-- direction components
-- line extent parameters
-- radii
-- angular parameters
+```text
+relative_gauge_residual(J) = ||J @ K_line||_F / max(||J||_F, 1e-12)
+```
 
-一度に一 group だけ scale する one-factor-at-a-time と、固定 seed で group scale を組み合わせる mixed case の両方を行う。
+を full constraint \(J_x\)、relation-only \(J_R\)、observable \(J_\phi\) について保存する。最大値が `1e-8` を超える line/pair は `line_gauge_not_annihilated` として primary 集計から除外し、件数と値を別表にする。`abs(t0-s0) <= 1e-8 * max(bbox_diagonal, 1)` の zero-length/degenerate line も同様に skip する。
 
-#### T3: Radius parameterization
+#### C2: Arc angle 5-parameter representation → three-point 6-parameter representation
 
-circle/arc の \(r>0\) に対して \(r'=\log r\) を用いる。baseline Jacobian は
+native arc block は
 
 \[
-\frac{\partial r'}{\partial r}=\frac{1}{r}
+x_a=(c_x,c_y,r,\alpha_s,\alpha_e)
 \]
 
-である。半径が numerical threshold 未満の primitive は skip し件数を記録する。
-
-#### T4: Angular representation scale
-
-arc angle の radian 表現と degree 表現の局所変換を
+である。固定 metadata の `xDir/yDir`、`clockwise` と、branch-unwrapped な \(\alpha_s,\alpha_e\) を用いて、baseline の三点を
 
 \[
-\theta'=\frac{180}{\pi}\theta
+q_s=q(\alpha_s),\qquad
+q_m=q\!\left(\frac{\alpha_s+\alpha_e}{2}\right),\qquad
+q_e=q(\alpha_e)
 \]
 
-で模擬する。これは length unit test ではなく coordinate parameterization test である。
+と定義する。すなわち第3点 \(q_m\) は、向き付き arc sweep の幾何学的中点であり、代替 block は
 
-#### T5: Optional nonlinear angle map
+\[
+y_a=(q_{s,x},q_{s,y},q_{m,x},q_{m,y},q_{e,x},q_{e,y})
+\]
 
-余力があれば、singularity から十分離れた angle に限り \(u=\tan(\theta/2)\) の局所 Jacobianを試す。これは補助結果であり必須ではない。
+である。他の sweep fraction は試さない。
 
-### 3.5 集計
+逆写像 \(g_a(y_a)\) は三点を通る円から native parameters を回復する。circumcenter \(c\) は次の \(2\times2\) system を解いて求める。
+
+\[
+2\begin{bmatrix}(q_m-q_s)^\top\\(q_e-q_s)^\top\end{bmatrix}c
+=
+\begin{bmatrix}\|q_m\|^2-\|q_s\|^2\\
+                \|q_e\|^2-\|q_s\|^2\end{bmatrix},
+\qquad r=\|q_s-c\|.
+\]
+
+start/end angle は `atan2` で求め、固定 `xDir/yDir` と `clockwise` の規約へ戻す。\(2\pi\) branch は baseline の \(\alpha_s,\alpha_e\) に最も近く、かつ局所的に middle point を通る向き付き arc になる整数 offset を baseline で一度だけ決め、その整数を Jacobian 計算中は固定する。branch selection 自体を微分してはならない。
+
+\(B_a=\partial g_a/\partial y_a\in\mathbb{R}^{5\times6}\) を autograd で求める。forward midpoint map \(h_a(x_a)=(q_s,q_m,q_e)\) の Jacobianを \(H_a\in\mathbb{R}^{6\times5}\) とし、各 arc で
+
+```text
+rank(H_arc) == 5
+rank(B_arc) == 5
+B_arc @ H_arc ≈ I_5
+g_arc(h_arc(x0)) ≈ x0  # angles are compared modulo the fixed 2pi branch
+```
+
+を確認する。three-point coordinates の1本の redundant tangent direction は \(\ker(B_a)\) として残るが、これは同じ円弧を表す middle-point representation gauge であり、削除して正方行列にしない。
+
+三点がほぼ collinear で circumcircle が不安定な arc は除外する。上の linear system matrix を \(M_a\)、`scale=max(bbox_diagonal, 1)` とし、次のいずれかを満たさない場合は `ill_conditioned_arc_three_point` として skip する。
+
+```text
+radius > 1e-8 * scale
+sigma_min(M_arc) >= max(1e-10 * scale, 1e-8 * sigma_max(M_arc))
+baseline point reconstruction max error <= 1e-8 * scale
+baseline angle reconstruction max wrapped error <= 1e-8
+```
+
+clockwise/counterclockwise、minor/major arc、\(2\pi\) 近傍を個別に unit test する。skip threshold は formal run 前に `run_config.json` へ固定し、結果を見て変更しない。
+
+### 3.5 対象データと集計
+
+paper の main evaluation に使う **reference aggregation 前の raw annotation pairs** を source とする。少なくとも held-out human、提案モデル、比較モデル、relational/dimensional dropout の各 group を含める。同じ pair ID の native/C1/C2 を保存した後、各 scenario に対して paper と同じ reference aggregation を独立に適用する。scenario 間で reference ID を流用しない。
+
+C1 は line を1本以上含む sketch、C2 は arc を1本以上含む sketch を primary 対象とする。scenario 固有の invalid/skip があるため、native vs transformed の差は必ず両方が valid な paired records だけで計算する。同時に、全 group について designed/valid/skipped sketches と raw pairs の数を理由別に報告する。
 
 各 transformed metric \(d'_m\) と baseline metric \(d_m\) について次を保存する。
 
@@ -562,6 +634,17 @@ metric ごと・scenario ごとに以下を報告する。
 
 `theta_leak` は asymmetric direction ごとに保存する。
 
+加えて block-level diagnostics として次を保存する。
+
+```text
+line: rank(H), rank(B), ||H B - I||, gauge residuals, |t0-s0|
+arc:  rank(H), rank(B), ||B H - I||, circumcircle condition number,
+      reconstruction errors, chosen angle branch
+global: native/alternative state dimensions and Jacobian/response ranks
+```
+
+主要な paper result は、各 group × metric × scenario の paired median absolute delta、Spearman rank correlation、method/dropout ordering の維持率である。worst-case 図は geometry と constraint set を併記し、数値不安定による外れ値と実質的な parameterization dependence を区別する。
+
 ### 3.6 解釈と論文上の主張範囲
 
 Appendix A.2.1 末尾の rationale、すなわち `theta_leak` が ground-truth relations への violation を直接測るため raw primitive tangent space に置かれている、という説明は semantic choice として妥当である。しかし、これだけで arbitrary reparameterization invariance は証明されない。
@@ -571,7 +654,7 @@ Appendix A.2.1 末尾の rationale、すなわち `theta_leak` が ground-truth 
 - canonicalization の対象は、**固定した SketchGraphs-compatible primitive schema の下での constraint syntax/design-intent equivalence** である。
 - arbitrary CAD systems 間の primitive coordinate chart に対する完全な invariance は主張しない。
 - `theta_leak` は relation-centric な fixed-schema diagnostic である。
-- Jacobian-level stress test により、現実的な局所 reparameterization で aggregate conclusions がどの程度安定かを実証する。
+- endpoint-based line chart と midpoint-three-point arc chart への Jacobian-level 変換により、現実的な primitive reparameterization で aggregate conclusions がどの程度安定かを実証する。
 
 変動が小さければ robustness evidence とする。変動が大きければ claim を狭め、parameterization-invariant metric を将来課題とする。「CAD system 依存だから無関係」とだけ返すのは避ける。
 
@@ -580,14 +663,14 @@ Appendix A.2.1 末尾の rationale、すなわち `theta_leak` が ground-truth 
 学習停止後、既存 core を変更せず standalone script と test を作る前提:
 
 ```text
-Jacobian-level framework + identity test:       0.5–1.0日
-T1/T2 transformations and aggregation:          0.5日
-T3/T4 nonlinear local maps:                     0.25–0.5日
-plots, worst cases, reproducibility checks:      0.25–0.5日
-合計:                                           1.5–2.5日
+rectangular-Jacobian framework + C0 test:        0.5–1.0日
+C1 line endpoint map + gauge diagnostics/tests: 0.5–1.0日
+C2 arc three-point inverse + branch tests:       1.0–2.0日
+aggregation, plots, reproducibility checks:      0.5日
+合計:                                           2.5–4.5日
 ```
 
-真の alternative CAD representation を end-to-end で実装する場合は別物である。概算として line endpoint representation で 4–6日、arc の三点表現等まで含めると 5–10日以上に加え検証 2–3日を要しうる。rebuttal には不要と判断する。
+これは Jacobian-level の chart stress test の工数であり、別 CAD importer/solver による end-to-end 再実装は含まない。後者は constraint handler、serialization、branch semantics、solver integration まで変わる別実験であり、rebuttal の必須範囲には含めない。
 
 ### 3.8 出力仕様
 
@@ -595,6 +678,8 @@ plots, worst cases, reproducibility checks:      0.25–0.5日
 artifacts/rebuttal/parameterization/
   run_config.json
   transformed_pair_metrics.parquet
+  transform_diagnostics.parquet
+  skip_summary.csv
   summary.csv
   ranking_changes.csv
   worst_cases.csv
@@ -1143,7 +1228,7 @@ rebuttal への寄与、実装コスト、計算資源を考慮し、次の順�
 ### Priority 1: 査読の核心
 
 1. **実験 A: finite solver behavior**
-2. **実験 C: parameterization Jacobian stress test**
+2. **実験 C: alternative primitive-chart Jacobian stress test**
 3. **実験 D: pseudoinverse sensitivity**
 
 実験 A は査読の major weakness に直接答え、実験 D の finite realism anchor も供給する。実験 C と D は FreeCAD を大量に回さず実行可能である。
@@ -1166,7 +1251,7 @@ E/F は既存 pair metric CSV が十分なら再集計中心であり、優先�
 時間が不足した場合でも、最低限以下を揃える。
 
 - 実験 A の magnitude-wise Spearman + success/failure counts。
-- 実験 C の identity、group scaling、log-radius、degree-angle stress test。
+- 実験 C の identity test、line endpoint representation、arc midpoint-three-point representation。
 - 実験 D の nullspace sensitivity curve と ranking stability。
 - 実験 E の joint-reference score。
 - 実験 F の raw human-human ECDF と annotator matrix。
@@ -1275,13 +1360,32 @@ finite edit 後の `phi` は geometry から再計算され、baseline Jacobian 
 
 ### 10.3 parameterization identity test
 
-`A=I` で transformed pipeline が baseline の全 metric、rank、response shape と `rtol=1e-8, atol=1e-10` 以内で一致する。
+`B=I` で transformed pipeline が baseline の全 metric、rank、response shape と `rtol=1e-8, atol=1e-10` 以内で一致する。
 
-### 10.4 orthogonal transformation test
+### 10.4 line endpoint transformation test
 
-well-conditioned synthetic Jacobian に対し、orthogonal `A` で raw Euclidean principal angles が不変であることを確認する。
+horizontal、vertical、oblique の非退化 line fixture について、次を確認する。
 
-### 10.5 nullspace test
+- \(g_\ell(h_\ell(x_0))=x_0\)。
+- \(H_\ell B_\ell=I_4\)、`rank(H_line)=rank(B_line)=4`。
+- analytic \(B_\ell\) と centered finite difference/autograd Jacobian が一致する。
+- endpoint perturbation 後も native reconstruction の start/end が入力 endpoints と一致する。
+- \(J_x\ker(H_\ell)\)、\(J_R\ker(H_\ell)\)、\(J_\phi\ker(H_\ell)\) が tolerance 内でゼロになる synthetic constraints を用意する。
+- zero-length line が指定の reason code で skip される。
+
+### 10.5 arc three-point transformation test
+
+clockwise/counterclockwise × minor/major arc、start/end angle が \(2\pi\) branch を跨ぐ fixture について、次を確認する。
+
+- 第3点が向き付き sweep の厳密な中点である。
+- \(g_a(h_a(x_0))=x_0\)（angle は固定 branch で比較）。
+- \(B_aH_a=I_5\)、`rank(H_arc)=rank(B_arc)=5`。
+- autograd \(B_a\) と centered finite difference が一致する。
+- 三点から復元した center/radius/start/end point が baseline と一致する。
+- middle point を元の円周に沿って微小に動かす gauge direction が \(\ker(B_a)\) に入る。
+- nearly-collinear points が `ill_conditioned_arc_three_point` で skip される。
+
+### 10.6 nullspace test
 
 各 sampled \(R_\eta\) に対して
 
@@ -1298,7 +1402,7 @@ J_phi (R_eta - R0) ≈ E
 
 であることを確認する。
 
-### 10.6 joint-reference test
+### 10.7 joint-reference test
 
 手計算可能な2 references × 4 components の fixture で:
 
@@ -1307,7 +1411,7 @@ J_phi (R_eta - R0) ≈ E
 - joint が一つの reference の全 component を使う。
 - tie-break が deterministic。
 
-### 10.7 bootstrap test
+### 10.8 bootstrap test
 
 同一 seed で CI が再現し、同一 sketch 内の複数行が一緒に resample されることを test する。
 
@@ -1361,7 +1465,7 @@ J_phi (R_eta - R0) ≈ E
 
 ### 12.2 Unit and parameterization
 
-> Length-unit changes are removed by the existing canonical-size normalization when coordinates and all dimensional quantities are converted consistently before normalization; we now state this convention explicitly and verify it with mm/cm/m representations (maximum numerical difference [value]). We also added Jacobian-level reparameterization stress tests, including relative scaling of coordinate groups, log-radius, and radian/degree angle charts. Aggregate conclusions were [stable/change]. We have narrowed “canonical” to equivalence across constraint syntax within the fixed SketchGraphs-compatible primitive schema, rather than claiming invariance across arbitrary CAD primitive charts.
+> Length-unit changes are removed by the existing canonical-size normalization when coordinates and all dimensional quantities are converted consistently before normalization; we now state this convention explicitly and verify it with mm/cm/m representations (maximum numerical difference [value]). We also recomputed all four metrics after Jacobian-level changes from the native six-parameter line chart to a four-coordinate endpoint chart, and from the native center/radius/angle arc chart to a start/midpoint/end three-point chart. Native-to-transformed metric rankings were [correlations], and the model/ablation ordering [was/was not] preserved. These tests use rectangular chart Jacobians and recompute the Moore--Penrose response rather than transforming the old response. We have narrowed “canonical” to equivalence across constraint syntax within the fixed SketchGraphs-compatible primitive schema, rather than claiming invariance across arbitrary CAD primitive charts.
 
 ### 12.3 Multi-reference aggregation
 
@@ -1392,7 +1496,7 @@ J_phi (R_eta - R0) ≈ E
 5. human-human 10 sketches、最小/中/最大 magnitude 各1点、並列度1で実験 A pilot を行う。
 6. pilot で `trials.csv` の全 status category、observable dimensions、response norms、failure reasons を目視する。
 7. magnitude grid や tolerance を変える必要があれば formal run 前に本書相当の run config に理由を固定する。
-8. 実験 C の identity test を通してから T1–T4 を実行する。
+8. 実験 C の identity test を通し、line gauge diagnostics と arc branch/reconstruction tests を確認してから C1/C2 を実行する。
 9. 実験 D の algebraic assertions を synthetic fixture と10 sketchesで確認してから全体を実行する。
 10. 既存 CSV を使って実験 E/F を実行し、過去の探索値との差を調べる。
 11. formal 実験 A を shard/resume 対応で実行する。進行中の学習や別ジョブと資源競合しないことを確認する。
