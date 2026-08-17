@@ -1,0 +1,46 @@
+\section{Dataset: Multi-Reference 2D Sketch Constraint Annotations}
+\label{sec:dataset}
+
+We construct a 2D CAD sketch dataset to evaluate constraint quality with respect to design intent.
+Unlike existing CAD datasets, it provides multiple independent expert annotations for the same sketch geometry, letting us study the ambiguity of design-intent-aware constraints.
+Each of 292 sketches is annotated by three of six CAD experts into a fully constrained sketch, yielding 876 human annotations.
+
+\subsection{Collection and Annotation}
+
+\textbf{Source.}
+We draw sketch geometries from Fusion 360 Gallery~\cite{willis2020fusion} rather than an Onshape-derived corpus (SketchGraphs~\cite{seff2020sketchgraphs}, ABC~\cite{Koch_2019_CVPR}, DeepCAD~\cite{Wu_2021_ICCV}) to limit source overlap with the training data of existing sketch-constraint models (App.~\ref{sec:appendix_dataset_source}).
+We extract individual sketches from the original 3D CAD models and convert them into the FreeCAD format, since the same FreeCAD constraint solver is later used for solver-based validation and reinforcement-learning feedback (\S~\ref{sec:experiments},\ref{sec:rl_reward}).
+Following Vitruvion~\cite{seff2021vitruvion}, we keep four primitive types (\texttt{Point}, \texttt{Line}, \texttt{Circle}, \texttt{Arc}); after discarding unsupported or degenerate sketches, $1{,}448$ valid sketches remain, most under-constrained (mean DoF $\approx 14.3$).
+We sample $300$ while preserving the DoF distribution, avoiding a bias toward trivially or excessively constrained sketches; the $292$ sketches whose three annotations were completed and passed quality screening form the benchmark.
+
+\textbf{Annotation.}
+Each sketch is assigned to a varying trio of the six experts, yielding three independent annotations for the same input geometry.
+The annotation protocol asks annotators to preserve the input geometry while adding design-intent-aware constraints, following the detailed guidelines in App.~\ref{sec:appendix_dataset_guidelines}.
+In particular, annotators are prohibited from referencing the global axes or origin, which would obscure sketch-intrinsic design intent and reduce reusability.
+This restriction intentionally leaves the two global translation degrees of freedom, so annotators add a single terminal \texttt{Block} constraint only to satisfy FreeCAD's fully constrained solver state (DoF $=0$); we treat this anchor as a technical artifact and exclude it from design-intent analysis.
+For quality control, annotators may delete and replace existing constraints when doing so better captures design intent, but may not delete, redraw, or reorder the original primitives.
+Adding up to two construction primitives is allowed only when necessary to express structural relations such as mirror axes, symmetry centers, or circular arrangements.
+
+\textbf{Analysis schema.}
+Although annotation is authored in FreeCAD, we report statistics in a SketchGraphs-style schema, retaining FreeCAD-derived labels such as \texttt{DistanceX}/\texttt{DistanceY} when constraint attributes distinguish them. The terminal \texttt{Block} is excluded as an artifact (App.~\ref{sec:appendix_dataset_schema}).
+
+\subsection{Statistics and Ambiguity}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.92\linewidth]{figs/ch3_constraint_distribution.pdf}
+    \caption{Constraint-type distribution of the annotations (SketchGraphs schema), as a share of all constraints, grouped into relational (top) and dimensional (bottom) families.}
+    \label{fig:constraint_dist}
+\end{figure}
+
+\textbf{Composition.}
+Every annotation is fully constrained (DoF $=0$), with on average $24.1$ constraints over $8.6$ primitives.
+As Fig.~\ref{fig:constraint_dist} shows, the annotations are relation-rich: relational constraints account for $75.2\%$ of all constraints.
+Extended per-type, primitive, and per-annotator statistics are reported in App.~\ref{sec:appendix_dataset_statistics}.
+
+\textbf{Ambiguity.}
+The multi-reference design exposes constraint-selection ambiguity directly: for fixed geometry, experts choose different but valid strategies (e.g., equality vs.\ explicit dimensions).
+As a result, disagreement is noticeable at the constraint-token level: the mean pairwise constraint-token F1 across the three expert annotations is $0.61$.
+This shows why single-reference evaluation is problematic: a prediction that differs from one human annotation may still express another plausible design intent.
+Multiple references therefore help distinguish invalid or poorly constrained predictions from valid alternatives chosen by different experts.
+At the same time, token-level disagreement does not necessarily imply different redesign behavior; many token-divergent annotations induce similar local edit motions, motivating the behavior-based metrics introduced next.

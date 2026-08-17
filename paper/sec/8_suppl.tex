@@ -1,0 +1,861 @@
+\clearpage
+\appendix
+\section{Supplementary Material}
+\label{sec:supplementary}
+
+\noindent\textbf{Code and data availability.}
+The implementation is available at \url{https://anonymous.4open.science/r/SketchIntent-75BE/}. The evaluation dataset is provided in the same repository.
+
+\etocsettocstyle{\subsection*{Contents}}{}
+\etocsetnexttocdepth{subsubsection}
+\localtableofcontents
+
+\subsection{Dataset Details}
+\label{sec:appendix_dataset}
+This section records the construction, filtering, and annotation details behind the dataset summary in \S\ref{sec:dataset}.
+
+\subsubsection{Source Selection, Reconstruction, and Evaluation Subset}
+\label{sec:appendix_dataset_source}
+The source choice in \S\ref{sec:dataset} is motivated by platform-level separation from the Onshape-derived corpora commonly used for sketch-constraint models. SketchGraphs~\cite{seff2020sketchgraphs} is derived from Onshape, and widely used CAD datasets such as ABC~\cite{Koch_2019_CVPR} and DeepCAD~\cite{Wu_2021_ICCV} are also tied to Onshape-derived public models. Fusion 360 Gallery~\cite{willis2020fusion} therefore provides a separate source of sketches for evaluation.
+
+We convert each selected sketch into a FreeCAD Python script and keep only sketches that can be represented using the four SketchGraphs-compatible primitive types used by Vitruvion~\cite{seff2021vitruvion}: \texttt{Point}, \texttt{Line}, \texttt{Circle}, and \texttt{Arc}. Sketches with unsupported entities, numerical degeneracies, or FreeCAD reconstruction failures are discarded. This filtering leaves $1{,}448$ valid sketches, from which we sample $300$ while preserving the original DoF distribution. The sampled sketches were split into $12$ annotation batches; each batch was assigned to three annotators, and each annotator received six batches, giving three independent annotations per sketch.
+
+\textbf{Evaluation subset.} Of the $300$ sampled sketches, we keep the $292$ whose three annotations are complete and pass screening, giving $876=292\times3$ annotations. Screening discards sketches that are too geometrically complex to annotate reliably, as well as sketches whose annotations are of insufficient quality.
+
+\textbf{Geometry-preservation audit.} The annotation task asks experts to preserve the input geometry while adding design-intent-aware constraints. However, a post-hoc audit found a small number of cases where enforcing a plausible design intent exposes slight inconsistencies in the original under-constrained geometry, causing the solved annotation to deviate from the canonical input. Specifically, $6$ of the $292$ sketches have at least one annotation whose base-primitive deviation exceeds our matching tolerance.
+
+In \S\ref{sec:experiments}, motion-metric scoring applies a geometry-preservation check to model predictions, and the same check is also applied to held-out human annotations. The affected sketches are therefore excluded from this metric computation, giving $(292-6)\times3=858$ scorable held-out evaluations in Table~\ref{tab:controls}.
+
+\subsubsection{Canonical Schema and FreeCAD Mapping}
+\label{sec:appendix_dataset_schema}
+
+Table~\ref{tab:appendix_schema} lists the FreeCAD primitive and constraint commands supported by the annotation interface and their canonical SketchGraphs counterparts. The mapping is many-to-one in a few cases, but the original command semantics are still recoverable from attributes or reference patterns.
+
+For dimensional constraints, \texttt{DistanceX} and \texttt{DistanceY} become \texttt{Distance} constraints with horizontal or vertical \texttt{direction} attributes, so the axis information is preserved. For relational constraints, FreeCAD \texttt{PointOnObject} becomes a canonical \texttt{Coincident} constraint whose references identify the point-on-curve case; line-line \texttt{Tangent}, used here for collinearity, is likewise stored as a \texttt{Coincident} constraint between line references. For Fig.~\ref{fig:constraint_dist}, we split these canonical types back into display categories: \texttt{Coincident}, \texttt{PointOnObject}, and \texttt{Collinear} by reference kind, and \texttt{Distance}, \texttt{DistanceX}, and \texttt{DistanceY} by direction.
+
+\begin{table}[t]
+    \centering
+    \footnotesize
+    \setlength{\tabcolsep}{4pt}
+    \caption{FreeCAD primitive and constraint commands and their SketchGraphs counterparts.}
+    \label{tab:appendix_schema}
+    \begin{tabularx}{\linewidth}{@{}>{\raggedright\arraybackslash}p{0.18\linewidth}>{\raggedright\arraybackslash}X>{\raggedright\arraybackslash}X@{}}
+        \toprule
+        Category & FreeCAD & SketchGraphs \\
+        \midrule
+        Primitives
+        & \texttt{Point}, \texttt{LineSegment}, \texttt{Circle}, \texttt{ArcOfCircle}
+        & \texttt{Point}, \texttt{Line}, \texttt{Circle}, \texttt{Arc} \\
+        \midrule
+        Relational
+        & \texttt{Coincident}, \texttt{PointOnObject}
+        & \texttt{Coincident} (reference pattern disambiguates) \\
+        Relational
+        & \texttt{Symmetric}
+        & \texttt{Mirror} or \texttt{Midpoint} \\
+        Relational
+        & \texttt{Horizontal}, \texttt{Vertical}, \texttt{Parallel}, \texttt{Perpendicular}, non-line-line \texttt{Tangent}, \texttt{Equal}
+        & same relation names \\
+        Relational
+        & line-line \texttt{Tangent} / collinearity
+        & \texttt{Coincident} between line references \\
+        \midrule
+        Dimensional
+        & \texttt{Distance}
+        & \texttt{Distance}; one-reference length constraints become \texttt{Length} \\
+        Dimensional
+        & \texttt{DistanceX}, \texttt{DistanceY}
+        & \texttt{Distance} with horizontal/vertical \texttt{direction} \\
+        Dimensional
+        & \texttt{Angle}, \texttt{Diameter}, \texttt{Radius}
+        & same dimension names \\
+        \bottomrule
+    \end{tabularx}
+\end{table}
+
+\subsubsection{Annotation Guidelines and Quality Control}
+\label{sec:appendix_dataset_guidelines}
+\textbf{Annotation task.}
+The annotation interface presents the original incomplete FreeCAD sketch and asks annotators to preserve the geometry while adding design-intent-aware constraints until the sketch is fully constrained. A pilot study showed that even human annotators sometimes tended to add excessive, non-meaningful dimensions. We therefore adopted the following annotation guidelines:
+\begin{enumerate}[leftmargin=*, itemsep=1pt, topsep=2pt]
+    \item Favor relational constraints over dimensional constraints.
+    \item Following Nerenst~\etal~\cite{nerenst2023parametric}, avoid \texttt{Angle} constraints where possible, prefer horizontal or vertical chain dimensions, and avoid dimensioning across empty gaps in concave areas.
+    \item Prohibit referencing the global $x$/$y$ axes and the origin, as this obscures sketch-intrinsic features and reduces reusability. \texttt{Horizontal} and \texttt{Vertical} constraints are allowed as practical exceptions for spatial organization. This restriction intentionally leaves a minimal DoF of $2$, representing global translation.
+\end{enumerate}
+Annotators may delete and replace existing constraints when a new configuration better captures design intent (e.g., replacing several identical \texttt{Radius} constraints with an \texttt{Equal} constraint). Once the intended constraint set reaches the residual DoF of $2$, annotators add exactly one \texttt{Block} constraint to an arbitrary primitive to satisfy FreeCAD's fully constrained solver state. This terminal \texttt{Block} is treated strictly as a technical anchoring artifact and excluded from design-intent evaluation.
+
+\textbf{Restrictions and quality control.}
+Annotators were prohibited from deleting, redrawing, or reordering existing sketch primitives, including construction geometry. This keeps the original geometry fixed across all three annotations of the same input. However, we allowed annotators to add up to two new construction geometries when necessary to express an important structural relationship; typical permitted use cases were mirror axes or centerlines, centers of point or rotational symmetry, and construction circles for regular polygons or circular arrangements. \texttt{Lock}, \texttt{Group}, and \texttt{Refraction} commands were disallowed.
+
+\subsubsection{Annotation and Dataset Statistics}
+\label{sec:appendix_dataset_statistics}
+Fig.~\ref{fig:appendix_annotators} summarizes per-annotator statistics (annotators anonymized as A1--A6). Relational share is tight across annotators ($73$--$77\%$), and the mean number of constraints per annotation varies only mildly.
+Fig.~\ref{fig:appendix_dataset_overview} summarizes source-geometry composition and annotation complexity.
+
+The primitive-composition plot (excluding auxiliary construction geometry) shows that the sketch geometry is dominated by straight lines: over $75\%$ of non-construction primitives are \texttt{Line} segments, with the remainder split between \texttt{Circle} and \texttt{Arc}. The joint primitive--constraint distribution further reveals a clear positive correlation between the number of primitives and the number of constraints per annotated sketch, consistent with larger sketches requiring proportionally more constraints to reach a fully constrained state.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{figs/appendix_annotator_summary.pdf}
+    \caption{Per-annotator constraint-family composition and mean constraint count per annotated sketch over the evaluation subset.}
+    \label{fig:appendix_annotators}
+\end{figure}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{figs/appendix_dataset_overview.pdf}
+    \caption{Extended dataset statistics over the evaluation subset. The plots summarize non-construction primitive composition and the exact joint distribution of primitive and constraint counts per annotated sketch.}
+    \label{fig:appendix_dataset_overview}
+\end{figure}
+
+\subsection{Metric Details}
+\label{sec:appendix_metric_details}
+
+\subsubsection{Observable Measurements for Motion Metrics}
+\label{sec:appendix_observable_projection}
+The main text defines motion subspaces in the primitive parameters $x$ for clarity. In practice, we take one additional care: we compare intra-sketch measurements rather than raw primitive-coordinate entries. Raw primitive parameters heterogeneously mix point coordinates, circle/arc radii, and scalar parameters that define line extent or arc sweep. Moreover, construction geometry can differ across annotators because our guidelines allow adding auxiliary construction primitives when needed (\S~\ref{sec:appendix_dataset_guidelines}). We therefore measure only pairwise distances among original sketch landmarks and circle/arc radii, which are unit-consistent and agnostic to annotator-specific construction geometry.
+
+Let $\mathcal{P}$ be the set of non-construction landmark points from the input sketch: point entities, line endpoints, circle centers, and arc centers and endpoints. Let $E^\mathrm{circle/arc}$ be the set of non-construction circles and arcs. We define
+\begin{equation}
+    \phi(x)
+    =
+    \begin{bmatrix}
+    \{\lVert p_a(x)-p_b(x)\rVert_2\}_{a<b,\;p_a,p_b\in\mathcal{P}}\\
+    \{e.\mathtt{radius}(x)\}_{e\in E^\mathrm{circle/arc}}
+    \end{bmatrix}
+    \in\mathbb{R}^{n_\phi}.
+    \label{eq:appendix_observation_map}
+\end{equation}
+We observe the infinitesimal motion of $\phi(x)$ instead of $x$. With $J_\phi=\partial\phi/\partial x$ evaluated at the original sketch, any raw tangent vector is pushed forward as
+\begin{equation}
+    d\phi = J_\phi\,dx.
+    \label{eq:appendix_observation_linearization}
+\end{equation}
+This is the only change from the main-text definitions. For dimensional edits, Eq.~\ref{eq:full_linearized} gives $dx=R_C\,dp_C$, hence
+\begin{equation}
+    d\phi = (J_\phi R_C)\,dp_C,
+    \qquad
+    \bar{\mathcal{W}}_C=\operatorname{range}(J_\phi R_C).
+    \label{eq:appendix_projected_full_space}
+\end{equation}
+For relation-only motion, if $N_C$ is an orthonormal basis of $\ker(J_R)$ from Eq.~\ref{eq:rel_linearized}, then
+\begin{equation}
+    \bar{\mathcal{W}}^\mathrm{rel}_C
+    =
+    \operatorname{range}(J_\phi N_C).
+    \label{eq:appendix_projected_rel_space}
+\end{equation}
+The reported subspace distances use Eq.~\ref{eq:principal_angle} on these measurement-space representations:
+\begin{align}
+    \theta_\mathrm{motion}^\mathrm{full}(C_P;C_G)
+    &=
+    d_\angle(\bar{\mathcal{W}}_{C_P},\bar{\mathcal{W}}_{C_G}),\\
+    \theta_\mathrm{motion}^\mathrm{rel}(C_P;C_G)
+    &=
+    d_\angle(\bar{\mathcal{W}}^\mathrm{rel}_{C_P},
+             \bar{\mathcal{W}}^\mathrm{rel}_{C_G}).
+    \label{eq:appendix_projected_motion_distances}
+\end{align}
+
+The placement score uses the same assignment as Eq.~\ref{eq:asgn_sim}, with each dimensional response direction taken from the corresponding column of $\bar{R}_C$:
+\begin{equation}
+    \bar{z}_j^C = \bar{R}_C[:,j],
+    \qquad
+    \bar{u}_j^C =
+    \begin{cases}
+    \bar{z}_j^C/\lVert\bar{z}_j^C\rVert_2, & \lVert\bar{z}_j^C\rVert_2>\varepsilon,\\
+    0, & \text{otherwise}.
+    \end{cases}
+    \label{eq:appendix_projected_dimension_direction}
+\end{equation}
+By contrast, the leak score remains exactly as defined in Eq.~\ref{eq:rel_leak_distance}. It is not a comparison between two observed motion representations; it directly asks whether the predicted dimensional motions violate the reference relational equations, so we measure their overlap with the reference relation row space in the primitive tangent space.
+The multi-reference aggregation in Sec.~\ref{sec:motion_metrics} is applied after these scores are computed for each reference.
+
+\subsubsection{Held-Out Human Score Distributions}
+\label{sec:appendix_metric_human_distributions}
+
+Table~\ref{tab:controls} reports medians, which round the held-out human motion distances to $0.000$. This means that the queried human annotation induces almost the same local redesign behavior as at least one independently authored reference annotation for the same sketch.
+
+Fig.~\ref{fig:appendix_heldout_distribution} shows the full held-out human distributions after the same multi-reference aggregation used in Table~\ref{tab:controls}. The medians are near numerical zero ($2.4{\times}10^{-8}$ for $\theta_{\mathrm{motion}}^{\mathrm{full}}$, $2.6{\times}10^{-8}$ for $\theta_{\mathrm{motion}}^{\mathrm{rel}}$, and $7.5{\times}10^{-15}$ for $\theta_{\mathrm{leak}}^{\mathrm{dim}}$), but the means and upper quartiles remain nonzero. In particular, $\theta_{\mathrm{motion}}^{\mathrm{full}}$ has mean $0.167$ and interquartile range (IQR; 25th--75th percentile range) $[1.2{\times}10^{-8},0.408]$, while $\theta_{\mathrm{motion}}^{\mathrm{rel}}$ has mean $0.178$ and IQR $[1.2{\times}10^{-8},0.408]$. This indicates that many human annotations are behaviorally equivalent under our metric, while a substantial tail reflects genuinely different human choices. The dimensional placement score remains less saturated ($S_{\mathrm{place}}$ mean $0.823$, median $0.831$), capturing residual diversity in which dimensions designers expose as drivers.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.96\linewidth]{figs/appendix_heldout_human_distribution.pdf}
+    \caption{Held-out human score distributions under the leave-one-out protocol and the same multi-reference aggregation used in Table~\ref{tab:controls}. Black dashed lines mark medians and orange dotted lines mark means. The evaluated annotation is excluded from the reference set, so low-distance mass reflects agreement between independently authored annotations rather than self-matching.}
+    \label{fig:appendix_heldout_distribution}
+\end{figure}
+
+\subsection{Reinforcement-Learning Reward Details}
+\label{sec:appendix_rl}
+This section describes implementation details for the reward experiment in \S\ref{sec:rl_reward}, focusing on the components specific to motion-subspace reward training.
+
+\subsubsection{Training Setup}
+\label{sec:appendix_rl_setup}
+
+All RL training starts from the same supervised Vitruvion checkpoint and follows the solver-feedback RLOO \cite{ahmadian2024back} framework of Casey~\etal~\cite{casey2025aligning}. As a brief recap of the shared model interface, each input sketch is normalized to the $[-0.5,0.5]^2$ coordinate range; primitive types, discretized $x/y$ coordinates with $64$ bins per axis, and construction-geometry flags are tokenized per primitive and flattened into a 1D sequence. From this input, the policy then autoregressively samples a constraint-token sequence, which is truncated at the \texttt{STOP} token and decoded into a SketchGraphs constraint set on the original primitives.
+
+On top of this shared setup, and in addition to MotionReward and DimRelAlign introduced in \S\ref{sec:rl_reward}, we use the following training modifications to improve model performance. They are not regarded as the main contribution and are kept fixed across the reward comparisons unless explicitly ablated. Table~\ref{tab:appendix_rl_components} summarizes the reward components used in the RL experiments.
+
+\paragraph{ClassPriorReward.}
+\label{sec:appendix_rl_class_prior}
+Sketch constraint generation is highly class-imbalanced: frequent relations such as \texttt{Coincident} are easy to sample, while less frequent but design-relevant relations may appear rarely in the rollout set for a selection reward to exploit. We therefore add small capped bonus rewards that encourage rare relational tokens such as \texttt{Equal}, \texttt{Parallel}, \texttt{Tangent}, and \texttt{Midpoint}. We also add dimensional class bonuses aligned with the annotation guideline in App.~\ref{sec:appendix_dataset_guidelines}: generic oblique \texttt{Distance} and \texttt{Angle} constraints are mildly discouraged, while axis-aligned \texttt{DistanceX}/\texttt{DistanceY} constraints are mildly encouraged. These priors are fixed across the main reward comparisons and are not interpreted as evidence for the motion-subspace reward itself.
+
+\paragraph{DimRelAlign weighting.}
+\label{sec:appendix_rl_reldim_weight}
+DimRelAlign asks whether predicted dimensional edits move in directions that are compatible with the pseudo-reference relations (\S~\ref{sec:rl_reward_design}). This is meaningful only when the rollout has introduced dimensional drivers: if no dimensional constraint is generated, there is simply no edit direction to test, so the relation-violation penalty becomes zero for the wrong reason. We therefore scale this term by the solver closure progress already computed by SolverReward.
+
+Let $D_{\emptyset}$ be the DoF of the input primitives before applying any constraints, $D(C_P)$ the remaining DoF after applying the predicted constraint set, and $D_{\mathrm{FC}}=2$ the residual translation gauge treated as fully constrained. We scale the effective DimRelAlign weight by
+\begin{equation}
+\lambda_A \leftarrow \lambda_A \cdot
+\mathrm{clip}\!\left(
+\frac{D_{\emptyset}-D(C_P)}{D_{\emptyset}-D_{\mathrm{FC}}},
+0,1
+\right)
+\end{equation}
+Invalid or non-converged rollouts use an effective $\lambda_A=0$. Thus, DimRelAlign is weak for largely open sketches and becomes active only as the solver reward moves the rollout toward closure.
+
+\paragraph{Flip augmentation.}
+\label{sec:appendix_rl_flip_aug}
+We also use input-sketch flip augmentation inside each RLOO group. Some rollouts are conditioned on the original primitive tokens, while others are conditioned on an $x$- or $y$-reflected view obtained by mapping the corresponding coordinate bin $q$ to \texttt{num\_bins}$-1-q$. Crucially, this reflection does not require changing the CAD constraint command space: constraints refer to primitive identities and relation types, and these commands remain valid under global axis reflections. For example, coincidence, tangency, equality, parallelism, perpendicularity, and axis-aligned distance commands keep the same primitive references and constraint types.
+
+The generated constraint sequence is therefore decoded directly on the original primitives and rewarded in the original coordinate frame. Flip augmentation only changes the conditioning view seen by the policy, increasing within-group rollout diversity and the exploration power of RLOO without changing the target constraint semantics.
+
+\begin{table}[t]
+    \centering
+    \footnotesize
+    \setlength{\tabcolsep}{3pt}
+    \caption{Reward components used in RL training. The upper block lists inherited or fixed auxiliary rewards, while the lower block lists the proposed motion-subspace rewards.}
+    \label{tab:appendix_rl_components}
+    \begin{tabularx}{\linewidth}{@{}p{0.31\linewidth}X@{}}
+    \toprule
+    Component & Role \\
+    \midrule
+    SolverReward & FreeCAD solver feedback for reducing remaining degrees of freedom, reaching full constrainedness, and penalizing invalid constraint sets. \\
+    DimParsimony & Penalty on dimensional-constraint usage; varied in the dimensional-parsimony ablations. \\
+    ClassPriorReward & Fixed auxiliary prior that encourages rare relational classes and lightly biases dimensional classes toward the annotation guidelines. \\
+    \midrule
+    MotionReward & Matches relation-preserving motion to the relational pseudo-reference. \\
+    DimRelAlign & Penalizes dimensional edit directions that violate pseudo-reference relations, with closure-progress weighting. \\
+    \bottomrule
+    \end{tabularx}
+\end{table}
+
+\subsubsection{Rule-Based Relational Pseudo-Reference}
+\label{sec:appendix_rl_pseudo_rules}
+
+\begin{table*}[t]
+    \centering
+    \footnotesize
+    \setlength{\tabcolsep}{4pt}
+    \caption{Rule-based predicates used to construct the relational pseudo-reference $C_G^\star$. Each candidate is accepted when its normalized margin is below the listed tolerance.}
+    \label{tab:appendix_pseudo_rules}
+    \begin{tabularx}{\linewidth}{@{}>{\raggedright\arraybackslash}p{0.17\linewidth}>{\raggedright\arraybackslash}X>{\raggedright\arraybackslash}p{0.10\linewidth}>{\raggedright\arraybackslash}p{0.25\linewidth}@{}}
+        \toprule
+        Detected relation & Normalized margin & Tolerance & Notes \\
+        \midrule
+        \begin{tabular}[t]{@{}l@{}}\texttt{Horizontal}\\\texttt{Vertical}\end{tabular}
+        & Off-axis coordinate gap divided by the line length or point-pair distance.
+        & $\sin 0.5^\circ$
+        & Includes single-line constraints and two-point alignments between endpoints, point entities, and curve centers. \\
+
+        \begin{tabular}[t]{@{}l@{}}\texttt{Parallel}\\\texttt{Perpendicular}\end{tabular}
+        & For \texttt{Parallel}, use $|d_1 \times d_2|/(\|d_1\|\|d_2\|)$. For \texttt{Perpendicular}, use $|d_1\cdot d_2|/(\|d_1\|\|d_2\|)$.
+        & $\sin 0.5^\circ$
+        & Tests angular closeness to parallel or perpendicular directions. \\
+
+        \begin{tabular}[t]{@{}l@{}}\texttt{Coincident}\\\texttt{Concentric}\end{tabular}
+        & Point-point, point-on-object, or center-center distance divided by the sketch bounding-box diagonal.
+        & $0.0025$
+        & Point-on-object uses the same \texttt{Coincident} command with reference-pattern disambiguation. \\
+
+        \texttt{Midpoint}
+        & Distance between the candidate midpoint and the midpoint implied by the referenced endpoints or line, divided by the bounding-box diagonal.
+        & $0.0025$
+        & Includes point-line midpoint and selected three-reference midpoint forms. \\
+
+        \texttt{Mirror}
+        & Combined symmetry residual divided by the bounding-box diagonal: midpoint-on-axis error and reflected-pair direction error.
+        & $0.0025$
+        & Uses existing line primitives as mirror-axis candidates. \\
+
+        \texttt{Tangent}
+        & For line--circle/arc candidates, checks whether the curve center is one radius away from the line. For arc--arc candidates, checks whether the center distance matches external or internal tangency. Point-specified forms additionally require the specified contact point to lie on the referenced object and the local tangent directions to agree.
+        & $0.0025$
+        & Line-line collinearity is excluded because it overlaps \texttt{Parallel} and has mixed residual scales. \\
+
+        \texttt{Equal}
+        & Difference in line length or curve radius divided by the larger magnitude.
+        & $0.005$
+        & Detects equal line lengths and equal circle/arc radii. \\
+        \bottomrule
+    \end{tabularx}
+\end{table*}
+
+Section~\ref{sec:rl_pseudo_targets} introduces the relational pseudo-reference $C_G^\star$. Here we specify the rule detector used to instantiate it. For each detectable relation, we enumerate the applicable primitive tuples in the input sketch and compute a normalized margin at the original geometry. The margin definitions and tolerances are listed in Table~\ref{tab:appendix_pseudo_rules}; a candidate relation is kept when its margin falls below the corresponding tolerance. The detector does not test whether a candidate would be redundant in a CAD solver or whether it is needed to reduce DoF; such command-level redundancy is absorbed by motion-subspace canonicalization.
+
+A possible risk of this high-recall construction is false-positive relations. For example, two geometrically equal but semantically unrelated features may be linked by an \texttt{Equal} constraint, making the pseudo-reference overly restrictive and potentially rewarding unintended structure. To test this risk, we compare the full pseudo-reference with a pruned variant that removes the relation families most likely to create long-range accidental matches: \texttt{Equal}, \texttt{Parallel}, \texttt{Perpendicular}, \texttt{Midpoint}, and \texttt{Mirror}. These families can connect primitives that are spatially distant, and are therefore more vulnerable to incidental geometric agreement.
+Note that this pruning does not trivially remove all orientation structure and make $C_G^\star$ excessively under-constrained, since many axis-aligned parallel and perpendicular relations remain partially covered by \texttt{Horizontal} and \texttt{Vertical} constraints.
+
+We train both variants with the identical configuration and compare them at the same $70$k-update budget. Table~\ref{tab:appendix_pseudo_ambiguous} shows that the two reach comparable closure (FC $0.647$ vs.\ $0.627$, DoF $\approx 5.1$ for both), yet the pruned variant uses more dimensional constraints (dim-ratio $0.255$ vs.\ $0.221$); the higher dimensional ratio is therefore not an operating-point artifact but reflects the model compensating for the lost relational coverage with additional dimensions. The pruned variant is also worse on the motion-subspace metrics ($\theta_{\mathrm{motion}}^{\mathrm{full}}$ and $\theta_{\mathrm{motion}}^{\mathrm{rel}}$) and on the leak distance ($\theta_{\mathrm{leak}}^{\mathrm{dim}}$ $0.239$ vs.\ $0.164$), indicating that the extra dimensions act in part as relation-violating shortcuts, while placement ($S_{\mathrm{place}}$) is essentially unchanged. This suggests that, for reward construction, the loss of relational coverage is more harmful than the potential false positives removed by pruning. We therefore use the full relational closure in the main RL experiments.
+
+\begin{table}[t]
+    \centering
+    \footnotesize
+    \setlength{\tabcolsep}{1pt}
+    \caption{Effect of pruning high-risk false-positive relation families from the pseudo-reference $C_G^\star$. The pruned variant removes relation families that could create long-range accidental matches; its higher dimensional ratio indicates that pruning weakens the relational target and encourages over-dimensioning.}
+    \label{tab:appendix_pseudo_ambiguous}
+    \begin{tabularx}{\linewidth}{@{}lccccccc@{}}
+        \toprule
+        Pseudo-ref. & FC $\uparrow$ & DoF $\downarrow$ & dim-ratio $\downarrow$ & $\theta_{\mathrm{motion}}^{\mathrm{full}}\!\downarrow$ & $\theta_{\mathrm{motion}}^{\mathrm{rel}}\!\downarrow$ & $\theta_{\mathrm{leak}}^{\mathrm{dim}}\!\downarrow$ & $S_{\mathrm{place}}\!\uparrow$\\
+        \midrule
+        Pruned $C_G^\star$ & \textbf{0.647} & 5.12 & 0.255 & 0.519 & 0.370 & 0.239 & 0.495 \\
+        Full $C_G^\star$ & 0.627 & \textbf{5.11} & \textbf{0.221} & \textbf{0.500} & \textbf{0.326} & \textbf{0.164} & \textbf{0.504} \\
+        \bottomrule
+    \end{tabularx}
+\end{table}
+
+\subsubsection{Reward Computation Pipeline}
+\label{sec:appendix_rl_online_metric}
+
+\begin{figure*}[t]
+    \centering
+    \resizebox{0.98\linewidth}{!}{%
+    \begin{tikzpicture}[
+        font=\footnotesize,
+        node distance=6mm and 10mm,
+        box/.style={draw, rounded corners=1.5pt, align=center, inner sep=4pt, minimum height=8mm},
+        token/.style={box, fill=blue!6, draw=blue!45!black},
+        sg/.style={box, fill=green!7, draw=green!45!black},
+        fc/.style={box, fill=red!5, draw=red!45!black},
+        reward/.style={box, fill=green!7, draw=green!45!black},
+        arr/.style={-{Latex[length=2mm]}, thick},
+        branch note/.style={font=\scriptsize\itshape, text=gray!65!black, align=center},
+        legend box/.style={draw, rounded corners=1pt, inner sep=0pt},
+        legend text/.style={font=\scriptsize, anchor=west, inner sep=0pt},
+        swatch/.style={draw, minimum width=3.5mm, minimum height=2.5mm, inner sep=0pt}
+    ]
+        \node[token] (sample) {GPU rollout\\constraint tokens};
+        \node[sg, right=of sample] (decode) {\texttt{STOP} truncate\\detokenize\\restore geometry};
+        \node[sg, above right=4mm and 10mm of decode] (metric) {ResponseMetricEvaluator\\CPU collect: $R_C$, $J_\phi$, $J_R$};
+        \node[fc, below right=4mm and 10mm of decode] (solver) {FreeCAD solver workers\\status + DoF};
+        \node[sg, right=of metric] (cache) {shared metric caches\\pseudo-ref subspaces, $J_\phi$, sketches};
+        \node[reward, right=of solver] (terms) {reward computation\\Motion + DimRelAlign\\+ Solver feedback};
+        \node[token, right=of terms] (stopreward) {assemble token-aligned\\reward tensor};
+        \node[token, below=of terms] (logp) {GPU policy/ref forward\\log-probs, KL, entropy};
+        \node[token, right=of stopreward] (rloo) {RLOO returns\\leave-one-out advantage};
+        \node[legend box, minimum width=34mm, minimum height=13mm, above=15mm of rloo.north east, anchor=south east] (legend) {};
+        \begin{scope}[shift={(legend.north west)}]
+            \node[swatch, anchor=west, fill=blue!6, draw=blue!45!black] at (2mm,-3mm) {};
+            \node[legend text] at (7mm,-3mm) {Token / GPU};
+            \node[swatch, anchor=west, fill=green!7, draw=green!45!black] at (2mm,-6.5mm) {};
+            \node[legend text] at (7mm,-6.5mm) {SketchGraphs / CPU};
+            \node[swatch, anchor=west, fill=red!5, draw=red!45!black] at (2mm,-10mm) {};
+            \node[legend text] at (7mm,-10mm) {FreeCAD / CPU};
+        \end{scope}
+
+        \node[branch note, above=1mm of solver] {async solver branch};
+        \node[branch note, below=1mm of logp] {overlapped GPU branch};
+
+        \draw[arr] (sample.east) -- (decode.west);
+        \draw[arr] (decode.north east) -- (metric.south west);
+        \draw[arr] (decode.south east) -- (solver.north west);
+        \draw[arr] (metric.east) -- (cache.west);
+        \draw[arr] (cache.south) -- ++(0,-3mm) -| (terms.north);
+        \draw[arr] (solver.east) -- (terms.west);
+        \draw[arr] (terms.east) -- (stopreward.west);
+        \draw[arr] (sample.south) |- (logp.west);
+        \draw[arr] (logp.east) -- (rloo.south);
+        \draw[arr] (stopreward.east) -- (rloo.west);
+    \end{tikzpicture}}
+    \caption{Online reward computation for RLOO fine-tuning. A sampled token sequence is decoded once, evaluated by the SketchGraphs/Jacobian metric path and FreeCAD solver workers, and combined with GPU log-probability and KL terms to form token-aligned rewards. Sequence-level rewards are placed at \texttt{STOP}; token-local solver-feedback terms are placed on the corresponding constraint tokens. FreeCAD solver work overlaps with the GPU policy/reference forward pass, while cached pseudo-reference and Jacobian quantities are reused across MotionReward and DimRelAlign.}
+    \label{fig:appendix_rl_pipeline}
+\end{figure*}
+
+Figure~\ref{fig:appendix_rl_pipeline} summarizes the reward computation pipeline. Each sampled constraint sequence is truncated at its first \texttt{STOP} token and decoded into a SketchGraphs sketch using the input sketch as the primitive reference. The decoded sketch is evaluated through two CPU-side paths and one GPU-side path. (i) The SketchGraphs metric path computes the Jacobian-based quantities required by MotionReward and DimRelAlign, reusing cached pseudo-reference subspaces and observation Jacobians whenever possible. (ii) In parallel, FreeCAD solver workers evaluate solver status and remaining DoF, while (iii) the GPU computes policy/reference log-probabilities, KL regularization, and entropy for the RLOO update. After these paths are collected, the terminal motion-subspace and solver rewards are written to the \texttt{STOP} position in the token-aligned reward tensor. Token-local solver-feedback terms, such as malformed or redundant constraint penalties, are placed at their corresponding constraint-token positions.
+Autoregressive rollout generation is further accelerated with KV caching. With these optimizations, one RLOO training iteration takes about $4.17$ seconds, or $0.24$ iterations per second.
+
+\subsubsection{Human-Preference Study Protocol}
+\label{sec:appendix_rl_user_study}
+
+\begin{figure*}[t]
+    \centering
+    \begin{minipage}[t]{0.49\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figs/user_study_dim_on.png}\\[-0.3em]
+        \footnotesize Dimensions shown
+    \end{minipage}\hfill
+    \begin{minipage}[t]{0.49\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figs/user_study_dim_off.png}\\[-0.3em]
+        \footnotesize After pressing Remove Dimension
+    \end{minipage}
+    \caption{Browser interface used for the human-preference study. Left/right outputs are anonymized and randomized. Each panel shows the remaining DoF; raters can press Remove Dimension to inspect only the relational constraints, and can drag vertices or dimension labels to test how each constraint set preserves the sketch shape.}
+    \label{fig:appendix_user_study_ui}
+\end{figure*}
+
+The preference study compares Solver-RL and Ours at the same $70$k training step. We select $45$ held-out input sketches from our benchmark dataset, for which both model outputs defines are well-converged constraint sets. We present these constrained sketch pairs one by one in a shared visual format, randomly left/right assigned, to four raters using the interface in Fig.~\ref{fig:appendix_user_study_ui}. Raters can remove dimensional constraints and drag vertices or dimension labels to inspect edit behavior. They are asked: ``Which constraint set would you use if you had to constrain this sketch yourself and could make modifications on top of the generated constraints?'' The $45\times4=180$ judgments are summarized in Table~\ref{tab:rl_user_study}.
+
+\paragraph{Preference-margin correlation.}
+The Spearman entries in Table~\ref{tab:rl_user_study} quantify how well each metric tracks human preference sketch by sketch. For each input sketch $s$, every rater chooses the better constraint set among Ours, Solver-RL, or Tie (Ours and Solver-RL are blinded). We summarize the four labels by a preference margin
+\begin{equation}
+v_s=\frac{\#\text{Ours}_s-\#\text{Solver-RL}_s}{R}\in[-1,1],
+\label{eq:appendix_pref_margin}
+\end{equation}
+where $\#\text{Ours}_s$ and $\#\text{Solver-RL}_s$ are the numbers of raters preferring each model and $R=4$ is the number of raters.
+
+To compare this human preference against our metrics, we define a per-sketch metric advantage $\Delta^{m}_s$ for each metric $m$. We set its sign such that a positive value always indicates that Ours outperformed Solver-RL on that metric:\\
+\begin{equation}
+    \Delta_m^s = \begin{cases}
+        m^\mathrm{Solver-RL}_s - m^\mathrm{Ours}_s & \text{if } m \text{ is lower-is-better}, \\
+        m^\mathrm{Ours}_s - m^\mathrm{Solver-RL}_s & \text{if } m \text{ is higher-is-better}.
+    \end{cases}
+\end{equation}
+Here, $m^{\text{model}}_s$ denotes the metric evaluated on that model's output for sketch $s$ under the multi-reference aggregation of \S\ref{sec:motion_metrics}. Lower-the-better metrics include $\theta_\mathrm{motion}^\mathrm{full}$, $\theta_\mathrm{motion}^\mathrm{rel}$, $\theta_\mathrm{leak}^\mathrm{dim}$, and the dimensional ratio, while higher-the-better metric is $S_\mathrm{place}$.
+
+We then compute the Spearman rank correlation $\rho_m$ between the human preference margins $\{v_s\}$ and the metric advantages $\{\Delta^{m}_s\}$ across all $n=45$ valid sketches. Two-sided $p$-values are computed using the standard large-sample $t$-approximation.
+%: $t=\rho_m\sqrt{(n-2)/(1-\rho_m^2)}$.
+
+\paragraph{Significance and inter-rater agreement.}
+
+As shown in Table~\ref{tab:rl_user_study}, the per-sketch preference robustly tracks the two placement-sensitive metrics. Both correlations are statistically significant: $\theta_{\mathrm{motion}}^{\mathrm{full}}$ ($p=4{\times}10^{-7}$) and $S_{\mathrm{place}}$ ($p=3{\times}10^{-5}$). Crucially, both safely pass a Bonferroni correction for the five metrics tested (threshold $0.05/5=0.01$). The correlations for the other three metrics are not significant ($p > 0.05$).
+
+\begin{table}[t]
+    \centering
+    \footnotesize
+    \caption{Per-rater and aggregate breakdown of preference judgments across the $45$ valid sketches.}
+    \begin{tabular}{@{}l ccc @{}}
+        \toprule
+        & \multicolumn{3}{c}{Preferred Constraint Set} \\
+        \cmidrule(l){2-4}
+        Rater & \textbf{Ours} & Solver-RL & Tie \\
+        \midrule
+        R1 & \textbf{22} & 11 & 12 \\
+        R2 & \textbf{20} & 14 & 11 \\
+        R3 & \textbf{17} & 12 & 16 \\
+        R4 & 10 & \textbf{26} &  9 \\
+        \midrule
+        Total & \textbf{69} & 63 & 48 \\
+        \bottomrule
+    \end{tabular}
+    \label{tab:appendix_per_rater_votes}
+\end{table}
+
+To measure consensus among the four raters, we compute Fleiss' $\kappa$. The resulting value is $\kappa = 0.35$, indicating only ``fair'' agreement. This is due to the heterogeneous per-rater tallies shown in Table~\ref{tab:appendix_per_rater_votes}: while three raters preferred Ours, one rater strongly preferred Solver-RL.
+Because of this dissenting rater and the high number of ties, we interpret the aggregate $69$--$63$ vote margin in Table~\ref{tab:rl_user_study} as a noisy signal rather than a decisive win. Instead, the stronger evidence lies in the per-sketch correlation above: when raters \emph{did} express a clear preference, it consistently aligned with $\theta_{\mathrm{motion}}^{\mathrm{full}}$ and $S_{\mathrm{place}}$.
+
+\subsubsection{Additional Results}
+\label{sec:appendix_rl_additional_results}
+
+Figure~\ref{fig:appendix_rl_qualitative_examples} shows representative qualitative examples from the RL reward comparison. Here, SolverR denotes SolverReward, Motion denotes MotionReward, and Ours includes SolverReward in addition to MotionReward and DimRelAlign. In the Solver-RL row, increasing $\lambda_D$ reduces the number of dimensional constraints, but often leaves more remaining DoF. Among the proposed-reward variants, MotionReward encourages more relational constraints, while DimRelAlign discourages relation-violating dimensional shortcuts; their combination in Ours is intended to reduce over-dimensioning without relying only on a dimensional-count penalty. As a failure mode, Ours can hesitate to add dimensional constraints, leaving some sketches with higher DoF and under-constrained outputs.
+
+\subsection{Limitations}
+\label{sec:appendix_limitations}
+
+\subsubsection{Scope of the Metrics}
+We first emphasize that our proposed metrics do not capture the entirety of design intent. As Otey \etal~\cite{otey2018revisiting} note, design intent has many aspects, most of which require external knowledge unattached to a CAD model itself. Incorporating such meta-knowledge into design-intent quantification is an important direction for future work.
+
+Being specific to our metrics design, they measure infinitesimal redesign behavior. Therefore, they cannot distinguish constraint sets whose finite-edit behavior differs but whose first-order behavior agrees at the original sketch. Comparing motion manifolds rather than only their tangent spaces, i.e., motion subspaces, will be a possible extension.
+
+\subsubsection{RL Application Limitations}
+
+In the RL application, although this is not the core of this work, it has two limitations. First, the present reward cannot learn human-like dimensional placement. The training signal contains no dimensional-placement target: it never specifies which length, radius, or angle should become a driving dimension. Therefore, $S_{\mathrm{place}}$ and full dimensional-response matching are impossible to optimize from this supervision alone. This will fundamentally require new supervision, such as human-annotated dimensions, interactive edit traces, or preference data that explicitly distinguishes dimensional placements.
+
+Second, our proposed rewards slow model convergence relative to Solver-RL. As our MotionReward and DimRelAlign provide finer-grained behavioral signals than Solver-RL's DimParsimony, they make the reward landscape harder to optimize and require more policy exploration.
+
+As a remedy, we tested inference-time solver intervention: after a sampled constraint sequence is decoded, FreeCAD checks the result; invalid constraints are removed, and the model resamples the remaining suffix for up to five iterations. As shown in Fig.~\ref{fig:appendix_rl_iter5}, this raises Ours' FC rate from $0.627$ to $0.716$. Solver-RL still reaches a higher FC rate, but compared with Fig.~\ref{fig:rl_reward_pareto}, the advantage of Ours becomes clearer: in the higher-FC regime, it has a lower dimensional ratio, better motion-subspace diagnostics, and higher $S_{\mathrm{place}}$ than Solver-RL.
+
+\begin{figure*}[p]
+    \centering
+    \begin{minipage}{\linewidth}
+        \centering
+        \includegraphics[width=0.96\linewidth]{figs/rl_reward_pareto_iter5.pdf}
+        \caption{Pareto-style RL evaluation with test-time solver intervention. Compared with Fig.~\ref{fig:rl_reward_pareto}, each output may be regenerated for up to five solver-feedback iterations, removing invalid constraints before resampling the remaining suffix. Although Solver-RL remains higher on FC, the intervention moves Ours into a higher-FC regime, while making its lower dimensional ratio and stronger motion-subspace diagnostics more visually apparent than Fig.~\ref{fig:rl_reward_pareto}.}
+        \label{fig:appendix_rl_iter5}
+    \end{minipage}
+
+    \vspace{0.5em}
+
+    \begin{minipage}{\linewidth}
+        \centering
+        \begin{minipage}[t]{0.44\linewidth}
+            \centering
+            \includegraphics[width=\linewidth]{figs/appendix_qualitative_1__22173_3dff5b17_0000_sketch00.png}
+        \end{minipage}\hspace{0.04\linewidth}
+        \begin{minipage}[t]{0.44\linewidth}
+            \centering
+            \includegraphics[width=\linewidth]{figs/appendix_qualitative_3__21236_b696e901_0008_sketch02.png}
+        \end{minipage}
+
+        \vspace{0.05em}
+
+        \begin{minipage}[t]{0.44\linewidth}
+            \centering
+            \includegraphics[width=\linewidth]{figs/appendix_qualitative_4__60720_ef9a0a95_0006_sketch01.png}
+        \end{minipage}\hspace{0.04\linewidth}
+        \begin{minipage}[t]{0.44\linewidth}
+            \centering
+            \includegraphics[width=\linewidth]{figs/appendix_qualitative_7__22524_0be3da8a_0017_sketch00.png}
+        \end{minipage}
+        \caption{Representative qualitative examples from the additional RL reward comparison. The compared variants are the same reward configurations plotted in the Pareto analysis of Fig.~\ref{fig:rl_reward_pareto}.}
+        \label{fig:appendix_rl_qualitative_examples}
+    \end{minipage}
+\end{figure*}
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% BELOW IS FOR REBUTTAL
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+
+\subsection{Do Local Motion Metrics Predict Finite-Edit Behavior?}
+\label{sec:appendix_consistency_with_finite_edit_behavior}
+
+Our motion-subspace metrics are computed from the tangent space at the original sketch, whereas practical CAD redesign applies finite edits through a nonlinear solver. We therefore test whether these pre-edit local metrics predict the discrepancy between two annotations under the same finite dimensional edit.
+
+We evaluate this with the following protocol: for each annotation pair with a common driving dimension, we apply the same perturbation to that dimension in both annotations, solve them independently with FreeCAD, and compare the resulting geometry changes. We then correlate this finite-response discrepancy with the original motion-subspace metrics.
+
+\paragraph{Evaluation pairs and perturbations.}
+From our benchmark dataset, we extract human-annotation pairs $(C^{(s)}_i, C^{(s)}_j)$ of the same sketch $s$ that share at least one driving length dimension. Each shared dimensional constraint $c$ ($h_c(x)=p_c$) defines a separate evaluation trial: we perturb only $c$ by the same amount $\Delta$ in both annotations and solve them independently with FreeCAD. The perturbation is defined as
+\begin{equation}
+\Delta=\pm\frac{\alpha}{100}L_s,\quad\alpha\in\{0.1,0.5,1,2,5,10,20\}
+\end{equation}
+where $L_s$ is the bounding-box diagonal of sketch $s$, and $\alpha$ controls the perturbation magnitude. For each $\alpha$, positive and negative perturbations are evaluated as separate trials. Targets outside the driver domain, such as non-positive radii, are skipped. A solve is considered successful only if it converges to the requested target within normalized error $10^{-3}$.
+
+\paragraph{Finite-edit response.}
+Let $(\hat{C}^{(s)}_i,\hat{C}^{(s)}_j)$ be the resulting annotations after perturbation $h_c(x)=p_c+\Delta$, and $(\hat{x}^{(s)}_i,\hat{x}^{(s)}_j)$ be their corresponding geometric parameters as in Sec.~\ref{sec:problem_formulation}. The respective deformation is described by the observation map in Sec.~\ref{sec:appendix_observable_projection} as
+\begin{equation}
+r_i^{c,\Delta}=\phi(\hat{x}^{(s)}_i)-\phi(x^{(s)}),\quad r_j^{c,\Delta}=\phi(\hat{x}^{(s)}_j)-\phi(x^{(s)}),
+\end{equation}
+where $x^{(s)}$ is the geometry of sketch $s$ before the perturbation. We define their discrepancy of these perturbation responses by the following:
+\begin{equation}
+D_\mathrm{finite}^{c,\Delta}(C^{(s)}_i, C^{(s)}_j) = \frac{\| r_i^{c,\Delta} - r_j^{c,\Delta} \|_2}{\| r_i^{c,\Delta} \|_2 + \| r_j^{c,\Delta} \|_2 + \epsilon},\quad \epsilon=10^{-12}.
+\end{equation}
+Thus, $D_\mathrm{finite}^{c,\Delta}\in[0,1)$ is zero when the two annotations undergo the same geometric change and increases as their responses diverge. We exclude trials for which both response norms are below $10^{-10}$, where the normalized discrepancy is dominated by numerical noise.
+
+\paragraph{Correlation with our metrics.}
+For each perturbation magnitude $\alpha$, we compute the Spearman correlation between $D_\mathrm{finite}^{c,\Delta}$ and each proposed metric in Sec.~\ref{sec:motion_metrics}. The evaluation contains 3,030 annotation-pair/driver cases, yielding 6,060 signed perturbation trials at each magnitude before filtering invalid targets and failed solves. Table~\ref{tab:appendix_finite_edit} shows positive correlations for all four metrics across the full $0.1\%$--$20\%$ edit range. In particular, $\theta_\mathrm{motion}^\mathrm{full}$ remains within $.280$--$.310$, $\theta_\mathrm{motion}^\mathrm{rel}$ within $.275$--$.308$, and $1-S_\mathrm{place}$ within $.538$--$.569$, while $\theta_\mathrm{leak}^\mathrm{dim}$ shows moderate attenuation from $.273$ to $.222$. Overall, the correlations remain stable across the tested edit magnitudes, indicating that the motion-subspace metrics computed solely at the original sketch remain predictive of discrepancies in finite nonlinear responses.
+
+\begin{table}[t]
+    \centering
+    \footnotesize
+    \setlength{\tabcolsep}{3pt}
+    \caption{Spearman correlation between the original local metrics and finite-edit discrepancy for human annotation pairs sharing a length-valued driving dimension. ``Success'' is the fraction of edits with a valid target value for which both FreeCAD solves succeed.}
+    \label{tab:appendix_finite_edit}
+    \begin{tabular}{@{}c c c c c c@{}}
+        \toprule
+        Edit magnitude $\alpha$
+        & Success
+        & $\theta_\mathrm{motion}^\mathrm{full}$
+        & $\theta_\mathrm{motion}^\mathrm{rel}$
+        & $\theta_\mathrm{leak}^\mathrm{dim}$
+        & $1-S_\mathrm{place}$ \\
+        \midrule
+        $0.1\%$ & $99.2\%$ & $.285$ & $.286$ & $.273$ & $.564$ \\
+        $0.5\%$ & $97.2\%$ & $.288$ & $.287$ & $.269$ & $.563$ \\
+        $1\%$ & $96.6\%$ & $.287$ & $.290$ & $.271$ & $.555$ \\
+        $2\%$ & $95.1\%$ & $.289$ & $.291$ & $.265$ & $.550$ \\
+        $5\%$ & $92.4\%$ & $.294$ & $.297$ & $.256$ & $.554$ \\
+        $10\%$ & $90.2\%$ & $.310$ & $.308$ & $.249$ & $.569$ \\
+        $20\%$ & $85.7\%$ & $.280$ & $.275$ & $.222$ & $.538$ \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+
+\subsection{Sensitivity to Primitive Parameterization}
+\label{sec:appendix_parameterization_sensitivity}
+Our canonicalization in Sec.~\ref{sec:motion_metrics} removes command-level diversity by representing a constraint set through the local geometric motions it induces. These motions, however, are computed as tangent vectors with respect to the coordinates used to parameterize the underlying primitives. Consequently, the choice of primitive parameterization remains a potential source of representational dependence: two coordinate descriptions of the same geometry need not yield identical metric values. Because invariance to such reparameterizations is not guaranteed by the construction, we explicitly test this dependence using two geometry-preserving reparameterizations: one for line segments and one for arcs.
+
+\paragraph{Reparametrizing lines and arcs.}
+Our original implementation is based on the SketchGraphs \cite{seff2020sketchgraphs} notation, where lines are parametrized by 6 parameters $x_\mathrm{line} = [p_x, p_y, d_x, d_y, s, t]^T$ with endpoints
+\begin{equation}
+q_s = p + sd,\quad q_e = p + td,
+\end{equation}
+where $p = (p_x, p_y)$ is a reference point on the supporting line, $d = (d_x, d_y)$ is its direction, and $s$, $t$ determine the segment endpoints $q_s$ and $q_e$.
+For arcs, we use the five-parameter representation
+$x_\mathrm{arc} = [c_x,c_y,r,\alpha_s,\alpha_e]^T$, where $c=(c_x,c_y)$ is the center, $r$ is the radius, and $\alpha_s$, $\alpha_e$ specify the angular extent of the arc. Writing
+\begin{equation}
+q(\alpha)=c+r[\cos\alpha,\sin\alpha]^T,
+\end{equation}
+the start and end points are $q_s=q(\alpha_s)$ and $q_e=q(\alpha_e)$.
+
+For this experiment, we adopt the following alternative representations.
+For lines, we replace the above 6 parameters with the 4-parameter endpoint coordinates $y_\mathrm{line}=[q_s^\top, q_e^\top]^\top \in \mathbb{R}^4$. For arcs, we introduce the 3-point representation, i.e., specifying an arc by its endpoints and the midpoint on the arc: $y_\mathrm{arc}=[q_s^\top, q_m^\top, q_e^\top]\in\mathbb{R}^6$.
+
+\paragraph{Metric recomputation.}
+The above reparametrization requires modification of our metric computation, but the fix is in fact straightforward.
+Let $y$ denote either alternative parameterization and $x = g(y)$ the corresponding coordinates in the original SketchGraphs representation. We write
+\begin{equation}
+B = \partial g / \partial y
+\end{equation}
+for the Jacobian of this coordinate map, which is generally rectangular because the original and alternative representations need not have the same dimension. An infinitesimal perturbation $dy$ therefore induces
+\begin{equation}
+dx = B dy.
+\end{equation}
+Applying the chain rule, we transform all geometry-side Jacobians (Equations~\ref{eq:full_linearized},\ref{eq:rel_linearized},\ref{eq:appendix_observation_linearization}) as
+\begin{equation}
+\widetilde{J}_x = J_x B,\quad
+\widetilde{J}_R = J_R B,\quad
+\widetilde{J}_\phi = J_\phi B,
+\end{equation}
+and recompute the minimum-norm dimensional response (Eq.~\ref{eq:full_linearized}) in the alternative coordinates as
+\begin{equation}
+\widetilde{R} = -(\widetilde{J}_x)^\dagger J_p = -(J_x B)^\dagger J_p.
+\end{equation}
+The rest metrics computation follows the same procedure as in Sec.~\ref{sec:motion_metrics}.
+
+\paragraph{Comparison results.}
+We evaluate four types of prediction--reference comparisons: held-out human annotations against human references, model predictions (Base, Solver-RL, and Ours) against human references, and the dimensional- and relational-dropout controls used in our sensitivity analysis (Sec.~\ref{sec:exp_degradation}). For each paired record, we keep the constraint sets and, for the dropout controls, the dropout realization fixed, and change only the primitive parameterization. For each metric $m\in\{\theta_\mathrm{motion}^\mathrm{full}, \theta_\mathrm{motion}^\mathrm{rel}, \theta_\mathrm{leak}^\mathrm{dim}, S_\mathrm{place}\}$ and paired record $i$, we measure the L1 change before and after the reparametrization:
+\begin{equation}
+    \Delta_{m,i} = |m_i^\mathrm{alternative} - m_i^\mathrm{native}|.
+\end{equation}
+Because all four metrics lie in $[0,1]$, this absolute change has a common scale across metrics.
+
+
+\begin{table*}[t]
+    \centering
+    \caption{
+    Absolute metric change $\Delta_m$ under geometry-preserving primitive
+    reparameterizations, stratified by evaluation setting.
+    Human--model includes Base, Solver-RL, and Ours.
+    Values below $10^{-12}$ are reported as $<10^{-12}$.
+    }
+    \label{tab:appendix_parameterization_stress}
+    \resizebox{\textwidth}{!}{%
+    \begin{tabular}{@{}llr rrr rrr rrr rrr@{}}
+        \toprule
+        & & &
+        \multicolumn{3}{c}{$\theta_\mathrm{motion}^\mathrm{full}$} &
+        \multicolumn{3}{c}{$\theta_\mathrm{motion}^\mathrm{rel}$} &
+        \multicolumn{3}{c}{$\theta_\mathrm{leak}^\mathrm{dim}$} &
+        \multicolumn{3}{c}{$S_\mathrm{place}$} \\
+        \cmidrule(lr){4-6}
+        \cmidrule(lr){7-9}
+        \cmidrule(lr){10-12}
+        \cmidrule(lr){13-15}
+        Reparam. & Setting & $n$
+        & Mean & Med. & $P_{90}$
+        & Mean & Med. & $P_{90}$
+        & Mean & Med. & $P_{90}$
+        & Mean & Med. & $P_{90}$ \\
+        \midrule
+
+        \multirow{4}{*}{\shortstack{Line\\$6{\to}4$}}
+        & Human--human & 1,656
+        & $.00173$ & $<10^{-12}$ & $1.9{\times}10^{-8}$
+        & $5.05{\times}10^{-9}$ & $<10^{-12}$ & $1.8{\times}10^{-8}$
+        & $.00403$ & $<10^{-12}$ & $.0048$
+        & $4.39{\times}10^{-4}$ & $<10^{-12}$ & $<10^{-12}$ \\
+
+        & Human--model & 4,202
+        & $.00653$ & $<10^{-12}$ & $.0110$
+        & $2.14{\times}10^{-9}$ & $<10^{-12}$ & $1.0{\times}10^{-8}$
+        & $.0157$ & $<10^{-12}$ & $.0409$
+        & $.00574$ & $<10^{-12}$ & $.0159$ \\
+
+        & Dim. dropout & 6,624
+        & $.00253$ & $<10^{-12}$ & $.0029$
+        & $5.05{\times}10^{-9}$ & $<10^{-12}$ & $1.8{\times}10^{-8}$
+        & $.00736$ & $<10^{-12}$ & $.0129$
+        & $.00786$ & $3.53{\times}10^{-4}$ & $.0241$ \\
+
+        & Rel. dropout & 3,328
+        & $.0234$ & $.0132$ & $.0603$
+        & $<10^{-12}$ & $<10^{-12}$ & $<10^{-12}$
+        & $.0313$ & $.0258$ & $.0678$
+        & $.0280$ & $.0169$ & $.0707$ \\
+
+        \midrule
+
+        \multirow{4}{*}{\shortstack{Arc\\$5{\to}6$}}
+        & Human--human & 558
+        & $.0114$ & $<10^{-12}$ & $.0071$
+        & $3.93{\times}10^{-4}$ & $<10^{-12}$ & $1.7{\times}10^{-8}$
+        & $.0174$ & $<10^{-12}$ & $.0438$
+        & $.00702$ & $<10^{-12}$ & $.0045$ \\
+
+        & Human--model & 1,224
+        & $.0119$ & $<10^{-12}$ & $.0445$
+        & $2.36{\times}10^{-4}$ & $<10^{-12}$ & $<10^{-12}$
+        & $.0373$ & $<10^{-12}$ & $.1059$
+        & $.0145$ & $<10^{-12}$ & $.0495$ \\
+
+        & Dim. dropout & 2,232
+        & $.00782$ & $<10^{-12}$ & $.0201$
+        & $3.93{\times}10^{-4}$ & $<10^{-12}$ & $1.7{\times}10^{-8}$
+        & $.0238$ & $<10^{-12}$ & $.0705$
+        & $.0205$ & $.00469$ & $.0631$ \\
+
+        & Rel. dropout & 1,116
+        & $.0270$ & $.0154$ & $.0675$
+        & $1.43{\times}10^{-4}$ & $<10^{-12}$ & $<10^{-12}$
+        & $.0349$ & $.0264$ & $.0764$
+        & $.0436$ & $.0283$ & $.1001$ \\
+
+        \bottomrule
+    \end{tabular}%
+    }
+\end{table*}
+
+Table~\ref{tab:appendix_parameterization_stress} shows near-zero medians in most cases, whereas the larger means indicate a small number of larger changes in the upper tail.
+$\theta_\mathrm{motion}^\mathrm{rel}$ is the least sensitive to reparameterization: its medians are below $10^{-12}$ and its $P_{90}$ changes remain below $2\times10^{-8}$ across all settings. The sensitivity of other metrics is higher, especially for model predictions and synthetic dropout controls. The most sensitive metric is $\theta_\mathrm{leak}^\mathrm{dim}$, where the $P_{90}$ change reaches $.1059$.
+
+In summary, the metrics are reasonably stable to the tested
+reparameterizations, while exact score comparability is best maintained
+by using a fixed primitive schema and evaluation platform.
+
+
+\subsection{Sensitivity to the Minimum-Norm Response}
+\label{sec:appendix_pseudoinverse_sensitivity}
+
+For an under-constrained sketch, the linearized dimensional response is not unique.  If
+\begin{equation}
+    R_0=-J_x^+J_p,
+    \qquad
+    N=\ker(J_x),
+\end{equation}
+then every
+\begin{equation}
+    R=R_0+NZ
+    \label{eq:appendix_response_family}
+\end{equation}
+satisfies $J_xR=-J_p$ in exact arithmetic.  Our evaluation uses $R_0$, the Moore--Penrose minimum-norm member of this family.  We quantify the dependence on that choice by replacing only the prediction-side response; the reference annotation and all non-response quantities are held fixed.
+
+\paragraph{Numerically admissible response family.}
+We use the same truncated-SVD rule as the main evaluator,
+\begin{equation}
+    \epsilon_{\mathrm{eff}}(A)
+    =\max\!\left(10^{-9},10^{-6}\sigma_{\max}(A)\right),
+    \label{eq:appendix_response_cutoff}
+\end{equation}
+for every null space, range, and pseudoinverse below.  In particular, $N$ is obtained from a full SVD; an economy SVD would omit right-null vectors when $J_x$ is wide.  A baseline response is accepted only when
+\begin{equation}
+    \varepsilon(R_0)
+    =\frac{\lVert J_xR_0+J_p\rVert_F}
+           {\max(\lVert J_p\rVert_F,1)}
+    \leq 10^{-6}.
+    \label{eq:appendix_response_residual}
+\end{equation}
+The same test is repeated after every perturbation.  This second gate is necessary because a direction below the truncated-SVD cutoff can be amplified by a subsequent pseudoinverse.  Of $1{,}298{,}213$ constructed prediction-response draws in the main arm, 563 ($0.043\%$) fail this post-perturbation gate; the auxiliary arm rejects 31 of 677,520 ($0.0046\%$).  All retained draws have $\varepsilon(R)\leq9.87\times10^{-7}$.
+
+Raw state coordinates mix primitive-specific quantities, so a Gaussian coefficient in $N$ would not give a comparable perturbation size across sketches.  We instead control the added motion in the paper's observation space.  Let
+\begin{equation}
+    K=J_\phi N,
+    \qquad
+    U_F=\operatorname{orth}(K),
+    \qquad
+    M_0=J_\phi R_0.
+\end{equation}
+For driver column $j$ and Monte Carlo draw $b$, we sample $g_j^{(b)}\sim\mathcal{N}(0,I)$ and set
+\begin{align}
+    u_j^{(b)}
+    &=U_F\frac{g_j^{(b)}}{\lVert g_j^{(b)}\rVert_2},
+    &
+    e_j^{(\eta,b)}
+    &=\eta\lVert M_{0,:,j}\rVert_2u_j^{(b)},
+    \label{eq:appendix_observable_noise}\\
+    E^{(\eta,b)}
+    &=[e_1^{(\eta,b)},\ldots,e_k^{(\eta,b)}],
+    &
+    R_{\eta,b}
+    &=R_0+N K^+E^{(\eta,b)}.
+    \label{eq:appendix_observable_response}
+\end{align}
+Thus each added observable response has norm $\eta$ times that driver's baseline observable-response norm.  Columns below $10^{-12}$ receive no noise; a response for which every relevant column is zero is excluded rather than counted as a zero sensitivity result.  Similarly, cases with $\operatorname{rank}(K)=0$ cannot be tested by this arm.  Among 6,697 consistent response maps, 4,313 are eligible: 1,325 have no observable-free direction and 1,059 have no nonzero observable response.  These filters still leave 286 sketches and 9,392--9,396 paired evaluation records at each nonzero strength.
+
+We use $\eta\in\{.01,.05,.10,.25,.50,1.0\}$ and 50 deterministic-seed draws per response.  For each of the four metrics, we recompute the complete evaluation row structure of Sec.~\ref{sec:experiments}, including held-out humans, model predictions, and the controlled dropout variants.  If $d_m^{0}(P,G)$ is the native score and $d_m^{\eta,b}(P,G)$ its value under Eq.~\ref{eq:appendix_observable_response}, the primary quantity is
+\begin{equation}
+    \Delta_m^{\eta,b}(P,G)
+    =\left|d_m^{\eta,b}(P,G)-d_m^0(P,G)\right|.
+    \label{eq:appendix_response_delta}
+\end{equation}
+For placement, $|\Delta_{S_\mathrm{place}}|=|\Delta_{1-S_\mathrm{place}}|$.  We also compute Spearman correlation between native and perturbed records separately for each draw.  The $\eta=0$ implementation gate reproduces all four native metrics exactly on 9,398 paired records.
+
+\begin{table}[t]
+    \centering
+    \scriptsize
+    \setlength{\tabcolsep}{2.2pt}
+    \caption{Sensitivity to alternative constraint-preserving responses normalized in observable space.  Each metric block reports median/$P_{90}$ of $|\Delta_m|$ over paired records and 50 draws.  The final column gives the median per-draw Spearman correlations for $\theta_\mathrm{motion}^\mathrm{full}$, $\theta_\mathrm{leak}^\mathrm{dim}$, and $S_\mathrm{place}$.  For $\theta_\mathrm{motion}^\mathrm{rel}$, $|\Delta|=0$ and $\rho=1$ in every condition.}
+    \label{tab:appendix_pseudoinverse_sensitivity}
+    \resizebox{\linewidth}{!}{%
+    \begin{tabular}{@{}c cc cc cc c@{}}
+        \toprule
+        & \multicolumn{2}{c}{$\theta_\mathrm{motion}^\mathrm{full}$}
+        & \multicolumn{2}{c}{$\theta_\mathrm{leak}^\mathrm{dim}$}
+        & \multicolumn{2}{c}{$S_\mathrm{place}$}
+        & $\rho_{\mathrm{full/leak/place}}$ \\
+        $\eta$ & Median & $P_{90}$ & Median & $P_{90}$ & Median & $P_{90}$ & Median over draws \\
+        \midrule
+        $.01$ & $.00007$ & $.00105$ & $.00037$ & $.0125$ & $.00038$ & $.00133$ & $.996/.984/1.000$ \\
+        $.05$ & $.00047$ & $.00536$ & $.00309$ & $.0684$ & $.00190$ & $.00662$ & $.996/.974/1.000$ \\
+        $.10$ & $.00117$ & $.0114$  & $.00765$ & $.112$  & $.00398$ & $.0134$  & $.995/.963/.999$ \\
+        $.25$ & $.00430$ & $.0339$  & $.0221$  & $.181$  & $.0135$  & $.0365$  & $.990/.943/.994$ \\
+        $.50$ & $.0118$  & $.0783$  & $.0395$  & $.239$  & $.0378$  & $.0898$  & $.968/.924/.976$ \\
+        $1.0$ & $.0261$  & $.150$   & $.0562$  & $.295$  & $.0938$  & $.205$   & $.887/.905/.914$ \\
+        \bottomrule
+    \end{tabular}}
+\end{table}
+
+Table~\ref{tab:appendix_pseudoinverse_sensitivity} separates three behaviors.  First, $\theta_\mathrm{motion}^\mathrm{rel}$ is exactly invariant because its construction from $J_R$ and $J_\phi$ does not use $R_0$.  Second, full-motion and placement scores are stable through small and moderate observable perturbations: at $\eta=.10$, their $P_{90}$ changes are $.0114$ and $.0134$, and their rank correlations are $.995$ and $.999$.  The changes grow in the $.50$--$1$ stress regime; $\eta=1$ deliberately adds a free observable response as large as the original response.  Third, $\theta_\mathrm{leak}^\mathrm{dim}$ is more response-selection-sensitive, with $P_{90}=.112$ already at $\eta=.10$.
+
+The isolated maximum $|\Delta_{\mathrm{full}}|=.707$ at every strength is a cutoff discontinuity rather than typical behavior: the estimated response-subspace rank changes in $1.70\%$ of rows through $\eta=.50$ and $2.06\%$ at $\eta=1$.  Sensitivity is also concentrated where more observable freedom exists.  At $\eta=.10$, responses with observable-free rank at least six have median changes $.00293$ and $.0289$ for $\theta_\mathrm{motion}^\mathrm{full}$ and $\theta_\mathrm{leak}^\mathrm{dim}$, compared with values below $10^{-6}$ in the rank-three-to-five stratum.  Across every draw and strength, the available dimensional-dropout ordering for full motion and placement and the relational-dropout ordering for relational motion and leakage are preserved.  Held-out humans also remain separated from both evaluated models.  The much smaller Base--Solver-RL gap within this eligible subset is not always preserved for full motion or leakage, so we do not claim invariance of fine model ordering under arbitrary response selection.
+
+\paragraph{Observable-invisible freedom.}
+The main arm cannot excite a null direction invisible to $J_\phi$.  To isolate this blind spot, we separately form
+\begin{equation}
+    G=\ker\!\begin{bmatrix}J_x\\J_\phi\end{bmatrix},
+    \qquad
+    \widehat R_{\eta,b,:,j}
+    =R_{0,:,j}+\eta\lVert R_{0,:,j}\rVert_2\,G
+       \frac{h_j^{(b)}}{\lVert h_j^{(b)}\rVert_2},
+    \label{eq:appendix_observable_null_response}
+\end{equation}
+with 20 draws per strength.  This auxiliary $\eta$ is normalized in raw state space and is therefore not compared numerically with the main-arm $\eta$.  We use the null space of the stacked matrix rather than intersecting two separately thresholded bases.  The resulting directions include any state freedom unseen by the distance observable; they need not all be primitive-parameterization gauges.
+
+Of the consistent response maps, 5,646 have both a nonzero driver response and a nonempty $G$.  Equation~\ref{eq:appendix_observable_null_response} preserves $J_\phi R$ as well as $J_xR$.  Accordingly, at $\eta=1$, the median/$P_{90}$ changes are $1.1\times10^{-16}/5.5\times10^{-9}$ for $\theta_\mathrm{motion}^\mathrm{full}$, exactly zero for $\theta_\mathrm{motion}^\mathrm{rel}$, and $0/1.1\times10^{-16}$ for $S_\mathrm{place}$.  Among rows whose estimated subspace rank is unchanged, the maximum changes are $2.98\times10^{-8}$ and $4.05\times10^{-9}$ for full motion and placement; rare cutoff crossings account for the larger raw maximum of full motion.  In contrast, the raw-state leakage diagnostic changes as intended: its median is $9.75\times10^{-5}$ but its $P_{90}$ reaches $.207$ at $\eta=1$; when the reference relation Jacobian sees $G$, the median reaches $.154$.  This controlled separation supports the characterization of $\theta_\mathrm{leak}^\mathrm{dim}$ as a fixed-schema diagnostic, not a coordinate-free observable-space quantity.
+
+\paragraph{Finite-solver anchor.}
+The nullspace experiment describes admissible first-order alternatives but does not assert that a CAD solver selects them uniformly.  As an empirical anchor, we start every edit from a freshly solved annotation and compare FreeCAD's exact finite observable response at the smallest edit magnitude used in Sec.~\ref{sec:appendix_consistency_with_finite_edit_behavior} with the minimum-norm tangent prediction.  For driver $q$ and signed increment $\delta$,
+\begin{align}
+    v_\mathrm{FC}^{q,\delta}
+    &=\frac{\phi(x^{q,\delta})-\phi(\bar x)}{\delta},
+    &
+    v_\mathrm{MP}^{q}
+    &=J_\phi R_{0,:,q},
+    \label{eq:appendix_solver_anchor}\\
+    c^{q,\delta}
+    &=\frac{\langle v_\mathrm{FC}^{q,\delta},v_\mathrm{MP}^{q}\rangle}
+            {\lVert v_\mathrm{FC}^{q,\delta}\rVert_2
+             \lVert v_\mathrm{MP}^{q}\rVert_2},
+    &
+    e^{q,\delta}
+    &=\frac{\lVert v_\mathrm{FC}^{q,\delta}-v_\mathrm{MP}^{q}\rVert_2}
+            {\lVert v_\mathrm{MP}^{q}\rVert_2}.
+    \label{eq:appendix_solver_anchor_metrics}
+\end{align}
+Length edits use $|\delta|=.001L_s$ and angle edits use $|\delta|=0.1^\circ$.  We retain only successful edits with nonzero finite and tangent responses.  The tangent is evaluated at the same solved baseline from which the finite edit begins.
+
+\begin{table}[t]
+    \centering
+    \scriptsize
+    \setlength{\tabcolsep}{3.2pt}
+    \caption{Agreement between FreeCAD's small finite-edit response and the Moore--Penrose tangent prediction.  The null-dimension strata use the same cutoff as Eq.~\ref{eq:appendix_response_cutoff}.}
+    \label{tab:appendix_solver_anchor}
+    \resizebox{\linewidth}{!}{%
+    \begin{tabular}{@{}lrrcccc@{}}
+        \toprule
+        Stratum & Trials & Sketches & Median $c$ & $P_{10}(c)$ & $\Pr[c>.99]$ & Median/$P_{90}$ $e$ \\
+        \midrule
+        All          & 13,050 & 286 & $1.000000$ & $.999916$ & $94.2\%$ & $.00079/.0217$ \\
+        Human        &  8,795 & 286 & $1.000000$ & $.999981$ & $99.1\%$ & $.00074/.00762$ \\
+        Model        &  4,255 & 262 & $1.000000$ & $.882650$ & $84.2\%$ & $.00089/.513$ \\
+        \midrule
+        $\dim\ker J_x=1$--$5$   & 288   & 5   & $1.000000$ & $.999998$ & $97.2\%$ & $.00044/.00228$ \\
+        $\dim\ker J_x=6$--$10$  & 2,820 & 77  & $1.000000$ & $.999969$ & $97.8\%$ & $.00055/.0101$ \\
+        $\dim\ker J_x=11$--$20$ & 5,917 & 193 & $1.000000$ & $.999984$ & $96.1\%$ & $.00068/.00664$ \\
+        $\dim\ker J_x\geq21$    & 4,025 & 136 & $.999999$  & $.968771$ & $88.8\%$ & $.00123/.273$ \\
+        \bottomrule
+    \end{tabular}}
+\end{table}
+
+Table~\ref{tab:appendix_solver_anchor} shows that the minimum-norm direction is a strong empirical proxy for incremental edits of human annotations: $99.1\%$ have cosine above $.99$.  Agreement has a heavier tail for model outputs and for large null spaces, where the solver has more branch freedom.  We do not infer that FreeCAD implements the Moore--Penrose rule, nor that continuity uniquely determines it.  Rather, $R_0$ is a deterministic local minimum-displacement convention that closely matches the observed small-edit branch in the primary human data.  The nullspace stress test above quantifies what changes under other admissible conventions and identifies leakage, rather than the observable relational metric, as the principal response-selection limitation.

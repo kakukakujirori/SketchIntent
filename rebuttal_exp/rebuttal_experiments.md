@@ -788,7 +788,12 @@ J_xR_\eta=-J_p
 - `raw_null_dim = 0`: 一意解なので perturb せず、`not_underconstrained` と記録する。
 - `observable_free_rank = 0`: raw nullspace はあるが observable から見えない gauge motion のみ。metric は変わらないはずなので、その事実を報告する。
 - `||M0[:,j]|| < 1e-12`: その driver column には noise を加えず `zero_baseline_response_column` を記録する。
+- 対象 arm の全 driver column が上記の zero column である response は、「変化しない sensitivity sample」として混ぜず、arm 別の理由付き skip とする。
 - `K` の rank 判定にも既存 SVD tolerance と整合する threshold を使う。
+- 各サンプル生成後にも
+  `||J_x R_eta + J_p||_F / max(||J_p||_F, 1) <= 1e-6` を検査する。
+  截断 SVD で null と見なした小特異値方向が `K^+` で大きく増幅される場合があるためで、
+  threshold を超えた response--draw は別集計とし、metric 集計から除外する。
 - 乱数 seed は `(global_seed, sketch_id, annotation_id, eta, sample_index)` から決定的に生成する。
 
 ### 4.7 perturbation strength と sample 数

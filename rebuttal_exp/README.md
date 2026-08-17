@@ -172,6 +172,104 @@ $CR python rebuttal_exp/analyze_parameterization.py --in artifacts/rebuttal/para
   rescales singular values can push a borderline direction across them. `summary.csv`
   therefore splits moved records by whether a subspace dimension also changed.
 
+---
+
+## Experiment D — pseudoinverse minimum-norm choice (`rebuttal_experiments.md` §4)
+
+Answers *"the pseudoinverse selects one minimum-norm response although multiple valid
+geometry updates exist"*. Whenever `ker(J_x)` is non-trivial, every `R0 + N Z` solves
+`J_x R = -J_p` just as well. Only the **Pred** side is perturbed, so the variance has a
+single source, and two arms sample the freedom in different spaces:
+
+```
+main             E_j = eta * ||(J_phi R0)_j|| * unit vector in range(J_phi N)
+                 Z = pinv(J_phi N) E,  R_eta = R0 + N Z
+                 -> J_phi R_eta = J_phi R0 + E exactly; eta is an observable-space size
+
+observable_null  R_eta[:,j] = R0[:,j] + eta * ||R0[:,j]|| * unit vector in ker([J_x; J_phi])
+                 -> J_x R_eta = -J_p AND J_phi R_eta = J_phi R0; eta is a raw-space size
+```
+
+The two `eta` are **not comparable** and are never pooled or drawn on one axis.
+
+```bash
+# eta = 0 gate first: the sampling path must reproduce pair_paper_metrics exactly
+$CR python rebuttal_exp/pseudoinverse_sensitivity.py --etas 0 --limit 20 \
+    --out artifacts/rebuttal/pseudoinverse_eta0
+$CR python rebuttal_exp/analyze_pseudoinverse.py --in artifacts/rebuttal/pseudoinverse_eta0
+
+$CR python rebuttal_exp/pseudoinverse_sensitivity.py --limit 50 \
+    --out artifacts/rebuttal/pseudoinverse_pilot
+$CR python rebuttal_exp/pseudoinverse_sensitivity.py --out artifacts/rebuttal/pseudoinverse
+$CR python rebuttal_exp/analyze_pseudoinverse.py --in artifacts/rebuttal/pseudoinverse
+
+# section 4.10 anchor, independent of the sampling run
+$CR python rebuttal_exp/finite_anchor.py --out artifacts/rebuttal/pseudoinverse
+```
+
+### Outputs
+
+| file | contents |
+|---|---|
+| `native_pair_metrics.parquet` | the unperturbed `pair_paper_metrics` row per (rid, variant, gt): the delta baseline and the gate |
+| `perturbation_metrics.parquet` | one row per valid (rid, variant, gt, arm, eta, sample): the four metrics, subspace ranks, `raw_perturbation_ratio`, and post-perturbation constraint/nullspace residuals |
+| `response_metadata.csv` | per annotation: `raw_null_dim`, `observable_free_rank`, `observable_null_dim`, `consistency_residual`, driver count |
+| `pair_null_visibility.csv` | per directed pair: `‖J_R^G G‖_F` and `rank(J_R^G G)`, the stratification key of the auxiliary arm |
+| `eta0_gate.csv` | the eta = 0 gate |
+| `sensitivity_summary.csv` | \|d_eta − d_0\| median/Q90/Q95/max, signed quantiles, within-record sd and range, Spearman across samples and its bootstrap CI |
+| `sensitivity_by_observable_free_rank.csv` | the same split by how many observable directions the response is free in |
+| `observable_null_summary.csv` | the auxiliary arm, split by whether the GT relations see the direction |
+| `ranking_changes.csv` | per (arm, eta): fraction of samples preserving the variant ordering, winner flip rate |
+| `worst_cases.csv` | worst 20 per arm and metric with the response's null dimensions alongside |
+| `finite_anchor.csv` | cosine and normalised error between the solver's small finite response and `J_phi R0[:, q]` |
+
+### Protocol decisions
+
+- **Pred only.** GT keeps the current definition (§4.2). Both-sides perturbation is not run.
+- **One cutoff convention.** `ker(J_x)`, `range(J_phi N)` and every pseudo-inverse use
+  `compute_native_response`'s `eps_eff = max(1e-9, 1e-6 σ_max)`. The null space comes from a
+  **full** SVD: the economy SVD of a wide matrix returns only `m` right singular vectors and
+  would silently truncate it.
+- **G is not called a gauge basis** and is not a numerical intersection. It is `ker` of the
+  *stacked* `[J_x; J_phi]`, taken from one SVD, because `ker(J_phi)` also contains directions
+  such as global rotation that the pairwise-distance observable misses but GT relations do not.
+- **No metric formula is duplicated.** Experiment C had to copy `SketchMotion`'s assembly to
+  inject `B`; here only `R` changes, so `motion_with_response` rebuilds exactly the
+  `R`-dependent fields and `pair_paper_metrics` is reused. `PairEvaluator` caches the GT
+  relation Jacobian at the Pred state (it does not depend on `R`) and `PredResponseState` is
+  computed once per sample for both GT references; agreement with the paper path is asserted
+  by unit tests and by the eta = 0 gate.
+- **Mutation guard.** Each Pred's `native.R`, state vector and `U_rel` are fingerprinted
+  before and after its sampling loop. §4.8 asks for theta_rel to be invariant across eta; the
+  real content of that check is that no cache was mutated, and recomputing a quantity that
+  does not depend on `R` would not test it.
+- **Edge cases are categories, not silent drops.** `not_underconstrained`,
+  `inconsistent_linear_system` (‖J_x R0 + J_p‖_F / max(‖J_p‖_F, 1) > 1e-6),
+  `no_observable_free_direction`, `no_observable_null_direction`, and columns with
+  ‖R0[:, j]‖ below 1e-12 receive no noise. Responses for which every relevant driver
+  column is zero are excluded from that arm. Every sampled response is checked again after
+  perturbation; a sample with
+  ‖J_x R_eta + J_p‖_F / max(‖J_p‖_F, 1) > 1e-6 is counted and excluded.
+- **Paired populations.** An arm skips the responses it cannot perturb, so the ordering of
+  each arm is compared against a native ordering rebuilt on exactly the records that arm
+  produced.
+- **Ties are ties.** An ordering is scored by counting inverted variant pairs *among the
+  pairs the baseline separates by more than 1e-6*. theta_leak's aggregate median is exactly
+  zero for many variants, and comparing sorted lists would report a reshuffle of ties as a
+  broken ordering. The same tolerance gates the winner flip rate.
+- **The invariance check is split by magnitude.** `theta = sqrt(1 − cos²/max)` has a
+  sqrt(machine eps) floor wherever two subspaces coincide, so a resolved value must not move
+  by more than 1e-7 while a near-zero value only has to stay inside that noise band.
+- **Single-threaded.** The per-sample matrices are small; intra-op threading cost more than
+  it saved and a single core keeps this out of the training job's way.
+
+### Statistics
+
+The analysis unit is one (record, arm, eta, sample) row. Spearman is reported as a
+distribution over sample indices (median and minimum); the bootstrap CI is built on one
+fixed sample index with a sketch-cluster bootstrap, and the spread across the other draws is
+reported separately rather than folded into that interval.
+
 ## Module map
 
 | module | responsibility |
@@ -186,3 +284,8 @@ $CR python rebuttal_exp/analyze_parameterization.py --in artifacts/rebuttal/para
 | `transformed_motion.py` | the four metrics recomputed with `B` injected into every Jacobian |
 | `parameterization_stress.py` | experiment C runner |
 | `analyze_parameterization.py` | delta distributions, ordering stability, figures |
+| `response_perturbation.py` | admissible response bases, the two samplers, per-response diagnostics |
+| `perturbed_motion.py` | the paper metrics against a substituted `R`, with the `R`-independent parts cached |
+| `pseudoinverse_sensitivity.py` | experiment D runner |
+| `analyze_pseudoinverse.py` | sensitivity, stratification, ordering stability, figures |
+| `finite_anchor.py` | §4.10 solver anchor for the minimum-norm prediction |

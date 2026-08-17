@@ -1,0 +1,93 @@
+\section{Application: Reinforcement Learning from Motion Subspaces}
+\label{sec:rl_reward}
+
+Motion subspaces are more than diagnostics: the same behavior-level representation can be turned into reinforcement-learning signals. We test this in sketch constraint prediction, where a policy observes primitive geometry and must close DoF through meaningful geometric relations. We ask whether motion-subspace rewards can guide design-intent-aware constraints beyond the solver closure and dimensional-count regularization of Solver-RL~\cite{casey2025aligning}.
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=0.96\linewidth]{figs/rl_reward_pareto_iter1.pdf}
+    \caption{Pareto-style RL evaluation on our benchmark. Markers are $5$k checkpoints plotted against fully constrained (FC) rate. Dimensional ratio, $\theta_{\mathrm{motion}}^{\mathrm{full}}$, and $S_\mathrm{place}$ are evaluation axes, while $\theta_{\mathrm{motion}}^{\mathrm{rel}}$ and $\theta_{\mathrm{leak}}^{\mathrm{dim}}$ are reward-mechanism checks.}
+    \label{fig:rl_reward_pareto}
+\end{figure*}
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=0.94\linewidth]{figs/qualitative.pdf}
+    \caption{Selected fully constrained examples. Solver-RL ($70$k steps) often closes sketches with dense dimensional constraints, while Ours ($70$k steps) uses fewer dimensional shortcuts. Human references illustrate valid design-intent diversity.}
+    \label{fig:qualitative}
+\end{figure*}
+
+\subsection{Pseudo-Relational Targets}
+\label{sec:rl_pseudo_targets}
+
+Following Vitruvion~\cite{seff2021vitruvion}, we train on the SketchGraphs dataset~\cite{seff2020sketchgraphs}. Since its recorded annotations are mostly under-constrained, using them as reward references would treat missing relations as intended freedoms. We instead build a high-recall relational pseudo-reference $C_G^\star$: we add every geometric relation detected by rule-based predicates as a relational constraint (Appendix~\ref{sec:appendix_rl_pseudo_rules}).
+
+At the command level, $C_G^\star$ is too dense: many relations overlap and would be marked redundant by a CAD solver. This is exactly where motion-subspace canonicalization matters. The corresponding $\mathcal{W}_{C_G^\star}^{\mathrm{rel}}$ is a single, well-defined space into which these redundant relations collapse, so the RL objective can safely encourage relation-rich predictions without imitating the redundant command set. We restrict the pseudo-reference to relations because they are comparatively observable from geometry, while dimensional placement is difficult to auto-annotate reliably with rules.
+
+\subsection{Reward Setup and Evaluation Axes}
+\label{sec:rl_reward_design}
+
+We fine-tune all variants with the same RLOO setup as Solver-RL~\cite{casey2025aligning}, which uses FreeCAD \textbf{SolverReward} $\rho_S$ as a reward for reducing remaining DoF and \textbf{DimParsimony} $\rho_D$ as a dimensional-count penalty. All variants also use the fixed class prior $\rho_C$ in Appendix~\ref{sec:appendix_rl_class_prior}. We convert two distances from Sec.~\ref{sec:method} into clipped bonuses using $b_\tau(x)=1-\min(x,\tau)/\tau$: \textbf{MotionReward} $\rho_M$ matches the pseudo-reference relational envelope, while \textbf{DimRelAlign} $\rho_A$ penalizes dimensional constraints that violate it:
+\begin{align}
+    \rho_M(C_P)
+    &=
+    b_{\tau_M}\!\left(
+    \theta_\mathrm{motion}^\mathrm{rel}(C_P;C_G^\star)
+    \right),
+    \label{eq:motion_reward}\\
+    \rho_A(C_P)
+    &=
+    b_{\tau_A}\!\left(
+    \theta_{\mathrm{leak}}^{\mathrm{dim}}(C_P;C_G^\star)
+    \right).
+    \label{eq:dim_rel_align_reward}
+\end{align}
+We do not use full motion distance $\theta_\mathrm{motion}^\mathrm{full}$ or dimensional placement similarity $S_\mathrm{place}$ as rewards because they require reference dimensions, which $C_G^\star$ omits.
+
+Together with the base rewards, each variant optimizes
+\begin{equation}
+    \rho_{\mathrm{total}}
+    =
+    \rho_S + \rho_C
+    + \lambda_D \rho_D
+    + \lambda_M \rho_M
+    + \lambda_A \rho_A .
+    \label{eq:rl_total_reward}
+\end{equation}
+Solver-RL sets $\lambda_M=\lambda_A=0$ and sweeps $\lambda_D\in\{0.3,1,3\}$, whereas Ours sets $\lambda_D=0$, $\lambda_M=4.5$, and $\lambda_A=1.5$. We omit \textbf{DimParsimony} because \textbf{DimRelAlign} also curbs over-dimensioning, but does so more selectively: it penalizes only dimensional constraints that induce relation-violating edits. As a caveat, predictions with no dimensional drivers make $\theta_\mathrm{leak}^\mathrm{dim}$ vacuously zero, so we reduce $\lambda_A$ when remaining DoF is high (Appendix~\ref{sec:appendix_rl_reldim_weight}).
+
+Different rewards change model convergence speeds, so comparing them at the same training step can favor rewards that simply reach closure faster. Fig.~\ref{fig:rl_reward_pareto} therefore plots every $5$k checkpoint against its fully constrained (FC) rate rather than training steps. The preference study separately compares Solver-RL and Ours after the same $70$k updates (Table~\ref{tab:rl_user_study}).
+
+\begin{table}[t]
+    \centering
+    \scriptsize
+    \renewcommand{\arraystretch}{1.0}
+    \setlength{\tabcolsep}{1.35pt}
+    \begin{tabular}{@{}lccccccc@{}}
+        \toprule
+        & Votes
+        & FC $\uparrow$
+        & Dim. $\downarrow$
+        & $\theta_{\mathrm{motion}}^{\mathrm{full}}\!\downarrow$
+        & $\theta_{\mathrm{motion}}^{\mathrm{rel}}\!\downarrow$
+        & $\theta_{\mathrm{leak}}^{\mathrm{dim}}\!\downarrow$
+        & $S_{\mathrm{place}}\!\uparrow$ \\
+        \midrule
+        Solver-RL & 63 & $\mathbf{0.89}$ & 0.276 & 0.447 & 0.356 & 0.365 & $\mathbf{0.574}$ \\
+        Ours & $\mathbf{69}$ & 0.78 & $\mathbf{0.230}$ & $\mathbf{0.433}$ & $\mathbf{0.306}$ & $\mathbf{0.231}$ & 0.561            \\
+        \midrule
+        Spearman ($\rho$) & -- & -- & -0.19 & $\mathbf{0.67}$ & 0.25 & -0.04 & $\mathbf{0.58}$  \\
+        \bottomrule
+    \end{tabular}
+    \vspace{0.15em}
+    \caption{User study at the same-step ($70$k) comparison on $45$ sketches. Votes are individual preferences from four raters ($45\times 4 = 180$ judgments): $48$ ties are omitted from the rows. FC is the fully-constrained rate. \textbf{Spearman $\rho$} correlates each metric with the four-rater preference margin (App.~\ref{sec:appendix_rl_user_study}).}
+    \label{tab:rl_user_study}
+\end{table}
+
+
+\subsection{Results}
+\label{sec:rl_reward_results}
+Figure~\ref{fig:rl_reward_pareto} exposes the Solver-RL trade-off: SolverReward raises FC rate by adding dimensions, while DimParsimony suppresses them at the cost of FC rate. Motion-subspace rewards decouple it: MotionReward preserves the pseudo-reference relational motion family and DimRelAlign penalizes \textit{only} dimensions whose edits would violate it, lowering dimensional ratio at comparable FC while keeping $\theta_{\mathrm{motion}}^{\mathrm{full}}$ and $S_\mathrm{place}$ near Solver-RL. Fig.~\ref{fig:qualitative} mirrors this: among fully constrained outputs, Solver-RL relies on dense dimensions whereas Ours uses fewer dimensional shortcuts.
+
+In our user study on the $45$ valid sketches at $70$k steps, Ours received $69$ preferences versus Solver-RL's $63$, with $48$ ties (Table~\ref{tab:rl_user_study}), yet this margin is small. Indeed, the comparison is conservative: at a fixed step, Ours is less converged than Solver-RL, since its finer motion-subspace rewards optimize more slowly (App.~\ref{sec:appendix_limitations}).
+More informative is that the per-sketch human preference correlates most strongly with $\theta_\mathrm{motion}^\mathrm{full}$ and $S_\mathrm{place}$ (Spearman $\rho=0.67$ and $0.58$), while $\theta_\mathrm{motion}^\mathrm{rel}$ and $\theta_\mathrm{leak}^\mathrm{dim}$ do not. We attribute this to the former two being more sensitive to the dimensional placement, which our pseudo-reference cannot supervise; strengthening this signal remains future work.

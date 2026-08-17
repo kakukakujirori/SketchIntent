@@ -38,8 +38,9 @@ WORST_CASES = 20
 
 SUMMARY_COLUMNS = [
     "scenario", "metric", "n_pairs", "n_sketches",
-    "median_absolute_delta", "q90_absolute_delta", "q95_absolute_delta", "max_absolute_delta",
-    "median_relative_delta", "q90_relative_delta", "max_relative_delta",
+    "mean_absolute_delta", "median_absolute_delta",
+    "q90_absolute_delta", "q95_absolute_delta", "max_absolute_delta",
+    "mean_relative_delta", "median_relative_delta", "q90_relative_delta", "max_relative_delta",
     "rank_columns", "n_rank_changed", "n_moved", "n_moved_with_rank_change",
     "spearman", "spearman_ci_low", "spearman_ci_high", "n_valid_replicates",
 ]
@@ -62,6 +63,18 @@ RANKING_COLUMNS = [
 ]
 CONTROL_PREFIXES = ("dim_drop", "rel_drop")
 NON_METHOD_VARIANTS = ("source_self",)
+BREAKDOWN_COLUMNS = ["level", "key", *SUMMARY_COLUMNS]
+SETTINGS = {
+    "source_self": "self_consistency",
+    "heldout": "human_human",
+    "base": "human_model",
+    "solver_rl": "human_model",
+    "ours": "human_model",
+}
+SETTING_ORDER = ["self_consistency", "human_human", "human_model", "dim_dropout", "rel_dropout"]
+"""The Sec. 5 evaluation settings the pooled table mixes together. Pooling weights the
+synthetic dropout controls (six of eleven variants) as heavily as the rows the paper's
+conclusions rest on, so the per-setting split is reported next to it."""
 
 
 def ordered_variants(pairs: pd.DataFrame) -> list[str]:
@@ -74,6 +87,13 @@ def ordered_variants(pairs: pd.DataFrame) -> list[str]:
 def is_method_variant(variant: str) -> bool:
     """Held-out human and the model runs: the rows the paper's conclusions rest on."""
     return not variant.startswith(CONTROL_PREFIXES) and variant not in NON_METHOD_VARIANTS
+
+
+def setting_of(variant: str) -> str:
+    """Which Sec. 5 evaluation setting a variant row belongs to."""
+    if variant in SETTINGS:
+        return SETTINGS[variant]
+    return f"{variant.split('_drop')[0]}_dropout" if variant.startswith(CONTROL_PREFIXES) else variant
 
 
 def load_pairs(run_dir: Path) -> pd.DataFrame:
@@ -161,46 +181,75 @@ def rank_columns_match(pairs: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def metric_stats(joined: pd.DataFrame, metric: str, *, scenario: str,
+                 replicates: int, seed: int) -> dict:
+    """Paired |delta| distribution and rank agreement for one metric over `joined` rows."""
+    native = joined[metric].to_numpy(dtype=float)
+    transformed = joined[f"{metric}_transformed"].to_numpy(dtype=float)
+    absolute = np.abs(transformed - native)
+    relative = absolute / np.maximum(np.abs(native), 1e-12)
+    clusters = joined["sketch_id"].to_numpy()
+
+    def statistic(rows_idx, x=native, y=transformed):
+        a, b = x[rows_idx], y[rows_idx]
+        if a.size < 2 or np.all(a == a[0]) or np.all(b == b[0]):
+            return float("nan")
+        return float(spearmanr(a, b).statistic)
+
+    replicates_array = sketch_cluster_bootstrap(
+        clusters, statistic, n_replicates=replicates, seed=seed
+    )
+    ci_low, ci_high, n_valid = percentile_ci(replicates_array)
+    rank_changed = _rank_changed(joined, metric)
+    moved = absolute > MOVED_TOL
+    return dict(
+        scenario=scenario, metric=metric,
+        n_pairs=len(joined), n_sketches=joined["sketch_id"].nunique(),
+        rank_columns="+".join(RANK_COLUMNS[metric]),
+        n_rank_changed=int(rank_changed.sum()),
+        n_moved=int(moved.sum()),
+        n_moved_with_rank_change=int((moved & rank_changed).sum()),
+        mean_absolute_delta=float(np.mean(absolute)) if absolute.size else float("nan"),
+        median_absolute_delta=float(np.median(absolute)) if absolute.size else float("nan"),
+        q90_absolute_delta=_quantile(absolute, 0.90),
+        q95_absolute_delta=_quantile(absolute, 0.95),
+        max_absolute_delta=float(absolute.max()) if absolute.size else float("nan"),
+        mean_relative_delta=float(np.mean(relative)) if relative.size else float("nan"),
+        median_relative_delta=float(np.median(relative)) if relative.size else float("nan"),
+        q90_relative_delta=_quantile(relative, 0.90),
+        max_relative_delta=float(relative.max()) if relative.size else float("nan"),
+        spearman=statistic(np.arange(len(joined))),
+        spearman_ci_low=ci_low, spearman_ci_high=ci_high, n_valid_replicates=n_valid,
+    )
+
+
 def delta_summary(pairs: pd.DataFrame, scenario: str, *, replicates: int, seed: int) -> pd.DataFrame:
     joined = paired_frame(pairs, scenario)
-    rows = []
-    for metric in METRICS:
-        native = joined[metric].to_numpy(dtype=float)
-        transformed = joined[f"{metric}_transformed"].to_numpy(dtype=float)
-        absolute = np.abs(transformed - native)
-        relative = absolute / np.maximum(np.abs(native), 1e-12)
-        clusters = joined["sketch_id"].to_numpy()
-
-        def statistic(rows_idx, x=native, y=transformed):
-            a, b = x[rows_idx], y[rows_idx]
-            if a.size < 2 or np.all(a == a[0]) or np.all(b == b[0]):
-                return float("nan")
-            return float(spearmanr(a, b).statistic)
-
-        replicates_array = sketch_cluster_bootstrap(
-            clusters, statistic, n_replicates=replicates, seed=seed
-        )
-        ci_low, ci_high, n_valid = percentile_ci(replicates_array)
-        rank_changed = _rank_changed(joined, metric)
-        moved = absolute > MOVED_TOL
-        rows.append(dict(
-            scenario=scenario, metric=metric,
-            n_pairs=len(joined), n_sketches=joined["sketch_id"].nunique(),
-            rank_columns="+".join(RANK_COLUMNS[metric]),
-            n_rank_changed=int(rank_changed.sum()),
-            n_moved=int(moved.sum()),
-            n_moved_with_rank_change=int((moved & rank_changed).sum()),
-            median_absolute_delta=float(np.median(absolute)) if absolute.size else float("nan"),
-            q90_absolute_delta=_quantile(absolute, 0.90),
-            q95_absolute_delta=_quantile(absolute, 0.95),
-            max_absolute_delta=float(absolute.max()) if absolute.size else float("nan"),
-            median_relative_delta=float(np.median(relative)) if relative.size else float("nan"),
-            q90_relative_delta=_quantile(relative, 0.90),
-            max_relative_delta=float(relative.max()) if relative.size else float("nan"),
-            spearman=statistic(np.arange(len(joined))),
-            spearman_ci_low=ci_low, spearman_ci_high=ci_high, n_valid_replicates=n_valid,
-        ))
+    rows = [metric_stats(joined, m, scenario=scenario, replicates=replicates, seed=seed)
+            for m in METRICS]
     return pd.DataFrame(rows, columns=SUMMARY_COLUMNS)
+
+
+def delta_breakdown(pairs: pd.DataFrame, scenario: str, *, level: str,
+                    replicates: int, seed: int) -> pd.DataFrame:
+    """The same paired statistics, computed inside one evaluation setting or one variant.
+
+    `level="setting"` groups the Sec. 5 rows into held-out human, human-model, the two
+    dropout controls and the self-consistency gate; `level="variant"` keeps them separate.
+    A setting whose native values are constant (self-consistency sits at zero, and dimension
+    dropout leaves theta_rel untouched) yields no Spearman value by construction.
+    """
+    joined = paired_frame(pairs, scenario)
+    keys = joined["variant"] if level == "variant" else joined["variant"].map(setting_of)
+    order = (ordered_variants(joined) if level == "variant"
+             else [s for s in SETTING_ORDER if s in set(keys)])
+    rows = []
+    for key in order:
+        group = joined[(keys == key).to_numpy()]
+        for metric in METRICS:
+            rows.append(dict(level=level, key=key, **metric_stats(
+                group, metric, scenario=scenario, replicates=replicates, seed=seed)))
+    return pd.DataFrame(rows, columns=BREAKDOWN_COLUMNS)
 
 
 def _quantile(values: np.ndarray, q: float) -> float:
@@ -374,6 +423,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--in", dest="run_dir", default="artifacts/rebuttal/parameterization")
     parser.add_argument("--replicates", type=int, default=2000)
+    parser.add_argument("--breakdown-replicates", type=int, default=1000,
+                        help="bootstrap replicates per setting/variant cell (many more cells)")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--no-figures", action="store_true")
     args = parser.parse_args()
@@ -403,10 +454,21 @@ def main() -> None:
         [delta_summary(pairs, s, replicates=args.replicates, seed=args.seed) for s in scenarios],
         ignore_index=True,
     )
+    breakdowns = {
+        level: pd.concat(
+            [delta_breakdown(pairs, s, level=level,
+                             replicates=args.breakdown_replicates, seed=args.seed)
+             for s in scenarios],
+            ignore_index=True,
+        )
+        for level in ("setting", "variant")
+    }
     ranking = pd.concat([ranking_report(pairs, s) for s in scenarios], ignore_index=True)
     worst = pd.concat([worst_cases(pairs, diagnostics, s) for s in scenarios], ignore_index=True)
 
     summary.to_csv(run_dir / "summary.csv", index=False)
+    breakdowns["setting"].to_csv(run_dir / "summary_by_setting.csv", index=False)
+    breakdowns["variant"].to_csv(run_dir / "summary_by_variant.csv", index=False)
     ranking.to_csv(run_dir / "ranking_changes.csv", index=False)
     worst.to_csv(run_dir / "worst_cases.csv", index=False)
 
@@ -420,6 +482,10 @@ def main() -> None:
     print(summary[["scenario", "metric", "n_pairs", "median_absolute_delta",
                    "q90_absolute_delta", "max_absolute_delta", "n_moved",
                    "n_moved_with_rank_change", "spearman"]].to_string(index=False))
+    print("\n=== absolute delta per evaluation setting ===")
+    print(breakdowns["setting"][
+        ["scenario", "key", "metric", "n_pairs", "n_sketches", "median_absolute_delta",
+         "q90_absolute_delta", "max_absolute_delta", "n_moved", "spearman"]].to_string(index=False))
     print("\n=== variant ordering ===")
     print(ranking[["scenario", "metric", "ordering_preserved", "method_ordering_preserved",
                    "winner_flip_rate", "n_flip_comparisons"]].to_string(index=False))

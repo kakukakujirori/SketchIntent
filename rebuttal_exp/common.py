@@ -149,11 +149,13 @@ def environment_metadata() -> dict:
     )
 
 
-def prepare_output_dir(out_dir: Path, config: dict, *, force: bool = False) -> str:
+def prepare_output_dir(
+    out_dir: Path, config: dict, *, force: bool = False, filename: str = "run_config.json"
+) -> str:
     """Create out_dir and refuse to mix results produced under a different config."""
     out_dir.mkdir(parents=True, exist_ok=True)
     digest = config_hash(config)
-    marker = out_dir / "run_config.json"
+    marker = out_dir / filename
     if marker.exists() and not force:
         previous = json.loads(marker.read_text())
         if previous.get("config_hash") != digest:
@@ -184,8 +186,8 @@ def write_environment(
     (out_dir / filename).write_text(json.dumps(payload, indent=2, sort_keys=True))
 
 
-def finalize_run_config(out_dir: Path, **extra) -> None:
-    marker = out_dir / "run_config.json"
+def finalize_run_config(out_dir: Path, *, filename: str = "run_config.json", **extra) -> None:
+    marker = out_dir / filename
     payload = json.loads(marker.read_text())
     payload.update(finished_at=_utc_now(), **extra)
     marker.write_text(json.dumps(payload, indent=2, sort_keys=True, default=str))

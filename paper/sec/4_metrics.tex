@@ -1,0 +1,146 @@
+\section{Method: Motion-Subspace Metrics for Design Intent}
+
+\label{sec:method}\begin{figure*}[t]
+    \centering
+    \includegraphics[width=0.95\linewidth]{figs/motion_subspace.pdf}
+    \caption{Motion-subspace metrics. (a) Each constraint set is mapped to a motion manifold, whose tangent space under dimensional edits defines the motion subspace $\mathcal{W}_C$; the relation-only tangent space defines the relational motion envelope $\mathcal{W}_C^\mathrm{rel}$. In this example, $\mathcal{W}_{C_P}$ is one-dimensional while $\mathcal{W}_{C_P}^\mathrm{rel}$ is two-dimensional, because the prediction is under-constrained and has only one driving dimension instead of two. (b) $\theta^{\mathrm{full}}_{\mathrm{motion}}$ compares the driven subspaces $\mathcal{W}_{C_G}$ and $\mathcal{W}_{C_P}$. $\theta^{\mathrm{rel}}_{\mathrm{motion}}$ compares relational envelopes $\mathcal{W}_{C_G}^\mathrm{rel}$ and $\mathcal{W}_{C_P}^\mathrm{rel}$. $S_{\mathrm{place}}$ matches individual dimensional response directions $U_G$ and $U_P$, while $\theta_{\mathrm{leak}}^{\mathrm{dim}}$ measures how much the predicted dimensional directions leave the reference relational envelope.}
+    \label{fig:motion_subspace}
+\end{figure*}
+
+As discussed in Sec.~\ref{sec:related_works}, design intent is multifaceted and may depend on information not present in a CAD model itself. For an evaluation setting without such external context, we focus on a directly observable facet: \textbf{predictable redesign behavior under edits}. In 2D sketches, this behavior is mediated by constraints: relational constraints encode geometric invariants to be preserved, while dimensional constraints act as editable driving parameters that close the remaining degrees of freedom. This scope matches prior sketch-constraint prediction settings~\cite{seff2020sketchgraphs,seff2021vitruvion,lin2026unisketch} and is consistent with robust sketching principles~\cite{nerenst2023parametric}.
+
+
+\subsection{Evaluation Desiderata and Problems in Existing Metrics}
+\label{sec:evaluation_desiderata}
+
+The above operationalization leads to three requirements for evaluating constraint annotations. \textbf{(i) behavioral equivalence}: annotations that induce the same redesign behavior should be treated as equivalent, even if they use different constraint commands. \textbf{(ii) under-constraint sensitivity}: scores should consistently reflect the remaining degrees of freedom, since design-intent-aware editability requires controlled motion rather than arbitrary flexibility. \textbf{(iii) over-dimensioning sensitivity}: excessive dimensional constraints should be penalized when they replace explicit geometric relations with brittle numerical coincidences.
+
+Token-level Precision, Recall, and F1 clearly violate (i). HistCAD's editability benchmark~\cite{dong2025histcad} addresses (i) by evaluating edit success rather than command overlap. However, because it tests selected edit queries with binary preservation checks, it does not reliably satisfy (ii): fully constrained sketches may be penalized when the edit query conflicts with existing constraints, while under-constrained sketches may pass selected edits by exploiting unintended freedoms.
+
+We therefore compare constraint annotations by the edit motions they induce around the original geometry. Instead of testing whether a selected finite edit query succeeds, we consider the entire local space of infinitesimal edit motions permitted by the constraint system; this is formalized as the \textit{motion subspace} in \S~\ref{sec:motion_subspace}. In this view, equivalent command sets collapse to the same motion subspace, while missing constraints or excessive dimensions are exposed through changes in that space.
+
+
+\subsection{Problem Formulation}
+\label{sec:problem_formulation}
+
+We formally define a 2D CAD sketch as a tuple $(E, C)$, where $E$ denotes the set of geometric primitives and $C$ denotes the set of geometric constraints applied to them.
+
+\begin{itemize}[leftmargin=*, itemsep=2pt, topsep=2pt]
+    \item $E = \{e_i\}_{i=1}^{N_E}$ is a set of primitive entities (e.g., Point, Line, Circle, Arc). Each entity $e_i$ is parameterized by a continuous vector $x_i \in \mathbb{R}^{k_i}$ (e.g., $k_i=4$ for a Line, $k_i=3$ for a Circle). Let $x = [x_1^\top,\dots,x_{N_E}^\top]^\top \in \mathbb{R}^{n_x}$ denote the joint state vector representing the entire sketch geometry.
+    \item $C = \{c_j\}_{j=1}^{N_C}$ is the set of constraints, which is partitioned into dimensional constraints $C_\mathrm{dim}$ and relational constraints $C_\mathrm{rel}$. A dimensional constraint $c \in C_\mathrm{dim}$ introduces an editable scalar parameter $p_c$, enforcing $h_c(x) - p_c = 0$, where $h_c(x) \in \mathbb{R}$ measures a geometric property such as a distance or an angle. A relational constraint $c \in C_\mathrm{rel}$ encodes an invariant property, such as Parallel or Tangent, by enforcing a residual function $r_c(x) = 0$.
+\end{itemize}
+
+We collect all constraints $C$ into a unified vector-valued function
+\begin{equation}
+    F_C(x,p_C):=
+    \begin{bmatrix}
+        \{h_c(x)-p_c\}_{c\in C_{\mathrm{dim}}}\\
+        \{r_c(x)\}_{c\in C_{\mathrm{rel}}}
+    \end{bmatrix}
+    =0,
+\end{equation}
+where $p_C=[p_c\mid c\in C_{\mathrm{dim}}]^\top$ is the vector of native
+dimensional parameters. Our objective is to evaluate a predicted constraint set $C_P$ against multiple human-verified references $\mathcal{C}_G=\{C_G^{(1)},\dots,C_G^{(K)}\}$ ($K=3$ in our dataset) for the same original geometry $x$.
+
+
+\subsection{The Motion Subspace as Canonical Object}
+\label{sec:motion_subspace}
+
+From the perspective of evaluating design intent from redesign behavior, we compare annotations by asking \textit{what local redesign motions they allow} around the original sketch.
+
+Each dimensional parameter set $p_C$ defines a sketch shape $x$ satisfying $F_C(x,p_C)=0$, and perturbing $p_C$ induces its deformation. The attainable sketch shapes under these perturbations form a nonlinear \textbf{motion manifold} over $x$.
+Because directly analyzing this manifold is impractical, we focus on its first-order structure at the original sketch. Linearizing $F_C(x,p_C)=0$ gives
+\begin{equation}
+    J_x \, dx + J_p \, dp_C = 0
+    \quad \Longrightarrow \quad
+    R_C := \frac{dx}{dp_C} = -J_x^\dagger J_p.
+    \label{eq:full_linearized}
+\end{equation}
+where $J_x = \partial F_C / \partial x$, $J_p = \partial F_C / \partial p_C$, and $(\cdot)^\dagger$ denotes the Moore--Penrose pseudo-inverse.\footnote{When the system is under-constrained, the solution is not unique; the pseudo-inverse selects the minimum-norm geometry update $dx$. We assume locally consistent constraints and exclude conflicting cases with no exact first-order solution.}
+The columns of $R_C$ represent the first-order sketch deformation induced by editing the driving dimensions.
+We call its image $\mathcal{W}_C:=\operatorname{range}(R_C)$ the \textbf{motion subspace}.
+
+Because the motion subspace is spanned by the driving-parameter responses, $\mathcal{W}_C$ mixes the effects of relational and dimensional constraints. To isolate the first factor, we consider the \textit{relational-only} version. Assuming the sketch has only relational constraints $\{r_c(x)\}_{c\in C_\mathrm{rel}}$, we have
+\begin{equation}
+(r_c(x))_{c\in C_\mathrm{rel}}=0 \quad \Longrightarrow \quad J_R\,dx=0, \label{eq:rel_linearized}
+\end{equation}
+where $J_R=\left[\partial r_c/\partial x\right]_{c\in C_{\mathrm{rel}}}$.
+Because the relational-only system has no driving parameters, it does not define a particular edit response. We therefore consider all first-order motions satisfying Eq.~\ref{eq:rel_linearized}, namely the null space of $J_R$. We name it the \textbf{relational motion envelope}: $\mathcal{W}_C^\mathrm{rel}:=\ker(J_R)$.
+
+Since $J_R R_C=0$, we have $\mathcal{W}_C\subseteq \mathcal{W}^\mathrm{rel}_C$. Crucially, these spaces give a \textbf{command-independent canonicalization} of a constraint annotation: they are determined by the induced infinitesimal behavior, not by the syntactic commands used to produce it. Behavior-equivalent annotations collapse to the same spaces. Missing or spurious relations change $\mathcal{W}_C^\mathrm{rel}$, while missing, redundant, or misplaced dimensions change its subset $\mathcal{W}_C$ inside that envelope.
+
+\subsection{Motion-Based Metrics}
+\label{sec:motion_metrics}
+
+We derive four diagnostics from the motion subspace $\mathcal{W}_C$ and its relational envelope $\mathcal{W}_C^\mathrm{rel}$. To compare these linear spaces, we first introduce the \textbf{normalized principal-angle distance} \cite{ye2016schubert}.
+For generality, let $\mathcal{A},\mathcal{B}\subset\mathbb{R}^{D}$ be linear subspaces with dimensions $a$ and $b$, and let $U_\mathcal{A}$ and $U_\mathcal{B}$ be their orthonormal bases. Then we define
+\begin{equation}
+    d_\angle(\mathcal{A},\mathcal{B})
+    =
+    \sqrt{\,1 - \frac{\lVert U_\mathcal{A}^\top U_\mathcal{B}\rVert_F^2}{\max(a,b)}}
+    \in[0,1].
+    \label{eq:principal_angle}
+\end{equation}
+Intuitively, it measures the angular mismatch between two subspaces: it is zero for identical subspaces and increases as their directions become less aligned. The $\max(a,b)$ normalization treats missing dimensions as orthogonal unmatched directions, thereby penalizing dimensional mismatch.
+
+Using these spaces and directions, we define four complementary diagnostics.
+
+\noindent\textbf{Full motion distance $\theta_{\mathrm{motion}}^{\mathrm{full}}$}
+is the most direct comparison of prediction and reference motion subspaces:
+\begin{equation}
+    \theta_\mathrm{motion}^\mathrm{full}(C_P;C_G)
+    =
+    d_\angle(\mathcal{W}_{C_P},\mathcal{W}_{C_G}).
+    \label{eq:full_motion_distance}
+\end{equation}
+This captures the overall mismatch in exposed redesign behavior, including both
+relational errors and missing or extra driven dimensions.
+
+\noindent\textbf{Relational motion distance $\theta_\mathrm{motion}^\mathrm{rel}$}
+instead compares the relational motion envelopes:
+\begin{equation}
+    \theta_\mathrm{motion}^\mathrm{rel}(C_P;C_G)
+    =
+    d_\angle(\mathcal{W}^\mathrm{rel}_{C_P},
+             \mathcal{W}^\mathrm{rel}_{C_G}).
+    \label{eq:rel_motion_distance}
+\end{equation}
+This measures the similarity of the relation-preserving motions, ignoring dimensional constraints altogether.
+
+\noindent\textbf{Dimensional placement similarity $S_\mathrm{place}$}
+compares how individual dimensions move the sketch within the motion subspace. This is not captured by the above span-level distances, which ignore the individual generators of the motion subspace. Let $u_j^C={R_C[:,j]}/{\lVert R_C[:,j]\rVert_2}$ be the L2-normalized response to the $j$-th dimensional parameter, and let
+$U_P=\{u_i^{C_P}\}_{i=1}^{m_P}$ and
+$U_G=\{u_j^{C_G}\}_{j=1}^{m_G}$. We define
+\begin{equation}
+    S_{\mathrm{place}}(C_P,C_G)
+    =
+    \frac{
+    \max_{\pi\in\Pi_{P,G}}
+    \sum_{(i,j)\in\pi}
+    \left|\langle u_i^{C_P},u_j^{C_G}\rangle\right|
+    }{\max(m_P,m_G)}\in[0,1],
+    \label{eq:asgn_sim}
+\end{equation}
+where $\Pi_{P,G}$ is the set of one-to-one matchings of size $\min(m_P,m_G)$. The assignment is solved with the Hungarian algorithm.
+
+\noindent\textbf{Dimensional leak distance $\theta_\mathrm{leak}^\mathrm{dim}$}
+asks whether predicted dimensional edits violate the reference relational constraints. Recall that $\mathcal{W}_{C_G}^{\mathrm{rel}}=\ker(J_{R,G})$. An ideal dimensional edit $dx\in\mathcal{W}_{C_P}$ should preserve the reference relations, so $dx$ should be orthogonal to the row space of $J_{R,G}$.
+
+To measure deviation from this orthogonality independently of scale and redundant dimensions, let $Q_P$ be an orthonormal basis of the predicted motion subspace $\mathcal{W}_{C_P}$, and let $\widetilde{J}_{R,G}$ be an orthonormal basis of the row space of $J_{R,G}$. Then we define
+\begin{equation}
+    \theta_{\mathrm{leak}}^{\mathrm{dim}}(C_P;C_G)
+    =
+    \frac{\lVert \widetilde{J}_{R,G}Q_P\rVert_F}
+    {\sqrt{\max(\dim\mathcal{W}_{C_P},1)}}\in[0,1].
+    \label{eq:rel_leak_distance}
+\end{equation}
+The numerator measures deviation from this orthogonality, i.e., the relation-violating component of the predicted driven motions.
+
+Finally, with multiple references $\mathcal{C}_G=\{C_G^{(k)}\}$, we use the most favorable match:
+$\theta(C_P;\mathcal{C}_G)=\min_k\theta(C_P;C_G^{(k)})$ for distances and $S_{\mathrm{place}}(C_P;\mathcal{C}_G)=\max_k S_{\mathrm{place}}(C_P;C_G^{(k)})$ for similarity, reflecting multiple plausible annotations of the same geometry.
+
+
+\subsection{Implementation Details}
+\label{sec:metric_implementation}
+
+We implement the residual functions $h_c(x)$ and $r_c(x)$ in Python and compute their Jacobians with PyTorch automatic differentiation; App.~\ref{sec:appendix_metric_details} gives further details. For the linear-algebra steps, pseudo-inverses, null spaces, and range bases are computed by SVD with singular values below $\varepsilon=10^{-9}$ discarded after sketch normalization. Since all quantities are derived from Jacobians evaluated once at the original sketch state, a full prediction--reference comparison averages only $29.1\,\mathrm{ms}$ per sketch pair across our benchmark on a CPU.

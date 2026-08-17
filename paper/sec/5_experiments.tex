@@ -1,0 +1,56 @@
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{Protocol and Evaluation Questions}
+\label{sec:exp_setup}
+
+We validate the four motion-subspace diagnostics with two criteria on which existing metrics partly fail: held-out humans should score close to reference annotations while model predictions separate from them, and controlled constraint removal should degrade the corresponding scores.
+
+To test these criteria, we use a leave-one-out protocol: for each sketch, two of the three annotations form the reference set $\mathcal{C}_G$, and the remaining annotation is evaluated as a prediction. This puts held-out humans and model outputs under the same multi-reference scoring procedure. We evaluate only sketches that FreeCAD reloads as \texttt{Converged} without sketch deformation.
+
+For model comparison, we evaluate \textbf{Base} Vitruvion~\cite{seff2021vitruvion} and \textbf{Solver-RL}, our FreeCAD adaptation of Casey~\etal's solver-feedback RL baseline~\cite{casey2025aligning}. Solver-RL is fine-tuned with RLOO~\cite{ahmadian2024back} to encourage fully constrained sketches, with a dimensional-usage penalty to discourage over-dimensioning.
+
+We also report HistCAD OES~\cite{dong2025histcad} and token-F1. For OES, each ground-truth dimension defines an edit query by adding $\pm1\%$ of the sketch bounding-box diagonal to its current value, and the relational constraints from the same annotation form the preservation set.
+
+\begin{table}[t]
+\centering
+\scriptsize
+\setlength{\tabcolsep}{2pt}
+\resizebox{\linewidth}{!}{%
+\begin{tabular}{lccccc|cc}
+\toprule
+& & \multicolumn{4}{c|}{Ours} & \multicolumn{2}{c}{Baselines} \\
+Variant & $n$ & $\theta_{\mathrm{motion}}^{\mathrm{full}}\!\downarrow$ & $\theta_{\mathrm{motion}}^{\mathrm{rel}}\!\downarrow$ & $\theta_{\mathrm{leak}}^{\mathrm{dim}}\!\downarrow$ & $S_{\mathrm{place}}\!\uparrow$ & OES$\,\uparrow$ & F1$\,\uparrow$ \\
+\midrule
+Source-self      & 858 & $0.000$ & $0.000$ & $0.000$ & $1.000$ & $1.000$ & $1.000$ \\
+Human held-out   & 858 & $0.000$ & $0.000$ & $0.000$ & $0.831$ & $0.343$ & $0.700$ \\
+Base Vitruvion   & 552 & $0.839$ & $0.707$ & $0.029$ & $0.283$ & $0.792$ & $0.486$ \\
+Solver-RL       & 810 & $0.488$ & $0.471$ & $0.304$ & $0.628$ & $0.200$ & $0.479$ \\
+\midrule
+Dim.\ drop 25\%  & 858 & $0.500$ & $0.000$ & $0.000$ & $0.664$ & $0.600$ & $0.696$ \\
+Dim.\ drop 50\%  & 858 & $0.707$ & $0.000$ & $0.000$ & $0.469$ & $0.750$ & $0.696$ \\
+Dim.\ drop 75\%  & 858 & $0.866$ & $0.000$ & $0.000$ & $0.239$ & $0.929$ & $0.692$ \\
+Dim.\ drop 100\% & 858 & $1.000$ & $0.000$ & $0.000$ & $0.000$ & $1.000$ & $0.689$ \\
+Rel.\ drop 50\%  & 858 & $0.677$ & $0.832$ & $0.680$ & $0.581$ & $0.770$ & $0.492$ \\
+Rel.\ drop 100\% & 858 & $0.795$ & $0.900$ & $0.802$ & $0.471$ & $0.854$ & $0.154$ \\
+\bottomrule
+\end{tabular}}
+\vspace{0.3em}
+\caption{Median scores under the multi-reference aggregation in Sec.~\ref{sec:motion_metrics}. The top block tests human agreement and model separation: held-out humans remain close to the reference annotations, while model predictions are separated from them. The bottom block tests sensitivity to controlled dimensional and relational constraint removal, where HistCAD OES and token-F1 fail in complementary ways. $n\!<\!858$ means some predictions did not converge.}
+\label{tab:controls}
+\end{table}
+
+
+\subsection{Human Agreement and Model Separation}
+\label{sec:exp_validation}
+
+The top block of Table~\ref{tab:controls} shows that motion subspaces absorb much of the syntactic diversity among human annotations. Despite notable command-level variation (token-F1 $=0.700$), held-out humans have median motion distances of $0$ to the reference humans, indicating implicit human consensus on redesign behavior. At the dimensional level, $S_{\mathrm{place}}=0.831$ captures residual variation in which deformation directions designers expose as drivers.
+
+The same block shows the expected separability between model predictions and held-out humans. Both Base Vitruvion and Solver-RL score worse than humans on all four metrics; Solver-RL improves full-motion distance over Base ($0.488$ vs.\ $0.839$), consistent with its solver reward closing DoF, but remains far from humans in relational motion ($0.471$ vs.\ $0$) and placement ($0.628$ vs.\ $0.831$). Its higher leak distance ($0.304$ vs.\ Base $0.029$) further indicates that some added dimensions act as relation-violating shortcuts rather than human-like drivers.
+
+\subsection{Sensitivity to Constraint Removal}
+\label{sec:exp_degradation}
+
+The bottom block of Table~\ref{tab:controls} confirms the intended degradation behavior. Dimensional dropout monotonically increases $\theta_{\mathrm{motion}}^{\mathrm{full}}$ ($0.500\!\to\!1.000$) and decreases $S_{\mathrm{place}}$ to $0$, while $\theta_{\mathrm{motion}}^{\mathrm{rel}}$ stays zero because relations are intact. $\theta_{\mathrm{leak}}^{\mathrm{dim}}$ also stays zero because removing dimensions cannot introduce relation-violating edit directions. Relational dropout raises both $\theta_{\mathrm{motion}}^{\mathrm{rel}}$ ($0.832\!\to\!0.900$) and $\theta_{\mathrm{leak}}^{\mathrm{dim}}$ ($0.680\!\to\!0.802$).
+
+The baselines fail in complementary ways. HistCAD OES improves under dimensional dropout ($0.343\!\to\!1.000$), since removing driving dimensions leaves extra freedoms that satisfy finite edit queries; the same bias lets under-constrained Base outperform held-out humans on OES. Token-F1 is nearly flat under dimensional dropout ($0.700\!\to\!0.689$), showing its insensitivity to missing dimensions when their command-level agreement is already low.

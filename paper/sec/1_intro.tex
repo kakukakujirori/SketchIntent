@@ -1,0 +1,36 @@
+\section{Introduction}
+\label{sec:intro}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.98\linewidth]{figs/teaser.pdf}
+    % \caption{The ambiguity of sketch constraints and design intent. Design-intent-aware sketches respond to future redesign in a natural, predictable manner. Yet, multiple valid constraint sets can achieve this. While (a) and (b) offer distinct but equally plausible redesign behaviors when modifying a driving dimension, (c) leads to structural collapse. \textit{Given that design intent is subjective and non-unique, how can we quantify it without being biased by syntactic differences?} Our objective is to design metrics that embrace the genuine diversity of valid design intents seen in (a) and (b), while firmly rejecting structural failures like (c).}
+    \caption{Evaluating design intent beyond constraint syntax. Design-intent-aware sketches respond to future redesign in a natural, predictable manner, yet multiple valid constraint command sets can achieve this. Examples (a) and (b) encode distinct but plausible redesign behaviors, whereas (c) collapses after an edit. \textit{Can we devise a metric that absorbs syntactic differences, accepts multiple intuitive redesign behaviors, and still distinguishes them from unnatural deformation?}}
+    \label{fig:teaser}
+\end{figure}
+
+A CAD model is useful not only as a description of shape, but as a reusable design object. Engineers expect to modify a design for new requirements while preserving the geometric relationships and modeling rationale that matter. In parametric CAD, this expected behavior under later modification is a key aspect of \emph{design intent}~\cite{iyer2006design,otey2018revisiting}. When design intent is poorly encoded, even simple edits can make a model collapse, forcing engineers to recreate it from scratch. This is why design intent has long been treated as a central concept in CAD research and education~\cite{camba2016parametric,naya2020role,kyratzi2021constraint}.
+
+Many parametric CAD workflows build 3D geometry from 2D sketches, whose primitives (e.g., lines, circles, arcs) define shape and whose constraints specify how that shape behaves under edits. Relational constraints preserve geometric invariants such as coincidence, tangency, or parallelism, while dimensional constraints expose editable quantities such as distances or angles. A well-authored sketch should also remove unintended degrees of freedom: its constraints uniquely determine the geometry, while redesign occurs through intended driving dimensions. Thus, sketch constraints are not the entirety of design intent, but they are one of its most explicit and observable carriers, encoding both preserved relationships and allowed redesign motions.
+
+Despite its long-standing importance, machine learning for CAD has only weakly operationalized design intent. Most recent work evaluates whether models generate plausible geometry, primitives, or construction commands~\cite{Wu_2021_ICCV,rukhovich2025cad}. In sketch constraint prediction, existing evaluations typically reduce constraints to token-level Precision, Recall, or F1~\cite{seff2021vitruvion,lin2026unisketch}. However, design-intent-aware constraints are inherently non-unique (Fig.~\ref{fig:teaser}). Token-level metrics therefore conflate surface syntax with intent, penalizing predictions that disagree with one reference even when they express a plausible human annotation.
+
+HistCAD~\cite{dong2025histcad} moves toward behavior-based evaluation by testing whether a constrained sketch can satisfy target edits while preserving specified relations. This post-editability view is appealing because it evaluates redesign behavior rather than command matching. However, edit success alone has a failure mode: it can favor partially under-constrained sketches whose extra freedoms help satisfy selected edit queries, while fully constrained sketches can fail when existing constraints conflict with those queries. An intent-aware metric should therefore characterize the space of redesign motions a constraint system allows, not only whether particular edits succeed.
+
+We address this need with a new benchmark and metrics for design intent in 2D CAD sketches. Our benchmark contains 292 sketches, each independently annotated by three CAD designers with fully constrained, design-intent-aware constraints, capturing both command-level non-uniqueness and genuinely different human interpretations of intent.
+
+For evaluation, we introduce the \textbf{motion subspace}: the tangent space of the local edit-motion manifold induced by editing a constrained sketch's driving dimensions. This linearized representation canonicalizes annotations that differ syntactically but induce the same local redesign behavior. Based on this representation, we define four primary comparison metrics: $\theta_{\mathrm{motion}}^{\mathrm{full}}$ compares driven redesign motions, $\theta_{\mathrm{motion}}^{\mathrm{rel}}$ compares relation-preserving motion families, $S_{\mathrm{place}}$ compares the placement of driving dimensions, and $\theta_{\mathrm{leak}}^{\mathrm{dim}}$ checks the preservation of reference relational constraints under dimensional edits.
+
+Motion subspaces also provide a way to \emph{learn} design intent. We convert $\theta_{\mathrm{motion}}^{\mathrm{rel}}$ and $\theta_{\mathrm{leak}}^{\mathrm{dim}}$ into rewards that steer generation toward relation-rich constraints with fewer dimensional shortcuts, which the previous solver-only reinforcement-learning method~\cite{casey2025aligning} struggles with.
+
+\paragraph{Contributions.}
+\begin{itemize}[leftmargin=*, itemsep=2pt, topsep=2pt]
+    \item \textbf{A multi-reference benchmark for design-intent diversity.}
+    We curate 292 2D CAD sketches with three expert annotations each, enabling analysis of how diverse design intents are expressed on the same geometry and what redesign behavior remains shared across annotations (\S\ref{sec:dataset}).
+
+    \item \textbf{Motion subspaces as a canonical representation.}
+    We identify the motion subspace---the tangent space of geometry deformations induced by driving dimensions---as a canonical object for comparing sketch constraints by local redesign behavior. It factors out syntactic command differences while preserving behaviorally distinct valid intents, leading to $\theta_{\mathrm{motion}}^{\mathrm{full}}$, $\theta_{\mathrm{motion}}^{\mathrm{rel}}$, $S_{\mathrm{place}}$, and $\theta_{\mathrm{leak}}^{\mathrm{dim}}$ (\S\ref{sec:method}).
+
+    \item \textbf{Validation and RL application.}
+    We show that our metrics absorb syntactic annotation diversity, detect constraint deficiencies, and separate model predictions from human annotations. We also transfer $\theta_{\mathrm{motion}}^{\mathrm{rel}}$ and $\theta_{\mathrm{leak}}^{\mathrm{dim}}$ to RL rewards for relation-aware constraint generation (\S\ref{sec:experiments}, \S\ref{sec:rl_reward}).
+\end{itemize}
