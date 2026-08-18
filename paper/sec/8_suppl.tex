@@ -608,6 +608,7 @@ The rest metrics computation follows the same procedure as in Sec.~\ref{sec:moti
 We evaluate four types of prediction--reference comparisons: held-out human annotations against human references, model predictions (Base, Solver-RL, and Ours) against human references, and the dimensional- and relational-dropout controls used in our sensitivity analysis (Sec.~\ref{sec:exp_degradation}). For each paired record, we keep the constraint sets and, for the dropout controls, the dropout realization fixed, and change only the primitive parameterization. For each metric $m\in\{\theta_\mathrm{motion}^\mathrm{full}, \theta_\mathrm{motion}^\mathrm{rel}, \theta_\mathrm{leak}^\mathrm{dim}, S_\mathrm{place}\}$ and paired record $i$, we measure the L1 change before and after the reparametrization:
 \begin{equation}
     \Delta_{m,i} = |m_i^\mathrm{alternative} - m_i^\mathrm{native}|.
+    \label{eq:appendix_alternative_native_diff_metric}
 \end{equation}
 Because all four metrics lie in $[0,1]$, this absolute change has a common scale across metrics.
 
@@ -708,154 +709,146 @@ by using a fixed primitive schema and evaluation platform.
 \subsection{Sensitivity to the Minimum-Norm Response}
 \label{sec:appendix_pseudoinverse_sensitivity}
 
-For an under-constrained sketch, the linearized dimensional response is not unique.  If
-\begin{equation}
-    R_0=-J_x^+J_p,
-    \qquad
-    N=\ker(J_x),
-\end{equation}
-then every
-\begin{equation}
-    R=R_0+NZ
-    \label{eq:appendix_response_family}
-\end{equation}
-satisfies $J_xR=-J_p$ in exact arithmetic.  Our evaluation uses $R_0$, the Moore--Penrose minimum-norm member of this family.  We quantify the dependence on that choice by replacing only the prediction-side response; the reference annotation and all non-response quantities are held fixed.
+For an under-constrained sketch, a dimensional edit does not uniquely determine the resulting geometry update.
+Specifically, in the linearized system $J_x dx + J_p dp_C = 0$ (Eq.~\ref{eq:full_linearized}) with $dp_C$ given, $dx + n$ for any $n \in \ker(J_x)$ satisfies this equation.
 
-\paragraph{Numerically admissible response family.}
-We use the same truncated-SVD rule as the main evaluator,
-\begin{equation}
-    \epsilon_{\mathrm{eff}}(A)
-    =\max\!\left(10^{-9},10^{-6}\sigma_{\max}(A)\right),
-    \label{eq:appendix_response_cutoff}
-\end{equation}
-for every null space, range, and pseudoinverse below.  In particular, $N$ is obtained from a full SVD; an economy SVD would omit right-null vectors when $J_x$ is wide.  A baseline response is accepted only when
-\begin{equation}
-    \varepsilon(R_0)
-    =\frac{\lVert J_xR_0+J_p\rVert_F}
-           {\max(\lVert J_p\rVert_F,1)}
-    \leq 10^{-6}.
-    \label{eq:appendix_response_residual}
-\end{equation}
-The same test is repeated after every perturbation.  This second gate is necessary because a direction below the truncated-SVD cutoff can be amplified by a subsequent pseudoinverse.  Of $1{,}298{,}213$ constructed prediction-response draws in the main arm, 563 ($0.043\%$) fail this post-perturbation gate; the auxiliary arm rejects 31 of 677,520 ($0.0046\%$).  All retained draws have $\varepsilon(R)\leq9.87\times10^{-7}$.
+The Moore-Penrose pseudoinverse used in our evaluator selects $dx = R_C\,dp_C$ with $R_C=-J_x^\dagger J_p$, the minimum-norm solution among these admissible responses. This raises two questions: (i) is the minimum-norm response a reasonable local convention for CAD edits, and (ii) how sensitive are our metrics to choosing a different admissible response? We address these questions through a null-space sensitivity analysis and an empirical comparison with FreeCAD's small-edit behavior.
 
-Raw state coordinates mix primitive-specific quantities, so a Gaussian coefficient in $N$ would not give a comparable perturbation size across sketches.  We instead control the added motion in the paper's observation space.  Let
-\begin{equation}
-    K=J_\phi N,
-    \qquad
-    U_F=\operatorname{orth}(K),
-    \qquad
-    M_0=J_\phi R_0.
-\end{equation}
-For driver column $j$ and Monte Carlo draw $b$, we sample $g_j^{(b)}\sim\mathcal{N}(0,I)$ and set
-\begin{align}
-    u_j^{(b)}
-    &=U_F\frac{g_j^{(b)}}{\lVert g_j^{(b)}\rVert_2},
-    &
-    e_j^{(\eta,b)}
-    &=\eta\lVert M_{0,:,j}\rVert_2u_j^{(b)},
-    \label{eq:appendix_observable_noise}\\
-    E^{(\eta,b)}
-    &=[e_1^{(\eta,b)},\ldots,e_k^{(\eta,b)}],
-    &
-    R_{\eta,b}
-    &=R_0+N K^+E^{(\eta,b)}.
-    \label{eq:appendix_observable_response}
-\end{align}
-Thus each added observable response has norm $\eta$ times that driver's baseline observable-response norm.  Columns below $10^{-12}$ receive no noise; a response for which every relevant column is zero is excluded rather than counted as a zero sensitivity result.  Similarly, cases with $\operatorname{rank}(K)=0$ cannot be tested by this arm.  Among 6,697 consistent response maps, 4,313 are eligible: 1,325 have no observable-free direction and 1,059 have no nonzero observable response.  These filters still leave 286 sketches and 9,392--9,396 paired evaluation records at each nonzero strength.
+\paragraph{Constraint-preserving response perturbations.}
+To measure sensitivity to the minimum-norm choice, we perturb the minimum-norm solution $dx$ by adding null-space motions $n\in\ker(J_x)$, thereby generating alternative responses $dx+n$ that satisfy the same linearized constraints. We then recompute the metrics and measure their deviation from the original scores.
 
-We use $\eta\in\{.01,.05,.10,.25,.50,1.0\}$ and 50 deterministic-seed draws per response.  For each of the four metrics, we recompute the complete evaluation row structure of Sec.~\ref{sec:experiments}, including held-out humans, model predictions, and the controlled dropout variants.  If $d_m^{0}(P,G)$ is the native score and $d_m^{\eta,b}(P,G)$ its value under Eq.~\ref{eq:appendix_observable_response}, the primary quantity is
+The perturbation magnitude should be comparable across sketches and independent of the primitive parameterization. We therefore control its scale in the observation space. For the response $r_j=R_C[:,j]$ to dimensional driver $j$, we sample a random unit-norm direction
 \begin{equation}
-    \Delta_m^{\eta,b}(P,G)
-    =\left|d_m^{\eta,b}(P,G)-d_m^0(P,G)\right|.
-    \label{eq:appendix_response_delta}
+\hat{n}_j\in\ker(J_x),\qquad \|\hat{n}_j\|_2=1,
 \end{equation}
-For placement, $|\Delta_{S_\mathrm{place}}|=|\Delta_{1-S_\mathrm{place}}|$.  We also compute Spearman correlation between native and perturbed records separately for each draw.  The $\eta=0$ implementation gate reproduces all four native metrics exactly on 9,398 paired records.
+and rescale it as
+\begin{equation}
+n_j
+=
+\eta
+\frac{\|J_\phi r_j\|_2}
+     {\|J_\phi \hat{n}_j\|_2}
+\hat{n}_j .
+\end{equation}
+This preserves the linearized constraints, $J_x n_j=0$, while fixing the observable perturbation magnitude to
+\begin{equation}
+\|J_\phi n_j\|_2
+=
+\eta\|J_\phi r_j\|_2.
+\end{equation}
+Thus, $\eta$ directly controls the added admissible motion relative to the original observable response of each driver. To avoid excessively large rescaling, we discard the draw if
+\begin{equation}
+\|J_\phi \hat{n}_j\|_2 < 10^{-9}.
+\end{equation}
+The perturbed responses $r_j+n_j$ are stacked across all dimensional drivers to form $R_{C,\eta}$.
+
+In the following experiment, we test six perturbation strengths, $\eta\in\{.01,.05,.10,.25,.50,1.0\}$.
+For each $R_C$ and each $\eta$, we generate 50 independent realizations of $R_{C,\eta}$ by independently sampling $\hat{n}_j$ for each driver.
+
+\paragraph{Sensitivity to alternative admissible responses.}
+For each metric $m$, we reuse Eq.~\ref{eq:appendix_alternative_native_diff_metric} to measure the deviation:
+\begin{equation}
+\Delta_{m,i} = |m_i^{(\eta)} - m_i^{(0)}|
+\end{equation}
+where $m_i^{(0)}$ is the score obtained with the minimum-norm response and $m_i^{(\eta)}$ is the score under the perturbed admissible response. Since all four metrics lie in $[0,1]$, these absolute changes have a common scale.
+
+Table~\ref{tab:appendix_pseudo_inv_response_sensitivity} summarizes the resulting changes.
+Note that $\theta_{\mathrm{motion}}^{\mathrm{rel}}$ is exactly invariant because it is defined from the relational motion envelope and does not depend on the dimensional response $R_C$, and is therefore omitted from the table.
+The remaining three metrics depend on the selected admissible response, but the effect is small for moderate perturbations. At $\eta=.10$, the median/$P_{90}$ changes are $.0011/.0125$ for $\theta_{\mathrm{motion}}^{\mathrm{full}}$, $.0028/.0424$ for $\theta_{\mathrm{leak}}^{\mathrm{dim}}$, and $.0046/.0154$ for $S_{\mathrm{place}}$.
+The dependence becomes more pronounced for stronger alternatives: at $\eta=1$, where the added observable motion has the same norm as the original response, the corresponding $P_{90}$ changes increase to $.131$, $.222$, and $.203$.
+
+However, note that large null-space perturbations mean substantial unintended sketch deformation while preserving the same linearized constraints, so larger metric changes are expected. We therefore ask which admissible response a CAD solver follows in practice, and compare the minimum-norm response with FreeCAD's observed small-edit behavior.
 
 \begin{table}[t]
     \centering
-    \scriptsize
-    \setlength{\tabcolsep}{2.2pt}
-    \caption{Sensitivity to alternative constraint-preserving responses normalized in observable space.  Each metric block reports median/$P_{90}$ of $|\Delta_m|$ over paired records and 50 draws.  The final column gives the median per-draw Spearman correlations for $\theta_\mathrm{motion}^\mathrm{full}$, $\theta_\mathrm{leak}^\mathrm{dim}$, and $S_\mathrm{place}$.  For $\theta_\mathrm{motion}^\mathrm{rel}$, $|\Delta|=0$ and $\rho=1$ in every condition.}
-    \label{tab:appendix_pseudoinverse_sensitivity}
-    \resizebox{\linewidth}{!}{%
-    \begin{tabular}{@{}c cc cc cc c@{}}
+    \footnotesize
+    \setlength{\tabcolsep}{4.0pt}
+    \caption{
+    Sensitivity to alternative constraint-preserving responses.
+    Each entry reports the median/$P_{90}$ of
+    $\Delta_{m,i}=|m_i^{(\eta)}-m_i^{(0)}|$.
+    $\theta_{\mathrm{motion}}^{\mathrm{rel}}$ is omitted because it is
+    exactly invariant for all $\eta$.
+    }
+    \label{tab:appendix_pseudo_inv_response_sensitivity}
+    \begin{tabular}{@{}cccc@{}}
         \toprule
-        & \multicolumn{2}{c}{$\theta_\mathrm{motion}^\mathrm{full}$}
-        & \multicolumn{2}{c}{$\theta_\mathrm{leak}^\mathrm{dim}$}
-        & \multicolumn{2}{c}{$S_\mathrm{place}$}
-        & $\rho_{\mathrm{full/leak/place}}$ \\
-        $\eta$ & Median & $P_{90}$ & Median & $P_{90}$ & Median & $P_{90}$ & Median over draws \\
+        $\eta$
+        & $\theta_{\mathrm{motion}}^{\mathrm{full}}$
+        & $\theta_{\mathrm{leak}}^{\mathrm{dim}}$
+        & $S_{\mathrm{place}}$ \\
         \midrule
-        $.01$ & $.00007$ & $.00105$ & $.00037$ & $.0125$ & $.00038$ & $.00133$ & $.996/.984/1.000$ \\
-        $.05$ & $.00047$ & $.00536$ & $.00309$ & $.0684$ & $.00190$ & $.00662$ & $.996/.974/1.000$ \\
-        $.10$ & $.00117$ & $.0114$  & $.00765$ & $.112$  & $.00398$ & $.0134$  & $.995/.963/.999$ \\
-        $.25$ & $.00430$ & $.0339$  & $.0221$  & $.181$  & $.0135$  & $.0365$  & $.990/.943/.994$ \\
-        $.50$ & $.0118$  & $.0783$  & $.0395$  & $.239$  & $.0378$  & $.0898$  & $.968/.924/.976$ \\
-        $1.0$ & $.0261$  & $.150$   & $.0562$  & $.295$  & $.0938$  & $.205$   & $.887/.905/.914$ \\
+        $.01$ & $.00007/.0012$ & $.00020/.0030$ & $.00045/.0015$ \\
+        $.05$ & $.00048/.0061$ & $.0012/.0193$  & $.0022/.0077$ \\
+        $.10$ & $.0011/.0125$  & $.0028/.0424$  & $.0046/.0154$ \\
+        $.25$ & $.0035/.0340$  & $.0099/.101$   & $.0146/.0409$ \\
+        $.50$ & $.0081/.0719$  & $.0223/.161$   & $.0374/.0940$ \\
+        $1.0$ & $.0161/.131$   & $.0379/.222$   & $.0866/.203$ \\
         \bottomrule
-    \end{tabular}}
+    \end{tabular}
 \end{table}
 
-Table~\ref{tab:appendix_pseudoinverse_sensitivity} separates three behaviors.  First, $\theta_\mathrm{motion}^\mathrm{rel}$ is exactly invariant because its construction from $J_R$ and $J_\phi$ does not use $R_0$.  Second, full-motion and placement scores are stable through small and moderate observable perturbations: at $\eta=.10$, their $P_{90}$ changes are $.0114$ and $.0134$, and their rank correlations are $.995$ and $.999$.  The changes grow in the $.50$--$1$ stress regime; $\eta=1$ deliberately adds a free observable response as large as the original response.  Third, $\theta_\mathrm{leak}^\mathrm{dim}$ is more response-selection-sensitive, with $P_{90}=.112$ already at $\eta=.10$.
+\paragraph{Is the minimum-norm response a reasonable convention?}
+The perturbation analysis above shows how the metrics vary across admissible responses, but does not establish whether the minimum-norm response is representative of actual CAD edits. We therefore compare it with FreeCAD's observed response to small finite edits.
 
-The isolated maximum $|\Delta_{\mathrm{full}}|=.707$ at every strength is a cutoff discontinuity rather than typical behavior: the estimated response-subspace rank changes in $1.70\%$ of rows through $\eta=.50$ and $2.06\%$ at $\eta=1$.  Sensitivity is also concentrated where more observable freedom exists.  At $\eta=.10$, responses with observable-free rank at least six have median changes $.00293$ and $.0289$ for $\theta_\mathrm{motion}^\mathrm{full}$ and $\theta_\mathrm{leak}^\mathrm{dim}$, compared with values below $10^{-6}$ in the rank-three-to-five stratum.  Across every draw and strength, the available dimensional-dropout ordering for full motion and placement and the relational-dropout ordering for relational motion and leakage are preserved.  Held-out humans also remain separated from both evaluated models.  The much smaller Base--Solver-RL gap within this eligible subset is not always preserved for full motion or leakage, so we do not claim invariance of fine model ordering under arbitrary response selection.
+For each driving length dimension $q$ of a held-out human annotation or model prediction, we perturb its solved value by $\delta$, re-solve the sketch with FreeCAD, and compare the resulting observable response with the corresponding minimum-norm tangent prediction. We evaluate both signs of $\delta$ with $|\delta|=0.001L_s$, where $L_s$ is the canonical sketch bounding-box diagonal. This is the smallest edit magnitude used in Sec.~\ref{sec:appendix_consistency_with_finite_edit_behavior}, chosen here to approximate the local solver response while minimizing finite-edit nonlinearities.
 
-\paragraph{Observable-invisible freedom.}
-The main arm cannot excite a null direction invisible to $J_\phi$.  To isolate this blind spot, we separately form
+Let $x$ and $x^{q,\delta}$ denote the solved geometries before and after the edit, respectively. The finite edit gives an observable-space response rate, while the minimum-norm linearization provides its tangent prediction:
 \begin{equation}
-    G=\ker\!\begin{bmatrix}J_x\\J_\phi\end{bmatrix},
-    \qquad
-    \widehat R_{\eta,b,:,j}
-    =R_{0,:,j}+\eta\lVert R_{0,:,j}\rVert_2\,G
-       \frac{h_j^{(b)}}{\lVert h_j^{(b)}\rVert_2},
-    \label{eq:appendix_observable_null_response}
+v_{\mathrm{finite}}=\frac{\phi(x^{q,\delta})-\phi(x)}{\delta},
+\qquad
+v=J_\phi R_{C,:,q}.
 \end{equation}
-with 20 draws per strength.  This auxiliary $\eta$ is normalized in raw state space and is therefore not compared numerically with the main-arm $\eta$.  We use the null space of the stacked matrix rather than intersecting two separately thresholded bases.  The resulting directions include any state freedom unseen by the distance observable; they need not all be primitive-parameterization gauges.
+We measure their agreement using cosine similarity $c$, which captures the deformation direction, and relative response error $e$, which also accounts for its magnitude:
+\begin{equation}
+c=
+\frac{\langle v_{\mathrm{finite}},v\rangle}
+{\|v_{\mathrm{finite}}\|_2\|v\|_2},
+\qquad
+e=
+\frac{\|v_{\mathrm{finite}}-v\|_2}
+{\|v\|_2}.
+\end{equation}
 
-Of the consistent response maps, 5,646 have both a nonzero driver response and a nonempty $G$.  Equation~\ref{eq:appendix_observable_null_response} preserves $J_\phi R$ as well as $J_xR$.  Accordingly, at $\eta=1$, the median/$P_{90}$ changes are $1.1\times10^{-16}/5.5\times10^{-9}$ for $\theta_\mathrm{motion}^\mathrm{full}$, exactly zero for $\theta_\mathrm{motion}^\mathrm{rel}$, and $0/1.1\times10^{-16}$ for $S_\mathrm{place}$.  Among rows whose estimated subspace rank is unchanged, the maximum changes are $2.98\times10^{-8}$ and $4.05\times10^{-9}$ for full motion and placement; rare cutoff crossings account for the larger raw maximum of full motion.  In contrast, the raw-state leakage diagnostic changes as intended: its median is $9.75\times10^{-5}$ but its $P_{90}$ reaches $.207$ at $\eta=1$; when the reference relation Jacobian sees $G$, the median reaches $.154$.  This controlled separation supports the characterization of $\theta_\mathrm{leak}^\mathrm{dim}$ as a fixed-schema diagnostic, not a coordinate-free observable-space quantity.
+Table~\ref{tab:appendix_solver_anchor} shows near-exact agreement for
+human annotations. This is expected because the human annotations are
+fully constrained: locally, $\ker(J_x)=\{0\}$ and the geometric
+response is unique, so the pseudoinverse does not make a choice among
+multiple admissible responses.
 
-\paragraph{Finite-solver anchor.}
-The nullspace experiment describes admissible first-order alternatives but does not assert that a CAD solver selects them uniformly.  As an empirical anchor, we start every edit from a freshly solved annotation and compare FreeCAD's exact finite observable response at the smallest edit magnitude used in Sec.~\ref{sec:appendix_consistency_with_finite_edit_behavior} with the minimum-norm tangent prediction.  For driver $q$ and signed increment $\delta$,
-\begin{align}
-    v_\mathrm{FC}^{q,\delta}
-    &=\frac{\phi(x^{q,\delta})-\phi(\bar x)}{\delta},
-    &
-    v_\mathrm{MP}^{q}
-    &=J_\phi R_{0,:,q},
-    \label{eq:appendix_solver_anchor}\\
-    c^{q,\delta}
-    &=\frac{\langle v_\mathrm{FC}^{q,\delta},v_\mathrm{MP}^{q}\rangle}
-            {\lVert v_\mathrm{FC}^{q,\delta}\rVert_2
-             \lVert v_\mathrm{MP}^{q}\rVert_2},
-    &
-    e^{q,\delta}
-    &=\frac{\lVert v_\mathrm{FC}^{q,\delta}-v_\mathrm{MP}^{q}\rVert_2}
-            {\lVert v_\mathrm{MP}^{q}\rVert_2}.
-    \label{eq:appendix_solver_anchor_metrics}
-\end{align}
-Length edits use $|\delta|=.001L_s$ and angle edits use $|\delta|=0.1^\circ$.  We retain only successful edits with nonzero finite and tangent responses.  The tangent is evaluated at the same solved baseline from which the finite edit begins.
+For model predictions, the median discrepancies are also very small, indicating that FreeCAD's local response closely matches the minimum-norm tangent in typical cases.
+However, the substantially heavier tails, with $P_{90}(1-c)=.114$ and $P_{90}(e)=.508$, show that FreeCAD can select markedly different admissible responses for some under-constrained outputs.
+
+In conclusion, we regard our derivation of the local response via the Moore--Penrose pseudoinverse as a reasonable deterministic convention for evaluating sketch editability, rather than a universal solver-invariant characterization. A solver-invariant treatment of this response ambiguity remains future work.
+
 
 \begin{table}[t]
     \centering
     \scriptsize
-    \setlength{\tabcolsep}{3.2pt}
-    \caption{Agreement between FreeCAD's small finite-edit response and the Moore--Penrose tangent prediction.  The null-dimension strata use the same cutoff as Eq.~\ref{eq:appendix_response_cutoff}.}
+    \setlength{\tabcolsep}{4.5pt}
+    \caption{
+    Agreement between FreeCAD's small finite-edit response and the
+    minimum-norm tangent prediction for driving length dimensions.
+    Both $1-c$ and $e$ are zero under exact agreement and lower is better.
+    }
     \label{tab:appendix_solver_anchor}
-    \resizebox{\linewidth}{!}{%
-    \begin{tabular}{@{}lrrcccc@{}}
+    \begin{tabular}{@{}lr cc cc@{}}
         \toprule
-        Stratum & Trials & Sketches & Median $c$ & $P_{10}(c)$ & $\Pr[c>.99]$ & Median/$P_{90}$ $e$ \\
+        & & \multicolumn{2}{c}{Directional error $1-c$}
+          & \multicolumn{2}{c}{Relative response error $e$} \\
+        \cmidrule(lr){3-4}\cmidrule(lr){5-6}
+        Source & Trials
+          & Median & $P_{90}$
+          & Median & $P_{90}$ \\
         \midrule
-        All          & 13,050 & 286 & $1.000000$ & $.999916$ & $94.2\%$ & $.00079/.0217$ \\
-        Human        &  8,795 & 286 & $1.000000$ & $.999981$ & $99.1\%$ & $.00074/.00762$ \\
-        Model        &  4,255 & 262 & $1.000000$ & $.882650$ & $84.2\%$ & $.00089/.513$ \\
-        \midrule
-        $\dim\ker J_x=1$--$5$   & 288   & 5   & $1.000000$ & $.999998$ & $97.2\%$ & $.00044/.00228$ \\
-        $\dim\ker J_x=6$--$10$  & 2,820 & 77  & $1.000000$ & $.999969$ & $97.8\%$ & $.00055/.0101$ \\
-        $\dim\ker J_x=11$--$20$ & 5,917 & 193 & $1.000000$ & $.999984$ & $96.1\%$ & $.00068/.00664$ \\
-        $\dim\ker J_x\geq21$    & 4,025 & 136 & $.999999$  & $.968771$ & $88.8\%$ & $.00123/.273$ \\
+        Human
+          & 8,649
+          & $2.3{\times}10^{-7}$ & $2.0{\times}10^{-5}$
+          & $.00073$ & $.00762$ \\
+        Model
+          & 4,245
+          & $3.4{\times}10^{-7}$ & $.114$
+          & $.00089$ & $.508$ \\
         \bottomrule
-    \end{tabular}}
+    \end{tabular}
 \end{table}
-
-Table~\ref{tab:appendix_solver_anchor} shows that the minimum-norm direction is a strong empirical proxy for incremental edits of human annotations: $99.1\%$ have cosine above $.99$.  Agreement has a heavier tail for model outputs and for large null spaces, where the solver has more branch freedom.  We do not infer that FreeCAD implements the Moore--Penrose rule, nor that continuity uniquely determines it.  Rather, $R_0$ is a deterministic local minimum-displacement convention that closely matches the observed small-edit branch in the primary human data.  The nullspace stress test above quantifies what changes under other admissible conventions and identifies leakage, rather than the observable relational metric, as the principal response-selection limitation.

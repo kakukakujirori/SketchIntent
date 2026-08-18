@@ -747,52 +747,50 @@ consistency_residual = ||J_x R0 + J_p||_F
 
 ### 4.5 observable-normalized perturbation
 
+各 driving column \(j\) について、固定 seed の isotropic random vector から \(\ker(J_x)\) の単位球上の方向
+
 \[
-K=J_\phi N
+\hat n_j=N\frac{g_j}{\lVert g_j\rVert_2}
 \]
 
-とする。\(K\) の column space の orthonormal basisを \(U_F\) とする。これは constraints を一次で保ったまま observable を変えられる方向である。
-
-baseline observable response を
+を引き、baseline observable response \(M_0=J_\phi R_0\) を使って
 
 \[
-M_0=J_\phi R_0
-\]
-
-とする。各 driving column \(j\) について、固定 seed の isotropic random vector \(g_j\) を用い
-
-\[
-u_j=U_F\frac{g_j}{\lVert g_j\rVert_2},
+\Delta_j=\eta\lVert M_{0,:,j}\rVert_2\frac{\hat n_j}{\lVert J_\phi\hat n_j\rVert_2},
 \qquad
-e_j=\eta\lVert M_{0,:,j}\rVert_2u_j
+R_\eta=R_0+\Delta
 \]
 
-を生成する。全 column を並べた \(E=[e_1,\dots,e_k]\) に対し
+とする。\(\Delta_j\in\ker(J_x)\) なので \(J_xR_\eta=-J_p\) が保たれ、かつ
 
 \[
-Z=K^\dagger E,
-\qquad
-R_\eta=R_0+NZ
+\lVert J_\phi\Delta_j\rVert_2=\eta\lVert M_{0,:,j}\rVert_2
 \]
 
-とする。これにより
+が厳密に成り立つ。すなわち \(\eta\) は observable space での大きさである。
+
+**draw guard.** 唯一の脆弱な演算はこの除算である。\(\ker(J_x)\) の大部分は \(J_\phi\) から見えない（\(\phi\) は完全な剛体不変量なので global rigid motion、Line の `(pnt, dir, startParam, endParam)` が持つ 1 本あたり 2 次元の parameterization gauge、`base_eids` 外の entity の全座標）。そのため引いた方向の \(\lVert J_\phi\hat n_j\rVert_2\) が数値的にゼロになりうる。
 
 \[
-J_xR_\eta=-J_p
+\lVert J_\phi\hat n_j\rVert_2<10^{-9}
 \]
 
-を保ちつつ、各 driver response に baseline observable response norm の \(\eta\) 倍の自由 motion を加える。
+の draw は棄却する（その column は摂動せず、件数を記録する）。\(10^{-9}\) は \(\epsilon_{\mathrm{eff}}\) の絶対フロアそのものであり、新しい定数ではない。
+
+閾値の恣意性は仮定せず測定する。全 292 sketch の本番 run では gain に明確なギャップは無く、\(10^{-10}\) から \(10^{-5}\) まで 1 桁ごとに数百本ずつ棄却数が増える（1,293,670 draw 中 \(10^{-9}\):28、\(10^{-7}\):491、\(10^{-5}\):697）。したがって「ギャップがある」ではなく「影響が無い」を示す必要があり、`floor_sensitivity.csv` に各候補フロアで報告統計を再計算した結果を出す。フロアを 4 桁上げて \(10^{-5}\) にしても、報告する median / Q90 の変化は相対 0.5% 未満である。post hoc に検証できるのは run 自身のフロア以上の値のみで、それ未満は draw が生成されていないため再現できない。
+
+棄却された draw は seed を変えて引き直さない。引き直すと \(\ker(J_x)\) 上の一様分布が条件付き分布に置き換わるためで、実測の棄却率がそれを正当化しない: `exactly_invariant` を除いた集団での棄却は 1,293,670 draw 中 30 column だった。
+
+**厳密不変性.** `sigma_max(J_phi N) < 1e-9`、すなわち \(J_\phi N=0\) の response では、任意の許容応答に対して \(J_\phi R=J_\phi R_0\) が恒等的に成立する。したがって \(\theta_{\mathrm{full}}\)、\(\theta_{\mathrm{rel}}\)、\(S_{\mathrm{place}}\) は最小ノルム選択に**厳密に不変**であり、サンプリングの必要がない。これらは `exactly_invariant` として記録し、`invariance_coverage.csv` で集団別に報告する。raw state space の `range(R)` を見る \(\theta_{\mathrm{leak}}\) のみがここでも response 依存で、かつ draw が運ぶ gauge 成分にも応答する。この事実は別 arm に切り出さず、そのまま記述する。
 
 ### 4.6 edge cases
 
 - `raw_null_dim = 0`: 一意解なので perturb せず、`not_underconstrained` と記録する。
-- `observable_free_rank = 0`: raw nullspace はあるが observable から見えない gauge motion のみ。metric は変わらないはずなので、その事実を報告する。
-- `||M0[:,j]|| < 1e-12`: その driver column には noise を加えず `zero_baseline_response_column` を記録する。
-- 対象 arm の全 driver column が上記の zero column である response は、「変化しない sensitivity sample」として混ぜず、arm 別の理由付き skip とする。
-- `K` の rank 判定にも既存 SVD tolerance と整合する threshold を使う。
+- `exactly_invariant`: 上記のとおり sampling せず `invariance_coverage.csv` に計上する。全 eta でゼロの行を sensitivity 表に混ぜると、動きようのない movement に向けて median が引っ張られるため。
+- `||M0[:,j]|| < 1e-12`: その driver column には noise を加えない。これは guard による棄却ではない（スケールする大きさが存在しないだけ）ので別に数える。
+- 全 driver column が上記の zero column である response は `no_nonzero_observable_response` として skip する。
 - 各サンプル生成後にも
   `||J_x R_eta + J_p||_F / max(||J_p||_F, 1) <= 1e-6` を検査する。
-  截断 SVD で null と見なした小特異値方向が `K^+` で大きく増幅される場合があるためで、
   threshold を超えた response--draw は別集計とし、metric 集計から除外する。
 - 乱数 seed は `(global_seed, sketch_id, annotation_id, eta, sample_index)` から決定的に生成する。
 
@@ -867,7 +865,12 @@ artifacts/rebuttal/pseudoinverse/
   run_config.json
   response_metadata.csv
   perturbation_metrics.parquet
+  eta0_gate.csv
+  invariance_coverage.csv
+  guard_summary.csv
+  floor_sensitivity.csv
   sensitivity_summary.csv
+  sensitivity_by_observable_free_rank.csv
   ranking_changes.csv
   worst_cases.csv
   finite_anchor.csv

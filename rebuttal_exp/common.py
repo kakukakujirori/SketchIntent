@@ -26,6 +26,14 @@ from src.eval.manifest import discover_manifest  # noqa: E402
 from src.sketch_handlers.context import SketchContext  # noqa: E402
 from src.sketch_handlers.sketch_freecad_converter import SketchFreecadConverter  # noqa: E402
 
+RESOLVED_METRIC_FLOOR = 1e-6
+ZERO_ANGLE_NOISE = 1e-6
+"""The padded angle is sqrt(1 - cos2/max). When two subspaces coincide, cos2/max is
+1 - O(machine eps) and the square root lifts that to O(1e-8), so a metric value near zero
+carries a sqrt(eps) noise floor no pipeline can beat. An identity gate is therefore split:
+values above RESOLVED_METRIC_FLOOR must agree to machine precision, values at the floor
+only have to stay inside that noise band."""
+
 
 @dataclass(frozen=True)
 class SketchItem:
@@ -255,6 +263,8 @@ def percentile_ci(replicates: np.ndarray, alpha: float = 0.05) -> tuple[float, f
 __all__ = [
     "BASE_POLICY",
     "REPO_ROOT",
+    "RESOLVED_METRIC_FLOOR",
+    "ZERO_ANGLE_NOISE",
     "SketchItem",
     "build_base_eids",
     "build_context",

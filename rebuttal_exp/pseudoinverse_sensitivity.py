@@ -1,20 +1,19 @@
 """Experiment D: how much do the paper metrics depend on the minimum-norm response?
 
 Reproduces the row structure of ``ablation/run_motion.py`` (the Sec. 5 table) and, for
-every Pred side, replaces ``R0 = -pinv(J_x) J_p`` by admissible alternatives
-``R0 + N Z``:
+every Pred side, replaces ``R0 = -pinv(J_x) J_p`` by admissible alternatives ``R0 + N Z``
+drawn as described in ``response_perturbation``: one uniform direction per driver column,
+sized so that its observable displacement is exactly ``eta`` times that column's baseline
+observable response, with draws below the observable-gain floor discarded.
 
-    native           the existing pair_paper_metrics path; the delta baseline and the gate
-    main             free motion sized in observable space (rebuttal_experiments.md 4.5)
-    observable_null  free motion drawn from ker([J_x; J_phi]) and sized in raw space
-
-Only the Pred side is perturbed; GT keeps the current definition, so the variance has one
-source. The two arms normalise eta in different spaces and are never pooled.
+Only the Pred side is perturbed, so the variance has one source; GT keeps the current
+definition. Responses whose whole null space is invisible to J_phi are recorded with
+``exactly_invariant`` rather than sampled: for them ``J_phi R`` does not depend on the
+choice at all.
 
 Outputs (see rebuttal_exp/README.md):
     run_config.json  environment.json  native_pair_metrics.parquet
-    perturbation_metrics.parquet  response_metadata.csv  pair_null_visibility.csv
-    skip_summary.csv
+    perturbation_metrics.parquet  response_metadata.csv  skip_summary.csv
 """
 from __future__ import annotations
 
@@ -32,7 +31,6 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from ablation.controls import relation_dropout_variant  # noqa: E402
 from rebuttal_exp.common import (  # noqa: E402
     BASE_POLICY,
     build_base_eids,
@@ -48,16 +46,14 @@ from rebuttal_exp.common import (  # noqa: E402
 )
 from rebuttal_exp.perturbed_motion import PairEvaluator, pred_response_state  # noqa: E402
 from rebuttal_exp.response_perturbation import (  # noqa: E402
-    ARMS,
     CONSISTENCY_TOL,
-    MAIN_ARM,
-    OBSERVABLE_NULL_ARM,
+    OBSERVABLE_GAIN_FLOOR,
     ResponseGeometry,
     build_response_geometry,
     perturbed_response,
-    relation_visibility,
 )
-from src.eval.file_bundle import dropout_variant, stable_seed  # noqa: E402
+from rebuttal_exp.variants import build_variants  # noqa: E402
+from src.eval.file_bundle import stable_seed  # noqa: E402
 from src.eval.motion_metrics import SketchMotion, pair_paper_metrics  # noqa: E402
 from src.eval.progress import progress  # noqa: E402
 from src.metrics.edit_response_distance import pairwise_distance_observable  # noqa: E402
@@ -71,8 +67,11 @@ DEFAULT_ETAS = (0.0, 0.01, 0.05, 0.10, 0.25, 0.50, 1.00)
 DEFAULT_DIM_RATES = (25.0, 50.0, 75.0, 100.0)
 DEFAULT_REL_RATES = (50.0, 100.0)
 DEFAULT_SAMPLES = 50
-DEFAULT_NULL_SAMPLES = 20
 BASELINE_ETA = 0.0
+
+HUMAN_KIND = "human"
+MODEL_KIND = "model"
+DROPOUT_KIND = "dropout_control"
 
 METRIC_COLUMNS = [
     "theta_full", "theta_rel", "theta_leak", "placement_sim",
@@ -81,27 +80,24 @@ METRIC_COLUMNS = [
 ]
 RECORD_KEYS = ["batch", "sketch_id", "rid", "variant", "gt"]
 NATIVE_COLUMNS = [*RECORD_KEYS, "pred_label", *METRIC_COLUMNS, "status"]
-SAMPLE_COLUMNS = [*RECORD_KEYS, "arm", "eta", "sample", *METRIC_COLUMNS,
-                  "raw_perturbation_ratio", "constraint_residual", "nullspace_residual"]
-RESPONSE_COLUMNS = [
-    "batch", "sketch_id", "label", "raw_null_dim", "observable_free_rank",
-    "observable_null_dim", "consistency_residual", "r0_frobenius",
-    "n_zero_observable_columns", "n_zero_raw_columns", "n_drivers",
-    "n_x", "m_phi", "skip_reason",
+SAMPLE_DIAGNOSTICS = [
+    "raw_perturbation_ratio", "constraint_residual", "nullspace_residual",
+    "min_observable_gain",
 ]
-VISIBILITY_COLUMNS = [
-    "batch", "sketch_id", "pred_label", "gt_label", "observable_null_dim",
-    "relation_null_overlap_norm", "relation_null_overlap_rank",
+RESPONSE_COLUMNS = [
+    "batch", "sketch_id", "label", "label_kind", "raw_null_dim", "observable_free_rank",
+    "observable_gain_max", "exactly_invariant", "consistency_residual", "r0_frobenius",
+    "n_zero_observable_columns", "n_drivers", "n_x", "m_phi", "skip_reason",
 ]
 
 
 SAMPLE_SCHEMA = pa.schema(
     [(name, pa.string()) for name in RECORD_KEYS]
-    + [("arm", pa.string()), ("eta", pa.float64()), ("sample", pa.int32())]
+    + [("eta", pa.float64()), ("sample", pa.int32())]
     + [(name, pa.float64() if name.startswith(("theta", "placement")) else pa.int32())
        for name in METRIC_COLUMNS]
-    + [(name, pa.float64()) for name in
-       ("raw_perturbation_ratio", "constraint_residual", "nullspace_residual")]
+    + [(name, pa.float64()) for name in SAMPLE_DIAGNOSTICS]
+    + [("n_columns_guarded", pa.int32())]
 )
 CHUNK_ROWS = 100_000
 
@@ -138,7 +134,6 @@ class Collectors:
     samples: SampleWriter
     native: list = field(default_factory=list)
     responses: list = field(default_factory=list)
-    visibility: list = field(default_factory=list)
     skips: Counter = field(default_factory=Counter)
 
 
@@ -160,50 +155,43 @@ def response_fingerprint(motion: SketchMotion) -> tuple:
     )
 
 
-def build_variants(bundle, item, refs, heldout, model_labels, dim_rates, rel_rates):
-    """The Sec. 5 variant set, seeded exactly like ablation/run_motion.py."""
-    rid = f"{item.batch}:{item.base_fcstd}:{'+'.join(refs)}__q={heldout}"
-    variants = [("heldout", heldout, bundle.sketches[heldout])]
-    for rate in dim_rates:
-        seed = stable_seed(item.batch, item.base_fcstd, rid, "dim", rate)
-        pred, *_ = dropout_variant(bundle.sketches[heldout], drop_rate=rate, seed=seed)
-        variants.append((f"dim_drop{rate:g}", f"{rid}:d{rate:g}", pred))
-    for rate in rel_rates:
-        seed = stable_seed(item.batch, item.base_fcstd, rid, "rel", rate)
-        pred, *_ = relation_dropout_variant(bundle.sketches[heldout], drop_rate=rate, seed=seed)
-        variants.append((f"rel_drop{rate:g}", f"{rid}:r{rate:g}", pred))
-    for label in model_labels:
-        variants.append((label, label, bundle.sketches[label]))
-    return rid, variants
+def plan_records(bundle, item, models, config) -> tuple[list[tuple], dict, dict]:
+    """Every (rid, variant, gt) row of the Sec. 5 table, the sketch behind each label, and
+    which population that label belongs to.
 
-
-def plan_records(bundle, item, models, config) -> tuple[list[tuple], dict]:
-    """Every (rid, variant, gt) row of the Sec. 5 table, and the sketch behind each label."""
+    ``label_kind`` is recorded here, where it is known from the bundle, so no downstream
+    consumer has to recover it by pattern-matching a label name.
+    """
     records: list[tuple] = []
     sketches: dict[str, object] = {}
+    kinds: dict[str, str] = {}
     for refs in combinations(item.human_labels, 2):
         heldout = next(n for n in item.human_labels if n not in refs)
         rid, variants = build_variants(bundle, item, refs, heldout, models,
                                        config["dim_rates"], config["rel_rates"])
         for gt_label in refs:
             sketches[gt_label] = bundle.sketches[gt_label]
+            kinds[gt_label] = HUMAN_KIND
             records.append((rid, "source_self", gt_label, gt_label))
         for variant, label, sketch in variants:
             sketches[label] = sketch
+            kinds[label] = (
+                HUMAN_KIND if variant == "heldout"
+                else DROPOUT_KIND if variant.startswith(("dim_drop", "rel_drop"))
+                else MODEL_KIND
+            )
             for gt_label in refs:
                 records.append((rid, variant, label, gt_label))
-    return records, sketches
+    return records, sketches, kinds
 
 
-def sample_plan(config) -> list[tuple[str, float, int]]:
-    """(arm, eta, sample_index) triples; eta = 0 is drawn once and only under the main arm."""
-    plan = [(MAIN_ARM, BASELINE_ETA, 0)]
-    counts = {MAIN_ARM: config["n_samples"], OBSERVABLE_NULL_ARM: config["n_null_samples"]}
-    for arm in config["arms"]:
-        for eta in config["etas"]:
-            if eta == BASELINE_ETA:
-                continue
-            plan.extend((arm, eta, index) for index in range(counts[arm]))
+def sample_plan(config) -> list[tuple[float, int]]:
+    """(eta, sample_index) pairs; eta = 0 is the delta baseline and is drawn once."""
+    plan = [(BASELINE_ETA, 0)]
+    for eta in config["etas"]:
+        if eta == BASELINE_ETA:
+            continue
+        plan.extend((eta, index) for index in range(config["n_samples"]))
     return plan
 
 
@@ -216,7 +204,7 @@ def process_sketch(item, converter, context, config, collectors: Collectors) -> 
 
     base_eids = build_base_eids(bundle.canonical_sketch, BASE_POLICY)
     eps, rcond = config["eps"], config["rcond"]
-    records, sketches = plan_records(bundle, item, models, config)
+    records, sketches, kinds = plan_records(bundle, item, models, config)
 
     cache: dict[str, PredCache] = {}
     for label, sketch in sketches.items():
@@ -226,35 +214,25 @@ def process_sketch(item, converter, context, config, collectors: Collectors) -> 
         )
         geometry = build_response_geometry(
             motion.native, j_phi, eps=eps, rcond=rcond,
-            consistency_tol=config["consistency_tol"],
+            consistency_tol=config["consistency_tol"], gain_floor=config["gain_floor"],
         )
         cache[label] = PredCache(motion, j_phi, geometry, response_fingerprint(motion))
         collectors.responses.append(dict(
             batch=item.batch, sketch_id=item.sketch_id, label=label,
+            label_kind=kinds[label],
             n_x=int(motion.native.J_x.shape[1]), m_phi=motion.m_phi,
             **geometry.as_record(),
         ))
         if geometry.skip_reason:
             collectors.skips[f"response:{geometry.skip_reason}"] += 1
-        else:
-            for arm in config["arms"]:
-                reason = geometry.arm_skip_reason(arm)
-                if reason:
-                    collectors.skips[f"response:{arm}:{reason}"] += 1
+        elif geometry.exactly_invariant:
+            collectors.skips["response:exactly_invariant"] += 1
 
     evaluators: dict[tuple[str, str], PairEvaluator] = {}
     for _rid, _variant, pred_label, gt_label in records:
         key = (pred_label, gt_label)
-        if key in evaluators:
-            continue
-        evaluators[key] = PairEvaluator(cache[pred_label].motion, cache[gt_label].motion)
-        collectors.visibility.append(dict(
-            batch=item.batch, sketch_id=item.sketch_id,
-            pred_label=pred_label, gt_label=gt_label,
-            observable_null_dim=cache[pred_label].geometry.observable_null_dim,
-            **relation_visibility(evaluators[key].J_R_at_pred, cache[pred_label].geometry.G,
-                                  eps=eps, rcond=rcond),
-        ))
+        if key not in evaluators:
+            evaluators[key] = PairEvaluator(cache[pred_label].motion, cache[gt_label].motion)
 
     for rid, variant, pred_label, gt_label in records:
         metrics = pair_paper_metrics(cache[pred_label].motion, cache[gt_label].motion)
@@ -273,17 +251,18 @@ def process_sketch(item, converter, context, config, collectors: Collectors) -> 
         by_pred.setdefault(pred_label, []).append((rid, variant, gt_label))
 
     rows: list[dict] = []
-    for arm, eta, index in sample_plan(config):
+    for eta, index in sample_plan(config):
         for pred_label, targets in by_pred.items():
             entry = cache[pred_label]
-            if entry.geometry.arm_skip_reason(arm):
+            if entry.geometry.skip_reason or entry.geometry.exactly_invariant:
                 continue
-            seed = stable_seed(config["seed"], item.sketch_id, pred_label, arm, eta, index)
-            R_eta, diagnostics = perturbed_response(
-                entry.geometry, arm, eta, seed, eps=eps, rcond=rcond
-            )
+            # An exactly-invariant response would contribute a row of zeros to every eta and
+            # pull the reported medians toward a movement it cannot have. Its population is
+            # reported by invariance_coverage.csv instead.
+            seed = stable_seed(config["seed"], item.sketch_id, pred_label, eta, index)
+            R_eta, diagnostics = perturbed_response(entry.geometry, eta, seed)
             if diagnostics["constraint_residual"] > config["consistency_tol"]:
-                collectors.skips[f"sample:{arm}:inconsistent_linear_system"] += 1
+                collectors.skips["sample:inconsistent_linear_system"] += 1
                 continue
             state = pred_response_state(R_eta, entry.j_phi, eps)
             for rid, variant, gt_label in targets:
@@ -292,7 +271,7 @@ def process_sketch(item, converter, context, config, collectors: Collectors) -> 
                     continue
                 rows.append(dict(
                     batch=item.batch, sketch_id=item.sketch_id, rid=rid,
-                    variant=variant, gt=gt_label, arm=arm, eta=eta, sample=index,
+                    variant=variant, gt=gt_label, eta=eta, sample=index,
                     **metrics, **diagnostics,
                 ))
     collectors.samples.extend(rows)
@@ -310,10 +289,9 @@ def build_config(args) -> dict:
         eps=args.eps,
         rcond=args.rcond,
         consistency_tol=args.consistency_tol,
-        arms=tuple(a.strip() for a in args.arms.split(",") if a.strip()),
+        gain_floor=args.gain_floor,
         etas=tuple(sorted({float(e) for e in args.etas.split(",") if e})),
         n_samples=args.n_samples,
-        n_null_samples=args.null_samples,
         seed=args.seed,
         dim_rates=tuple(float(r) for r in args.dim_drop_rates.split(",") if r),
         rel_rates=tuple(float(r) for r in args.rel_drop_rates.split(",") if r),
@@ -329,10 +307,10 @@ def main() -> None:
     parser.add_argument("--eps", type=float, default=1e-9)
     parser.add_argument("--rcond", type=float, default=1e-6)
     parser.add_argument("--consistency-tol", type=float, default=CONSISTENCY_TOL)
-    parser.add_argument("--arms", default=",".join(ARMS))
+    parser.add_argument("--gain-floor", type=float, default=OBSERVABLE_GAIN_FLOOR,
+                        help="discard a draw whose ||J_phi n|| falls below this")
     parser.add_argument("--etas", default=",".join(f"{e:g}" for e in DEFAULT_ETAS))
     parser.add_argument("--n-samples", type=int, default=DEFAULT_SAMPLES)
-    parser.add_argument("--null-samples", type=int, default=DEFAULT_NULL_SAMPLES)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--dim-drop-rates", default=",".join(f"{r:g}" for r in DEFAULT_DIM_RATES))
     parser.add_argument("--rel-drop-rates", default=",".join(f"{r:g}" for r in DEFAULT_REL_RATES))
@@ -342,9 +320,6 @@ def main() -> None:
     args = parser.parse_args()
 
     config = build_config(args)
-    unknown = set(config["arms"]) - set(ARMS)
-    if unknown:
-        raise SystemExit(f"unknown arms: {sorted(unknown)}")
     if BASELINE_ETA not in config["etas"]:
         raise SystemExit("eta = 0 is the delta baseline and must be included")
 
@@ -375,7 +350,6 @@ def main() -> None:
     native.to_parquet(out_dir / "native_pair_metrics.parquet", index=False)
     n_sample_rows = collectors.samples.n_rows
     write_csv(out_dir / "response_metadata.csv", collectors.responses, RESPONSE_COLUMNS)
-    write_csv(out_dir / "pair_null_visibility.csv", collectors.visibility, VISIBILITY_COLUMNS)
     write_csv(
         out_dir / "skip_summary.csv",
         [dict(reason=reason, count=count) for reason, count in sorted(collectors.skips.items())],

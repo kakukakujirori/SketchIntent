@@ -1,4 +1,5 @@
-"""A perturbed response must stay an exact solution of the linearised system."""
+"""A perturbed response must stay an exact solution of the linearised system, and eta must
+mean the same observable-space size for every driver column."""
 from __future__ import annotations
 
 from collections import OrderedDict
@@ -9,25 +10,17 @@ import torch
 
 from rebuttal_exp.response_perturbation import (
     INCONSISTENT_LINEAR_SYSTEM,
-    MAIN_ARM,
     NOT_UNDERCONSTRAINED,
-    NO_OBSERVABLE_NULL_DIRECTION,
     NO_NONZERO_OBSERVABLE_RESPONSE,
-    NO_NONZERO_RAW_RESPONSE,
-    OBSERVABLE_NULL_ARM,
     build_response_geometry,
     cutoff_null_space,
     perturbed_response,
-    relation_visibility,
-    stacked_observable_null,
 )
 from rebuttal_exp.tests.fixtures import arc, circle, constraint, line
 from src.metrics.edit_response_distance import (
-    _is_relational,
     compute_native_response,
     pairwise_distance_observable,
 )
-from src.metrics.motion_subspace import stack_relation_jacobians_at
 from src.sketch_handlers.context import SketchContext
 
 EPS = 1e-9
@@ -56,11 +49,14 @@ def _sketch(context: SketchContext) -> datalib.Sketch:
     return datalib.Sketch(entities=entities, constraints=constraints)
 
 
-def _geometry(context: SketchContext):
-    sketch = _sketch(context)
+def _geometry_of(context: SketchContext, sketch: datalib.Sketch):
     native = compute_native_response(sketch, context, eps=EPS)
     j_phi = pairwise_distance_observable(sketch, base_eids=None).to(dtype=native.R.dtype)
     return sketch, native, j_phi, build_response_geometry(native, j_phi, eps=EPS, rcond=RCOND)
+
+
+def _geometry(context: SketchContext):
+    return _geometry_of(context, _sketch(context))
 
 
 # ---------------------------------------------------------------------------
@@ -81,35 +77,25 @@ def test_cutoff_null_space_keeps_the_full_null_space_of_a_wide_matrix():
     assert Vh_economy.shape[0] == 2, "economy SVD cannot express this null space"
 
 
-def test_stacked_null_space_annihilates_both_jacobians(context):
-    _sk, native, j_phi, geometry = _geometry(context)
-    G = geometry.G
+def test_observable_gain_max_is_the_supremum_of_the_guarded_quantity(context):
+    """No unit direction in ker(J_x) can beat sigma_max(J_phi N), which the guard compares to."""
+    _sk, _native, j_phi, geometry = _geometry(context)
+    generator = torch.Generator().manual_seed(0)
+    coefficients = torch.randn(geometry.N.shape[1], 64, generator=generator, dtype=torch.float64)
+    directions = geometry.N @ (coefficients / torch.linalg.norm(coefficients, dim=0))
 
-    assert torch.allclose(native.J_x @ G, torch.zeros(native.J_x.shape[0], G.shape[1],
-                                                      dtype=G.dtype), atol=1e-9)
-    assert torch.allclose(j_phi @ G, torch.zeros(j_phi.shape[0], G.shape[1], dtype=G.dtype),
-                          atol=1e-9)
-    assert geometry.observable_null_dim <= geometry.raw_null_dim
+    gains = torch.linalg.norm(j_phi @ directions, dim=0)
 
-
-def test_stacked_null_space_is_not_a_numerical_intersection(context):
-    """Built from one SVD of [J_x; J_phi], so no tolerance is spent twice."""
-    _sk, native, j_phi, _geo = _geometry(context)
-    G = stacked_observable_null(native.J_x, j_phi, EPS, RCOND)
-    stacked = torch.cat([native.J_x, j_phi], dim=0)
-    assert torch.linalg.matrix_rank(stacked, rtol=1e-8) + G.shape[1] == native.J_x.shape[1]
+    assert float(gains.max()) <= geometry.observable_gain_max * (1 + 1e-9)
 
 
 # ---------------------------------------------------------------------------
-# Admissibility
+# Admissibility and the eta guarantee
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("arm", [MAIN_ARM, OBSERVABLE_NULL_ARM])
-def test_perturbed_response_still_solves_the_linearised_system(context, arm):
+def test_perturbed_response_still_solves_the_linearised_system(context):
     _sk, native, _j_phi, geometry = _geometry(context)
-    R_eta, diagnostics = perturbed_response(
-        geometry, arm, ETA, seed=7, eps=EPS, rcond=RCOND
-    )
+    R_eta, diagnostics = perturbed_response(geometry, ETA, seed=7)
 
     baseline = torch.linalg.norm(native.J_x @ native.R + native.J_p)
     perturbed = torch.linalg.norm(native.J_x @ R_eta + native.J_p)
@@ -119,47 +105,95 @@ def test_perturbed_response_still_solves_the_linearised_system(context, arm):
     assert not torch.allclose(R_eta, native.R)
 
 
-def test_main_arm_moves_each_column_by_eta_times_its_observable_norm(context):
+def test_each_column_moves_by_eta_times_its_observable_norm(context):
+    """The whole point of the scheme: eta is an observable-space size, not a raw one."""
     _sk, _native, j_phi, geometry = _geometry(context)
-    R_eta, _diag = perturbed_response(geometry, MAIN_ARM, ETA, seed=3, eps=EPS, rcond=RCOND)
+    R_eta, diagnostics = perturbed_response(geometry, ETA, seed=3)
 
+    assert diagnostics["n_columns_guarded"] == 0
     increment = j_phi @ (R_eta - geometry.R0)
     for column in range(int(geometry.R0.shape[1])):
         expected = ETA * float(geometry.observable_column_norms[column])
         assert float(torch.linalg.norm(increment[:, column])) == pytest.approx(expected, rel=1e-8)
 
 
-def test_observable_null_arm_leaves_the_observable_response_untouched(context):
-    _sk, _native, j_phi, geometry = _geometry(context)
-    R_eta, _diag = perturbed_response(geometry, OBSERVABLE_NULL_ARM, ETA, seed=3)
-
-    assert torch.allclose(j_phi @ R_eta, j_phi @ geometry.R0, atol=1e-9)
-    increment = R_eta - geometry.R0
-    for column in range(int(geometry.R0.shape[1])):
-        expected = ETA * float(geometry.raw_column_norms[column])
-        assert float(torch.linalg.norm(increment[:, column])) == pytest.approx(expected, rel=1e-8)
-
-
 def test_eta_zero_returns_the_minimum_norm_response_itself(context):
     _sk, _native, _j_phi, geometry = _geometry(context)
-    for arm in (MAIN_ARM, OBSERVABLE_NULL_ARM):
-        R_eta, diagnostics = perturbed_response(geometry, arm, 0.0, seed=1)
-        assert R_eta is geometry.R0
-        assert diagnostics["raw_perturbation_ratio"] == 0.0
-        assert diagnostics["constraint_residual"] == pytest.approx(
-            geometry.consistency_residual
-        )
-        assert diagnostics["nullspace_residual"] == 0.0
+    R_eta, diagnostics = perturbed_response(geometry, 0.0, seed=1)
+
+    assert R_eta is geometry.R0
+    assert diagnostics["raw_perturbation_ratio"] == 0.0
+    assert diagnostics["constraint_residual"] == pytest.approx(geometry.consistency_residual)
+    assert diagnostics["nullspace_residual"] == 0.0
+    assert diagnostics["n_columns_guarded"] == 0
 
 
 def test_samples_are_reproducible_and_seed_dependent(context):
     _sk, _native, _j_phi, geometry = _geometry(context)
-    first, _ = perturbed_response(geometry, MAIN_ARM, ETA, seed=11, eps=EPS, rcond=RCOND)
-    again, _ = perturbed_response(geometry, MAIN_ARM, ETA, seed=11, eps=EPS, rcond=RCOND)
-    other, _ = perturbed_response(geometry, MAIN_ARM, ETA, seed=12, eps=EPS, rcond=RCOND)
+    first, _ = perturbed_response(geometry, ETA, seed=11)
+    again, _ = perturbed_response(geometry, ETA, seed=11)
+    other, _ = perturbed_response(geometry, ETA, seed=12)
 
     assert torch.equal(first, again)
     assert not torch.allclose(first, other)
+
+
+# ---------------------------------------------------------------------------
+# The draw guard
+# ---------------------------------------------------------------------------
+
+def test_a_draw_below_the_gain_floor_leaves_its_column_untouched(context):
+    """Below the floor the quotient eta ||M_j|| / ||J_phi n|| is roundoff, not a direction."""
+    _sk, _native, _j_phi, geometry = _geometry(context)
+    R_eta, diagnostics = perturbed_response(geometry, ETA, seed=3, gain_floor=1e9)
+
+    assert torch.equal(R_eta, geometry.R0)
+    assert diagnostics["n_columns_guarded"] == int(geometry.R0.shape[1])
+    assert diagnostics["raw_perturbation_ratio"] == 0.0
+    assert diagnostics["min_observable_gain"] < 1e9
+
+
+def test_the_floor_governs_the_response_verdict_and_the_draw_alike(context):
+    """One threshold, two scales: raising it must move both tests together."""
+    sketch = _sketch(context)
+    native = compute_native_response(sketch, context, eps=EPS)
+    j_phi = pairwise_distance_observable(sketch, base_eids=None).to(dtype=native.R.dtype)
+
+    strict = build_response_geometry(native, j_phi, eps=EPS, rcond=RCOND, gain_floor=1e9)
+    R_eta, diagnostics = perturbed_response(strict, ETA, seed=3)
+
+    assert strict.exactly_invariant, "no direction can pass a floor above the gain supremum"
+    assert torch.equal(R_eta, strict.R0)
+    assert diagnostics["n_columns_guarded"] == int(strict.R0.shape[1])
+
+
+def test_an_observable_invisible_null_space_is_exactly_invariant(context):
+    """ker(J_x) = rigid motion + the Line's parameterisation gauge, both invisible to phi.
+
+    phi is a complete rigid invariant (pairwise landmark distances plus radii) and the Line's
+    (pnt, dir, startParam, endParam) carries two redundancies that leave both endpoints
+    fixed, so J_phi N vanishes and J_phi R cannot depend on the response choice.
+    """
+    sketch = datalib.Sketch(
+        entities=OrderedDict([
+            ("0", line("0", 0.0, 0.0, 2.0, 0.0)),
+            ("1", circle("1", 0.0, 0.0, 0.5)),
+        ]),
+        constraints=OrderedDict([
+            ("c0", constraint(context, "Coincident", ("0.start", "1.center"))),
+            ("c1", constraint(context, "Radius", ("1",), value=0.5)),
+            ("c2", constraint(context, "Distance", ("0.start", "0.end"), value=2.0)),
+        ]),
+    )
+    _sk, _native, j_phi, geometry = _geometry_of(context, sketch)
+
+    assert geometry.raw_null_dim > 0
+    assert geometry.observable_free_rank == 0
+    assert geometry.exactly_invariant
+    R_eta, diagnostics = perturbed_response(geometry, 1.0, seed=4)
+    assert torch.equal(R_eta, geometry.R0)
+    assert diagnostics["n_columns_guarded"] == int(geometry.R0.shape[1])
+    assert torch.allclose(j_phi @ R_eta, j_phi @ geometry.R0)
 
 
 # ---------------------------------------------------------------------------
@@ -180,7 +214,6 @@ def test_fully_constrained_response_is_flagged_not_perturbed(context):
     geometry = build_response_geometry(fake, j_phi, eps=EPS, rcond=RCOND)
     assert geometry.raw_null_dim == 0
     assert geometry.skip_reason == NOT_UNDERCONSTRAINED
-    assert geometry.arm_skip_reason(MAIN_ARM) == NOT_UNDERCONSTRAINED
 
 
 def test_inconsistent_linear_system_is_a_separate_category(context):
@@ -193,35 +226,23 @@ def test_inconsistent_linear_system_is_a_separate_category(context):
     assert geometry.skip_reason == INCONSISTENT_LINEAR_SYSTEM
 
 
-def test_absent_observable_null_directions_skip_only_that_arm(context):
-    _sk, native, j_phi, geometry = _geometry(context)
-    dense = type(native)(native.state, native.J_x, native.J_p, native.R,
-                         native.dim_constraint_ids)
-    full_observable = torch.eye(native.J_x.shape[1], dtype=j_phi.dtype)
-
-    without_null = build_response_geometry(dense, full_observable, eps=EPS, rcond=RCOND)
-    assert without_null.observable_null_dim == 0
-    assert without_null.arm_skip_reason(OBSERVABLE_NULL_ARM) == NO_OBSERVABLE_NULL_DIRECTION
-    assert without_null.arm_skip_reason(MAIN_ARM) == ""
-    assert geometry.observable_null_dim > 0
-
-
 def test_zero_response_columns_receive_no_noise(context):
     _sk, native, j_phi, geometry = _geometry(context)
     zeroed = geometry.R0.clone()
     zeroed[:, 0] = 0.0
     silent = build_response_geometry(
         type(native)(native.state, native.J_x, native.J_p, zeroed, native.dim_constraint_ids),
-        j_phi, eps=EPS, rcond=RCOND,
+        j_phi, eps=EPS, rcond=RCOND, consistency_tol=float("inf"),
     )
 
     assert silent.n_zero_observable_columns >= 1
-    R_eta, _diag = perturbed_response(silent, MAIN_ARM, ETA, seed=5, eps=EPS, rcond=RCOND)
+    R_eta, diagnostics = perturbed_response(silent, ETA, seed=5)
     assert torch.allclose(R_eta[:, 0], zeroed[:, 0], atol=1e-15)
+    assert diagnostics["n_columns_guarded"] == 0, "a zero column is not a guarded draw"
 
 
-def test_an_arm_skips_a_response_when_every_driver_column_is_zero(context):
-    _sk, native, j_phi, _unused_geometry = _geometry(context)
+def test_a_response_with_no_observable_motion_at_all_is_skipped(context):
+    _sk, native, j_phi, _unused = _geometry(context)
     zeroed = torch.zeros_like(native.R)
     silent = build_response_geometry(
         type(native)(native.state, native.J_x, native.J_p, zeroed,
@@ -229,22 +250,4 @@ def test_an_arm_skips_a_response_when_every_driver_column_is_zero(context):
         j_phi, eps=EPS, rcond=RCOND, consistency_tol=float("inf"),
     )
 
-    assert silent.arm_skip_reason(MAIN_ARM) == NO_NONZERO_OBSERVABLE_RESPONSE
-    assert silent.arm_skip_reason(OBSERVABLE_NULL_ARM) == NO_NONZERO_RAW_RESPONSE
-
-
-# ---------------------------------------------------------------------------
-# Stratification key for the auxiliary arm
-# ---------------------------------------------------------------------------
-
-def test_relation_visibility_separates_pure_gauge_from_relation_visible(context):
-    sketch, native, j_phi, geometry = _geometry(context)
-    rels = [c for c in sketch.constraints.values() if _is_relational(c)]
-    J_R, _n = stack_relation_jacobians_at(rels, native.state, context)
-
-    seen = relation_visibility(J_R, geometry.G, eps=EPS, rcond=RCOND)
-    assert seen["relation_null_overlap_rank"] <= geometry.observable_null_dim
-    assert seen["relation_null_overlap_norm"] >= 0.0
-
-    blind = relation_visibility(None, geometry.G, eps=EPS, rcond=RCOND)
-    assert blind == dict(relation_null_overlap_norm=0.0, relation_null_overlap_rank=0)
+    assert silent.skip_reason == NO_NONZERO_OBSERVABLE_RESPONSE

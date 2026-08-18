@@ -2,24 +2,34 @@
 
 The linearised system ``J_x R = -J_p`` is under-determined whenever ``ker(J_x)`` is
 non-trivial, so every ``R0 + N Z`` with ``N = ker(J_x)`` is an equally valid first-order
-response. Two arms sample that freedom:
+response. We sample that freedom one driver column at a time:
 
-    main            (paper section 4.5) the free motion is sized in *observable* space,
-                    so ``eta`` means the same physical thing across sketches. By
-                    construction E lies in range(J_phi N), which means the arm can never
-                    excite a direction the observable cannot see.
+    n_j  uniform on the unit sphere of ker(J_x)
+    Delta_j = eta * ||(J_phi R0)_j|| * n_j / ||J_phi n_j||
 
-    observable_null (auxiliary) the free motion is drawn from G = ker([J_x; J_phi]) and
-                    sized in *raw* space. Both J_x R and J_phi R are then preserved
-                    exactly, so theta_full / theta_rel / S_place cannot move and only
-                    theta_leak -- which compares range(R) in raw primitive tangent space --
-                    is exposed. The two arms' eta are not comparable and must not be
-                    plotted on one axis.
+so ``||J_phi Delta_j|| = eta ||(J_phi R0)_j||`` exactly: eta is an *observable-space* size
+and therefore means the same physical thing across sketches, which a Gaussian coefficient in
+raw state coordinates (mixing mm, radians and Line direction components) would not.
 
-G is the null space of the *stacked* Jacobian rather than a numerical intersection of two
-separately computed null spaces, and it is not called a gauge basis: ker(J_phi) also holds
-directions such as global rotation, which the pairwise-distance observable cannot see but
-GT relations can.
+The division is the scheme's only fragile step. ``ker(J_x)`` is mostly invisible to J_phi --
+it contains global rigid motion (phi is a complete rigid invariant), the two-per-Line
+parameterisation gauge of ``(pnt, dir, startParam, endParam)``, and every coordinate of an
+entity outside ``base_eids`` -- so a draw can land where ``||J_phi n_j||`` is numerically
+zero. Such a draw is discarded, not rescaled: below ``OBSERVABLE_GAIN_FLOOR`` the quotient
+is roundoff, not a direction.
+
+How much the floor matters is measured rather than assumed. There is no clean gap to hide
+in: over the full run the draw gains thin out continuously, and each decade of floor from
+1e-10 to 1e-5 discards a few hundred more draws of 1.29 million. What makes the choice
+harmless is the consequence, not a gap -- ``analyze_pseudoinverse.floor_sensitivity``
+re-derives the reported statistics under each candidate floor, and moving it four orders up
+to 1e-5 shifts every reported median and Q90 by under 0.5% relative.
+
+A response for which *every* direction is discarded is not a sampling failure. It means
+``J_phi N = 0``, hence ``J_phi R = J_phi R0`` for every admissible R, so theta_full,
+theta_rel and S_place cannot depend on the minimum-norm choice at all -- see
+``ResponseGeometry.exactly_invariant``. Only theta_leak, which compares ``range(R)`` in raw
+state space, stays response-dependent there.
 """
 from __future__ import annotations
 
@@ -28,21 +38,18 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
-MAIN_ARM = "main"
-OBSERVABLE_NULL_ARM = "observable_null"
-ARMS = (MAIN_ARM, OBSERVABLE_NULL_ARM)
-
 EPS_DEFAULT = 1e-9
 RCOND_DEFAULT = 1e-6
+OBSERVABLE_GAIN_FLOOR = 1e-9
+"""Draw guard on ``||J_phi n||`` for a unit ``n``. This is the absolute floor of
+``effective_cutoff`` -- the same number the evaluator already uses to decide that a
+singular value is zero -- reused at the level of a single sampled direction."""
 ZERO_COLUMN_TOL = 1e-12
 CONSISTENCY_TOL = 1e-6
 
 NOT_UNDERCONSTRAINED = "not_underconstrained"
 INCONSISTENT_LINEAR_SYSTEM = "inconsistent_linear_system"
-NO_OBSERVABLE_FREE_DIRECTION = "no_observable_free_direction"
-NO_OBSERVABLE_NULL_DIRECTION = "no_observable_null_direction"
 NO_NONZERO_OBSERVABLE_RESPONSE = "no_nonzero_observable_response"
-NO_NONZERO_RAW_RESPONSE = "no_nonzero_raw_response"
 
 
 def effective_cutoff(singular_values: torch.Tensor, eps: float, rcond: float) -> float:
@@ -69,38 +76,6 @@ def cutoff_null_space(
     return Vh[kept].T.contiguous()
 
 
-def cutoff_range(
-    A: torch.Tensor, eps: float = EPS_DEFAULT, rcond: float = RCOND_DEFAULT
-) -> torch.Tensor:
-    """Orthonormal basis of range(A) under the same cutoff convention."""
-    if A.numel() == 0 or A.shape[1] == 0:
-        return torch.zeros(A.shape[0], 0, dtype=A.dtype)
-    U, S, _Vh = torch.linalg.svd(A, full_matrices=False)
-    keep = int((S >= effective_cutoff(S, eps, rcond)).sum())
-    return U[:, :keep].contiguous() if keep else torch.zeros(A.shape[0], 0, dtype=A.dtype)
-
-
-def cutoff_pinv(
-    A: torch.Tensor, eps: float = EPS_DEFAULT, rcond: float = RCOND_DEFAULT
-) -> torch.Tensor:
-    if A.numel() == 0:
-        return torch.zeros(A.shape[1], A.shape[0], dtype=A.dtype)
-    U, S, Vh = torch.linalg.svd(A, full_matrices=False)
-    keep = S >= effective_cutoff(S, eps, rcond)
-    if not bool(keep.any()):
-        return torch.zeros(A.shape[1], A.shape[0], dtype=A.dtype)
-    return Vh.T[:, keep] @ torch.diag(1.0 / S[keep]) @ U[:, keep].T
-
-
-def stacked_observable_null(
-    J_x: torch.Tensor, J_phi: torch.Tensor,
-    eps: float = EPS_DEFAULT, rcond: float = RCOND_DEFAULT,
-) -> torch.Tensor:
-    """G = ker([J_x; J_phi]), taken from one SVD of the stacked matrix."""
-    stacked = torch.cat([J_x, J_phi.to(dtype=J_x.dtype)], dim=0)
-    return cutoff_null_space(stacked, eps, rcond)
-
-
 @dataclass(frozen=True)
 class ResponseGeometry:
     """Everything about one annotation's response freedom that no sample changes."""
@@ -110,47 +85,39 @@ class ResponseGeometry:
     J_p: torch.Tensor
     J_phi: torch.Tensor
     N: torch.Tensor
-    U_free: torch.Tensor
-    K_pinv: torch.Tensor
-    G: torch.Tensor
     observable_column_norms: torch.Tensor
-    raw_column_norms: torch.Tensor
-    r0_frobenius: float
-    raw_null_dim: int
+    observable_gain_max: float
+    """sigma_max(J_phi N): the largest ``||J_phi n||`` any unit ``n`` in ker(J_x) can reach,
+    i.e. the supremum of the quantity each draw is guarded on."""
     observable_free_rank: int
-    observable_null_dim: int
+    """rank(J_phi N). Reported for stratification only -- the sampler never branches on it."""
+    raw_null_dim: int
+    r0_frobenius: float
     consistency_residual: float
     n_zero_observable_columns: int
-    n_zero_raw_columns: int
+    gain_floor: float
+    """The draw guard, carried here so the response-level verdict below and the per-draw test
+    in ``perturbed_response`` can never be judged against two different thresholds."""
     skip_reason: str
 
-    def arm_skip_reason(self, arm: str) -> str:
-        if self.skip_reason:
-            return self.skip_reason
-        if arm == MAIN_ARM and self.observable_free_rank == 0:
-            return NO_OBSERVABLE_FREE_DIRECTION
-        if arm == MAIN_ARM and (
-            self.R0.shape[1] == 0
-            or self.n_zero_observable_columns == self.R0.shape[1]
-        ):
-            return NO_NONZERO_OBSERVABLE_RESPONSE
-        if arm == OBSERVABLE_NULL_ARM and self.observable_null_dim == 0:
-            return NO_OBSERVABLE_NULL_DIRECTION
-        if arm == OBSERVABLE_NULL_ARM and (
-            self.R0.shape[1] == 0 or self.n_zero_raw_columns == self.R0.shape[1]
-        ):
-            return NO_NONZERO_RAW_RESPONSE
-        return ""
+    @property
+    def exactly_invariant(self) -> bool:
+        """J_phi N is numerically zero, so J_phi R is the same for every admissible R.
+
+        Equivalently: no unit direction in ker(J_x) can pass the draw guard, since
+        ``observable_gain_max`` is the supremum of the quantity each draw is tested on.
+        """
+        return self.observable_gain_max < self.gain_floor
 
     def as_record(self) -> dict:
         return dict(
             raw_null_dim=self.raw_null_dim,
             observable_free_rank=self.observable_free_rank,
-            observable_null_dim=self.observable_null_dim,
+            observable_gain_max=self.observable_gain_max,
+            exactly_invariant=self.exactly_invariant,
             consistency_residual=self.consistency_residual,
             r0_frobenius=self.r0_frobenius,
             n_zero_observable_columns=self.n_zero_observable_columns,
-            n_zero_raw_columns=self.n_zero_raw_columns,
             n_drivers=int(self.R0.shape[1]),
             skip_reason=self.skip_reason,
         )
@@ -160,6 +127,7 @@ def build_response_geometry(
     native, J_phi: torch.Tensor,
     eps: float = EPS_DEFAULT, rcond: float = RCOND_DEFAULT,
     consistency_tol: float = CONSISTENCY_TOL,
+    gain_floor: float = OBSERVABLE_GAIN_FLOOR,
 ) -> ResponseGeometry:
     dtype = native.R.dtype
     J_phi = J_phi.to(dtype=dtype)
@@ -170,18 +138,16 @@ def build_response_geometry(
     consistency_residual = float(residual) / denominator
 
     N = cutoff_null_space(J_x, eps, rcond)
-    K = J_phi @ N
-    U_free = cutoff_range(K, eps, rcond)
-    G = stacked_observable_null(J_x, J_phi, eps, rcond)
-    observable_columns = J_phi @ R0
-    observable_column_norms = torch.linalg.norm(observable_columns, dim=0)
-    raw_column_norms = torch.linalg.norm(R0, dim=0)
+    gain_max, free_rank = _observable_gain(J_phi @ N, eps, rcond)
+    observable_column_norms = torch.linalg.norm(J_phi @ R0, dim=0)
 
     skip_reason = ""
     if int(N.shape[1]) == 0:
         skip_reason = NOT_UNDERCONSTRAINED
     elif consistency_residual > consistency_tol:
         skip_reason = INCONSISTENT_LINEAR_SYSTEM
+    elif int(R0.shape[1]) == 0 or bool((observable_column_norms < ZERO_COLUMN_TOL).all()):
+        skip_reason = NO_NONZERO_OBSERVABLE_RESPONSE
 
     return ResponseGeometry(
         R0=R0,
@@ -189,20 +155,24 @@ def build_response_geometry(
         J_p=J_p,
         J_phi=J_phi,
         N=N,
-        U_free=U_free,
-        K_pinv=cutoff_pinv(K, eps, rcond),
-        G=G,
         observable_column_norms=observable_column_norms,
-        raw_column_norms=raw_column_norms,
-        r0_frobenius=float(torch.linalg.norm(R0)) if R0.numel() else 0.0,
+        observable_gain_max=gain_max,
+        observable_free_rank=free_rank,
         raw_null_dim=int(N.shape[1]),
-        observable_free_rank=int(U_free.shape[1]),
-        observable_null_dim=int(G.shape[1]),
+        r0_frobenius=float(torch.linalg.norm(R0)) if R0.numel() else 0.0,
         consistency_residual=consistency_residual,
         n_zero_observable_columns=int((observable_column_norms < ZERO_COLUMN_TOL).sum()),
-        n_zero_raw_columns=int((raw_column_norms < ZERO_COLUMN_TOL).sum()),
+        gain_floor=gain_floor,
         skip_reason=skip_reason,
     )
+
+
+def _observable_gain(K: torch.Tensor, eps: float, rcond: float) -> tuple[float, int]:
+    """(sigma_max, rank) of ``K = J_phi N`` from one SVD; no basis is retained."""
+    if K.numel() == 0 or K.shape[1] == 0:
+        return 0.0, 0
+    S = torch.linalg.svdvals(K)
+    return float(S[0]), int((S >= effective_cutoff(S, eps, rcond)).sum())
 
 
 def _unit_columns(basis: torch.Tensor, n_columns: int, seed: int) -> torch.Tensor:
@@ -217,75 +187,58 @@ def _unit_columns(basis: torch.Tensor, n_columns: int, seed: int) -> torch.Tenso
 
 
 def perturbed_response(
-    geometry: ResponseGeometry, arm: str, eta: float, seed: int,
-    eps: float = EPS_DEFAULT, rcond: float = RCOND_DEFAULT,
+    geometry: ResponseGeometry, eta: float, seed: int,
+    *, gain_floor: float | None = None,
 ) -> tuple[torch.Tensor, dict]:
-    if arm == MAIN_ARM:
-        return _observable_normalized_response(geometry, eta, seed, eps, rcond)
-    if arm == OBSERVABLE_NULL_ARM:
-        return _observable_null_response(geometry, eta, seed)
-    raise ValueError(f"unknown arm: {arm}")
+    """``R0 + Delta`` with ``Delta_j = eta ||M_j|| n_j / ||J_phi n_j||``.
 
-
-def _observable_normalized_response(
-    geometry: ResponseGeometry, eta: float, seed: int, eps: float, rcond: float
-) -> tuple[torch.Tensor, dict]:
-    """R0 + N K^+ E with E_j = eta * ||(J_phi R0)_j|| * unit vector in range(J_phi N)."""
+    A column is left untouched when its observable response is zero (there is no size to
+    scale to) or when its draw falls below ``gain_floor``; both are counted rather than
+    silently rescaled or resampled. No retry loop: resampling would replace the uniform
+    distribution on ker(J_x) with a conditioned one, and the measured rejection rate does not
+    justify that -- once the exactly-invariant responses are set aside, the full run guarded
+    30 columns out of 1.29 million draws.
+    """
+    gain_floor = geometry.gain_floor if gain_floor is None else gain_floor
     R0 = geometry.R0
-    if eta == 0.0 or geometry.observable_free_rank == 0 or R0.shape[1] == 0:
-        return R0, _sample_diagnostics(geometry, R0)
-    directions = _unit_columns(geometry.U_free, int(R0.shape[1]), seed)
-    scales = geometry.observable_column_norms.clone()
-    scales[scales < ZERO_COLUMN_TOL] = 0.0
-    E = directions * (eta * scales)
-    R_eta = R0 + geometry.N @ (geometry.K_pinv @ E)
-    return R_eta, _sample_diagnostics(geometry, R_eta)
+    n_columns = int(R0.shape[1])
+    if eta == 0.0 or n_columns == 0:
+        return R0, _sample_diagnostics(geometry, R0, n_guarded=0, gains=None)
+
+    directions = _unit_columns(geometry.N, n_columns, seed)
+    gains = torch.linalg.norm(geometry.J_phi @ directions, dim=0)
+    sizeable = geometry.observable_column_norms >= ZERO_COLUMN_TOL
+    guarded = sizeable & (gains < gain_floor)
+    usable = sizeable & ~guarded
+
+    factors = torch.zeros_like(gains)
+    factors[usable] = eta * geometry.observable_column_norms[usable] / gains[usable]
+    R_eta = R0 + directions * factors if bool(usable.any()) else R0
+    return R_eta, _sample_diagnostics(
+        geometry, R_eta, n_guarded=int(guarded.sum()), gains=gains[sizeable]
+    )
 
 
-def _observable_null_response(
-    geometry: ResponseGeometry, eta: float, seed: int
-) -> tuple[torch.Tensor, dict]:
-    """R0 + eta * ||R0_j|| * unit vector in ker([J_x; J_phi]), column by column."""
-    R0 = geometry.R0
-    if eta == 0.0 or geometry.observable_null_dim == 0 or R0.shape[1] == 0:
-        return R0, _sample_diagnostics(geometry, R0)
-    directions = _unit_columns(geometry.G, int(R0.shape[1]), seed)
-    scales = geometry.raw_column_norms.clone()
-    scales[scales < ZERO_COLUMN_TOL] = 0.0
-    R_eta = R0 + directions * (eta * scales)
-    return R_eta, _sample_diagnostics(geometry, R_eta)
-
-
-def _sample_diagnostics(geometry: ResponseGeometry, R_eta: torch.Tensor) -> dict:
+def _sample_diagnostics(
+    geometry: ResponseGeometry, R_eta: torch.Tensor, *, n_guarded: int,
+    gains: torch.Tensor | None,
+) -> dict:
+    """``gains`` holds the draw gains of the columns the guard actually judged, so
+    ``min_observable_gain`` is what a different floor would have to cross to change this
+    draw, which is what makes the floor's arbitrariness measurable after the fact.
+    """
     delta = R_eta - geometry.R0
     denominator = max(
         float(torch.linalg.norm(geometry.J_p)) if geometry.J_p.numel() else 0.0,
         1.0,
     )
-    rhs = geometry.J_p
-    total_residual = geometry.J_x @ R_eta + rhs
+    total_residual = geometry.J_x @ R_eta + geometry.J_p
     nullspace_residual = geometry.J_x @ delta
     return dict(
         raw_perturbation_ratio=float(torch.linalg.norm(delta))
         / max(geometry.r0_frobenius, ZERO_COLUMN_TOL),
         constraint_residual=float(torch.linalg.norm(total_residual)) / denominator,
         nullspace_residual=float(torch.linalg.norm(nullspace_residual)) / denominator,
-    )
-
-
-def relation_visibility(J_R: torch.Tensor | None, G: torch.Tensor,
-                        eps: float = EPS_DEFAULT, rcond: float = RCOND_DEFAULT) -> dict:
-    """How much of the observable-null freedom the GT relations can still see.
-
-    ``rank == 0`` marks directions invisible to both this GT relation Jacobian and the
-    observable.  This is a visibility label, not a claim that every such direction is a
-    primitive-parameterization gauge (global rigid motion can also be invisible).
-    """
-    if J_R is None or J_R.numel() == 0 or G.shape[1] == 0:
-        return dict(relation_null_overlap_norm=0.0, relation_null_overlap_rank=0)
-    overlap = J_R.to(dtype=G.dtype) @ G
-    U = cutoff_range(overlap, eps, rcond)
-    return dict(
-        relation_null_overlap_norm=float(torch.linalg.norm(overlap)),
-        relation_null_overlap_rank=int(U.shape[1]),
+        n_columns_guarded=n_guarded,
+        min_observable_gain=float(gains.min()) if gains is not None and gains.numel() else float("nan"),
     )

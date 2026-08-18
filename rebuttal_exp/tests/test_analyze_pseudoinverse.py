@@ -7,8 +7,12 @@ import pytest
 from rebuttal_exp.analyze_pseudoinverse import (
     ORDERING_TOL,
     flip_rate,
+    floor_sensitivity,
+    floor_sensitivity_worst_shift,
+    guard_summary,
     identity_gate_failed,
     identity_report,
+    invariance_coverage,
     ordering_violations,
     paired_samples,
     variant_ordering,
@@ -105,7 +109,7 @@ def _frames(perturbed: dict) -> tuple[pd.DataFrame, pd.DataFrame]:
         theta_leak=[0.1, 0.0], placement_sim=[0.8, 1.0], **RANKS,
     ))
     samples = pd.DataFrame(dict(
-        **keys, sketch_id=["s", "s"], arm=["main", "main"], eta=[0.0, 0.0], sample=[0, 0],
+        **keys, sketch_id=["s", "s"], eta=[0.0, 0.0], sample=[0, 0],
         **RANKS, **perturbed,
     ))
     return native, samples
@@ -162,6 +166,102 @@ def test_records_without_a_baseline_are_dropped():
     orphan["rid"] = ["unknown", "r1"]
 
     assert len(paired_samples(native, orphan)) == 1
+
+
+# ---------------------------------------------------------------------------
+# Exact invariance and the draw guard
+# ---------------------------------------------------------------------------
+
+def _responses() -> pd.DataFrame:
+    return pd.DataFrame(dict(
+        sketch_id=["s0", "s0", "s1", "s1"],
+        label=["A", "ours", "B", "rid:d50"],
+        label_kind=["human", "model", "human", "dropout_control"],
+        raw_null_dim=[16, 18, 14, 22],
+        observable_free_rank=[0, 3, 0, 6],
+        observable_gain_max=[6e-15, 0.4, 2e-15, 1.1],
+        exactly_invariant=[True, False, True, False],
+        skip_reason=["", "", "", ""],
+    ))
+
+
+def test_invariance_coverage_splits_by_population():
+    coverage = invariance_coverage(_responses()).set_index("label_kind")
+
+    assert coverage.loc["all", "fraction_exactly_invariant"] == 0.5
+    assert coverage.loc["human", "fraction_exactly_invariant"] == 1.0
+    assert coverage.loc["dropout_control", "fraction_exactly_invariant"] == 0.0
+    assert coverage.loc["human", "n_exactly_invariant"] == 2
+
+
+def test_invariance_coverage_ignores_responses_the_runner_skipped():
+    responses = _responses()
+    responses.loc[1, "skip_reason"] = "inconsistent_linear_system"
+
+    coverage = invariance_coverage(responses).set_index("label_kind")
+
+    assert coverage.loc["all", "n_responses"] == 3
+    assert "model" not in coverage.index
+
+
+def _draws(gains: list[float], guarded: list[int]) -> pd.DataFrame:
+    n = len(gains)
+    return pd.DataFrame(dict(
+        sketch_id=["s"] * n, rid=[f"r{i}" for i in range(n)], variant=["ours"] * n,
+        pred_label=[f"p{i}" for i in range(n)],
+        gt=["A"] * n, eta=[0.1] * n, sample=list(range(n)),
+        min_observable_gain=gains, n_columns_guarded=guarded,
+    ))
+
+
+def test_guard_summary_counts_what_each_candidate_floor_would_discard():
+    summary = guard_summary(_draws([1e-2, 5e-1, 1e-15, 5e-7], [0, 0, 2, 0]))
+
+    assert int(summary["n_columns_guarded"].iloc[0]) == 2
+    assert int(summary["n_draws_with_a_guarded_column"].iloc[0]) == 1
+    # only the 1e-15 draw is below 1e-9; the 5e-7 one joins it once the floor reaches 1e-6
+    assert int(summary["would_guard_at_1e-09"].iloc[0]) == 1
+    assert int(summary["would_guard_at_1e-06"].iloc[0]) == 2
+
+
+def test_floor_sensitivity_recomputes_on_what_each_floor_would_keep():
+    """A floor only matters through the rows it removes, so it is applied post hoc."""
+    paired = pd.DataFrame(dict(
+        eta=[0.1] * 4, min_observable_gain=[1e-2, 1e-2, 1e-2, 1e-8],
+        theta_full=[0.10, 0.10, 0.10, 0.90], theta_full_0=[0.0] * 4,
+        theta_rel=[0.0] * 4, theta_rel_0=[0.0] * 4,
+        theta_leak=[0.0] * 4, theta_leak_0=[0.0] * 4,
+        placement_sim=[1.0] * 4, placement_sim_0=[1.0] * 4,
+    ))
+
+    frame = floor_sensitivity(paired)
+    full = frame[(frame.gain_floor == 1e-12) & (frame.metric == "theta_full")]
+    strict = frame[(frame.gain_floor == 1e-7) & (frame.metric == "theta_full")]
+
+    assert int(full["n_rows"].iloc[0]) == 4
+    assert int(strict["n_rows"].iloc[0]) == 3, "the 1e-8 draw is dropped at a 1e-7 floor"
+    assert float(strict["q90_absolute_delta"].iloc[0]) == pytest.approx(0.10)
+    assert floor_sensitivity_worst_shift(frame) > 0.0
+
+
+def test_guard_summary_counts_one_draw_per_response_not_per_record():
+    """A model response is scored against every reference pair AND both references.
+
+    One R_eta is drawn per (response, eta, sample) and reused across all of those rows, so
+    deduplicating on the evaluation-record key would count this single draw six times and
+    inflate both the denominator and the guarded-column tally.
+    """
+    rows = _draws([1e-2] * 6, [3, 3, 3, 3, 3, 3])
+    rows["pred_label"] = ["ours"] * 6
+    rows["rid"] = ["r0", "r0", "r1", "r1", "r2", "r2"]
+    rows["gt"] = ["A", "B", "A", "C", "B", "C"]
+    rows["sample"] = [0] * 6
+
+    summary = guard_summary(rows)
+
+    assert int(summary["n_draws"].iloc[0]) == 1
+    assert int(summary["n_columns_guarded"].iloc[0]) == 3, "guarded columns counted once"
+    assert int(summary["n_draws_with_a_guarded_column"].iloc[0]) == 1
 
 
 if __name__ == "__main__":

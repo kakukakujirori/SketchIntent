@@ -13,8 +13,6 @@ from rebuttal_exp.perturbed_motion import (
     pred_response_state,
 )
 from rebuttal_exp.response_perturbation import (
-    MAIN_ARM,
-    OBSERVABLE_NULL_ARM,
     build_response_geometry,
     perturbed_response,
 )
@@ -81,7 +79,7 @@ def test_evaluator_reproduces_pair_paper_metrics_at_the_baseline(pair):
 def test_substituted_response_agrees_with_the_paper_path(pair):
     """The fast path stays exact once R is no longer the minimum-norm solution."""
     pred, gt, j_phi, geometry = pair
-    R_eta, _diag = perturbed_response(geometry, MAIN_ARM, 0.5, seed=17, eps=EPS, rcond=RCOND)
+    R_eta, _diag = perturbed_response(geometry, 0.5, seed=17)
 
     slow = pair_paper_metrics(motion_with_response(pred, R_eta, j_phi), gt)
     fast = PairEvaluator(pred, gt).metrics(pred_response_state(R_eta, j_phi, EPS))
@@ -92,7 +90,7 @@ def test_substituted_response_agrees_with_the_paper_path(pair):
 
 def test_motion_with_response_rebuilds_only_the_response_dependent_fields(pair):
     pred, _gt, j_phi, geometry = pair
-    R_eta, _diag = perturbed_response(geometry, MAIN_ARM, 0.5, seed=2, eps=EPS, rcond=RCOND)
+    R_eta, _diag = perturbed_response(geometry, 0.5, seed=2)
 
     swapped = motion_with_response(pred, R_eta, j_phi)
 
@@ -107,36 +105,23 @@ def test_motion_with_response_rebuilds_only_the_response_dependent_fields(pair):
 
 @pytest.mark.parametrize("eta", ETAS)
 def test_relational_angle_is_untouched_by_the_response_choice(pair, eta):
+    """theta_rel is built from J_R and J_phi and never reads R, at any strength."""
     pred, gt, j_phi, geometry = pair
     evaluator = PairEvaluator(pred, gt)
     baseline = evaluator.metrics(pred_response_state(pred.native.R, j_phi, EPS))
 
-    for arm in (MAIN_ARM, OBSERVABLE_NULL_ARM):
-        R_eta, _diag = perturbed_response(geometry, arm, eta, seed=4, eps=EPS, rcond=RCOND)
-        moved = pair_paper_metrics(motion_with_response(pred, R_eta, j_phi), gt)
-        assert moved["theta_rel"] == baseline["theta_rel"]
+    R_eta, _diag = perturbed_response(geometry, eta, seed=4)
+    moved = pair_paper_metrics(motion_with_response(pred, R_eta, j_phi), gt)
+
+    assert moved["theta_rel"] == baseline["theta_rel"]
 
 
-@pytest.mark.parametrize("eta", ETAS)
-def test_observable_null_arm_moves_only_the_raw_space_metric(pair, eta):
-    """theta_full and S_place live in observable space, which this arm cannot reach."""
+def test_the_response_choice_moves_the_observable_metrics(pair):
     pred, gt, j_phi, geometry = pair
     evaluator = PairEvaluator(pred, gt)
     baseline = evaluator.metrics(pred_response_state(pred.native.R, j_phi, EPS))
 
-    R_eta, _diag = perturbed_response(geometry, OBSERVABLE_NULL_ARM, eta, seed=9)
-    moved = evaluator.metrics(pred_response_state(R_eta, j_phi, EPS))
-
-    assert moved["theta_full"] == pytest.approx(baseline["theta_full"], abs=1e-9)
-    assert moved["placement_sim"] == pytest.approx(baseline["placement_sim"], abs=1e-9)
-
-
-def test_main_arm_moves_the_observable_metrics(pair):
-    pred, gt, j_phi, geometry = pair
-    evaluator = PairEvaluator(pred, gt)
-    baseline = evaluator.metrics(pred_response_state(pred.native.R, j_phi, EPS))
-
-    R_eta, _diag = perturbed_response(geometry, MAIN_ARM, 1.0, seed=21, eps=EPS, rcond=RCOND)
+    R_eta, _diag = perturbed_response(geometry, 1.0, seed=21)
     moved = evaluator.metrics(pred_response_state(R_eta, j_phi, EPS))
 
     assert abs(moved["theta_full"] - baseline["theta_full"]) > 1e-6

@@ -30,7 +30,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import sketchgraphs.data as datalib  # noqa: E402
 
-from ablation.controls import relation_dropout_variant  # noqa: E402
 from rebuttal_exp.common import (  # noqa: E402
     BASE_POLICY,
     build_base_eids,
@@ -55,7 +54,7 @@ from rebuttal_exp.primitive_charts import (  # noqa: E402
     identity_chart,
 )
 from rebuttal_exp.transformed_motion import TransformedMotion, transformed_pair_metrics  # noqa: E402
-from src.eval.file_bundle import dropout_variant, stable_seed  # noqa: E402
+from rebuttal_exp.variants import build_variants  # noqa: E402
 from src.eval.motion_metrics import SketchMotion, pair_paper_metrics  # noqa: E402
 from src.eval.progress import progress  # noqa: E402
 from src.metrics.histcad_2d import _bbox_diag  # noqa: E402
@@ -119,23 +118,6 @@ def response_rank(motion) -> int:
     if hasattr(motion, "k_response"):
         return int(motion.k_response)
     return int(orthonormal_range(motion.native.R, motion.eps)[1])
-
-
-def build_variants(bundle, item, refs, heldout, model_labels, dim_rates, rel_rates):
-    """The Sec. 5 variant set, seeded exactly like ablation/run_motion.py."""
-    rid = f"{item.batch}:{item.base_fcstd}:{'+'.join(refs)}__q={heldout}"
-    variants = [("heldout", heldout, bundle.sketches[heldout])]
-    for rate in dim_rates:
-        seed = stable_seed(item.batch, item.base_fcstd, rid, "dim", rate)
-        pred, *_ = dropout_variant(bundle.sketches[heldout], drop_rate=rate, seed=seed)
-        variants.append((f"dim_drop{rate:g}", f"{rid}:d{rate:g}", pred))
-    for rate in rel_rates:
-        seed = stable_seed(item.batch, item.base_fcstd, rid, "rel", rate)
-        pred, *_ = relation_dropout_variant(bundle.sketches[heldout], drop_rate=rate, seed=seed)
-        variants.append((f"rel_drop{rate:g}", f"{rid}:r{rate:g}", pred))
-    for label in model_labels:
-        variants.append((label, label, bundle.sketches[label]))
-    return rid, variants
 
 
 def process_sketch(item, converter, context, config, collectors: Collectors) -> None:

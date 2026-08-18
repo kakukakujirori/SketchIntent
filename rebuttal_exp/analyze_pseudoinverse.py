@@ -5,10 +5,12 @@ variant ordering survives each individual draw; the rank correlation is reported
 them rather than as the claim. eta = 0 is an integration gate, not a result: if the
 sampling path does not reproduce ``pair_paper_metrics`` there, nothing else is trustworthy.
 
-The two arms are summarised in the same tables but must be read separately. ``main`` sizes
-the free motion in observable space; ``observable_null`` sizes it in raw primitive space
-and cannot move the observable at all, so its eta means something different and the two
-are never pooled or plotted on one axis.
+Two accounts are reported side by side. ``invariance_coverage`` counts the responses whose
+whole null space is invisible to J_phi: there ``J_phi R`` is the same for every admissible
+response, so theta_full, theta_rel and S_place cannot move at all and no sampling is done.
+``sensitivity_summary`` covers the remainder -- the responses that really do have a choice.
+``guard_summary`` accounts for the discarded draws and shows how far the run sits from the
+guard threshold.
 """
 from __future__ import annotations
 
@@ -25,14 +27,13 @@ sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "ablation"))  # ablation/aggregate.py imports _bootstrap
 
 from ablation.aggregate import ANGLES, aggregate  # noqa: E402
-from rebuttal_exp.analyze_parameterization import (  # noqa: E402
+from rebuttal_exp.common import (  # noqa: E402
     RESOLVED_METRIC_FLOOR,
     ZERO_ANGLE_NOISE,
-    is_method_variant,
-    ordered_variants,
+    percentile_ci,
+    sketch_cluster_bootstrap,
 )
-from rebuttal_exp.common import percentile_ci, sketch_cluster_bootstrap  # noqa: E402
-from rebuttal_exp.response_perturbation import MAIN_ARM, OBSERVABLE_NULL_ARM  # noqa: E402
+from rebuttal_exp.variants import is_method_variant, ordered_variants  # noqa: E402
 
 METRICS = ("theta_full", "theta_rel", "theta_leak", "placement_sim")
 KEY = ["rid", "variant", "gt"]
@@ -49,26 +50,27 @@ RANK_COLUMNS = sorted(set(METRIC_RANK.values()))
 BASELINE_ETA = 0.0
 GATE_RTOL = 1e-8
 GATE_ATOL = 1e-10
+DRAW_KEY = ["sketch_id", "pred_label", "eta", "sample"]
+"""One perturbation realization. The response, not the evaluation record, is the unit: a
+single R_eta is drawn per Pred annotation and then scored against every record that Pred
+appears in."""
 MOVED_TOL = 1e-6
 ORDERING_TOL = 1e-6
-INVARIANCE_TOL = 1e-7
-"""theta_full and S_place live in observable space, which the observable-null arm cannot
-reach by construction, so a resolved value must not move by more than this. The bound is not
-machine epsilon: G annihilates J_phi only down to the singular-value cutoff, which leaves
-||J_phi (R_eta - R0)|| at ~1e-9, and both metrics then pass that through an SVD whose basis
-is ill-conditioned wherever singular values are close. Values sitting at the padded angle's
-own sqrt(eps) floor are judged against ZERO_ANGLE_NOISE instead: sqrt(1 - cos2/max) lifts a
-machine-precision agreement to O(1e-8) whenever two subspaces coincide."""
 WORST_CASES = 20
 FREE_RANK_BINS = [(0, 0), (1, 2), (3, 5), (6, 10**9)]
 CI_SAMPLE = 0
 """Bootstrap CIs are built on one fixed sample index; the spread across the other draws is
 reported separately as spearman_median/min_over_samples rather than folded into the CI."""
+GUARD_FLOOR_LADDER = (1e-12, 1e-10, 1e-9, 1e-8, 1e-7, 1e-6, 1e-5)
+"""Candidate guard floors. How arbitrary the chosen floor is cannot be asserted, only
+measured: every floor that discards the same draws produces a bit-identical run, so the
+counts along this ladder say exactly how far the threshold can move for free."""
 
 SENSITIVITY_COLUMNS = [
-    "arm", "eta", "metric", "n_records", "n_sketches", "n_samples", "n_rows",
-    "median_absolute_delta", "q90_absolute_delta", "q95_absolute_delta", "max_absolute_delta",
-    "median_relative_delta", "q90_relative_delta", "max_relative_delta",
+    "eta", "metric", "n_records", "n_sketches", "n_samples", "n_rows",
+    "mean_absolute_delta", "median_absolute_delta", "q90_absolute_delta",
+    "q95_absolute_delta", "max_absolute_delta",
+    "mean_relative_delta", "median_relative_delta", "q90_relative_delta", "max_relative_delta",
     "signed_delta_q05", "signed_delta_median", "signed_delta_q95",
     "n_moved", "fraction_moved", "rank_column", "fraction_rank_changed",
     "fraction_moved_with_rank_change",
@@ -77,7 +79,7 @@ SENSITIVITY_COLUMNS = [
     "spearman_ci_low", "spearman_ci_high", "n_valid_replicates",
 ]
 RANKING_COLUMNS = [
-    "arm", "eta", "metric", "n_samples", "fraction_ordering_preserved",
+    "eta", "metric", "n_samples", "fraction_ordering_preserved",
     "fraction_method_ordering_preserved", "n_comparable_pairs",
     "median_inverted_pairs", "max_inverted_pairs", "median_winner_flip_rate",
     "max_winner_flip_rate", "native_order", "worst_order",
@@ -108,7 +110,7 @@ def paired_samples(native: pd.DataFrame, samples: pd.DataFrame) -> pd.DataFrame:
 
 def identity_report(native: pd.DataFrame, samples: pd.DataFrame) -> pd.DataFrame:
     """eta = 0 gate: the sampling path must reproduce the paper path exactly."""
-    baseline = samples[(samples["arm"] == MAIN_ARM) & (samples["eta"] == BASELINE_ETA)]
+    baseline = samples[samples["eta"] == BASELINE_ETA]
     joined = native.set_index(KEY).join(baseline.set_index(KEY), rsuffix="_sampled", how="inner")
     rows = []
     for metric in METRICS:
@@ -149,16 +151,16 @@ def _quantile(values: np.ndarray, q: float) -> float:
 
 def sensitivity_summary(paired: pd.DataFrame, *, replicates: int, seed: int) -> pd.DataFrame:
     rows = []
-    for (arm, eta), group in paired.groupby(["arm", "eta"], sort=True):
+    for eta, group in paired.groupby("eta", sort=True):
         if eta == BASELINE_ETA:
             continue
         for metric in METRICS:
-            rows.append(_sensitivity_row(group, arm, eta, metric,
+            rows.append(_sensitivity_row(group, eta, metric,
                                          replicates=replicates, seed=seed))
     return pd.DataFrame(rows, columns=SENSITIVITY_COLUMNS)
 
 
-def _sensitivity_row(group: pd.DataFrame, arm: str, eta: float, metric: str,
+def _sensitivity_row(group: pd.DataFrame, eta: float, metric: str,
                      *, replicates: int, seed: int) -> dict:
     perturbed = group[metric].to_numpy(dtype=float)
     baseline = group[f"{metric}_0"].to_numpy(dtype=float)
@@ -182,13 +184,15 @@ def _sensitivity_row(group: pd.DataFrame, arm: str, eta: float, metric: str,
     ci_low, ci_high, n_valid = _bootstrap_spearman(fixed, metric, replicates, seed)
 
     return dict(
-        arm=arm, eta=eta, metric=metric,
+        eta=eta, metric=metric,
         n_records=group.groupby(KEY).ngroups, n_sketches=group["sketch_id"].nunique(),
         n_samples=group["sample"].nunique(), n_rows=len(group),
+        mean_absolute_delta=float(absolute.mean()) if absolute.size else float("nan"),
         median_absolute_delta=float(np.median(absolute)) if absolute.size else float("nan"),
         q90_absolute_delta=_quantile(absolute, 0.90),
         q95_absolute_delta=_quantile(absolute, 0.95),
         max_absolute_delta=float(absolute.max()) if absolute.size else float("nan"),
+        mean_relative_delta=float(relative.mean()) if relative.size else float("nan"),
         median_relative_delta=float(np.median(relative)) if relative.size else float("nan"),
         q90_relative_delta=_quantile(relative, 0.90),
         max_relative_delta=float(relative.max()) if relative.size else float("nan"),
@@ -242,19 +246,19 @@ def _response_index(responses: pd.DataFrame) -> pd.DataFrame:
 def stratify_by_free_rank(paired: pd.DataFrame, responses: pd.DataFrame) -> pd.DataFrame:
     """Sensitivity split by how many observable directions the response is free in."""
     keys = ["sketch_id", "pred_label"]
-    ranks = _response_index(responses)[["observable_free_rank", "observable_null_dim",
-                                        "raw_null_dim"]]
+    ranks = _response_index(responses)[["observable_free_rank", "raw_null_dim"]]
     joined = paired.join(ranks, on=keys, how="left")
     joined["free_rank_bin"] = joined["observable_free_rank"].map(_free_rank_bin)
     rows = []
-    for (arm, eta, bin_name), group in joined.groupby(["arm", "eta", "free_rank_bin"], sort=True):
+    for (eta, bin_name), group in joined.groupby(["eta", "free_rank_bin"], sort=True):
         if eta == BASELINE_ETA:
             continue
         for metric in METRICS:
             absolute = (group[metric] - group[f"{metric}_0"]).abs().to_numpy(dtype=float)
             rows.append(dict(
-                arm=arm, eta=eta, free_rank_bin=bin_name, metric=metric,
+                eta=eta, free_rank_bin=bin_name, metric=metric,
                 n_rows=len(group), n_sketches=group["sketch_id"].nunique(),
+                mean_absolute_delta=float(absolute.mean()) if absolute.size else np.nan,
                 median_absolute_delta=float(np.median(absolute)) if absolute.size else np.nan,
                 q90_absolute_delta=_quantile(absolute, 0.90),
                 max_absolute_delta=float(absolute.max()) if absolute.size else np.nan,
@@ -272,67 +276,106 @@ def _free_rank_bin(rank) -> str:
 
 
 # ---------------------------------------------------------------------------
-# The auxiliary arm
+# Exact invariance and the draw guard
 # ---------------------------------------------------------------------------
 
-def _within_invariance(absolute: np.ndarray, resolved: np.ndarray) -> bool:
-    return bool(
-        _max_or_zero(absolute[resolved]) <= INVARIANCE_TOL
-        and _max_or_zero(absolute[~resolved]) <= ZERO_ANGLE_NOISE
-    )
+def invariance_coverage(responses: pd.DataFrame) -> pd.DataFrame:
+    """How often the minimum-norm choice provably cannot matter.
 
-
-def observable_null_summary(paired: pd.DataFrame, visibility: pd.DataFrame) -> pd.DataFrame:
-    """theta_leak is the only metric this arm can reach; the rest is a sanity check.
-
-    Rows are split by whether the GT relations can see the observable-null directions at
-    all: rank 0 means that this GT relation Jacobian and the observable are both blind to
-    the sampled subspace, while rank > 0 means a direction the pairwise-distance observable
-    misses but the GT relation set does not.  The former is a visibility category, not a
-    claim that all of its directions are primitive-parameterization gauges.
-
-    The invariance verdict is taken over rows whose subspace dimension held. The range and
-    null-space cutoffs are absolute, and ``G`` annihilates ``J_phi`` only down to that
-    cutoff, so a response whose observable range is exactly rank-deficient can gain a
-    spurious direction just above the threshold. Those rows are counted, not folded in.
+    ``exactly_invariant`` marks ``J_phi N = 0``: every admissible response has the same
+    ``J_phi R``, so theta_full, theta_rel and S_place are identical for all of them and the
+    response is not sampled. Only theta_leak, built from ``range(R)`` in raw state space,
+    stays response-dependent there. The share is reported per population because it tracks
+    how tightly constrained the annotation is, not anything about the metric.
     """
-    arm = paired[paired["arm"] == OBSERVABLE_NULL_ARM]
-    if arm.empty:
-        return pd.DataFrame()
-    seen = visibility.rename(columns={"gt_label": "gt"}).set_index(
-        ["sketch_id", "pred_label", "gt"]
-    )[["relation_null_overlap_rank", "relation_null_overlap_norm", "observable_null_dim"]]
-    joined = arm.join(seen, on=["sketch_id", "pred_label", "gt"], how="left")
-    joined["relations_see_null"] = joined["relation_null_overlap_rank"].fillna(0) > 0
-
+    usable = responses[responses["skip_reason"].isna() | (responses["skip_reason"] == "")]
     rows = []
-    for (eta, visible), group in joined.groupby(["eta", "relations_see_null"], sort=True):
-        for metric in METRICS:
-            signed = (group[metric] - group[f"{metric}_0"]).to_numpy(dtype=float)
-            absolute = np.abs(signed)
-            resolved = group[f"{metric}_0"].to_numpy(dtype=float) > RESOLVED_METRIC_FLOOR
-            rank = METRIC_RANK[metric]
-            rank_held = (group[rank] == group[f"{rank}_0"]).to_numpy()
-            rows.append(dict(
-                eta=eta, relations_see_null=bool(visible), metric=metric,
-                n_rows=len(group), n_sketches=group["sketch_id"].nunique(),
-                median_absolute_delta=float(np.median(absolute)) if absolute.size else np.nan,
-                q90_absolute_delta=_quantile(absolute, 0.90),
-                max_absolute_delta=float(absolute.max()) if absolute.size else np.nan,
-                signed_delta_q05=_quantile(signed, 0.05),
-                signed_delta_median=float(np.median(signed)) if signed.size else np.nan,
-                signed_delta_q95=_quantile(signed, 0.95),
-                fraction_increased=float((signed > MOVED_TOL).mean()) if signed.size else np.nan,
-                fraction_decreased=float((signed < -MOVED_TOL).mean()) if signed.size else np.nan,
-                max_delta_resolved=_max_or_zero(absolute[resolved]),
-                max_delta_near_zero=_max_or_zero(absolute[~resolved]),
-                n_rank_changed=int((~rank_held).sum()),
-                max_delta_rank_stable=_max_or_zero(absolute[rank_held]),
-                within_invariance_tolerance=_within_invariance(
-                    absolute[rank_held], resolved[rank_held]
-                ),
-            ))
+    for name, group in [("all", usable)] + list(usable.groupby("label_kind", sort=True)):
+        invariant = group["exactly_invariant"].astype(bool)
+        rows.append(dict(
+            label_kind=name, n_responses=len(group),
+            n_sketches=group["sketch_id"].nunique(),
+            n_exactly_invariant=int(invariant.sum()),
+            fraction_exactly_invariant=float(invariant.mean()) if len(group) else np.nan,
+            median_raw_null_dim=float(group["raw_null_dim"].median()),
+            median_observable_free_rank=float(group["observable_free_rank"].median()),
+            median_observable_gain_max=float(group["observable_gain_max"].median()),
+        ))
     return pd.DataFrame(rows)
+
+
+def guard_summary(paired: pd.DataFrame) -> pd.DataFrame:
+    """Discarded-draw accounting, and how far the guard floor could move for free.
+
+    Takes the paired frame rather than the raw samples because the draw key needs
+    ``pred_label``, which only the native join carries.
+
+    The ``would_guard_at_*`` columns are the load-bearing ones. A draw is discarded exactly
+    when its smallest column gain falls below the floor, so two floors that would discard the
+    same draws produce bit-identical runs. Reporting the whole ladder replaces a claim about
+    the threshold being arbitrary with the measurement of how arbitrary it actually is.
+    """
+    rows = []
+    for eta, group in paired.groupby("eta", sort=True):
+        # One draw is one (response, eta, sample). Its rows repeat over every evaluation
+        # record that shares the Pred side -- both GT references, and, for a model or human
+        # label, every reference pair it appears under. Deduplicating on the record key
+        # instead would count one model draw three times.
+        draws = group.drop_duplicates(DRAW_KEY)
+        gains = draws["min_observable_gain"].to_numpy(dtype=float)
+        finite = gains[np.isfinite(gains)]
+        row = dict(
+            eta=eta, n_draws=len(draws), n_rows=len(group),
+            n_columns_guarded=int(draws["n_columns_guarded"].sum()),
+            n_draws_with_a_guarded_column=int((draws["n_columns_guarded"] > 0).sum()),
+            min_observable_gain=float(finite.min()) if finite.size else np.nan,
+            q01_observable_gain=_quantile(finite, 0.01),
+        )
+        row.update({f"would_guard_at_{floor:.0e}": int((finite < floor).sum())
+                    for floor in GUARD_FLOOR_LADDER})
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def floor_sensitivity(paired: pd.DataFrame) -> pd.DataFrame:
+    """Do the reported numbers actually move when the guard floor does?
+
+    ``guard_summary`` bounds the population a different floor would discard; this bounds the
+    consequence, which is what the reported medians and Q90s rest on. Each candidate floor is
+    applied post hoc by dropping the draws it would have rejected and recomputing.
+
+    Only floors at or above the run's own floor can be evaluated: draws below it were never
+    generated, so a lower floor cannot be simulated from this run's output.
+    """
+    rows = []
+    for floor in GUARD_FLOOR_LADDER:
+        kept = paired[paired["min_observable_gain"] >= floor]
+        if kept.empty:
+            continue
+        for eta, group in kept.groupby("eta", sort=True):
+            for metric in METRICS:
+                absolute = (group[metric] - group[f"{metric}_0"]).abs().to_numpy(dtype=float)
+                rows.append(dict(
+                    gain_floor=floor, eta=eta, metric=metric, n_rows=len(group),
+                    mean_absolute_delta=float(absolute.mean()) if absolute.size else np.nan,
+                    median_absolute_delta=float(np.median(absolute)) if absolute.size else np.nan,
+                    q90_absolute_delta=_quantile(absolute, 0.90),
+                ))
+    return pd.DataFrame(rows)
+
+
+def floor_sensitivity_worst_shift(frame: pd.DataFrame) -> float:
+    """Largest relative move of any reported statistic across the evaluable floors."""
+    if frame.empty:
+        return float("nan")
+    worst = 0.0
+    for column in ("median_absolute_delta", "q90_absolute_delta"):
+        pivot = frame.pivot_table(index=["eta", "metric"], columns="gain_floor", values=column)
+        reference = pivot[pivot.columns.min()]
+        spread = pivot.sub(reference, axis=0).abs().div(reference.abs().where(reference != 0), axis=0)
+        if spread.notna().any().any():
+            worst = max(worst, float(np.nanmax(spread.to_numpy())))
+    return worst
 
 
 # ---------------------------------------------------------------------------
@@ -419,51 +462,50 @@ def ranking_report(native: pd.DataFrame, samples: pd.DataFrame,
                    *, max_samples: int) -> pd.DataFrame:
     """Ordering stability, with each draw compared on the records it actually produced.
 
-    An arm skips responses it cannot perturb, and a numerically inadmissible draw can be
-    rejected by the post-perturbation residual gate.  Ranking either subset against an
+    Exactly-invariant responses are never sampled, and a numerically inadmissible draw can
+    be rejected by the post-perturbation residual gate.  Ranking that subset against an
     ordering built on all native records would measure population drift rather than the
     response choice, so the native aggregation is rebuilt for every draw.
     """
     observed: dict[tuple, list] = {}
     rows = []
-    for arm, arm_samples in samples.groupby("arm", sort=True):
-        for (eta, sample), group in arm_samples.groupby(["eta", "sample"], sort=True):
-            if eta == BASELINE_ETA or sample >= max_samples:
-                continue
-            covered = pd.MultiIndex.from_frame(group[KEY].drop_duplicates())
-            paired_native = native[pd.MultiIndex.from_frame(native[KEY]).isin(covered)]
-            variants = ordered_variants(paired_native)
-            native_medians, native_collapsed = collapsed_medians(
-                paired_native.to_dict("records"), variants
+    for (eta, sample), group in samples.groupby(["eta", "sample"], sort=True):
+        if eta == BASELINE_ETA or sample >= max_samples:
+            continue
+        covered = pd.MultiIndex.from_frame(group[KEY].drop_duplicates())
+        paired_native = native[pd.MultiIndex.from_frame(native[KEY]).isin(covered)]
+        variants = ordered_variants(paired_native)
+        native_medians, native_collapsed = collapsed_medians(
+            paired_native.to_dict("records"), variants
+        )
+        native_orders = {m: variant_ordering(native_medians, m) for m in METRICS}
+        methods = {
+            m: [v for v in native_orders[m] if is_method_variant(v)] for m in METRICS
+        }
+        medians, collapsed = collapsed_medians(group.to_dict("records"), variants)
+        for metric in METRICS:
+            order = variant_ordering(medians, metric)
+            rate, _n = flip_rate(native_collapsed, collapsed, metric)
+            inverted, comparable = ordering_violations(
+                native_medians, medians, metric, variants
             )
-            native_orders = {m: variant_ordering(native_medians, m) for m in METRICS}
-            methods = {
-                m: [v for v in native_orders[m] if is_method_variant(v)] for m in METRICS
-            }
-            medians, collapsed = collapsed_medians(group.to_dict("records"), variants)
-            for metric in METRICS:
-                order = variant_ordering(medians, metric)
-                rate, _n = flip_rate(native_collapsed, collapsed, metric)
-                inverted, comparable = ordering_violations(
-                    native_medians, medians, metric, variants
-                )
-                method_inverted, _n_method = ordering_violations(
-                    native_medians, medians, metric, methods[metric]
-                )
-                observed.setdefault((arm, eta, metric), []).append(
-                    (inverted == 0, method_inverted == 0, rate,
-                     ">".join(order), ">".join(native_orders[metric]),
-                     inverted, comparable)
-                )
+            method_inverted, _n_method = ordering_violations(
+                native_medians, medians, metric, methods[metric]
+            )
+            observed.setdefault((eta, metric), []).append(
+                (inverted == 0, method_inverted == 0, rate,
+                 ">".join(order), ">".join(native_orders[metric]),
+                 inverted, comparable)
+            )
 
-    for (arm, eta, metric), entries in sorted(observed.items()):
+    for (eta, metric), entries in sorted(observed.items()):
         preserved = np.array([e[0] for e in entries], dtype=float)
         method_preserved = np.array([e[1] for e in entries], dtype=float)
         rates = np.array([e[2] for e in entries], dtype=float)
         inverted = np.array([e[5] for e in entries], dtype=float)
         worst = max(entries, key=lambda e: (e[5], e[2]))
         rows.append(dict(
-            arm=arm, eta=eta, metric=metric, n_samples=len(entries),
+            eta=eta, metric=metric, n_samples=len(entries),
             fraction_ordering_preserved=float(preserved.mean()),
             fraction_method_ordering_preserved=float(method_preserved.mean()),
             n_comparable_pairs=int(min(e[6] for e in entries)),
@@ -514,21 +556,21 @@ def finite_anchor_summary(anchor: pd.DataFrame) -> pd.DataFrame:
 def worst_cases(paired: pd.DataFrame, responses: pd.DataFrame) -> pd.DataFrame:
     keys = ["sketch_id", "pred_label"]
     ranks = _response_index(responses)[["raw_null_dim", "observable_free_rank",
-                                        "observable_null_dim"]]
-    carried = ["sketch_id", "pred_label", "rid", "variant", "gt", "arm", "eta", "sample",
-               "raw_perturbation_ratio", "constraint_residual", "nullspace_residual"]
+                                        "observable_gain_max"]]
+    carried = ["sketch_id", "pred_label", "rid", "variant", "gt", "eta", "sample",
+               "raw_perturbation_ratio", "constraint_residual", "nullspace_residual",
+               "min_observable_gain", "n_columns_guarded"]
     frames = []
-    for _arm, group in paired.groupby("arm", sort=True):
-        for metric in METRICS:
-            signed = group[metric] - group[f"{metric}_0"]
-            top = signed.abs().nlargest(WORST_CASES).index
-            frames.append(group.loc[top, carried].assign(
-                metric=metric,
-                baseline_value=group.loc[top, f"{metric}_0"],
-                perturbed_value=group.loc[top, metric],
-                signed_delta=signed.loc[top],
-                absolute_delta=signed.loc[top].abs(),
-            ))
+    for metric in METRICS:
+        signed = paired[metric] - paired[f"{metric}_0"]
+        top = signed.abs().nlargest(WORST_CASES).index
+        frames.append(paired.loc[top, carried].assign(
+            metric=metric,
+            baseline_value=paired.loc[top, f"{metric}_0"],
+            perturbed_value=paired.loc[top, metric],
+            signed_delta=signed.loc[top],
+            absolute_delta=signed.loc[top].abs(),
+        ))
     worst = pd.concat(frames, ignore_index=True)
     return worst.join(ranks, on=keys, how="left")
 
@@ -540,23 +582,17 @@ def worst_cases(paired: pd.DataFrame, responses: pd.DataFrame) -> pd.DataFrame:
 def plot_delta_vs_eta(summary: pd.DataFrame, path: Path) -> None:
     import matplotlib.pyplot as plt
 
-    arms = sorted(summary["arm"].unique())
-    fig, axes = plt.subplots(1, len(arms), figsize=(5.4 * len(arms), 4.2), squeeze=False)
-    for ax, arm in zip(axes[0], arms):
-        frame = summary[summary["arm"] == arm]
-        for metric in METRICS:
-            per_metric = frame[frame["metric"] == metric].sort_values("eta")
-            ax.plot(per_metric["eta"], np.maximum(per_metric["median_absolute_delta"], 1e-18),
-                    marker="o", label=metric)
-            ax.plot(per_metric["eta"], np.maximum(per_metric["q90_absolute_delta"], 1e-18),
-                    marker="_", linestyle=":", color=ax.lines[-1].get_color())
-        ax.set_yscale("log")
-        ax.set_xlabel(r"$\eta$")
-        ax.set_ylabel(r"$|d_\eta - d_0|$  (solid: median, dotted: Q90)")
-        ax.set_title(f"{arm} arm")
-        ax.legend(fontsize=8)
-    fig.suptitle("eta is normalised in observable space (main) vs raw space (observable_null); "
-                 "the two axes are not comparable", fontsize=8)
+    fig, ax = plt.subplots(figsize=(6.0, 4.2))
+    for metric in METRICS:
+        per_metric = summary[summary["metric"] == metric].sort_values("eta")
+        ax.plot(per_metric["eta"], np.maximum(per_metric["median_absolute_delta"], 1e-18),
+                marker="o", label=metric)
+        ax.plot(per_metric["eta"], np.maximum(per_metric["q90_absolute_delta"], 1e-18),
+                marker="_", linestyle=":", color=ax.lines[-1].get_color())
+    ax.set_yscale("log")
+    ax.set_xlabel(r"$\eta$  (observable-space size of the added free motion)")
+    ax.set_ylabel(r"$|d_\eta - d_0|$  (solid: median, dotted: Q90)")
+    ax.legend(fontsize=8)
     fig.tight_layout()
     fig.savefig(path)
     plt.close(fig)
@@ -565,28 +601,23 @@ def plot_delta_vs_eta(summary: pd.DataFrame, path: Path) -> None:
 def plot_rank_correlation(summary: pd.DataFrame, path: Path) -> None:
     import matplotlib.pyplot as plt
 
-    arms = sorted(summary["arm"].unique())
-    fig, axes = plt.subplots(1, len(arms), figsize=(5.4 * len(arms), 4.0), squeeze=False)
-    for ax, arm in zip(axes[0], arms):
-        frame = summary[summary["arm"] == arm]
-        for metric in METRICS:
-            per_metric = frame[frame["metric"] == metric].sort_values("eta")
-            ax.plot(per_metric["eta"], per_metric["spearman_median_over_samples"],
-                    marker="o", label=metric)
-        ax.set_xlabel(r"$\eta$")
-        ax.set_ylabel("Spearman(baseline, perturbed), median over samples")
-        ax.set_ylim(0, 1.02)
-        ax.set_title(f"{arm} arm")
-        ax.legend(fontsize=8)
+    fig, ax = plt.subplots(figsize=(6.0, 4.0))
+    for metric in METRICS:
+        per_metric = summary[summary["metric"] == metric].sort_values("eta")
+        ax.plot(per_metric["eta"], per_metric["spearman_median_over_samples"],
+                marker="o", label=metric)
+    ax.set_xlabel(r"$\eta$")
+    ax.set_ylabel("Spearman(baseline, perturbed), median over samples")
+    ax.set_ylim(0, 1.02)
+    ax.legend(fontsize=8)
     fig.tight_layout()
     fig.savefig(path)
     plt.close(fig)
 
 
-def plot_by_free_rank(stratified: pd.DataFrame, path: Path) -> None:
+def plot_by_free_rank(frame: pd.DataFrame, path: Path) -> None:
     import matplotlib.pyplot as plt
 
-    frame = stratified[stratified["arm"] == MAIN_ARM]
     bins = [b for b in frame["free_rank_bin"].unique() if b != "unknown"]
     fig, ax = plt.subplots(figsize=(7.5, 4.2))
     for bin_name in sorted(bins):
@@ -599,34 +630,8 @@ def plot_by_free_rank(stratified: pd.DataFrame, path: Path) -> None:
     ax.set_yscale("log")
     ax.set_xlabel(r"$\eta$")
     ax.set_ylabel(r"median $|d_\eta - d_0|$")
-    ax.set_title("Main arm sensitivity by observable free rank")
+    ax.set_title("Sensitivity by observable free rank")
     ax.legend(fontsize=7)
-    fig.tight_layout()
-    fig.savefig(path)
-    plt.close(fig)
-
-
-def plot_observable_null_leak(summary: pd.DataFrame, path: Path) -> None:
-    import matplotlib.pyplot as plt
-
-    if summary.empty:
-        return
-    fig, ax = plt.subplots(figsize=(7.0, 4.2))
-    for visible in (False, True):
-        frame = summary[(summary["metric"] == "theta_leak")
-                        & (summary["relations_see_null"] == visible)].sort_values("eta")
-        if frame.empty:
-            continue
-        label = ("GT relations see the direction" if visible
-                 else "GT-relation-invisible")
-        ax.plot(frame["eta"], frame["signed_delta_median"], marker="o", label=f"median | {label}")
-        ax.fill_between(frame["eta"], frame["signed_delta_q05"], frame["signed_delta_q95"],
-                        alpha=0.18)
-    ax.axhline(0.0, color="black", linewidth=0.8)
-    ax.set_xlabel(r"$\eta$  (raw-space normalisation)")
-    ax.set_ylabel(r"signed $\theta_{\rm leak}$ shift")
-    ax.set_title("Observable-null arm: only the raw-space metric can move")
-    ax.legend(fontsize=8)
     fig.tight_layout()
     fig.savefig(path)
     plt.close(fig)
@@ -638,14 +643,18 @@ def main() -> None:
     parser.add_argument("--replicates", type=int, default=2000)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--ordering-samples", type=int, default=20,
-                        help="samples per (arm, eta) used for the ordering analysis")
+                        help="samples per eta used for the ordering analysis")
     parser.add_argument("--no-figures", action="store_true")
     args = parser.parse_args()
 
     run_dir = Path(args.run_dir)
     native, samples = load_run(run_dir)
     responses = pd.read_csv(run_dir / "response_metadata.csv")
-    visibility = pd.read_csv(run_dir / "pair_null_visibility.csv")
+
+    coverage = invariance_coverage(responses)
+    coverage.to_csv(run_dir / "invariance_coverage.csv", index=False)
+    print("=== exact invariance (J_phi N = 0: the choice provably cannot matter) ===")
+    print(coverage.to_string(index=False))
 
     gate = identity_report(native, samples)
     gate.to_csv(run_dir / "eta0_gate.csv", index=False)
@@ -662,13 +671,15 @@ def main() -> None:
 
     summary = sensitivity_summary(paired, replicates=args.replicates, seed=args.seed)
     stratified = stratify_by_free_rank(paired, responses)
-    null_arm = observable_null_summary(paired, visibility)
+    guards = guard_summary(paired)
+    floors = floor_sensitivity(paired)
     ranking = ranking_report(native, samples, max_samples=args.ordering_samples)
     worst = worst_cases(paired, responses)
 
     summary.to_csv(run_dir / "sensitivity_summary.csv", index=False)
     stratified.to_csv(run_dir / "sensitivity_by_observable_free_rank.csv", index=False)
-    null_arm.to_csv(run_dir / "observable_null_summary.csv", index=False)
+    guards.to_csv(run_dir / "guard_summary.csv", index=False)
+    floors.to_csv(run_dir / "floor_sensitivity.csv", index=False)
     ranking.to_csv(run_dir / "ranking_changes.csv", index=False)
     worst.to_csv(run_dir / "worst_cases.csv", index=False)
 
@@ -678,14 +689,23 @@ def main() -> None:
         plot_delta_vs_eta(summary, figures / "metric_delta_vs_eta.pdf")
         plot_rank_correlation(summary, figures / "rank_correlation_vs_eta.pdf")
         plot_by_free_rank(stratified, figures / "sensitivity_by_observable_free_rank.pdf")
-        plot_observable_null_leak(null_arm, figures / "observable_null_leak.pdf")
 
-    print("\n=== sensitivity ===")
-    print(summary[["arm", "eta", "metric", "median_absolute_delta", "q90_absolute_delta",
-                   "max_absolute_delta", "fraction_moved",
+    print("\n=== sensitivity (responses that can move) ===")
+    print(summary[["eta", "metric", "mean_absolute_delta", "median_absolute_delta",
+                   "q90_absolute_delta", "max_absolute_delta", "fraction_moved",
                    "spearman_median_over_samples"]].to_string(index=False))
+    print("\n=== draw guard ===")
+    print(guards.to_string(index=False))
+    total = int(guards["n_draws"].sum())
+    ladder = " ".join(
+        f"{floor:.0e}:{int(guards[f'would_guard_at_{floor:.0e}'].sum())}"
+        for floor in GUARD_FLOOR_LADDER
+    )
+    print(f"  draws discarded at each candidate floor (of {total}): {ladder}")
+    shift = floor_sensitivity_worst_shift(floors)
+    print(f"  largest relative move of any reported median/Q90 across those floors: {shift:.2%}")
     print("\n=== ordering ===")
-    print(ranking[["arm", "eta", "metric", "fraction_method_ordering_preserved",
+    print(ranking[["eta", "metric", "fraction_method_ordering_preserved",
                    "fraction_ordering_preserved", "n_comparable_pairs",
                    "median_inverted_pairs", "median_winner_flip_rate"]].to_string(index=False))
     anchor_path = run_dir / "finite_anchor.csv"
@@ -695,12 +715,6 @@ def main() -> None:
         print("\n=== finite solver anchor (auxiliary) ===")
         print(anchor.to_string(index=False))
 
-    if not null_arm.empty:
-        print("\n=== observable-null arm (auxiliary) ===")
-        print(null_arm[["eta", "relations_see_null", "metric", "median_absolute_delta",
-                        "max_absolute_delta", "n_rank_changed", "max_delta_rank_stable",
-                        "signed_delta_q05", "signed_delta_q95",
-                        "within_invariance_tolerance"]].to_string(index=False))
     print(f"\nwrote -> {run_dir}")
 
 

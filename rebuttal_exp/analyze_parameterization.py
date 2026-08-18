@@ -19,21 +19,25 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "ablation"))  # ablation/aggregate.py imports _bootstrap
 
-from ablation.aggregate import ANGLES, VARIANT_ORDER, aggregate  # noqa: E402
-from rebuttal_exp.common import percentile_ci, sketch_cluster_bootstrap  # noqa: E402
+from ablation.aggregate import ANGLES, aggregate  # noqa: E402
+from rebuttal_exp.common import (  # noqa: E402
+    RESOLVED_METRIC_FLOOR,
+    ZERO_ANGLE_NOISE,
+    percentile_ci,
+    sketch_cluster_bootstrap,
+)
 from rebuttal_exp.primitive_charts import C0, NATIVE  # noqa: E402
+from rebuttal_exp.variants import (  # noqa: E402
+    SETTING_ORDER,
+    is_method_variant,
+    ordered_variants,
+    setting_of,
+)
 
 METRICS = ("theta_full", "theta_rel", "theta_leak", "placement_sim")
 KEY = ["rid", "variant", "gt"]
 IDENTITY_RTOL = 1e-8
 IDENTITY_ATOL = 1e-10
-RESOLVED_METRIC_FLOOR = 1e-6
-ZERO_ANGLE_NOISE = 1e-6
-"""The padded angle is sqrt(1 - cos2/max). When two subspaces coincide, cos2/max is
-1 - O(machine eps) and the square root lifts that to O(1e-8), so a metric value near zero
-carries a sqrt(eps) noise floor no pipeline can beat. The identity gate is therefore split:
-values above RESOLVED_METRIC_FLOOR must agree to machine precision, values at the floor
-only have to stay inside that noise band."""
 WORST_CASES = 20
 
 SUMMARY_COLUMNS = [
@@ -61,39 +65,7 @@ RANKING_COLUMNS = [
     "scenario", "metric", "n_variants", "ordering_preserved", "method_ordering_preserved",
     "native_order", "transformed_order", "winner_flip_rate", "n_flip_comparisons",
 ]
-CONTROL_PREFIXES = ("dim_drop", "rel_drop")
-NON_METHOD_VARIANTS = ("source_self",)
 BREAKDOWN_COLUMNS = ["level", "key", *SUMMARY_COLUMNS]
-SETTINGS = {
-    "source_self": "self_consistency",
-    "heldout": "human_human",
-    "base": "human_model",
-    "solver_rl": "human_model",
-    "ours": "human_model",
-}
-SETTING_ORDER = ["self_consistency", "human_human", "human_model", "dim_dropout", "rel_dropout"]
-"""The Sec. 5 evaluation settings the pooled table mixes together. Pooling weights the
-synthetic dropout controls (six of eleven variants) as heavily as the rows the paper's
-conclusions rest on, so the per-setting split is reported next to it."""
-
-
-def ordered_variants(pairs: pd.DataFrame) -> list[str]:
-    """Sec. 5 order, then any variant the ablation list predates (e.g. the proposed model)."""
-    present = set(pairs["variant"].unique())
-    known = [v for v in VARIANT_ORDER if v in present]
-    return known + sorted(present - set(VARIANT_ORDER))
-
-
-def is_method_variant(variant: str) -> bool:
-    """Held-out human and the model runs: the rows the paper's conclusions rest on."""
-    return not variant.startswith(CONTROL_PREFIXES) and variant not in NON_METHOD_VARIANTS
-
-
-def setting_of(variant: str) -> str:
-    """Which Sec. 5 evaluation setting a variant row belongs to."""
-    if variant in SETTINGS:
-        return SETTINGS[variant]
-    return f"{variant.split('_drop')[0]}_dropout" if variant.startswith(CONTROL_PREFIXES) else variant
 
 
 def load_pairs(run_dir: Path) -> pd.DataFrame:
