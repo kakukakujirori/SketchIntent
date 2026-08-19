@@ -365,6 +365,116 @@ $CR python rebuttal_exp/shared_reference.py --out artifacts/rebuttal/shared_refe
 - **The Table 1 gate.** `independent(all)` is checked against `tab:controls` before anything is
   written; a mismatch aborts the run unless `--allow-table1-mismatch` is passed.
 
+## Experiment F — direct pairwise human agreement (`rebuttal_experiments_3.md`)
+
+Answers *"median motion distances of zero for held-out humans may hide substantial variation; full
+distributions and pairwise annotator results would be more informative"*. Appendix Fig. 8 already
+gives the full held-out distributions, but under the Sec. 5 aggregation — `min` over the two
+references for the angles, `max` for `S_place` — so it is a best-of-2 statistic and never compares
+two named annotations directly. This experiment reports every within-sketch human pair on its own.
+
+Nothing is recomputed. `06_run_motion_eval.py` enumerates `combinations(names, 2)` with the third
+annotation held out and scores it against *each* reference separately, so with three annotations
+per sketch the `variant=heldout` rows of `motion_eval.csv` are already all six ordered human pairs
+per sketch — all three unordered pairs with both `theta_leak` directions. Re-reading that file
+inherits the normalization, observable space, Jacobians, SVD thresholds, construction-geometry
+handling and FreeCAD gating with the file itself.
+
+```bash
+# unit tests (no FreeCAD needed)
+$CR python -m pytest rebuttal_exp/tests/test_human_pairwise.py -q
+
+# the whole experiment, ~5 s
+$CR python rebuttal_exp/human_pairwise.py --out artifacts/rebuttal/human_pairwise
+```
+
+### Outputs
+
+| file | contents |
+|---|---|
+| `run_config.json` / `environment.json` | config and its hash, the source CSV path/sha256/mtime, the `S_place` column actually read, git commit, versions |
+| `human_pairwise_metrics.csv` | one row per unordered pair (858): both annotator initials and annotation filenames, `theta_full_motion`, `theta_rel_motion`, `s_place`, both `theta_dim_leak` directions, and the three `*_asym_abs` symmetry diagnostics, at full float precision |
+| `human_pairwise_summary.csv` | per metric x protocol: `n`, `mean`, `median`, `q1`, `q3`, `iqr`, `p90`, `min`, `max`, and the near-zero / near-identical fractions. `protocol=all_pairs` is this experiment; `protocol=best_reference` is Fig. 8 recomputed from the same rows, for a like-for-like comparison |
+| `human_pairwise_per_sketch.csv` | per sketch (286): max/mean pairwise `theta_full`, `theta_rel`, `theta_leak`, min/mean `S_place`, and a `consensus` / `mixed` / `divergent` label |
+| `sanity_checks.json` | every item of the spec's checklist with its measured value and a pass/fail |
+| `cross_source_stability.csv` | the same statistics recomputed from an independent rerun of the pipeline (`ablation/out/motion_eval.csv`) |
+| `sample_counts.json` | row, group and sample counts with every exclusion, plus the agreement-label split |
+| `figures/human_pairwise_distribution.{pdf,png}` | Appendix Fig. 8's panel redrawn on the direct all-pair observations |
+| `figures/human_pairwise_vs_bestref.{pdf,png}` | the two protocols overlaid as fractions, with mean and median per protocol per panel. Intended as a drop-in replacement for Appendix Fig. 8 |
+
+### Numbers
+
+286 valid sketches, 858 valid annotations, 858 valid unordered pairs, 1716 directional
+`theta_leak` evaluations.
+
+| metric | best-reference (Fig. 8) | all pairs |
+|---|---|---|
+| `theta_full` | N 858, mean 0.168, median 2.4e-8, Q3 0.408, P90 0.500 | N 858, mean 0.249, median 0.316, Q3 0.447, P90 0.577 |
+| `theta_rel` | N 858, mean 0.178, median 2.6e-8, Q3 0.408 | N 858, mean 0.258, median 0.333, Q3 0.470 |
+| `theta_leak` | N 858, mean 0.090, median 7.5e-15, Q3 1.2e-4 | N 1716, mean 0.125, median 1.1e-14, Q3 0.302, P90 0.464 |
+| `S_place` | N 858, mean 0.823, median 0.831, Q1 0.703 | N 858, mean 0.760, median 0.759, Q1 0.609 |
+
+Read straight off the data, without forcing a conclusion:
+
+- The near-zero **mass** is real and large: 44.2% of all unordered pairs are below 1e-6 on
+  `theta_full` (44.2% on `theta_rel`, 66.6% of directional observations on `theta_leak`), against
+  57.9% / 57.9% / 74.1% under best-reference. The near-zero **median** in Table 1 / Fig. 8 does
+  not survive: it moves to 0.316 once the `min` is removed. What Fig. 8 shows is that a held-out
+  annotation usually has *at least one* behaviourally equivalent counterpart, which is a weaker
+  statement than pairwise equivalence.
+- The upper tail is not an artifact of aggregation either — on `theta_full` the P90 rises from
+  0.500 to 0.577 while the maximum is unchanged at 0.845, and `theta_leak`'s Q3 moves from 1.2e-4
+  to 0.302. A genuine minority of annotation pairs induce different redesign behaviour.
+- Per sketch, 87 (30.4%) have all three pairs below 1e-6 (full behavioural consensus), 81 (28.3%)
+  have none (fully multi-modal intent), and 118 (41.3%) are mixed.
+- Dimensional-placement disagreement is the *less* saturated axis but also the less
+  aggregation-sensitive one: `S_place` loses 0.063 of its mean going from best-reference to all
+  pairs (exact-placement agreement 30.1% -> 23.1%), while `theta_full` gains 0.081 and its median
+  moves by seven orders of magnitude. The relation-level metrics are near-binary — a pair either
+  matches to machine precision or sits around 0.4 — so aggregation flips whole samples, whereas
+  `S_place` is continuous and shifts smoothly.
+
+### Protocol decisions
+
+- **Symmetry is asserted, not assumed.** `theta_full`, `theta_rel` and `S_place` are symmetric in
+  (Hi, Hj) by construction — principal angles and a Hungarian matching of `|<u_i, u_j>|` do not
+  care which side is called Pred. Each unordered pair therefore contributes exactly one value,
+  taken from the canonical direction (annotator initials in sorted order), and the observed
+  asymmetry is kept per row. Measured maxima are 1.9e-8, 2.4e-8 and 2.2e-16, all below the
+  `RESOLVED_METRIC_FLOOR = 1e-6` that `common.py` already documents as the sqrt(eps) floor of the
+  padded angle. Anything above that floor aborts the run — an argument-order bug must not be
+  averaged away.
+- **`theta_leak` is not symmetrized.** It evaluates GT's relational constraints at Pred's state,
+  so it is directional by definition, and on this data the two directions differ by up to 0.845.
+  Both are written per row and both enter the summary; no new symmetrized metric is defined.
+- **The two N differ on purpose.** The symmetric metrics have one observation per unordered pair
+  (858); `theta_leak` has one per ordered pair (1716). Fig. 8 also reports 858 observations, but
+  they are the *minimum* of two of these pairs rather than the pairs themselves — that is the
+  whole difference between the protocols, so the overlay figure plots fractions, not counts.
+- **The filtering rule is inherited, not reimplemented.** A sketch enters only with exactly three
+  parseable annotations (`require_k=3`, `src/eval/manifest.py`), all three passing the
+  `canonical_solid` base policy at `geometry_tol=5e-1` (`src/eval/file_bundle.py:69`, applied at
+  `ablation/run_motion.py:118`, which is what drops 292 to 286), and both sides of a pair sharing
+  the observable dimension `m_phi` (`src/eval/motion_metrics.py:96`). Construction geometry is
+  outside the observable by `metric_base_eids`. Human annotations are not solver-gated; only model
+  predictions are.
+- **The Fig. 8 gate.** Re-applying `min`/`max` to the same parsed rows must reproduce the
+  published Fig. 8 statistics before anything is written; a mismatch aborts unless
+  `--allow-fig8-mismatch` is passed. This is the mechanical proof that the normalization,
+  measurement space, SVD threshold and filtering are the Table 1 ones — stronger than asserting it
+  in prose. Means are compared absolutely (2e-3); medians sit on the noise floor and are compared
+  relatively (25%).
+- **Full precision on disk.** Every metric cell is written with `repr(float)`, which round-trips
+  exactly, so a 7.5e-15 leak angle is never flattened to `0` before the statistics are computed.
+- **Two source CSVs exist and both are used.** `fusion360_annotation_/eda_code/out/motion_eval.csv`
+  (the one Experiment E reads, and the one the committed `heldout_human_distribution_stats.json`
+  came from) is primary; `ablation/out/motion_eval.csv` is an independent rerun of the same
+  pipeline. They disagree on up to 241 of the 1716 held-out rows by more than 1e-9 (241 on
+  `theta_rel`, 211 on `theta_full`, 24 on `S_place`, 6 on `theta_leak`), by as much as 0.157,
+  which is SVD-level noise on near-degenerate subspaces. `cross_source_stability.csv`
+  shows this moves no headline mean by more than 0.0003, so the upper tail is not a property of one
+  run.
+
 ## Module map
 
 | module | responsibility |
@@ -386,4 +496,5 @@ $CR python rebuttal_exp/shared_reference.py --out artifacts/rebuttal/shared_refe
 | `analyze_pseudoinverse.py` | invariance coverage, guard accounting, sensitivity, stratification, ordering stability, figures |
 | `finite_anchor.py` | §4.10 solver anchor for the minimum-norm prediction |
 | `shared_reference.py` | experiment E: tie-aware best-reference sets, rank-only joint selection, regret, the independent-vs-shared table |
+| `human_pairwise.py` | experiment F: direct human-human pair construction, the symmetry assertion, the all-pairs vs best-reference summary and figures |
 | `deprecated/` | the superseded two-arm Experiment D implementation, archived for provenance |

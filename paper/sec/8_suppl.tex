@@ -171,17 +171,22 @@ The placement score uses the same assignment as Eq.~\ref{eq:asgn_sim}, with each
 By contrast, the leak score remains exactly as defined in Eq.~\ref{eq:rel_leak_distance}. It is not a comparison between two observed motion representations; it directly asks whether the predicted dimensional motions violate the reference relational equations, so we measure their overlap with the reference relation row space in the primitive tangent space.
 The multi-reference aggregation in Sec.~\ref{sec:motion_metrics} is applied after these scores are computed for each reference.
 
-\subsubsection{Held-Out Human Score Distributions}
+\subsubsection{Held-Out Human and Pairwise Score Distributions}
 \label{sec:appendix_metric_human_distributions}
+Table~\ref{tab:controls} reports held-out human scores under the leave-one-out multi-reference protocol, where each queried annotation is compared with the other two independently authored annotations and the most favorable reference is selected. The near-zero motion-distance medians therefore indicate that a human annotation often has at least one reference with nearly equivalent local redesign behavior. However, this aggregation does not characterize the variation across all human--human pairs for the same sketch.
 
-Table~\ref{tab:controls} reports medians, which round the held-out human motion distances to $0.000$. This means that the queried human annotation induces almost the same local redesign behavior as at least one independently authored reference annotation for the same sketch.
+Fig.~\ref{fig:appendix_heldout_distribution} complements this evaluation by reporting direct pairwise scores alongside the corresponding best-reference scores. For each of the 286 sketches used in Sec.~\ref{sec:experiments}, we evaluate all three unordered human pairs, yielding 858 pairwise comparisons. For the asymmetric $\theta_{\mathrm{leak}}^{\mathrm{dim}}$, both directions are evaluated, yielding 1,716 comparisons.
 
-Fig.~\ref{fig:appendix_heldout_distribution} shows the full held-out human distributions after the same multi-reference aggregation used in Table~\ref{tab:controls}. The medians are near numerical zero ($2.4{\times}10^{-8}$ for $\theta_{\mathrm{motion}}^{\mathrm{full}}$, $2.6{\times}10^{-8}$ for $\theta_{\mathrm{motion}}^{\mathrm{rel}}$, and $7.5{\times}10^{-15}$ for $\theta_{\mathrm{leak}}^{\mathrm{dim}}$), but the means and upper quartiles remain nonzero. In particular, $\theta_{\mathrm{motion}}^{\mathrm{full}}$ has mean $0.167$ and interquartile range (IQR; 25th--75th percentile range) $[1.2{\times}10^{-8},0.408]$, while $\theta_{\mathrm{motion}}^{\mathrm{rel}}$ has mean $0.178$ and IQR $[1.2{\times}10^{-8},0.408]$. This indicates that many human annotations are behaviorally equivalent under our metric, while a substantial tail reflects genuinely different human choices. The dimensional placement score remains less saturated ($S_{\mathrm{place}}$ mean $0.823$, median $0.831$), capturing residual diversity in which dimensions designers expose as drivers.
+The direct pairwise distributions show additional variation beyond the best-reference scores. The medians of $\theta_{\mathrm{motion}}^{\mathrm{full}}$ and $\theta_{\mathrm{motion}}^{\mathrm{rel}}$ increase to $0.316$ and $0.333$, respectively, while $S_{\mathrm{place}}$ also exhibits broader variation. At the same time, $44.2\%$ of human pairs have $\theta_{\mathrm{motion}}^{\mathrm{full}}<10^{-6}$, indicating nearly equivalent local redesign behavior for these independently authored annotation pairs. $\theta_{\mathrm{leak}}^{\mathrm{dim}}$ similarly remains strongly concentrated near zero while exhibiting a nonzero tail.
+
+Together, these results show both behavioral agreement and genuine variation among human annotations of the same geometry. Motion-subspace canonicalization identifies annotations with equivalent local behavior, while the remaining pairwise variation shows that multiple valid redesign behaviors can coexist for a sketch. This further motivates the multi-reference benchmark rather than relying on a single human annotation.
 
 \begin{figure}[t]
     \centering
-    \includegraphics[width=0.96\linewidth]{figs/appendix_heldout_human_distribution.pdf}
-    \caption{Held-out human score distributions under the leave-one-out protocol and the same multi-reference aggregation used in Table~\ref{tab:controls}. Black dashed lines mark medians and orange dotted lines mark means. The evaluated annotation is excluded from the reference set, so low-distance mass reflects agreement between independently authored annotations rather than self-matching.}
+    \includegraphics[width=\linewidth]{figs/appendix_human_pairwise_vs_bestref.pdf}
+    \caption{
+    Human score distributions under best-reference and pairwise evaluation. Outlined histograms show the leave-one-out best-reference scores used in Table~\ref{tab:controls}; filled histograms show direct comparisons over all human pairs for each sketch. Histograms are normalized to fractions; for the asymmetric $\theta_{\mathrm{leak}}^{\mathrm{dim}}$, both directions are included. Pairwise evaluation exposes the variation across human annotations that is not characterized by best-reference aggregation, while retaining substantial mass near equivalent motion behavior.
+    }
     \label{fig:appendix_heldout_distribution}
 \end{figure}
 
