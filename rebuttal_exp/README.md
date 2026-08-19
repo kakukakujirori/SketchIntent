@@ -298,6 +298,73 @@ over sample indices (median and minimum); the bootstrap CI is built on one fixed
 index with a sketch-cluster bootstrap, and the spread across the other draws is reported
 separately rather than folded into that interval.
 
+---
+
+## Experiment E — shared-reference aggregation (`rebuttal_experiments_2.md`)
+
+Answers *"the multi-reference aggregation can produce incoherent matches"*. Sec. 5 lets each
+metric pick its own most favourable human reference, so a prediction could match the relational
+behaviour of one annotator and the dimensional placement of another. Nothing is recomputed:
+`fusion360_annotation_/eda_code/out/motion_eval.csv` already holds one row per
+`(rid, variant, reference)` — the per-reference scores *before* the min/max aggregation in
+`11_analyze_paper_numbers.py` — so the convergence, geometry-preservation and leave-one-out
+filtering are inherited with the file, and `independent(all)` reproduces Table 1 exactly.
+
+```bash
+# unit tests (no FreeCAD needed)
+$CR python -m pytest rebuttal_exp/tests/test_shared_reference.py -q
+
+# the whole experiment, ~30 s
+$CR python rebuttal_exp/shared_reference.py --out artifacts/rebuttal/shared_reference
+```
+
+### Outputs
+
+| file | contents |
+|---|---|
+| `run_config.json` / `environment.json` | config and its hash, the source CSV path/sha256/mtime, the `S_place` column actually read, git commit, versions |
+| `per_reference_scores.csv` | long form: one row per (rid, variant, reference) with the four metrics, their ranks, best-set membership, rank sum, `is_k_joint` |
+| `per_sample.csv` | one row per (rid, variant): per-reference values and best sets (JSON cells, any K), coherent flag, the four incompatibility flags, rank sums, `k_joint` or `ambiguous_joint_selection`, per-metric regret and envelope |
+| `exp1_best_reference_consistency.csv` | coherent/incoherent rates with cluster-bootstrap CIs, pairwise incompatibility rates, unique-best agreement split, ambiguity rate |
+| `exp3_regret_stats.csv` | per variant x metric: zero fraction, median, mean, p75/p90/p95, max |
+| `exp4_table_independent_vs_shared.csv` | independent(all) / independent(unique) / shared(unique) / envelope worst / envelope best, with the paired median-difference CI |
+| `exp4_subset_diagnostic.csv` | how different the unique-`k_joint` subset is from the ambiguous one, both scored independently |
+| `exp4_paired_tests.csv` | Wilcoxon under both protocols: held-out vs each model, and Base vs Solver-RL |
+| `secondary_model_flips.csv` | per-sketch Base-vs-Solver-RL verdict flips between the two protocols |
+| `tolerance_sweep.csv` | the headline statistics at atol in {0, 1e-9, 1e-6, 1e-3} |
+| `sample_counts.json` | row, group and sample counts with every exclusion, per variant |
+
+### Protocol decisions
+
+- **Tie tolerance.** Best-reference sets are `|s - best| <= atol`, absolute, `rtol = 0`: the
+  question is whether two references differ by more than the metric's own numerical resolution,
+  which does not scale with the value. The primary `atol` is `RESOLVED_METRIC_FLOOR = 1e-6`,
+  already documented in `common.py` as the sqrt(eps) floor of the padded angle — not a threshold
+  chosen for this experiment. It matters: held-out human angles sit at ~1e-8, so exact equality
+  splits references that are numerically tied and reports coherence 0.32 instead of 0.81.
+  `tolerance_sweep.csv` carries {0, 1e-9, 1e-6, 1e-3}.
+- **Ranks only.** A shared reference is chosen by the rank sum over the four metrics
+  (ascending for the angles, descending for `S_place`, average ranks for ties). The rank sum is a
+  selection device and is never reported as a CAD metric; no raw metric values are averaged or
+  normalised across metrics.
+- **Rank-sum ties are not broken.** With K = 2 a 2-2 metric split leaves both references
+  rank-optimal, and rank information alone cannot decide. Those samples are flagged
+  `ambiguous_joint_selection` — never resolved by reference index or by any numerical tie-break.
+- **The envelope is per metric.** For ambiguous samples every metric is bounded separately over
+  the rank-optimal references, so `envelope_worst` and `envelope_best` are attained by different
+  tie resolutions. They bound each metric; they are not one simultaneously realizable Table 1.
+- **The comparison that isolates aggregation** is independent(unique) vs shared(unique): the same
+  samples, only the aggregation changes. `independent(all)` vs `shared(unique)` mixes in the
+  selection, which `exp4_subset_diagnostic.csv` quantifies — the ambiguous samples are not a
+  random subsample (Solver-RL's independent `theta_leak` median is 0.023 on the unique subset and
+  0.410 on the ambiguous one).
+- **K >= 2 throughout.** The current data has exactly two references per sample, but every
+  primitive takes an arbitrary reference set; the unit tests cover K = 3. Tolerance ties are not
+  transitive, so ranks group them by single linkage along the sorted order — exact at K = 2, a
+  documented choice above it.
+- **The Table 1 gate.** `independent(all)` is checked against `tab:controls` before anything is
+  written; a mismatch aborts the run unless `--allow-table1-mismatch` is passed.
+
 ## Module map
 
 | module | responsibility |
@@ -318,4 +385,5 @@ separately rather than folded into that interval.
 | `pseudoinverse_sensitivity.py` | experiment D runner |
 | `analyze_pseudoinverse.py` | invariance coverage, guard accounting, sensitivity, stratification, ordering stability, figures |
 | `finite_anchor.py` | §4.10 solver anchor for the minimum-norm prediction |
+| `shared_reference.py` | experiment E: tie-aware best-reference sets, rank-only joint selection, regret, the independent-vs-shared table |
 | `deprecated/` | the superseded two-arm Experiment D implementation, archived for provenance |

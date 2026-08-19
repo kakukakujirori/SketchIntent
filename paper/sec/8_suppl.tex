@@ -612,7 +612,6 @@ We evaluate four types of prediction--reference comparisons: held-out human anno
 \end{equation}
 Because all four metrics lie in $[0,1]$, this absolute change has a common scale across metrics.
 
-
 \begin{table*}[t]
     \centering
     \caption{
@@ -821,14 +820,12 @@ However, the substantially heavier tails, with $P_{90}(1-c)=.114$ and $P_{90}(e)
 
 In conclusion, we regard our derivation of the local response via the Moore--Penrose pseudoinverse as a reasonable deterministic convention for evaluating sketch editability, rather than a universal solver-invariant characterization. A solver-invariant treatment of this response ambiguity remains future work.
 
-
 \begin{table}[t]
     \centering
-    \scriptsize
+    \footnotesize
     \setlength{\tabcolsep}{4.5pt}
     \caption{
-    Agreement between FreeCAD's small finite-edit response and the
-    minimum-norm tangent prediction for driving length dimensions.
+    Agreement between FreeCAD's small finite-edit response and the minimum-norm tangent prediction for driving length dimensions.
     Both $1-c$ and $e$ are zero under exact agreement and lower is better.
     }
     \label{tab:appendix_solver_anchor}
@@ -852,3 +849,83 @@ In conclusion, we regard our derivation of the local response via the Moore--Pen
         \bottomrule
     \end{tabular}
 \end{table}
+
+
+\subsection{Robustness to Shared-Reference Evaluation}
+\label{sec:appendix_shared_reference}
+Our multi-reference evaluation in Sec.~\ref{sec:motion_metrics} independently takes the best-matching human reference for each diagnostic. This accommodates multiple plausible human annotations, but it also permits different metrics to select different human annotations. We therefore evaluate a more conservative protocol in which all four metrics are scored against the same complete human annotation.
+
+\paragraph{Best-reference consistency.}
+For each prediction and metric, we first identify the set of best-scoring references, treating values within the existing numerical
+resolution $\epsilon=10^{-6}$ as tied.
+We call an evaluation \emph{coherent} if there exists at least one human reference that is simultaneously optimal (within $\epsilon$) for all four metrics, i.e.,
+\begin{equation}
+B_{\theta_\mathrm{motion}^\mathrm{full}}\cap B_{\theta_\mathrm{motion}^\mathrm{rel}}\cap
+B_{\theta_\mathrm{leak}^\mathrm{dim}}\cap B_{S_\mathrm{place}}\neq\emptyset,
+\end{equation}
+where $B_m$ denotes the best-reference set for metric $m$.
+By this criterion, $81.4\%$, $78.4\%$, and $80.2\%$ of held-out-human, Base Vitruvion, and Solver-RL evaluations are coherent, respectively.
+
+\paragraph{Rank-based shared-reference protocol.}
+Best-reference consistency alone does not quantify how much independent reference selection affects the reported metric values. We therefore evaluate a stricter protocol in which all four metrics are scored against the same complete human annotation.
+Directly combining the four metrics to define the best reference could bias the selection because the metrics have different effective numerical ranges. Therefore, we let each metric rank the $K$ candidate references from best to worst and select the reference with the smallest sum of ranks:
+\begin{equation}
+    k^\star =
+    \arg\min_k
+    \sum_{m \in
+    \{\theta_\mathrm{motion}^\mathrm{full},\theta_\mathrm{motion}^\mathrm{rel},\theta_\mathrm{leak}^\mathrm{dim},S_\mathrm{place}\}}
+    \operatorname{rank}_m(k).
+    \label{eq:shared_reference_rank}
+\end{equation}
+Tied metric values are assigned average ranks. When the minimum rank sum is tied, we retain all rank-optimal references rather than impose an additional tie-break. For each metric, we represent this ambiguity by reporting the best and worst scores over all rank-optimal choices of the shared reference.
+
+\begin{table*}[t]
+\centering
+\caption{
+Robustness to shared-reference evaluation.
+``Independent'' is the original per-metric multi-reference aggregation. ``Shared range'' gives the best--worst per-metric envelope when all diagnostics are restricted to a rank-optimal shared human reference.
+}
+\label{tab:shared_reference}
+\small
+\setlength{\tabcolsep}{4.2pt}
+\begin{tabular}{lcc cc cc cc}
+\toprule
+&
+\multicolumn{2}{c}{$\theta^{\mathrm{full}}_{\mathrm{motion}}\downarrow$} &
+\multicolumn{2}{c}{$\theta^{\mathrm{rel}}_{\mathrm{motion}}\downarrow$} &
+\multicolumn{2}{c}{$\theta^{\mathrm{dim}}_{\mathrm{leak}}\downarrow$} &
+\multicolumn{2}{c}{$S_{\mathrm{place}}\uparrow$} \\
+\cmidrule(lr){2-3}
+\cmidrule(lr){4-5}
+\cmidrule(lr){6-7}
+\cmidrule(lr){8-9}
+Variant
+& Indep. & Shared range
+& Indep. & Shared range
+& Indep. & Shared range
+& Indep. & Shared range \\
+\midrule
+Human held-out
+& 0.000 & [0.000, 0.000]
+& 0.000 & [0.000, 0.000]
+& 0.000 & [0.000, 0.000]
+& 0.831 & [0.827, 0.830] \\
+
+Base Vitruvion
+& 0.839 & [0.840, 0.851]
+& 0.707 & [0.707, 0.726]
+& 0.029 & [0.044, 0.044]
+& 0.283 & [0.267, 0.279] \\
+
+Solver-RL
+& 0.488 & [0.488, 0.488]
+& 0.471 & [0.471, 0.493]
+& 0.304 & [0.318, 0.333]
+& 0.628 & [0.621, 0.623] \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\paragraph{Results.}
+Table~\ref{tab:shared_reference} shows that enforcing a shared human reference changes the reported scores only modestly and preserves the qualitative ordering of Table~\ref{tab:controls}.
+Therefore, the flexibility of selecting references independently across metrics does not materially affect the evaluation relative to scoring all four metrics against a single complete human annotation.
