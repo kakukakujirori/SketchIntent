@@ -75,7 +75,8 @@ For dimensional constraints, \texttt{DistanceX} and \texttt{DistanceY} become \t
 
 \subsubsection{Annotation Guidelines and Quality Control}
 \label{sec:appendix_dataset_guidelines}
-\textbf{Annotation task.}
+
+\paragraph{Annotation task.}
 The annotation interface presents the original incomplete FreeCAD sketch and asks annotators to preserve the geometry while adding design-intent-aware constraints until the sketch is fully constrained. A pilot study showed that even human annotators sometimes tended to add excessive, non-meaningful dimensions. We therefore adopted the following annotation guidelines:
 \begin{enumerate}[leftmargin=*, itemsep=1pt, topsep=2pt]
     \item Favor relational constraints over dimensional constraints.
@@ -84,7 +85,7 @@ The annotation interface presents the original incomplete FreeCAD sketch and ask
 \end{enumerate}
 Annotators may delete and replace existing constraints when a new configuration better captures design intent (e.g., replacing several identical \texttt{Radius} constraints with an \texttt{Equal} constraint). Once the intended constraint set reaches the residual DoF of $2$, annotators add exactly one \texttt{Block} constraint to an arbitrary primitive to satisfy FreeCAD's fully constrained solver state. This terminal \texttt{Block} is treated strictly as a technical anchoring artifact and excluded from design-intent evaluation.
 
-\textbf{Restrictions and quality control.}
+\paragraph{Restrictions and quality control.}
 Annotators were prohibited from deleting, redrawing, or reordering existing sketch primitives, including construction geometry. This keeps the original geometry fixed across all three annotations of the same input. However, we allowed annotators to add up to two new construction geometries when necessary to express an important structural relationship; typical permitted use cases were mirror axes or centerlines, centers of point or rotational symmetry, and construction circles for regular polygons or circular arrangements. \texttt{Lock}, \texttt{Group}, and \texttt{Refraction} commands were disallowed.
 
 \subsubsection{Annotation and Dataset Statistics}
@@ -107,6 +108,10 @@ The primitive-composition plot (excluding auxiliary construction geometry) shows
     \caption{Extended dataset statistics over the evaluation subset. The plots summarize non-construction primitive composition and the exact joint distribution of primitive and constraint counts per annotated sketch.}
     \label{fig:appendix_dataset_overview}
 \end{figure}
+
+\subsubsection{FreeCAD Sketcher Visualization and Constraint Symbols}
+\label{sec:appendix_freecad_visualization}
+The qualitative figures \ref{fig:teaser}, \ref{fig:qualitative}, and \ref{fig:appendix_rl_qualitative_examples} use the native FreeCAD Sketcher visualization. Numerical annotations denote dimensional constraints, while symbolic glyphs denote relational constraints; for example, \textcolor{red}{$=$} means the \texttt{Equal} constraint. A complete description of the constraint symbols is available in the FreeCAD Sketcher documentation: \url{https://wiki.freecad.org/Sketcher_Workbench#Constraints_2}.
 
 \subsection{Metric Details}
 \label{sec:appendix_metric_details}
@@ -858,31 +863,6 @@ In conclusion, we regard our derivation of the local response via the Moore--Pen
 
 \subsection{Robustness to Shared-Reference Evaluation}
 \label{sec:appendix_shared_reference}
-Our multi-reference evaluation in Sec.~\ref{sec:motion_metrics} independently takes the best-matching human reference for each diagnostic. This accommodates multiple plausible human annotations, but it also permits different metrics to select different human annotations. We therefore evaluate a more conservative protocol in which all four metrics are scored against the same complete human annotation.
-
-\paragraph{Best-reference consistency.}
-For each prediction and metric, we first identify the set of best-scoring references, treating values within the existing numerical
-resolution $\epsilon=10^{-6}$ as tied.
-We call an evaluation \emph{coherent} if there exists at least one human reference that is simultaneously optimal (within $\epsilon$) for all four metrics, i.e.,
-\begin{equation}
-B_{\theta_\mathrm{motion}^\mathrm{full}}\cap B_{\theta_\mathrm{motion}^\mathrm{rel}}\cap
-B_{\theta_\mathrm{leak}^\mathrm{dim}}\cap B_{S_\mathrm{place}}\neq\emptyset,
-\end{equation}
-where $B_m$ denotes the best-reference set for metric $m$.
-By this criterion, $81.4\%$, $78.4\%$, and $80.2\%$ of held-out-human, Base Vitruvion, and Solver-RL evaluations are coherent, respectively.
-
-\paragraph{Rank-based shared-reference protocol.}
-Best-reference consistency alone does not quantify how much independent reference selection affects the reported metric values. We therefore evaluate a stricter protocol in which all four metrics are scored against the same complete human annotation.
-Directly combining the four metrics to define the best reference could bias the selection because the metrics have different effective numerical ranges. Therefore, we let each metric rank the $K$ candidate references from best to worst and select the reference with the smallest sum of ranks:
-\begin{equation}
-    k^\star =
-    \arg\min_k
-    \sum_{m \in
-    \{\theta_\mathrm{motion}^\mathrm{full},\theta_\mathrm{motion}^\mathrm{rel},\theta_\mathrm{leak}^\mathrm{dim},S_\mathrm{place}\}}
-    \operatorname{rank}_m(k).
-    \label{eq:shared_reference_rank}
-\end{equation}
-Tied metric values are assigned average ranks. When the minimum rank sum is tied, we retain all rank-optimal references rather than impose an additional tie-break. For each metric, we represent this ambiguity by reporting the best and worst scores over all rank-optimal choices of the shared reference.
 
 \begin{table*}[t]
 \centering
@@ -930,6 +910,32 @@ Solver-RL
 \bottomrule
 \end{tabular}
 \end{table*}
+
+Our multi-reference evaluation in Sec.~\ref{sec:motion_metrics} independently takes the best-matching human reference for each diagnostic. This accommodates multiple plausible human annotations, but it also permits different metrics to select different human annotations. We therefore evaluate a more conservative protocol in which all four metrics are scored against the same complete human annotation.
+
+\paragraph{Best-reference consistency.}
+For each prediction and metric, we first identify the set of best-scoring references, treating values within the existing numerical
+resolution $\epsilon=10^{-6}$ as tied.
+We call an evaluation \emph{coherent} if there exists at least one human reference that is simultaneously optimal (within $\epsilon$) for all four metrics, i.e.,
+\begin{equation}
+B_{\theta_\mathrm{motion}^\mathrm{full}}\cap B_{\theta_\mathrm{motion}^\mathrm{rel}}\cap
+B_{\theta_\mathrm{leak}^\mathrm{dim}}\cap B_{S_\mathrm{place}}\neq\emptyset,
+\end{equation}
+where $B_m$ denotes the best-reference set for metric $m$.
+By this criterion, $81.4\%$, $78.4\%$, and $80.2\%$ of held-out-human, Base Vitruvion, and Solver-RL evaluations are coherent, respectively.
+
+\paragraph{Rank-based shared-reference protocol.}
+Best-reference consistency alone does not quantify how much independent reference selection affects the reported metric values. We therefore evaluate a stricter protocol in which all four metrics are scored against the same complete human annotation.
+Directly combining the four metrics to define the best reference could bias the selection because the metrics have different effective numerical ranges. Therefore, we let each metric rank the $K$ candidate references from best to worst and select the reference with the smallest sum of ranks:
+\begin{equation}
+    k^\star =
+    \arg\min_k
+    \sum_{m \in
+    \{\theta_\mathrm{motion}^\mathrm{full},\theta_\mathrm{motion}^\mathrm{rel},\theta_\mathrm{leak}^\mathrm{dim},S_\mathrm{place}\}}
+    \operatorname{rank}_m(k).
+    \label{eq:shared_reference_rank}
+\end{equation}
+Tied metric values are assigned average ranks. When the minimum rank sum is tied, we retain all rank-optimal references rather than impose an additional tie-break. For each metric, we represent this ambiguity by reporting the best and worst scores over all rank-optimal choices of the shared reference.
 
 \paragraph{Results.}
 Table~\ref{tab:shared_reference} shows that enforcing a shared human reference changes the reported scores only modestly and preserves the qualitative ordering of Table~\ref{tab:controls}.
